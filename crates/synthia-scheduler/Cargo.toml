@@ -21,6 +21,10 @@ parking_lot.workspace = true
 tracing.workspace = true
 ulid.workspace = true
 libc.workspace = true
+# BoxFuture for AgentSpawner::spawn — the scheduler is runtime-free
+# (the host's executor runs the future), so the dep is needed only
+# for the type. Keeping this crate's tokio-free gate green.
+futures.workspace = true
 cron = { workspace = true, optional = true }
 
 [dev-dependencies]

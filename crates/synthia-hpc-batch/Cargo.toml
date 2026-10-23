@@ -1,0 +1,52 @@
+[package]
+name = "synthia-hpc-batch"
+# Batched embedder / batched completion
+# adapter. Lives in the "perf + concurrency" plug-in tier
+# alongside `synthia-semantic-cache` / `synthia-tool-memo`
+# / `synthia-resilience` etc. Default zero-dep; the batch
+# paths use only `futures::stream::buffer_unordered` plus
+# the shared `parking_lot` / `tracing` primitives already
+# in the workspace graph, so the MVP subset never grows an
+# HTTP / OTel / DB dependency (`make check-mvp-deps` is the
+# gate).
+description = "Batched embedder / batched completion adapters over already-registered providers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# `ModelProvider` trait + the wire types. We only carry the trait
+# — `default-features = false` keeps reqwest out of the graph
+# for consumers that never enable this crate's feature.
+synthia-provider = { workspace = true, default-features = false }
+# `Embedder` trait lives in `synthia-search` (BM25 + vector
+# hybrid). We never carry that crate's external HTTP adapter —
+# `synthia-search` itself has zero default-dep HTTP stack,
+# proved by the dedicated `synthia-search` segment in
+# `make check-mvp-deps`.
+synthia-search = { workspace = true }
+# Only the async plumbing primitives; no external HTTP or
+# runtime crate is pulled by any of these.
+futures.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Examples name `synthia_core::Error` / `synthia_core::Clock`
+# directly, and implement `ModelProvider` with `#[async_trait]`;
+# the lib itself uses neither.
+synthia-core.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+futures.workspace = true
+
+[features]
+default = []

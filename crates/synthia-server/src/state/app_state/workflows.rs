@@ -1,32 +1,47 @@
-//! Workflows state: in-memory registry of `WorkflowSpec`s, with
-//! CRUD helpers. Execution lands in a follow-up turn — the
-//! runtime needs a `WorkflowHost` implementation that calls back
-//! into the agent harness, and that wiring is its own R-series
-//! change. This turn ships the storage + read/list/create/replace/
-//! delete surface the frontend commits to.
+//! Workflows state: in-memory registry of `WorkflowSpec`s with
+//! CRUD helpers, write-through persisted by `WorkflowStore` under
+//! `<workspace>/workflows/` so a restart (or a second node over a
+//! shared filesystem) sees the same catalogue.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use synthia::workflow::{
     WorkflowCaps,
     WorkflowError,
     WorkflowPlan,
     WorkflowSpec,
+    WorkflowStore,
 };
 use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct WorkflowsState {
     inner: Arc<RwLock<BTreeMap<String, WorkflowSpec>>>,
+    store: WorkflowStore,
 }
 
 impl WorkflowsState {
-    /// Build an empty registry. Workflows are in-memory this turn;
-    /// disk persistence mirrors the `ScheduleStore` pattern in a
-    /// follow-up turn if/when needed.
-    pub fn build() -> Self {
+    /// Build the registry from `<root>/workflows/`. A store load
+    /// failure degrades to an empty registry with a `warn!` — the
+    /// same honest-recovery posture `SchedulesState::build` takes.
+    pub fn build(workspace_root: &Path) -> Self {
+        let store = WorkflowStore::new(workspace_root.to_path_buf());
+        let mut map = BTreeMap::new();
+        match store.load() {
+            Ok(specs) => {
+                for spec in specs {
+                    map.insert(spec.id.clone(), spec);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "workflow store load failed; starting empty: {e}"
+                );
+            }
+        }
         Self {
-            inner: Arc::new(RwLock::new(BTreeMap::new())),
+            inner: Arc::new(RwLock::new(map)),
+            store,
         }
     }
 
@@ -49,6 +64,7 @@ impl WorkflowsState {
         // create time, not run time.
         spec.plan(&WorkflowCaps::default())
             .map_err(|e| e.to_string())?;
+        self.store.upsert(&spec).map_err(|e| e.to_string())?;
         g.insert(spec.id.clone(), spec);
         Ok(())
     }
@@ -67,13 +83,18 @@ impl WorkflowsState {
         let mut g = self.inner.write().await;
         spec.plan(&WorkflowCaps::default())
             .map_err(|e| e.to_string())?;
+        self.store.upsert(&spec).map_err(|e| e.to_string())?;
         g.insert(spec.id.clone(), spec);
         Ok(())
     }
 
-    pub async fn remove(&self, id: &str) -> bool {
+    pub async fn remove(&self, id: &str) -> Result<bool, String> {
         let mut g = self.inner.write().await;
-        g.remove(id).is_some()
+        if g.remove(id).is_none() {
+            return Ok(false);
+        }
+        self.store.remove(id).map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     /// Plan a spec against the current caps. Returns the plan or an

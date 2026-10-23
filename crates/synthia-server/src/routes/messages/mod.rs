@@ -525,9 +525,12 @@ async fn append_message(
     message: Message,
 ) -> anyhow::Result<()> {
     let row = json!({ "type": "Message", "data": message });
+    // The row's ordinal is reserved here, like every other writer
+    // on this session: the seeded history and the rows the run
+    // writes later share one counter.
+    sink.alloc_seq();
     sink.append(&row)
         .await
-        .map(|_| ())
         .map_err(|error| anyhow::anyhow!("seed session history: {error}"))
 }
 

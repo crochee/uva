@@ -9,7 +9,7 @@
 
 use async_trait::async_trait;
 use serde::Serialize;
-use synthia_core::registry::{Registry, paginate_registry_list};
+use synthia_core::registry::{Registry, RegistryItem, paginate_registry_list};
 
 use super::*;
 
@@ -27,8 +27,14 @@ impl Registry for ToolRegistry {
         &self,
         item: Self::Item,
     ) -> std::result::Result<(), synthia_core::Error> {
-        self.register_entry(item);
-        Ok(())
+        let name = RegistryItem::name(&item).to_string();
+        if self.register_entry(item) {
+            Ok(())
+        } else {
+            // A Core tool occupies the name; report it instead of
+            // silently dropping the registration.
+            Err(synthia_core::Error::already_exists(name))
+        }
     }
 
     async fn delete(
@@ -50,12 +56,7 @@ impl Registry for ToolRegistry {
         &self,
         name: &str,
     ) -> std::result::Result<Option<Self::Item>, synthia_core::Error> {
-        let inner = self.inner.read();
-        Ok(inner
-            .tools
-            .get(name)
-            .and_then(|entries| entries.last())
-            .map(entry_from_provider))
+        Ok(self.get(name))
     }
 
     async fn list_paginate(

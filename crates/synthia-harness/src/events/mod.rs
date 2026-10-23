@@ -1,567 +1,376 @@
-//! Agent lifecycle events.
+//! Agent lifecycle events: `AgentEvent`, `SystemEvent`,
+//! `WarningKind`, `AgentMeta`, `SessionEndReason`.
 //!
-//! # Module Layout
-//!
-//! - `event_enum`: the top-level [`event_enum::AgentEvent`] enum
-//!   with four variants (`Model` / `ModelDone` / `System` / `Agent`).
-//! - `system_event`: the [`system_event::SystemEvent`] enum +
-//!   [`system_event::WarningKind`] for lifecycle and diagnostic
-//!   events (session start/end, progress, warnings, recovery, usage).
-//! - `agent_meta`: the [`agent_meta::AgentMeta`] struct describing a
-//!   subagent's parent / child relationship.
-//! - `reasons`: [`reasons::SessionEndReason`] (terminal reason).
+//! This crate emits the `Model` / `ModelDone` / `System` / `Agent`
+//! shapes. `SystemEvent::PolicyViolation`, `WarningKind::TokenBudget`,
+//! `WarningKind::EditConflict` and `SessionEndReason::Refused` are
+//! **reserved for a consumer's own integration** and never constructed
+//! here — reserving them keeps the wire stable, so a consumer can start
+//! emitting one without a matching harness release.
 
-mod agent_meta;
-mod event_enum;
-mod reasons;
-mod system_event;
+use serde::{Deserialize, Serialize};
+use synthia_provider::{ContentPart, SamplingResult};
 
-pub use agent_meta::AgentMeta;
-pub use event_enum::AgentEvent;
-pub use reasons::SessionEndReason;
-pub use system_event::{SteeringSource, SystemEvent, WarningKind};
+// --- AgentEvent ---------------------------------------------------------
 
-/// What one [`Agent`](crate::agent::Agent) run ended with.
-///
-/// The streaming half of a run is the caller's event stream — by the
-/// time this value is returned, the stream has already yielded every
-/// event, so only the terminal answer is carried here. It is the
-/// loop's internal return value (the same value the `OnAgentEnd` hooks
-/// receive); the public surface for a run is the stream plus
-/// `SystemEvent::SessionEnded`.
-#[derive(Clone, Debug)]
-pub(crate) struct AgentOutput {
-    /// Text of the last assistant turn that carried any, or `None`
-    /// when the run produced no assistant text at all.
-    pub(crate) final_message: Option<String>,
+/// Serialized with serde internally tagged for dispatch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AgentEvent {
+    Model(ContentPart),
+    ModelDone(SamplingResult),
+    System(SystemEvent),
+    Agent(AgentMeta, Box<AgentEvent>),
+}
+
+impl AgentEvent {
+    /// Short, stable label for log lines and metrics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Model(_) => "Model",
+            Self::ModelDone(_) => "ModelDone",
+            Self::System(_) => "System",
+            Self::Agent(_, _) => "Agent",
+        }
+    }
+
+    /// Conservative byte-estimate for log lines and metrics: sums the payload's string lengths plus a fixed per-event overhead instead of
+    /// serializing, so the per-event metric path pays no `serde_json` pass; it tracks the wire JSON within a small factor, never undershooting.
+    pub fn size_hint(&self) -> usize {
+        const OVERHEAD: usize = 64;
+        match self {
+            Self::Model(part) => OVERHEAD + content_part_len(part),
+            Self::ModelDone(result) => {
+                OVERHEAD
+                    + result.text.len()
+                    + result.reasoning.len()
+                    + result
+                        .tool_calls
+                        .iter()
+                        .map(tool_use_len)
+                        .sum::<usize>()
+                    // usage counters + stop_reason + signature
+                    + OVERHEAD
+            }
+            Self::System(event) => OVERHEAD + system_event_len(event),
+            Self::Agent(meta, inner) => {
+                OVERHEAD
+                    + meta.parent_session_id.len()
+                    + meta.child_session_id.len()
+                    + meta.agent_name.as_deref().map(str::len).unwrap_or(0)
+                    + meta.prompt.as_deref().map(str::len).unwrap_or(0)
+                    // requested/effective model + thinking fields
+                    + OVERHEAD
+                    + inner.size_hint()
+            }
+        }
+    }
+
+    /// Returns `true` if this event is durable (state-changing).
+    pub fn is_durable(&self) -> bool {
+        match self {
+            Self::Model(ContentPart::Text(_))
+            | Self::Model(ContentPart::ToolUse(_))
+            | Self::Model(ContentPart::ToolResult(_))
+            | Self::Model(ContentPart::Resource(_)) => true,
+            Self::Model(_) | Self::ModelDone(_) | Self::System(_) => false,
+            Self::Agent(_, inner) => inner.is_durable(),
+        }
+    }
+
+    /// Convenience constructor for an ephemeral text delta.
+    pub fn text_delta(text: impl Into<String>) -> Self {
+        Self::Model(ContentPart::Text(synthia_provider::TextContent {
+            text: text.into(),
+            cache_control: None,
+        }))
+    }
+
+    pub fn usage(
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_read_tokens: Option<usize>,
+        cache_creation_tokens: Option<usize>,
+    ) -> Self {
+        Self::System(SystemEvent::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        })
+    }
+}
+
+// --- SystemEvent --------------------------------------------------------
+
+/// Lifecycle, diagnostic, and terminal state changes reported via [`AgentEvent::System`]. Durable: `SessionStarted` /
+/// `SessionEnded` / `SessionInterrupted` / `PolicyViolation`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SystemEvent {
+    SessionStarted {
+        session_id: String,
+    },
+    SessionEnded {
+        reason: SessionEndReason,
+    },
+    SessionInterrupted {
+        reason: String,
+    },
+    Progress {
+        message: String,
+        step: usize,
+        total: usize,
+    },
+    ToolProgress {
+        tool_name: String,
+        call_id: String,
+        output: synthia_tool::ToolOutput,
+    },
+    Warning {
+        kind: WarningKind,
+        message: String,
+        iteration: Option<usize>,
+    },
+    Usage {
+        input_tokens: usize,
+        output_tokens: usize,
+        cache_read_tokens: Option<usize>,
+        cache_creation_tokens: Option<usize>,
+    },
+    PolicyViolation {
+        stage: String,
+        severity: String,
+        source: String,
+        pattern: String,
+        iteration: Option<usize>,
+    },
+}
+
+impl SystemEvent {
+    /// Short, stable label for log lines and metrics.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::SessionStarted { .. } => "SessionStarted",
+            Self::SessionEnded { .. } => "SessionEnded",
+            Self::SessionInterrupted { .. } => "SessionInterrupted",
+            Self::Progress { .. } => "Progress",
+            Self::ToolProgress { .. } => "ToolProgress",
+            Self::Warning { .. } => "Warning",
+            Self::Usage { .. } => "Usage",
+            Self::PolicyViolation { .. } => "PolicyViolation",
+        }
+    }
+}
+
+/// Classification of a [`SystemEvent::Warning`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningKind {
+    Loop,
+    TokenBudget,
+    ContextCompaction,
+    Hook,
+    EditConflict,
+    Guard,
+    StructuredOutput,
+}
+
+// --- AgentMeta ----------------------------------------------------------
+
+/// Carried as the first argument of [`AgentEvent::Agent`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentMeta {
+    pub parent_session_id: String,
+    pub child_session_id: String,
+    pub parent_depth: usize,
+    /// The model the *caller* asked for; `None` when they specified none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model: Option<String>,
+    /// The thinking effort the *caller* asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_thinking: Option<String>,
+    /// The model the descriptor / frontmatter actually resolved to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// The thinking effort the descriptor / frontmatter actually resolved to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_thinking: Option<String>,
+    /// `true` iff descriptor / frontmatter overrode a caller-specified value.
+    #[serde(default)]
+    pub overrides_applied: bool,
+    /// Registry name of the delegated peer (the `task` tool's `agent` field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// The dispatch prompt; set on the child's **first** forwarded event only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+impl AgentMeta {
+    pub fn new(
+        parent_session_id: impl Into<String>,
+        child_session_id: impl Into<String>,
+        parent_depth: usize,
+    ) -> Self {
+        Self {
+            parent_session_id: parent_session_id.into(),
+            child_session_id: child_session_id.into(),
+            parent_depth,
+            requested_model: None,
+            requested_thinking: None,
+            effective_model: None,
+            effective_thinking: None,
+            overrides_applied: false,
+            agent_name: None,
+            prompt: None,
+        }
+    }
+
+    /// Builder: record the registry name of the delegated peer.
+    #[must_use]
+    pub fn with_agent_name(mut self, name: Option<String>) -> Self {
+        self.agent_name = name;
+        self
+    }
+
+    /// Builder: carry the dispatch prompt (first forwarded event only).
+    #[must_use]
+    pub fn with_prompt(mut self, prompt: Option<String>) -> Self {
+        self.prompt = prompt;
+        self
+    }
+}
+
+// --- SessionEndReason ---------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionEndReason {
+    Completed,
+    Cancelled,
+    Error(String),
+    MaxIterations,
+    Refused { violation: String },
+}
+
+impl SessionEndReason {
+    /// Stable wire name (snake_case) for logs and hooks.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Error(_) => "error",
+            Self::MaxIterations => "max_iterations",
+            Self::Refused { .. } => "refused",
+        }
+    }
+}
+
+// --- size_hint payload walkers -------------------------------------------
+
+fn content_part_len(part: &ContentPart) -> usize {
+    match part {
+        ContentPart::Text(t) => t.text.len(),
+        ContentPart::Reasoning(r) => {
+            r.text.len() + r.signature.as_deref().map(str::len).unwrap_or(0)
+        }
+        ContentPart::Image(i) => i.data.len() + i.mime_type.len(),
+        ContentPart::Audio(a) => a.data.len() + a.mime_type.len(),
+        ContentPart::ToolUse(u) => tool_use_len(u),
+        ContentPart::ToolResult(r) => {
+            r.tool_use_id.len()
+                + r.tool_name.as_deref().map(str::len).unwrap_or(0)
+                + r.content.iter().map(content_part_len).sum::<usize>()
+        }
+        ContentPart::Resource(l) => {
+            l.uri.len()
+                + l.name.len()
+                + l.title.as_deref().map(str::len).unwrap_or(0)
+        }
+    }
+}
+
+fn tool_use_len(call: &synthia_provider::ToolUse) -> usize {
+    call.id.len() + call.name.len() + json_len(&call.input)
+}
+
+fn json_len(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(_) => 4,
+        serde_json::Value::Number(n) => number_len(n),
+        serde_json::Value::String(s) => s.len() + 2,
+        serde_json::Value::Array(items) => {
+            2 + items.iter().map(json_len).sum::<usize>() + items.len()
+        }
+        serde_json::Value::Object(fields) => {
+            2 + fields
+                .iter()
+                .map(|(k, v)| k.len() + 4 + json_len(v))
+                .sum::<usize>()
+        }
+    }
+}
+
+fn number_len(n: &serde_json::Number) -> usize {
+    if let Some(v) = n.as_u64() {
+        return u64_digits(v);
+    }
+    if let Some(v) = n.as_i64() {
+        return i64_digits(v);
+    }
+    if let Some(v) = n.as_f64() {
+        // A float's shortest round-trip form is at most one
+        // digit per bit of magnitude; `to_bits` is a monotone
+        // stand-in for the printed magnitude.
+        return match v.to_bits() {
+            0 => 1,
+            bits => u64_digits(bits),
+        };
+    }
+    1
+}
+
+fn u64_digits(v: u64) -> usize {
+    let mut digits = 1;
+    let mut rest = v;
+    while rest >= 10 {
+        rest /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn i64_digits(v: i64) -> usize {
+    u64_digits(v.unsigned_abs()) + usize::from(v < 0)
+}
+
+fn system_event_len(event: &SystemEvent) -> usize {
+    match event {
+        SystemEvent::SessionStarted { session_id } => session_id.len(),
+        SystemEvent::SessionEnded { reason } => reason.as_str().len(),
+        SystemEvent::SessionInterrupted { reason } => reason.len(),
+        SystemEvent::Progress { message, .. } => message.len(),
+        SystemEvent::ToolProgress {
+            tool_name,
+            call_id,
+            output,
+        } => {
+            tool_name.len()
+                + call_id.len()
+                + output.content.iter().map(content_part_len).sum::<usize>()
+        }
+        SystemEvent::Warning { message, .. } => message.len(),
+        SystemEvent::Usage { .. } => 0,
+        SystemEvent::PolicyViolation {
+            stage,
+            severity,
+            source,
+            pattern,
+            ..
+        } => stage.len() + severity.len() + source.len() + pattern.len(),
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    //! Unit tests for the `events` module family.
-    //!
-    //! Coverage map:
-    //!
-    //! - [`super::event_enum::AgentEvent`]: top-level 4-variant shape,
-    //!   serde round trip, helper ctors, `is_durable` correctness.
-
-    use synthia_provider::{
-        ContentPart,
-        ReasoningContent,
-        SamplingResult,
-        TokenUsage,
-        ToolUse,
-    };
-
-    use super::*;
-
-    fn sampling_result_for_test() -> SamplingResult {
-        SamplingResult {
-            text: "hi".to_string(),
-            tool_calls: vec![],
-            reasoning: String::new(),
-            reasoning_signature: None,
-            usage: TokenUsage::default(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_session_started_serialization() {
-        let event = AgentEvent::System(SystemEvent::SessionStarted {
-            session_id: "s1".to_string(),
-        });
-        let json = serde_json::to_string(&event).unwrap();
-        // Both AgentEvent and SystemEvent use serde `tag = "type"`. The
-        // outer "System" tag plus the inner "session_started" tag both
-        // appear in the wire JSON.
-        assert!(json.contains("\"type\":\"System\""));
-        assert!(json.contains("\"type\":\"session_started\""));
-        assert!(json.contains("s1"));
-    }
-
-    #[test]
-    fn test_event_serde_tag() {
-        let event =
-            AgentEvent::Model(ContentPart::Reasoning(ReasoningContent {
-                text: "Let me think".to_string(),
-                signature: None,
-            }));
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"type\":\"Model\""));
-        assert!(json.contains("\"type\":\"reasoning\""));
-
-        let event2 = AgentEvent::Model(ContentPart::ToolUse(ToolUse {
-            id: "u1".to_string(),
-            name: "read_file".to_string(),
-            input: serde_json::json!({ "path": "/tmp/test" }),
-        }));
-        let json2 = serde_json::to_string(&event2).unwrap();
-        assert!(json2.contains("\"type\":\"Model\""));
-
-        let roundtripped: AgentEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(
-            roundtripped,
-            AgentEvent::Model(ContentPart::Reasoning(..))
-        ));
-    }
-
-    #[test]
-    fn test_event_helper_methods() {
-        let warning = AgentEvent::warning("low disk space");
-        assert!(matches!(
-            warning,
-            AgentEvent::System(SystemEvent::Warning { .. })
-        ));
-
-        let progress = AgentEvent::progress("loading", 5, 10);
-        assert!(matches!(
-            progress,
-            AgentEvent::System(SystemEvent::Progress {
-                step: 5,
-                total: 10,
-                ..
-            })
-        ));
-
-        let recovery =
-            AgentEvent::recovery(3, Some("bash".into()), "fallback", None);
-        assert!(matches!(
-            recovery,
-            AgentEvent::System(SystemEvent::Recovery {
-                level_number: 3,
-                ..
-            })
-        ));
-
-        let usage = AgentEvent::usage(100, 50, Some(20), None);
-        assert!(matches!(
-            usage,
-            AgentEvent::System(SystemEvent::Usage {
-                input_tokens: 100,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn test_is_durable_classification() {
-        // Durable: text, tool use, tool result, resource.
-        assert!(AgentEvent::text_delta("hi").is_durable());
-        assert!(
-            AgentEvent::Model(ContentPart::ToolUse(ToolUse {
-                id: "u".into(),
-                name: "n".into(),
-                input: serde_json::json!({}),
-            }))
-            .is_durable()
-        );
-        assert!(
-            AgentEvent::Model(ContentPart::Resource(
-                synthia_provider::ResourceLink {
-                    uri: "file://x".into(),
-                    name: "x".into(),
-                    title: None,
-                    description: None,
-                    mime_type: None,
-                }
-            ))
-            .is_durable()
-        );
-
-        // Ephemeral: reasoning, image, audio, ModelDone, System, Hook.
-        assert!(!AgentEvent::reasoning_delta("thinking", None).is_durable());
-        assert!(
-            !AgentEvent::ModelDone(sampling_result_for_test()).is_durable()
-        );
-        assert!(!AgentEvent::warning("disk").is_durable());
-        assert!(!AgentEvent::progress("loading", 0, 1).is_durable());
-        assert!(!AgentEvent::recovery(1, None, "msg", None).is_durable());
-        assert!(!AgentEvent::usage(1, 1, None, None).is_durable());
-    }
-
-    #[test]
-    fn test_recursive_agent_event_durability() {
-        // Inner is durable → wrapper is durable.
-        let durable_inner = AgentEvent::text_delta("hi");
-        let wrap = AgentEvent::Agent(
-            AgentMeta::new("parent", "child", 1),
-            Box::new(durable_inner),
-        );
-        assert!(wrap.is_durable());
-
-        // Inner is ephemeral → wrapper is ephemeral.
-        let ephemeral_inner = AgentEvent::warning("oops");
-        let wrap = AgentEvent::Agent(
-            AgentMeta::new("parent", "child", 1),
-            Box::new(ephemeral_inner),
-        );
-        assert!(!wrap.is_durable());
-    }
-
-    #[test]
-    fn test_event_serde_round_trip() {
-        use crate::events::SessionEndReason;
-
-        let cases = [
-            AgentEvent::text_delta("hi"),
-            AgentEvent::System(SystemEvent::SessionStarted {
-                session_id: "s".into(),
-            }),
-            AgentEvent::System(SystemEvent::SessionEnded {
-                reason: SessionEndReason::Completed,
-            }),
-            AgentEvent::System(SystemEvent::SessionInterrupted {
-                reason: "user".into(),
-            }),
-            AgentEvent::System(SystemEvent::Warning {
-                kind: WarningKind::Loop,
-                message: "loop".into(),
-                iteration: Some(3),
-            }),
-            AgentEvent::System(SystemEvent::Recovery {
-                level_number: 5,
-                tool_name: Some("llm_sample".into()),
-                message: "reset".into(),
-                iteration: Some(7),
-            }),
-            AgentEvent::System(SystemEvent::Usage {
-                input_tokens: 100,
-                output_tokens: 50,
-                cache_read_tokens: Some(20),
-                cache_creation_tokens: None,
-            }),
-        ];
-        for ev in cases {
-            let json = serde_json::to_string(&ev).unwrap();
-            let back: AgentEvent = serde_json::from_str(&json).unwrap();
-            let json2 = serde_json::to_string(&back).unwrap();
-            assert_eq!(json, json2, "round-trip failed for {ev:?}");
-        }
-    }
-
-    #[test]
-    fn test_model_done_carries_sampling_result() {
-        let event = AgentEvent::ModelDone(sampling_result_for_test());
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"type\":\"ModelDone\""));
-        assert!(json.contains("\"text\":\"hi\""));
-    }
-
-    #[test]
-    fn test_agent_meta_constructor() {
-        let m = AgentMeta::new("p", "c", 2);
-        assert_eq!(m.parent_session_id, "p");
-        assert_eq!(m.child_session_id, "c");
-        assert_eq!(m.parent_depth, 2);
-    }
-
-    #[test]
-    fn test_event_kind_label() {
-        // Top-level kind label — collapses every ContentPart to
-        // "Model" so log queries can filter on the outer variant.
-        assert_eq!(AgentEvent::text_delta("hi").kind(), "Model");
-        assert_eq!(
-            AgentEvent::Model(ContentPart::ToolUse(ToolUse {
-                id: "u".into(),
-                name: "n".into(),
-                input: serde_json::json!({}),
-            }))
-            .kind(),
-            "Model"
-        );
-        assert_eq!(
-            AgentEvent::System(SystemEvent::SessionStarted {
-                session_id: "s".into()
-            })
-            .kind(),
-            "System"
-        );
-
-        // SystemEvent inner kind label.
-        let sys = SystemEvent::SessionStarted {
-            session_id: "s".into(),
-        };
-        assert_eq!(sys.kind(), "SessionStarted");
-        let sys = SystemEvent::SessionEnded {
-            reason: SessionEndReason::Completed,
-        };
-        assert_eq!(sys.kind(), "SessionEnded");
-        let sys = SystemEvent::Progress {
-            message: "m".into(),
-            step: 1,
-            total: 2,
-        };
-        assert_eq!(sys.kind(), "Progress");
-    }
-
-    #[test]
-    fn test_tool_progress_system_event_uses_tool_output() {
-        let ev = AgentEvent::System(SystemEvent::ToolProgress {
-            tool_name: "bash".into(),
-            call_id: "c1".into(),
-            output: synthia_tool::ToolOutput::text("hello"),
-        });
-        let json = serde_json::to_string(&ev).unwrap();
-        assert!(json.contains("\"type\":\"tool_progress\""));
-        assert!(json.contains("bash"));
-    }
-
-    // =============================================================================
-    // SystemEvent 8-way enum serde + durability matrix
-    // =============================================================================
-
-    /// `SystemEvent` MUST round-trip every variant through JSON.
-    /// This is the contract that backends (sqlite, file, kafka)
-    /// rely on for replay.
-    #[test]
-    fn system_event_eight_variant_round_trip_through_json() {
-        use crate::events::SessionEndReason;
-        let cases = [
-            SystemEvent::SessionStarted {
-                session_id: "s".into(),
-            },
-            SystemEvent::SessionEnded {
-                reason: SessionEndReason::Completed,
-            },
-            SystemEvent::SessionInterrupted {
-                reason: "user-cancel".into(),
-            },
-            SystemEvent::Progress {
-                message: "m".into(),
-                step: 1,
-                total: 5,
-            },
-            SystemEvent::ToolProgress {
-                tool_name: "bash".into(),
-                call_id: "c1".into(),
-                output: synthia_tool::ToolOutput::text("hello"),
-            },
-            SystemEvent::Warning {
-                kind: WarningKind::Loop,
-                message: "loop detected".into(),
-                iteration: Some(3),
-            },
-            SystemEvent::Recovery {
-                level_number: 3,
-                tool_name: Some("llm_sample".into()),
-                message: "fallback".into(),
-                iteration: Some(5),
-            },
-            SystemEvent::Usage {
-                input_tokens: 100,
-                output_tokens: 50,
-                cache_read_tokens: Some(20),
-                cache_creation_tokens: None,
-            },
-        ];
-        assert_eq!(cases.len(), 8);
-        for ev in cases {
-            let json = serde_json::to_string(&ev).unwrap();
-            let parsed: SystemEvent =
-                serde_json::from_str(&json).expect("round-trip");
-            assert_eq!(parsed, ev, "round-trip lost {ev:?}");
-        }
-    }
-
-    /// `SystemEvent` MUST use snake_case for the `type` tag
-    /// (the outer-tagged form of an `#[serde(tag = "type",
-    /// rename_all = "snake_case")]` enum). NOTE: `kind()` returns
-    /// PascalCase labels for log queries; the wire form is
-    /// snake_case. Pin both forms explicitly so a refactor that
-    /// changes either is caught loudly.
-    #[test]
-    fn system_event_all_variants_use_snake_case_type_tag() {
-        use crate::events::SessionEndReason;
-        let pairs: &[(SystemEvent, &str)] = &[
-            (
-                SystemEvent::SessionStarted {
-                    session_id: "s".into(),
-                },
-                "session_started",
-            ),
-            (
-                SystemEvent::SessionEnded {
-                    reason: SessionEndReason::Completed,
-                },
-                "session_ended",
-            ),
-            (
-                SystemEvent::SessionInterrupted { reason: "x".into() },
-                "session_interrupted",
-            ),
-            (
-                SystemEvent::Progress {
-                    message: "m".into(),
-                    step: 1,
-                    total: 2,
-                },
-                "progress",
-            ),
-            (
-                SystemEvent::ToolProgress {
-                    tool_name: "bash".into(),
-                    call_id: "c1".into(),
-                    output: synthia_tool::ToolOutput::text("x"),
-                },
-                "tool_progress",
-            ),
-            (
-                SystemEvent::Warning {
-                    kind: WarningKind::Hook,
-                    message: "x".into(),
-                    iteration: None,
-                },
-                "warning",
-            ),
-            (
-                SystemEvent::Recovery {
-                    level_number: 1,
-                    tool_name: Some("llm_sample".into()),
-                    message: "x".into(),
-                    iteration: None,
-                },
-                "recovery",
-            ),
-            (
-                SystemEvent::Usage {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    cache_read_tokens: None,
-                    cache_creation_tokens: None,
-                },
-                "usage",
-            ),
-        ];
-        for (ev, expected_tag) in pairs {
-            let json = serde_json::to_string(ev).unwrap();
-            assert!(
-                json.contains(&format!("\"type\":\"{expected_tag}\"")),
-                "type tag for {ev:?} must be `{expected_tag}`: {json}"
-            );
-        }
-    }
-
-    /// `SystemEvent` MUST reject an unknown variant string at the
-    /// JSON layer (forward-compat: an external schema change must
-    /// not silently round-trip into the local enum).
-    #[test]
-    fn system_event_rejects_unknown_variant_string() {
-        let json = r#"{"type":"future_variant","session_id":"x"}"#;
-        let result: Result<SystemEvent, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-    }
-
-    /// The 8 `SystemEvent` variants MUST all be distinct (no
-    /// accidental aliasing).
-    #[test]
-    fn system_event_eight_variants_are_distinct() {
-        use crate::events::SessionEndReason;
-        let all = [
-            SystemEvent::SessionStarted {
-                session_id: "s".into(),
-            },
-            SystemEvent::SessionEnded {
-                reason: SessionEndReason::Completed,
-            },
-            SystemEvent::SessionInterrupted { reason: "x".into() },
-            SystemEvent::Progress {
-                message: "m".into(),
-                step: 1,
-                total: 2,
-            },
-            SystemEvent::ToolProgress {
-                tool_name: "bash".into(),
-                call_id: "c1".into(),
-                output: synthia_tool::ToolOutput::text("x"),
-            },
-            SystemEvent::Warning {
-                kind: WarningKind::Loop,
-                message: "x".into(),
-                iteration: None,
-            },
-            SystemEvent::Recovery {
-                level_number: 1,
-                tool_name: Some("llm_sample".into()),
-                message: "x".into(),
-                iteration: None,
-            },
-            SystemEvent::Usage {
-                input_tokens: 1,
-                output_tokens: 1,
-                cache_read_tokens: None,
-                cache_creation_tokens: None,
-            },
-        ];
-        assert_eq!(all.len(), 8);
-        for i in 0..all.len() {
-            for j in 0..all.len() {
-                if i != j {
-                    assert_ne!(all[i], all[j], "{i} and {j} alias");
-                }
-            }
-        }
-    }
-
-    /// `WarningKind` MUST support the 5 documented variants (no
-    /// aliasing, no missing variant).
-    #[test]
-    fn warning_kind_five_variants_are_distinct() {
-        let all = [
-            WarningKind::Loop,
-            WarningKind::TokenBudget,
-            WarningKind::ContextCompaction,
-            WarningKind::Hook,
-            WarningKind::EditConflict,
-        ];
-        assert_eq!(all.len(), 5);
-        for i in 0..all.len() {
-            for j in 0..all.len() {
-                if i != j {
-                    assert_ne!(all[i], all[j], "{i} and {j} alias");
-                }
-            }
-        }
-    }
-
-    // =============================================================================
-    // AgentEvent serde — JSON shape contracts for top-level enum.
-    // =============================================================================
-
-    /// `AgentEvent` MUST use `"type"` as the outer tag (the
-    /// internally-tagged form declared via
-    /// `#[serde(tag = "type", content = "data")]`).
-    #[test]
-    fn agent_event_outer_tag_is_type_field() {
-        let ev = AgentEvent::text_delta("x");
-        let json: serde_json::Value = serde_json::to_value(&ev).unwrap();
-        assert!(json.get("type").is_some());
-        assert!(json.get("data").is_some());
-    }
-
-    /// `AgentEvent::Agent(meta, inner)` MUST serialize both the
-    /// meta struct AND the inner event into the `data` slot.
-    #[test]
-    fn agent_event_agent_carries_meta_and_inner() {
-        let inner = AgentEvent::text_delta("inner-text");
-        let meta = AgentMeta::new("parent", "child", 1);
-        let ev = AgentEvent::Agent(meta, Box::new(inner));
-        let json: serde_json::Value = serde_json::to_value(&ev).unwrap();
-        assert_eq!(json["type"], "Agent");
-        // data is a tuple [meta, inner].
-        let data = json["data"].as_array().expect("data must be array");
-        assert_eq!(data.len(), 2);
-        assert_eq!(data[0]["parent_session_id"], "parent");
-        assert_eq!(data[0]["child_session_id"], "child");
-        assert_eq!(data[0]["parent_depth"], 1);
-        assert_eq!(data[1]["type"], "Model");
-    }
-
-    /// `AgentEvent` MUST reject an unknown outer tag.
-    #[test]
-    fn agent_event_rejects_unknown_outer_tag() {
-        let json = r#"{"type":"UnknownVariant","data":{}}"#;
-        let result: Result<AgentEvent, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-    }
-}
+mod tests;

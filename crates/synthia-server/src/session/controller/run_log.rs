@@ -17,83 +17,76 @@ use synthia::{
 /// [`SurfaceLedger`] sees the exact bytes, in order, with the 1-based
 /// log ordinal the reader will reproduce — the source of truth a
 /// durable compaction checkpoint resolves its provenance against.
-/// Every ordinal this writer records is the one the **sink**
-/// returned from the append that produced the row, never a locally
-/// counted value — see `append` for why a local counter drifts.
+/// Every ordinal this writer records is the one the **sink** handed
+/// out, never a locally counted value — see `append` for why a local
+/// counter drifts.
 pub(crate) struct RunLog {
     pub(super) store: Arc<dyn SessionSink>,
     pub(super) ledger: Arc<SurfaceLedger>,
-    pub(super) next_seq: u64,
     /// Stamps each row's `ts`; the deployment's clock, not a fresh
     /// wall-clock read per append.
     pub(super) clock: synthia::core::SharedClock,
 }
 
 impl RunLog {
-    /// Wrap the run's sink, seeded with the ordinal of the last row
-    /// already on disk.
+    /// Wrap the run's sink and its ledger.
     pub(crate) fn new(
         store: Arc<dyn SessionSink>,
         ledger: Arc<SurfaceLedger>,
-        last_seq: u64,
         clock: synthia::core::SharedClock,
     ) -> Self {
         Self {
             store,
             ledger,
-            next_seq: last_seq,
             clock,
         }
     }
 
     /// Append one row and record it in the ledger under the ordinal
-    /// the **sink** assigned.
+    /// the **sink** reserved.
     ///
-    /// The sink is the only thing that can report that ordinal: it
-    /// reserves it under its own lock. A counter kept here drifts the
-    /// moment anything else appends concurrently — the controller's op
-    /// loop writes `Feedback` rows and the shutdown marker straight to
-    /// the sink — and the ledger's ordinals are exactly what a
-    /// compaction checkpoint's `source_event_seqs` are validated
-    /// against, so a drifted one makes a good splice look
-    /// unresolvable: `try_fold_log_surface` errors and the lenient
-    /// fold silently replays the span the checkpoint had replaced.
+    /// The sink owns the counter: it hands the next ordinal to
+    /// whoever asks, so the controller's op loop (which writes
+    /// `Feedback` rows and the shutdown marker straight to the sink)
+    /// and this run's writer draw from one sequence. A counter kept
+    /// here would drift the moment anything else appends, and the
+    /// ledger's ordinals are exactly what a compaction checkpoint's
+    /// `source_event_seqs` are validated against — a drifted one
+    /// makes a good splice look unresolvable: `try_fold_log_surface`
+    /// errors and the lenient fold silently replays the span the
+    /// checkpoint had replaced.
     pub(crate) async fn append(
         &mut self,
         value: &Value,
     ) -> Result<u64, SessionError> {
-        let seq = self.store.append(value).await?;
-        self.next_seq = seq;
+        let seq = self.store.alloc_seq();
+        self.store.append(value).await?;
         self.ledger.record(seq, value);
         Ok(seq)
     }
 
-    /// Append a typed record, stamping the wall clock and a `seq`.
+    /// Append a typed record, stamping the wall clock and the
+    /// ordinal the sink reserved for it.
     ///
-    /// The stamp is advisory: the fold that reads these rows assigns
-    /// ordinals positionally (`fold_lenient` uses the row index), and
-    /// the ledger — what a checkpoint validates against — takes the
-    /// sink's authoritative return from `append` above. The stamp can
-    /// only be off when another task appended between this run's two
-    /// appends, which costs a slightly wrong display value, never a
-    /// wrong provenance.
+    /// The stamp is what a typed reader reproduces: the row's own
+    /// `seq` field is the ordinal the log holds it under. The fold
+    /// that reads these rows assigns ordinals positionally
+    /// (`fold_lenient` uses the row index), so the two agree as long
+    /// as the rows are written in the order they were reserved.
     pub(crate) async fn append_typed(
         &mut self,
         mut value: Value,
     ) -> Result<(), SessionError> {
+        let seq = self.store.alloc_seq();
         if let Some(obj) = value.as_object_mut() {
             obj.insert(
                 "ts".to_string(),
                 Value::String(self.clock.now().to_rfc3339()),
             );
-            obj.insert("seq".to_string(), Value::from(self.next_seq + 1));
+            obj.insert("seq".to_string(), Value::from(seq));
         }
-        // `append` returns the sink's per-row stream_index; the
-        // typed variant discards it because `seq` is what the
-        // ledger tracks. The compiler insists on consuming the
-        // `Result<u64, _>` though, so we drop the value
-        // explicitly.
-        let _idx = self.append(&value).await?;
+        self.store.append(&value).await?;
+        self.ledger.record(seq, &value);
         Ok(())
     }
 }

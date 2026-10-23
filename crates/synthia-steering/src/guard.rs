@@ -129,6 +129,20 @@ pub fn run_guards(
 ) -> GuardOutcome {
     let mut current = action.clone();
     for guard in guards {
+        // R-OPT-1 Step 5.6: typed `SpanKind::Guardrail` span
+        // around each `check()` invocation. The OTel metric
+        // (`record_guardrail`) is emitted after the verdict
+        // is known; the panic branch emits the same metric
+        // with verdict=`panic` before failing closed.
+        let _guard_span = tracing::info_span!(
+            "guard_evaluate",
+            synthia.span.name = "guard_evaluate",
+            synthia.span.kind = synthia_telemetry::SpanKind::Guardrail
+                .as_str(),
+            otel.kind = synthia_telemetry::SpanKind::Guardrail
+                .otel_kind(),
+            guard.name = %guard.name(),
+        );
         let verdict = match catch_unwind(AssertUnwindSafe(|| {
             guard.check(&current, state)
         })) {
@@ -140,6 +154,8 @@ pub fn run_guards(
                     reason = %reason,
                     "guard panicked; failing closed"
                 );
+                #[cfg(feature = "otel")]
+                synthia_telemetry::record_guardrail(guard.name(), "panic");
                 return GuardOutcome::Denied {
                     guard: guard.name().to_string(),
                     reason: format!(
@@ -150,8 +166,13 @@ pub fn run_guards(
             }
         };
         match verdict {
-            GuardResult::Allow => {}
+            GuardResult::Allow => {
+                #[cfg(feature = "otel")]
+                synthia_telemetry::record_guardrail(guard.name(), "allow");
+            }
             GuardResult::Deny { reason, severity } => {
+                #[cfg(feature = "otel")]
+                synthia_telemetry::record_guardrail(guard.name(), "deny");
                 return GuardOutcome::Denied {
                     guard: guard.name().to_string(),
                     reason,
@@ -162,6 +183,8 @@ pub fn run_guards(
                 action: rewritten,
                 warning,
             } => {
+                #[cfg(feature = "otel")]
+                synthia_telemetry::record_guardrail(guard.name(), "sanitize");
                 tracing::debug!(
                     guard = guard.name(),
                     warning = %warning,
@@ -171,6 +194,7 @@ pub fn run_guards(
                 current = rewritten;
             }
         }
+        drop(_guard_span);
     }
     GuardOutcome::Allowed { action: current }
 }

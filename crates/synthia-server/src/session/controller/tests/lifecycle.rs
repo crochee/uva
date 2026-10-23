@@ -11,6 +11,7 @@ use super::{
     super::{SessionOp, SessionState},
     support::{
         BlockingFactory,
+        RecordedCall,
         VecFactory,
         make_manager_and_controller,
         wait_for_runs,
@@ -19,7 +20,7 @@ use super::{
 
 #[tokio::test]
 async fn test_two_concurrent_prompts_spawn_one_run() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(BlockingFactory {
             calls: Arc::clone(&calls),
@@ -77,7 +78,7 @@ async fn test_two_concurrent_prompts_spawn_one_run() {
 
 #[tokio::test]
 async fn test_shutdown_after_idle_timeout() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(VecFactory::new(vec![], Arc::clone(&calls), None));
     let (controller, _manager, _temp) =
@@ -115,7 +116,7 @@ async fn test_shutdown_after_idle_timeout() {
 /// alive, leaking the queued op into a stale run.
 #[tokio::test]
 async fn test_submit_after_shutdown_returns_error() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(VecFactory::new(vec![], Arc::clone(&calls), None));
     let (controller, _manager, _temp) =
@@ -159,7 +160,7 @@ async fn test_submit_after_shutdown_returns_error() {
 /// `lifecycle_shutdown` event, and is idempotent.
 #[tokio::test]
 async fn close_emits_lifecycle_shutdown_and_is_idempotent() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     // A blocking run so a live run is genuinely in flight
     // when `close()` lands — the shutdown path must cancel
     // it, not just stop an idle loop.
@@ -237,7 +238,7 @@ fn subscribe_snapshots_latest_is_initially_none() {
 /// internals.
 #[tokio::test]
 async fn snapshot_bus_publishes_running_then_completing() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory = Arc::new(VecFactory::new(
         vec![super::super::AgentEvent::text_delta("done")],
         calls.clone(),

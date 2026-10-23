@@ -19,10 +19,27 @@ parking_lot.workspace = true
 synthia-context.workspace = true
 synthia-core = { workspace = true, features = ["tokio-util"] }
 synthia-provider.workspace = true
+# R-OPT-1: typed `SpanKind::Guardrail` span + OTel metric
+# (`record_guardrail`) emitted from `run_guards`. The crate
+# itself takes a feature-less dep; consumers that want the
+# OTel metric path enable `synthia-telemetry/otlp` at the
+# facade level (e.g. via `synthia` feature `telemetry`).
+# That keeps the MVP minimal subset free of HTTP / OTel /
+# DB deps (see `make check-mvp-deps`).
+synthia-telemetry = { workspace = true, default-features = false }
 regex.workspace = true
 serde_json.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
+
+[features]
+# R-OPT-1: opt-in OTel metrics path. When a binary
+# (synthia-server, etc.) enables this feature the
+# `record_guardrail` calls below compile; otherwise the
+# lib is free of OTel + HTTP deps and stays in the MVP
+# subset (`make check-mvp-deps`).
+otel = ["synthia-telemetry/otlp"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 tracing-subscriber = { workspace = true }

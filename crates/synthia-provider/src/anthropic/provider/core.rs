@@ -34,6 +34,13 @@ impl AnthropicProvider {
         Self {
             api_key: None,
             model_config,
+            #[cfg(feature = "hpc-pool")]
+            client: crate::pool::ReqwestBackend::from_config(
+                crate::pool::PoolConfig::default(),
+            )
+            .client()
+            .clone(),
+            #[cfg(not(feature = "hpc-pool"))]
             client: reqwest::Client::new(),
             base_url: "https://api.anthropic.com".to_string(),
             cache_policy_applier: parking_lot::Mutex::new(
@@ -41,6 +48,28 @@ impl AnthropicProvider {
             ),
             cache_strategy_hook: None,
         }
+    }
+
+    /// : warm-up the connection pool by
+    /// issuing one `HEAD /` against the configured
+    /// `base_url` plus the hostnames of any URLs supplied
+    /// by the caller. No-op when the `hpc-pool` feature is
+    /// off (the default build keeps the same `Client::new()`
+    /// behaviour).
+    ///
+    /// The boot-time warm-up keeps the very first user
+    /// request from paying a TCP+TLS handshake; for
+    /// long-lived sessions whose costs dominate, the per-call
+    /// `pool_max_idle_per_host = 8` cap reuses sockets
+    /// across iterations.
+    #[cfg(feature = "hpc-pool")]
+    pub async fn warm_up_pool(&self, extra_hosts: &[url::Url]) -> usize {
+        let mut hosts =
+            vec![url::Url::parse(&self.base_url).unwrap_or_else(|_| {
+                url::Url::parse("https://api.anthropic.com").unwrap()
+            })];
+        hosts.extend(extra_hosts.iter().cloned());
+        crate::pool::warm_up_with(&self.client, &hosts).await
     }
 
     /// Install a [`CacheStrategyHook`](crate::cache_policy::CacheStrategyHook)
@@ -166,7 +195,7 @@ mod tests {
     }
 
     /// `with_api_key` MUST accept an empty string (no
-    /// validation — callers must check themselves).
+    /// validation—callers must check themselves).
     #[test]
     fn with_api_key_accepts_empty_string() {
         let p = AnthropicProvider::new(model_config("c")).with_api_key("");
@@ -186,7 +215,7 @@ mod tests {
     }
 
     /// `with_base_url` MUST strip ALL trailing slashes (not
-    /// just one — defensive).
+    /// just one—defensive).
     #[test]
     fn with_base_url_strips_all_trailing_slashes() {
         let p = AnthropicProvider::new(model_config("c"))

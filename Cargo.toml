@@ -18,7 +18,10 @@ members = [
     "crates/synthia-steering",
     "crates/synthia-tool-task",
     "crates/synthia-harness",
+    "crates/synthia-harness-tokio",
     "crates/synthia-server",
+    "crates/synthia-strategy-cot",
+    "crates/synthia-strategy-best-of-n",
     "crates/synthia-test-support",
     "crates/synthia-mcp",
     "crates/synthia-mcp-server",
@@ -27,6 +30,14 @@ members = [
     "crates/synthia-macros",
     "crates/synthia-eval",
     "crates/synthia-workflow",
+    "crates/synthia-safety",
+    "crates/synthia-semantic-cache",
+    "crates/synthia-tool-memo",
+    "crates/synthia-resilience",
+    "crates/synthia-strategy-plan-execute",
+    "crates/synthia-reflection",
+    "crates/synthia-budget",
+    "crates/synthia-hpc-batch",
 ]
 resolver = "2"
 
@@ -48,7 +59,10 @@ synthia-skill = { path = "crates/synthia-skill" }
  synthia-steering = { path = "crates/synthia-steering" }
 synthia-session = { path = "crates/synthia-session" }
 synthia-harness = { path = "crates/synthia-harness" }
- synthia-server = { path = "crates/synthia-server" }
+synthia-harness-tokio = { path = "crates/synthia-harness-tokio" }
+synthia-server = { path = "crates/synthia-server" }
+synthia-strategy-cot = { path = "crates/synthia-strategy-cot" }
+synthia-strategy-best-of-n = { path = "crates/synthia-strategy-best-of-n" }
 synthia-attachment = { path = "crates/synthia-attachment" }
 synthia-mcp = { path = "crates/synthia-mcp" }
 synthia-mcp-server = { path = "crates/synthia-mcp-server" }
@@ -61,6 +75,17 @@ synthia-test-support = { path = "crates/synthia-test-support" }
 synthia-macros = { path = "crates/synthia-macros" }
 synthia-eval = { path = "crates/synthia-eval" }
 synthia-workflow = { path = "crates/synthia-workflow" }
+synthia-safety = { path = "crates/synthia-safety" }
+synthia-semantic-cache = { path = "crates/synthia-semantic-cache" }
+synthia-tool-memo = { path = "crates/synthia-tool-memo" }
+synthia-resilience = { path = "crates/synthia-resilience" }
+synthia-strategy-plan-execute = { path = "crates/synthia-strategy-plan-execute" }
+synthia-reflection = { path = "crates/synthia-reflection" }
+synthia-budget = { path = "crates/synthia-budget" }
+# R-OPT-HPC: batched embedder/completer plug-in. Default
+# zero-dep; the new crate's `make check-mvp-deps` segment
+# asserts that.
+synthia-hpc-batch = { path = "crates/synthia-hpc-batch" }
 syn = "2.0"
 quote = "1.0"
 proc-macro2 = "1.0"
@@ -102,6 +127,7 @@ cron = "0.17"
 uuid = { version = "1.24", features = ["v4", "serde"] }
 indexmap = "2.14"
 parking_lot = "0.12"
+rand = "0.8"
 # `bundled` compiles SQLite from the amalgamation (FTS5 enabled) so the
 # build needs no system libsqlite3; only the optional `synthia-context`
 # `sqlite` feature pulls this in.
@@ -110,6 +136,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
+# Optional cluster bus backend (`synthia-server` feature
+# `cluster-redis`): pub/sub + `SET NX EX` leases. Only the
+# tokio async command surface is needed (multiplexed connections),
+# so the client's extra capabilities stay off.
+redis = { version = "1.7", default-features = false, features = ["tokio-comp", "script"] }
 tower-http = { version = "0.7", features = ["trace", "cors", "fs"] }
 http = "1.5"
 
@@ -137,9 +168,11 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
 ] }
 opentelemetry = { version = "0.32", default-features = false, features = [
   "trace",
+  "metrics",
 ] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = [
   "trace",
+  "metrics",
   "rt-tokio",
   "experimental_trace_batch_span_processor_with_async_runtime",
 ] }
@@ -148,6 +181,7 @@ opentelemetry-semantic-conventions = { version = "0.32", features = [
 ] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = [
   "trace",
+  "metrics",
   "grpc-tonic",
   "http-proto",
   "reqwest-client",
@@ -278,3 +312,4 @@ missing_crate_level_docs = "warn"
 [workspace.metadata.docs.rs]
 all-features = true
 targets = ["x86_64-unknown-linux-gnu"]
+rand = "0.8"

@@ -36,11 +36,11 @@ async fn with_prompt_context_injects_skills_and_agents() {
             Some("complex tasks"),
         ));
 
-    let agent = ReActAgent::with_prompt_context(
+    let agent = ReActAgent::with_descriptor(
         provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "BASE".to_string(),
+        crate::default_descriptor("BASE".to_string()),
         Arc::new(ctx),
     );
 
@@ -61,7 +61,6 @@ async fn with_prompt_context_injects_skills_and_agents() {
     }
 
     let captured = provider.captured.lock().await;
-    assert!(!captured.is_empty());
     let sys_text = match &captured[0][0].content {
         synthia_provider::Content::Single(ContentPart::Text(t)) => {
             t.text.clone()
@@ -92,7 +91,15 @@ async fn with_prompt_context_injects_skills_and_agents() {
         "disabled skills must not be advertised"
     );
     assert!(sys_text.contains("`planner`"));
-    assert!(sys_text.contains("(use when: complex tasks)"));
+    let agents_section = sys_text
+        .split_once("<available_agents>")
+        .and_then(|(_, rest)| rest.split_once("</available_agents>"))
+        .map(|(body, _)| body)
+        .expect("available_agents section");
+    assert!(
+        agents_section.contains("planner"),
+        "available_agents must name the peer agent"
+    );
     assert!(sys_text.contains("<identity>"));
     assert!(sys_text.contains("</identity>"));
     assert!(sys_text.contains("<available_skills>"));
@@ -114,34 +121,16 @@ async fn with_prompt_context_injects_skills_and_agents() {
 
 #[tokio::test]
 async fn descriptor_is_stable_returns_assembled_prompt_metadata() {
-    // Sanity: the descriptor fields used by the assembler
-    // are reachable via `prompt_context()` and `descriptor()`.
-    let agent = ReActAgent::with_prompt_context(
+    // Sanity: the descriptor fields used by the assembler are
+    // reachable via `descriptor()`.
+    let agent = ReActAgent::with_descriptor(
         Arc::new(synthia_provider::traits_stub::ModelProviderStub::new()),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "X".to_string(),
+        crate::default_descriptor("X".to_string()),
         Arc::new(crate::prompt::PromptContext::default()),
     );
-    assert_eq!(agent.prompt_context().skills.len(), 0);
     assert_eq!(agent.descriptor().instructions, "X");
-}
-
-#[tokio::test]
-async fn set_prompt_context_swaps_manifest_at_runtime() {
-    // The setter lets callers (e.g. settings changes) swap
-    // the manifest without rebuilding the agent.
-    let mut agent = ReActAgent::with_options(
-        Arc::new(synthia_provider::traits_stub::ModelProviderStub::new()),
-        Arc::new(ToolRegistry::new()),
-        PathBuf::new(),
-        "X".to_string(),
-    );
-    assert!(agent.prompt_context().skills.is_empty());
-    agent.set_prompt_context(
-        crate::prompt::PromptContext::default().with_skill("y", "y"),
-    );
-    assert_eq!(agent.prompt_context().skills.len(), 1);
 }
 
 #[tokio::test]
@@ -169,11 +158,11 @@ async fn tool_schemas_never_appear_in_assembled_system_prompt() {
     // completion request's `tools` channel.
     let ctx = crate::prompt::PromptContext::default();
 
-    let agent = ReActAgent::with_prompt_context(
+    let agent = ReActAgent::with_descriptor(
         provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "BASE".to_string(),
+        crate::default_descriptor("BASE".to_string()),
         Arc::new(ctx),
     );
 
@@ -209,5 +198,61 @@ async fn tool_schemas_never_appear_in_assembled_system_prompt() {
     assert!(
         !sys_text.contains("Use only these tools:"),
         "tool grounding belongs on the runtime, not in the prompt"
+    );
+}
+
+/// The harness has no git dependency, so the old git line was a permanent `unknown`.
+#[tokio::test]
+async fn runtime_snapshot_names_the_model_and_omits_git() {
+    let provider =
+        Arc::new(CapturingProvider::new(vec![vec![StreamChunk::IsDone {
+            result: Box::new(SamplingResult {
+                text: "ok".into(),
+                tool_calls: vec![],
+                reasoning: String::new(),
+                reasoning_signature: None,
+                usage: TokenUsage::default(),
+                ..Default::default()
+            }),
+        }]]));
+
+    let agent =
+        ReActAgent::new(provider.clone(), Arc::new(ToolRegistry::new()));
+    let mut stream = agent
+        .run(
+            crate::input::AgentInput::text("hi"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while let Some(_ev) = stream.next().await {}
+    drop(stream);
+
+    for _ in 0..50 {
+        if provider.call_count.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let captured = provider.captured.lock().await;
+    let snapshot = captured[0]
+        .iter()
+        .filter_map(|m| match &m.content {
+            synthia_provider::Content::Single(ContentPart::Text(t)) => {
+                Some(t.text.as_str())
+            }
+            _ => None,
+        })
+        .find(|t| t.contains("Current runtime context."))
+        .expect("the runtime-context snapshot reaches the wire");
+    assert!(
+        snapshot.contains("Model: capturing/capturing"),
+        "the snapshot must name the model the loop already holds; \
+         got:\n{snapshot}"
+    );
+    assert!(
+        !snapshot.contains("Is directory a git repo:"),
+        "no git dependency means no permanently-unknown git line; \
+         got:\n{snapshot}"
     );
 }

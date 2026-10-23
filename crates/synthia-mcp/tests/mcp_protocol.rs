@@ -163,8 +163,6 @@ async fn mcptool_surfaces_transport_failure_as_error_output() {
 
 #[tokio::test]
 async fn register_mcp_tools_publishes_into_the_registry() {
-    use synthia_core::registry::Registry as _;
-
     let transport = Arc::new(InMemoryTransport::new().with_echo_server());
     let client = McpClient::new(transport);
     let registry = ToolRegistry::new();
@@ -183,8 +181,6 @@ async fn register_mcp_tools_publishes_into_the_registry() {
     // its namespaced public name.
     let entry = registry
         .get("mcp__srv__echo")
-        .await
-        .unwrap()
         .expect("namespaced tool registered");
     assert_eq!(entry.tool_instance().name(), "mcp__srv__echo");
     assert_eq!(
@@ -201,8 +197,6 @@ async fn register_mcp_tools_publishes_into_the_registry() {
 /// tool still calls its OWN server's raw name on the wire.
 #[tokio::test]
 async fn two_servers_publishing_the_same_raw_name_coexist() {
-    use synthia_core::registry::Registry as _;
-
     let registry = ToolRegistry::new();
     let alpha_transport = Arc::new(InMemoryTransport::new().with_echo_server());
     let beta_transport = Arc::new(InMemoryTransport::new().with_echo_server());
@@ -227,11 +221,7 @@ async fn two_servers_publishing_the_same_raw_name_coexist() {
     assert!(names.contains(&"mcp__beta__echo".to_string()), "{names:?}");
 
     // Calling one reaches exactly one server, under its raw name.
-    let alpha = registry
-        .get("mcp__alpha__echo")
-        .await
-        .unwrap()
-        .expect("alpha");
+    let alpha = registry.get("mcp__alpha__echo").expect("alpha");
     let _ = alpha
         .tool_instance()
         .call(json!({"text": "hi"}), &Context::default())

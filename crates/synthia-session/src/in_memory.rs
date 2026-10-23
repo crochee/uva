@@ -4,7 +4,11 @@
 //! process restart loses all events. Callers (the agent test
 //! suite) MUST treat this as ephemeral.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc,
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -28,12 +32,16 @@ use crate::sink::{
 pub struct InMemorySessionSink {
     id: String,
     state: Arc<Mutex<State>>,
+    /// The ordinal counter. It lives beside the state it guards so
+    /// [`alloc_seq`](SessionSink::alloc_seq) can hand out an ordinal
+    /// without awaiting the lock — the reservation must not block the
+    /// loop's hot path.
+    next_seq: Arc<AtomicU64>,
 }
 
 struct State {
     events: Vec<Value>,
     closed: bool,
-    seq: u64,
     /// Set of every idempotency key the sink has accepted for
     /// this session. Mirrors the JSONL backend's LRU without
     /// the bounded window — tests do not exercise the eviction
@@ -41,10 +49,6 @@ struct State {
     /// Keys are owned `String`s so the trait API can hand us a
     /// borrowed `&str` and we store it cheaply.
     idem_keys: std::collections::HashSet<String>,
-    /// Reverse index: idempotency key → assigned seq. Separate
-    /// from `idem_keys` so a dup hit returns the seq directly
-    /// without re-deriving it from the events vec.
-    idem_seqs: std::collections::HashMap<String, u64>,
 }
 
 impl InMemorySessionSink {
@@ -55,10 +59,9 @@ impl InMemorySessionSink {
             state: Arc::new(Mutex::new(State {
                 events: Vec::new(),
                 closed: false,
-                seq: 0,
                 idem_keys: std::collections::HashSet::new(),
-                idem_seqs: std::collections::HashMap::new(),
             })),
+            next_seq: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -84,52 +87,48 @@ impl SessionSink for InMemorySessionSink {
         &self.id
     }
 
-    async fn append(&self, event: &Value) -> Result<u64, SessionError> {
+    fn alloc_seq(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    async fn append(&self, event: &Value) -> Result<(), SessionError> {
         let mut s = self.state.lock().expect("InMemorySessionSink poisoned");
         if s.closed {
             return Err(SessionError::Closed);
         }
-        s.seq += 1;
         s.events.push(event.clone());
-        Ok(s.seq)
+        Ok(())
     }
 
     async fn append_with_key(
         &self,
         key: Option<&str>,
         event: &Value,
-    ) -> Result<u64, SessionError> {
+    ) -> Result<(), SessionError> {
         let Some(key) = key else {
             return self.append(event).await;
         };
         let mut s = self.state.lock().expect("InMemorySessionSink poisoned");
-        if let Some(&seq) = s.idem_seqs.get(key) {
-            return Ok(seq);
+        if s.idem_keys.contains(key) {
+            return Ok(());
         }
         if s.closed {
             return Err(SessionError::Closed);
         }
-        s.seq += 1;
-        let seq = s.seq;
         s.events.push(event.clone());
         s.idem_keys.insert(key.to_string());
-        s.idem_seqs.insert(key.to_string(), seq);
-        Ok(seq)
+        Ok(())
     }
 
-    async fn append_many(&self, events: &[Value]) -> Result<u64, SessionError> {
+    async fn append_many(&self, events: &[Value]) -> Result<(), SessionError> {
         let mut s = self.state.lock().expect("InMemorySessionSink poisoned");
         if s.closed {
             return Err(SessionError::Closed);
         }
-        if events.is_empty() {
-            return Ok(s.seq);
-        }
         for event in events {
             s.events.push(event.clone());
-            s.seq += 1;
         }
-        Ok(s.seq)
+        Ok(())
     }
 
     async fn read(&self) -> Result<Vec<Value>, SessionError> {
@@ -144,11 +143,11 @@ impl SessionSink for InMemorySessionSink {
     }
 
     async fn snapshot(&self) -> Result<SessionSnapshot, SessionError> {
-        let s = self.state.lock().expect("InMemorySessionSink poisoned");
+        let last = self.next_seq.load(Ordering::SeqCst);
         Ok(SessionSnapshot {
             session_id: self.id.clone(),
-            last_event_seq: s.seq,
-            last_stream_index: s.seq,
+            last_event_seq: last,
+            last_stream_index: last,
             bytes_on_disk: 0,
         })
     }
@@ -169,11 +168,18 @@ mod tests {
 
     use super::*;
 
+    /// Write one row the way a writer does: reserve its ordinal
+    /// first, then hand the row to the sink.
+    async fn write(sink: &InMemorySessionSink, row: Value) {
+        sink.alloc_seq();
+        sink.append(&row).await.expect("append");
+    }
+
     #[tokio::test]
     async fn in_memory_sink_round_trips_events() {
         let s = InMemorySessionSink::new("test");
-        s.append(&json!({"i": 0})).await.unwrap();
-        s.append(&json!({"i": 1})).await.unwrap();
+        write(&s, json!({"i": 0})).await;
+        write(&s, json!({"i": 1})).await;
         let events = s.read().await.unwrap();
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["i"], 0);
@@ -191,8 +197,8 @@ mod tests {
     #[tokio::test]
     async fn in_memory_sink_snapshot_returns_sequence() {
         let s = InMemorySessionSink::new("test");
-        s.append(&json!({"i": 0})).await.unwrap();
-        s.append(&json!({"i": 1})).await.unwrap();
+        write(&s, json!({"i": 0})).await;
+        write(&s, json!({"i": 1})).await;
         let snap = s.snapshot().await.unwrap();
         assert_eq!(snap.session_id, "test");
         assert_eq!(snap.last_event_seq, 2);
@@ -216,6 +222,7 @@ mod tests {
         for i in 0..50 {
             let sink = s.clone();
             handles.push(tokio::spawn(async move {
+                sink.alloc_seq();
                 sink.append(&json!({"i": i})).await
             }));
         }
@@ -240,7 +247,7 @@ mod tests {
     async fn in_memory_sink_read_from_zero_matches_read() {
         let s = InMemorySessionSink::new("test");
         for i in 0..3 {
-            s.append(&json!({"i": i})).await.unwrap();
+            write(&s, json!({"i": i})).await;
         }
         let all = s.read().await.unwrap();
         let from_zero = s.read_from(0).await.unwrap();
@@ -251,7 +258,7 @@ mod tests {
     async fn in_memory_sink_read_from_n_returns_strict_suffix() {
         let s = InMemorySessionSink::new("test");
         for i in 0..5 {
-            s.append(&json!({"i": i})).await.unwrap();
+            write(&s, json!({"i": i})).await;
         }
         // Event sequence is 1-indexed (first `append` ⇒ seq=1).
         // `read_from(N)` drops events with `seq ≤ N`.
@@ -269,7 +276,7 @@ mod tests {
     async fn in_memory_sink_read_from_past_end_returns_empty() {
         let s = InMemorySessionSink::new("test");
         for i in 0..2 {
-            s.append(&json!({"i": i})).await.unwrap();
+            write(&s, json!({"i": i})).await;
         }
         // `seq > last_event_seq` ⇒ empty slice. The HTTP seam
         // surfaces that mismatch as `410 Gone` before reaching
@@ -284,27 +291,27 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[tokio::test]
-    async fn in_memory_sink_idempotent_append_returns_original_seq() {
+    async fn in_memory_sink_idempotent_append_writes_the_row_once() {
         let s = InMemorySessionSink::new("idem");
-        let first = s
-            .append_with_key(Some("evt-1"), &json!({"i": 0}))
+        s.alloc_seq();
+        s.append_with_key(Some("evt-1"), &json!({"i": 0}))
             .await
             .unwrap();
-        let second = s
-            .append_with_key(Some("evt-1"), &json!({"i": 0}))
+        s.alloc_seq();
+        s.append_with_key(Some("evt-1"), &json!({"i": 0}))
             .await
             .unwrap();
-        assert_eq!(first, second);
-        assert_eq!(s.snapshot().await.unwrap().last_event_seq, 1);
         assert_eq!(s.read().await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn in_memory_sink_idempotent_distinct_keys_both_written() {
         let s = InMemorySessionSink::new("idem-distinct");
+        s.alloc_seq();
         s.append_with_key(Some("a"), &json!({"i": 0}))
             .await
             .unwrap();
+        s.alloc_seq();
         s.append_with_key(Some("b"), &json!({"i": 1}))
             .await
             .unwrap();
@@ -312,14 +319,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.snapshot().await.unwrap().last_event_seq, 2);
+        assert_eq!(s.read().await.unwrap().len(), 2);
     }
 
     #[tokio::test]
     async fn in_memory_sink_idempotent_none_key_legacy_behavior() {
         let s = InMemorySessionSink::new("idem-none");
+        s.alloc_seq();
         s.append_with_key(None, &json!({"i": 0})).await.unwrap();
+        s.alloc_seq();
         s.append_with_key(None, &json!({"i": 0})).await.unwrap();
         assert_eq!(s.snapshot().await.unwrap().last_event_seq, 2);
+        assert_eq!(s.read().await.unwrap().len(), 2);
     }
 
     // -----------------------------------------------------------------
@@ -330,8 +341,10 @@ mod tests {
     async fn in_memory_sink_append_many_writes_batch() {
         let s = InMemorySessionSink::new("many");
         let batch: Vec<Value> = (0..10).map(|i| json!({"i": i})).collect();
-        let last = s.append_many(&batch).await.unwrap();
-        assert_eq!(last, 10);
+        for _ in &batch {
+            s.alloc_seq();
+        }
+        s.append_many(&batch).await.unwrap();
         assert_eq!(s.snapshot().await.unwrap().last_event_seq, 10);
         assert_eq!(s.read().await.unwrap().len(), 10);
     }
@@ -339,8 +352,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_sink_append_many_empty_is_noop() {
         let s = InMemorySessionSink::new("many-empty");
-        let last = s.append_many(&[]).await.unwrap();
-        assert_eq!(last, 0);
+        s.append_many(&[]).await.unwrap();
         assert!(s.is_empty());
     }
 

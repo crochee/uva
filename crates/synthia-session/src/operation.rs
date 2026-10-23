@@ -125,8 +125,8 @@ pub struct OperationSnapshot {
     /// `AgentState::iteration_count` at the snapshot's wall
     /// clock.
     pub iteration: usize,
-    /// Effective iteration cap after clamping (mirrors
-    /// `Agent::effective_max_iterations`).
+    /// Effective iteration cap after clamping (the agent's
+    /// `max_iterations` knob).
     pub max_iterations: usize,
     /// Wall-clock timestamp at which the snapshot was taken
     /// (chrono `DateTime<Utc>`, matches the R8 wall-clock

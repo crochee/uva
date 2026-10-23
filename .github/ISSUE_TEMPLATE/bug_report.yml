@@ -89,7 +89,7 @@ body:
         span 也可一并附上。
       placeholder: |
         ```
-        thread 'main' panicked at 'loop budget exceeded', crates/synthia-harness/src/agent/re_act.rs:42:5
+        thread 'main' panicked at 'loop budget exceeded', crates/synthia-harness/src/agent/re_act/mod.rs:42:5
         ```
     validations:
       required: false

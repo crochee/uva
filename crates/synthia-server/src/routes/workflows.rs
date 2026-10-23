@@ -1,16 +1,17 @@
-//! `synthia-workflow` HTTP surface — in-memory `WorkflowSpec`
+//! `synthia-workflow` HTTP surface—in-memory `WorkflowSpec`
 //! registry + plan validation.
 //!
 //! Surface:
-//! - `GET    /api/v1/workflows`        — list documents
-//! - `GET    /api/v1/workflows/{id}`   — single document
-//! - `POST   /api/v1/workflows`        — register a document
-//! - `PUT    /api/v1/workflows/{id}`   — replace a document
-//! - `DELETE /api/v1/workflows/{id}`   — remove a document
-//! - `POST   /api/v1/workflows/{id}/run` — execute (returns
-//!   `WorkflowRunResult`; today this is a stub that validates
-//!   the plan and reports the planned calls; real execution
-//!   needs a `WorkflowHost` wired into the agent harness).
+//! - `GET /api/v1/workflows`—list documents
+//! - `GET /api/v1/workflows/{id}`—single document
+//! - `POST /api/v1/workflows`—register a document
+//! - `PUT /api/v1/workflows/{id}`—replace a document
+//! - `DELETE /api/v1/workflows/{id}`—remove a document
+//! - `POST /api/v1/workflows/{id}/run`—execute: every planned
+//!   call dispatches through
+//!   [`AppState::workflow_host`](crate::state::AppState::workflow_host),
+//!   which resolves the step's agent by name from the deployment's
+//!   registry and runs it to completion.
 //!
 //! The wire shapes match `synthia::workflow::WorkflowSpec` and
 //! (for the run result) `synthia::workflow::result::WorkflowRun`.
@@ -33,7 +34,7 @@ pub struct WorkflowSummary {
     pub phase_count: usize,
 }
 
-/// `GET /api/v1/workflows` — list all registered documents.
+/// `GET /api/v1/workflows`—list all registered documents.
 pub async fn list_workflows(
     State(state): State<Arc<AppState>>,
     AppQuery(page): AppQuery<PageQuery>,
@@ -56,7 +57,7 @@ pub async fn list_workflows(
     }))
 }
 
-/// `GET /api/v1/workflows/{id}` — single document detail.
+/// `GET /api/v1/workflows/{id}`—single document detail.
 pub async fn get_workflow(
     State(state): State<Arc<AppState>>,
     AppPath(id): AppPath<String>,
@@ -69,7 +70,7 @@ pub async fn get_workflow(
     Ok(Json(spec))
 }
 
-/// `POST /api/v1/workflows` — register a new document.
+/// `POST /api/v1/workflows`—register a new document.
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<WorkflowSpec>,
@@ -88,7 +89,7 @@ pub async fn create_workflow(
     Ok((StatusCode::CREATED, Json(spec)))
 }
 
-/// `PUT /api/v1/workflows/{id}` — replace a stored document.
+/// `PUT /api/v1/workflows/{id}`—replace a stored document.
 pub async fn replace_workflow(
     State(state): State<Arc<AppState>>,
     AppPath(id): AppPath<String>,
@@ -107,12 +108,17 @@ pub async fn replace_workflow(
     Ok(Json(spec))
 }
 
-/// `DELETE /api/v1/workflows/{id}` — drop a document.
+/// `DELETE /api/v1/workflows/{id}`—drop a document.
 pub async fn delete_workflow(
     State(state): State<Arc<AppState>>,
     AppPath(id): AppPath<String>,
 ) -> Result<StatusCode, AppError> {
-    if state.workflows.remove(&id).await {
+    if state
+        .workflows
+        .remove(&id)
+        .await
+        .map_err(|e| AppError::from(synthia::core::Error::internal(e)))?
+    {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::from(synthia::core::Error::not_found(format!(
@@ -121,14 +127,23 @@ pub async fn delete_workflow(
     }
 }
 
-/// `POST /api/v1/workflows/{id}/run` — execute.
+/// `POST /api/v1/workflows/{id}/run`—execute.
 ///
-/// Today this validates the plan and returns a synthesized
-/// `WorkflowRunResult` describing what *would* run. The
-/// `WorkflowHost` trait implementation that calls back into
-/// the agent harness lands in a follow-up turn; until then
-/// every planned call settles as `Superseded` (a placeholder
-/// status indicating "the run got that far").
+/// Dispatches every planned call through
+/// [`AppState::workflow_host`](crate::state::AppState::workflow_host)'s
+/// `spawn_agent`, translating each `AgentOutcome` into a `CallRun`:
+/// `Succeeded(text)` when the host reported success, `Failed(error)`
+/// when it did not. The host today is the `ServerWorkflowHost` stub
+/// (see the `state::app_state::workflow_host` module), so every call
+/// settles as `Failed` with the typed "agent runtime not configured"
+/// reason—a real host (a follow-up PR) replaces the body without
+/// touching this handler.
+///
+/// The previous shape—synthesising `Superseded` per call with a
+/// hardcoded "not yet wired" string—never crossed the host, so
+/// the wire result could not change when the host landed. This
+/// handler is the translation layer the real host will flow
+/// through from day one.
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
     AppPath(id): AppPath<String>,
@@ -141,28 +156,66 @@ pub async fn run_workflow(
     let plan = state.workflows.plan(&spec).await.map_err(|e| {
         AppError::from(synthia::core::Error::validation(e.to_string()))
     })?;
-    let call_runs = plan
-        .calls()
-        .iter()
-        .map(|c| synthia::workflow::CallRun {
-            position: c.position,
-            step_id: c.step_id.clone(),
-            phase: c.phase.clone(),
-            status: synthia::workflow::CallStatus::Superseded,
-            text: None,
-            error: Some(
-                "WorkflowHost not yet wired into synthia-server — runs are stubbed".to_string(),
-            ),
-            gate: synthia::workflow::GateVerdict::Absent,
-            winner: false,
-            branch_score: None,
-        })
-        .collect();
+    let run_id = format!("wf_{}", uuid::Uuid::new_v4());
+    let mut call_runs = Vec::with_capacity(plan.calls().len());
+    let mut spawned = 0usize;
+    for call in plan.calls() {
+        let request = synthia::workflow::AgentRequest {
+            run_id: run_id.clone(),
+            step_id: call.step_id.clone(),
+            position: call.position,
+            depth: 0,
+            agent: call.agent.clone(),
+            prompt: call.prompt.clone(),
+            gate: call.gate.clone(),
+            isolation: call.isolation,
+            cwd: None,
+        };
+        let outcome = state.workflow_host.spawn_agent(&request).await;
+        let run = match outcome {
+            Ok(outcome) if outcome.succeeded() => {
+                spawned += 1;
+                synthia::workflow::CallRun {
+                    position: call.position,
+                    step_id: call.step_id.clone(),
+                    phase: call.phase.clone(),
+                    status: synthia::workflow::CallStatus::Succeeded,
+                    text: outcome.text,
+                    error: None,
+                    gate: synthia::workflow::GateVerdict::Absent,
+                    winner: false,
+                    branch_score: None,
+                }
+            }
+            Ok(outcome) => synthia::workflow::CallRun {
+                position: call.position,
+                step_id: call.step_id.clone(),
+                phase: call.phase.clone(),
+                status: synthia::workflow::CallStatus::Failed,
+                text: None,
+                error: outcome
+                    .error
+                    .or_else(|| Some("agent produced no outcome".into())),
+                gate: synthia::workflow::GateVerdict::Absent,
+                winner: false,
+                branch_score: None,
+            },
+            // A host `Err` means the call could not be made at all—
+            // the run cannot continue, so the whole request fails
+            // with the host's reason rather than half-settling.
+            Err(e) => {
+                return Err(AppError::from(synthia::core::Error::internal(
+                    e.to_string(),
+                )));
+            }
+        };
+        call_runs.push(run);
+    }
     Ok(Json(WorkflowRunResult {
-        run_id: format!("wf_{}", uuid::Uuid::new_v4()),
+        run_id,
         output: None,
         calls: call_runs,
         replayed: 0,
-        spawned: 0,
+        spawned,
     }))
 }

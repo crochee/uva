@@ -68,14 +68,19 @@ mod spec;
 
 pub use delegator::TaskDelegator;
 pub use schema::{task_tool_definition, task_tool_definition_with_features};
-pub use spec::{MAX_SUBAGENT_DEPTH, TASK_TOOL_NAME, TaskSpec};
+pub use spec::{
+    MAX_SUBAGENT_DEPTH,
+    TASK_TOOL_NAME,
+    TaskSpec,
+    TaskTraceContext,
+};
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use serde_json::{Value, json};
-    use synthia_harness::{AgentRegistry, ToolInterceptor};
+    use synthia_harness::{AgentRegistry, SyntheticTool};
     use synthia_tool::ToolFeatures;
 
     use super::*;

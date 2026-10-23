@@ -46,7 +46,10 @@
 //! meaningful sense. Persistence is a per-implementation concern; it
 //! lives on impl-side helper methods, not on the trait contract.
 
+use std::{collections::HashMap, sync::atomic::AtomicU64};
+
 use async_trait::async_trait;
+use parking_lot::RwLock;
 
 use crate::error::Error;
 
@@ -223,6 +226,125 @@ pub struct EmptyFilter;
 pub trait RegistryItem: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
+}
+
+// ===== NameTable =========================================================
+
+/// A concurrency-safe `HashMap<String, T>` with a monotonic version counter,
+/// shared by every "name → object" catalog in the workspace.
+///
+/// This is the storage half of a registry; the [`Registry`] trait is the
+/// wire-facing half. Holding the map + version in one type means the two
+/// cannot drift apart: every successful mutation bumps the version, and a
+/// caller keying a cache on [`NameTable::version`] is invalidated exactly
+/// when the catalog changed.
+///
+/// `names()` and `values()` return sorted order so listings are
+/// deterministic across lock-acquisition order.
+pub struct NameTable<T> {
+    inner: RwLock<HashMap<String, T>>,
+    version: AtomicU64,
+}
+
+impl<T> NameTable<T> {
+    /// Empty table at version `0`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: RwLock::new(HashMap::new()),
+            version: AtomicU64::new(0),
+        }
+    }
+
+    /// Insert `value` under `name`, returning the previous binding. Bumps the
+    /// version whether or not a previous binding existed.
+    pub fn insert(&self, name: String, value: T) -> Option<T> {
+        let prev = self.inner.write().insert(name, value);
+        self.bump();
+        prev
+    }
+
+    /// Insert only when `name` is absent, handing the value back on a
+    /// duplicate. This is the atomic check-and-set behind a `put`-style
+    /// registry whose duplicate rejection must not race with a concurrent
+    /// registration.
+    pub fn insert_if_absent(&self, name: String, value: T) -> Result<(), T> {
+        let mut guard = self.inner.write();
+        if guard.contains_key(&name) {
+            return Err(value);
+        }
+        guard.insert(name, value);
+        drop(guard);
+        self.bump();
+        Ok(())
+    }
+
+    /// Remove `name`, returning the binding. Does **not** bump the version
+    /// when the name was absent: a no-op delete is not a catalog change.
+    pub fn remove(&self, name: &str) -> Option<T> {
+        let prev = self.inner.write().remove(name);
+        if prev.is_some() {
+            self.bump();
+        }
+        prev
+    }
+
+    /// Every key, sorted.
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> =
+            self.inner.read().keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Number of bindings.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.read().len()
+    }
+
+    /// Whether the table holds no bindings.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Monotonic counter of successful mutations; cache keys read this.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn bump(&self) {
+        self.version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl<T: Clone> NameTable<T> {
+    /// Clone the binding under `name`.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<T> {
+        self.inner.read().get(name).cloned()
+    }
+
+    /// Clone every binding, in sorted-name order.
+    #[must_use]
+    pub fn values(&self) -> Vec<T> {
+        let guard = self.inner.read();
+        let mut pairs: Vec<(String, T)> =
+            guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        drop(guard);
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs.into_iter().map(|(_, v)| v).collect()
+    }
+}
+
+impl<T> Default for NameTable<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Named-item catalog trait.

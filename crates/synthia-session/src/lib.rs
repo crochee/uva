@@ -8,9 +8,9 @@
 //! refactor the public surface collapses to:
 //!
 //! - [`SessionSink`] — the single trait every consumer
-//!   (typically `synthia-harness`) depends on. **5 required
-//!   methods** (`id`, `append`, `read`, `snapshot`, `close`)
-//!   plus 2 **default-implemented** methods
+//!   (typically `synthia-harness`) depends on. **6 required
+//!   methods** (`id`, `alloc_seq`, `append`, `read`, `snapshot`,
+//!   `close`) plus 2 **default-implemented** methods
 //!   (`append_with_key`, `append_many`) that opt into
 //!   idempotency and batched durability without forcing every
 //!   backend to implement them.

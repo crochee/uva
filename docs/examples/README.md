@@ -31,9 +31,9 @@ Two things are worth knowing before reading the code:
 | `assemble_with_provider_profile` | `synthia-harness` | `ProviderProfile` as typed configuration instead of loose setters | the profile → provider translation |
 | `assemble_with_skills` | `synthia-harness` | `SkillRegistry`: procedural skills bound to tools | skill lookup during assembly |
 | `assemble_with_tier_steering` | `synthia-harness` | `ModelTier` → `Steering::for_tier` + `AdaptiveRegistry` tool cap | the visible tool list shrinking on `Small` |
-| `strategy_swap` | `synthia-harness` | One runtime, **three** reasoning loops through the same `ReActAgent`: `ReActStrategy` (tools offered, one tool call), `ChainOfThoughtStrategy` (no tools, step-by-step prompt), `BestOfNStrategy` (three concurrent samples scored by a caller-supplied `CandidateScorer`, winner published) | `STRATEGY-SWAP: OK`, and the request logs — ReAct with tools, Chain-of-Thought without, best-of-N with three unoffered-tool samples and the scorer's pick |
+| `chain_of_thought` | `synthia-strategy-cot` | The `ChainOfThoughtStrategy` plugin: one tool-free pass with a step-format instruction, the chain parsed from the answer | `COT: OK` |
+| `best_of_n_demo` | `synthia-strategy-best-of-n` | The `BestOfNStrategy` plugin with `LlmJudgeScorer`: three candidates, one judge call per candidate, the highest-scoring candidate wins | `BON: OK`, plus the per-candidate progress events and the selection event |
 | `argument_validation` | `synthia-tool` | The R74 opt-in: same `EchoTool`, two runs (off / on), the off path counts 2 tool bodies (default unchanged-by-R74 contract), the on path counts 1 (the malformed call is rejected at the registry with `is_error: true` and the dotted-path violation in the body) | `ARGUMENT-VALIDATION: OK`, and the tool's call counter (2 vs 1) |
-| `best_of_n_judge` | `synthia-harness` | The same `BestOfNStrategy`, with `LlmJudgeScorer` (an `Arc<dyn ModelProvider>` + rubric) replacing the marker-grep scorer: three candidates, one judge call per candidate, the highest-scoring candidate wins | `BEST-OF-N-JUDGE: OK`, plus the per-candidate progress events (`scored 0.300 / 0.950 / 0.700 via llm-judge`) and the selection event (`selected candidate 0 (score 0.950)`) |
 | `external-consumer` | `docs/examples/` | A **standalone crate** (not a workspace member) depending on synthia by relative path — the real "use it as a library" test | `CONSUMER-PROOF: OK` |
 | `minimal-consumer` | `docs/examples/` | The **smallest** complete agent: one dependency (`synthia`, `default-features = false`) and the seven-feature MVP subset from [`MINIMAL.md`](../../MINIMAL.md) — a scripted provider that asks for a tool, one hand-written `Tool`, and assertions that it really ran. Its tree carries no HTTP client at all | `MVP-OK`, and `make check-mvp-deps` for the dependency promise |
 | `assemble_from_zero` | `synthia` (facade) | The same assembly through **one dependency**: `use synthia::prelude::*` and nothing else | how few names a consumer actually needs; the crate docs are the longer version |
@@ -98,7 +98,7 @@ Two things are worth knowing before reading the code:
 ## Reading order suggestion
 
 Start with `assemble_with_builder` (what a normal consumer writes),
-then `tool_groups` and `strategy_swap` (the two most useful extension
+then `tool_groups` (the most useful extension
 points: what the model may call, and how it reasons), then
 `workflow_fanout` and `workflow_best_of` (how to make a
 multi-agent run resumable, and how to pick among attempts).

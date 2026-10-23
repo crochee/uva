@@ -11,11 +11,13 @@
 
 use std::sync::{
     Arc,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
 use futures::StreamExt;
+use serde_json::json;
+use synthia_context::AgentState;
 use synthia_core::{CancelToken, Error};
 use synthia_provider::{
     CompletionResponse,
@@ -29,7 +31,8 @@ use synthia_provider::{
     traits::ModelProvider,
     types::ModelConfig,
 };
-use synthia_tool::ToolRegistry;
+use synthia_steering::{GuardResult, GuardSeverity, Steering};
+use synthia_tool::{Context, ToolOutput, ToolRegistry};
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
@@ -125,6 +128,86 @@ impl ModelProvider for ScriptedStreamProvider {
             cached: false,
             replay_state: None,
             stop_reason: sampling.stop_reason.clone(),
+        })
+    }
+}
+
+// -- CancellingStreamProvider ----------------------------------------
+
+/// Provider that fires the run's cancel token the first time the
+/// loop asks it to sample, then returns normally. This is the
+/// "cancelled *during* the run" shape: setup already completed, so
+/// the loop is past [`crate::agent::EventSink::begin`] and reports
+/// a [`SystemEvent::SessionInterrupted`] before the terminal event.
+#[derive(Debug)]
+pub(super) struct CancellingStreamProvider {
+    token: CancellationToken,
+    fired: Arc<AtomicBool>,
+}
+
+impl CancellingStreamProvider {
+    pub(super) fn new(token: CancellationToken) -> Self {
+        Self {
+            token,
+            fired: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait]
+impl ModelProvider for CancellingStreamProvider {
+    async fn initialize(
+        &mut self,
+        _config: ProviderConfig,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "cancelling-stream"
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        ModelConfig {
+            name: "fake".to_string(),
+            provider: "cancelling".to_string(),
+            context_window: 128_000,
+            max_output_tokens: 4096,
+            supports_tools: true,
+            supports_streaming: true,
+            supports_reasoning: true,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: synthia_provider::CompletionRequest,
+    ) -> Result<CompletionResponse, Error> {
+        unreachable!("streaming path should not call complete()")
+    }
+
+    async fn complete_with_stream(
+        &self,
+        _request: synthia_provider::CompletionRequest,
+        _cancel_token: Option<Arc<dyn CancelToken>>,
+        _on_delta: Box<dyn FnMut(StreamChunk) + Send>,
+    ) -> Result<CompletionResponse, Error> {
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            self.token.cancel();
+        }
+        Ok(CompletionResponse {
+            id: "cancelled".to_string(),
+            model: "fake".to_string(),
+            content: synthia_provider::Content::Single(ContentPart::Text(
+                TextContent {
+                    text: String::new(),
+                    cache_control: None,
+                },
+            )),
+            usage: TokenUsage::default(),
+            cached: false,
+            replay_state: None,
+            stop_reason: None,
         })
     }
 }
@@ -353,5 +436,165 @@ pub(super) fn peer_descriptor(
         persona: None,
         display_name: None,
         max_iterations: None,
+    }
+}
+
+pub(super) fn done_chunk(text: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::Content(ContentPart::Text(TextContent {
+            text: text.to_string(),
+            cache_control: None,
+        })),
+        StreamChunk::IsDone {
+            result: Box::new(SamplingResult {
+                text: String::new(),
+                tool_calls: vec![],
+                reasoning: String::new(),
+                reasoning_signature: None,
+                usage: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_prompt_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: None,
+                },
+                ..Default::default()
+            }),
+        },
+    ]
+}
+
+// --- Steering wiring helpers ----------------------------
+
+// --- Steering wiring helpers ----------------------------
+//
+// run_and_collect_with_steering — helper for steering wiring tests.
+// DenyEchoGuard — guard fixture that always denies "echo".
+
+pub(super) async fn run_and_collect_with_steering(
+    provider: Arc<dyn ModelProvider>,
+    registry: Arc<ToolRegistry>,
+    steering: Arc<Steering>,
+    input: AgentInput,
+) -> Vec<AgentEvent> {
+    let agent = ReActAgent::new(provider, registry).with_steering(steering);
+    let mut stream = agent.run(input, Arc::new(CancellationToken::new())).await;
+    let mut out = Vec::new();
+    while let Some(ev) = stream.next().await {
+        out.push(ev);
+    }
+    out
+}
+
+pub(super) struct DenyEchoGuard;
+impl synthia_steering::Guard for DenyEchoGuard {
+    fn name(&self) -> &str {
+        "deny_echo"
+    }
+
+    fn check(
+        &self,
+        action: &synthia_steering::Action,
+        _state: &AgentState,
+    ) -> GuardResult {
+        match action {
+            synthia_steering::Action::ToolCall { name, .. }
+                if name == "echo" =>
+            {
+                GuardResult::Deny {
+                    reason: "echo is disabled for this run".to_string(),
+                    severity: GuardSeverity::High,
+                }
+            }
+            _ => GuardResult::Allow,
+        }
+    }
+}
+
+// --- Parallel-dispatch helpers ----------------------------
+
+pub(super) static UNSAFE_RUNNING: AtomicUsize = AtomicUsize::new(0);
+pub(super) static MAX_CONCURRENT_UNSAFE: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) struct CountingSafeTool;
+pub(super) struct CountingUnsafeTool;
+
+#[async_trait]
+impl synthia_tool::Tool for CountingSafeTool {
+    fn name(&self) -> &str {
+        "safe"
+    }
+
+    fn description(&self) -> &str {
+        "safe"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object"})
+    }
+
+    fn mode(&self) -> synthia_tool::traits::ExecutionMode {
+        synthia_tool::traits::ExecutionMode::Parallel
+    }
+
+    async fn call(&self, _: serde_json::Value, _: &Context) -> ToolOutput {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        ToolOutput::text("safe-done")
+    }
+}
+
+#[async_trait]
+impl synthia_tool::Tool for CountingUnsafeTool {
+    fn name(&self) -> &str {
+        "unsafe"
+    }
+
+    fn description(&self) -> &str {
+        "unsafe"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type":"object"})
+    }
+
+    fn mode(&self) -> synthia_tool::traits::ExecutionMode {
+        synthia_tool::traits::ExecutionMode::Sequential
+    }
+
+    async fn call(&self, _: serde_json::Value, _: &Context) -> ToolOutput {
+        let n = UNSAFE_RUNNING.fetch_add(1, Ordering::SeqCst) + 1;
+        MAX_CONCURRENT_UNSAFE.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        UNSAFE_RUNNING.fetch_sub(1, Ordering::SeqCst);
+        ToolOutput::text("unsafe-done")
+    }
+}
+
+// --- LongTool helper -------------------------------------
+
+pub(super) struct LongTool;
+#[async_trait]
+impl synthia_tool::Tool for LongTool {
+    fn name(&self) -> &str {
+        "long"
+    }
+
+    fn description(&self) -> &str {
+        "long"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn mode(&self) -> synthia_tool::traits::ExecutionMode {
+        synthia_tool::traits::ExecutionMode::Parallel
+    }
+
+    async fn call(&self, _: serde_json::Value, _: &Context) -> ToolOutput {
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        ToolOutput::text("never")
     }
 }

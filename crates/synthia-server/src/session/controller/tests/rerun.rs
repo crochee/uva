@@ -20,9 +20,10 @@ use synthia::{
 };
 
 use super::{
-    super::{AgentEvent, SessionOp},
+    super::{AgentEvent, AgentInput, SessionOp},
     support::{
         BlockingFactory,
+        RecordedCall,
         RecordingFactory,
         make_manager_and_controller,
         message_text,
@@ -41,7 +42,7 @@ use super::{
 /// parked and silently dropped.
 #[tokio::test]
 async fn rerun_hands_its_parts_to_the_factory() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -104,7 +105,7 @@ async fn rerun_hands_its_parts_to_the_factory() {
 /// semantics here agree everywhere at once.
 #[tokio::test]
 async fn rerun_prompt_row_shadows_the_turn_it_replaces() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -125,12 +126,14 @@ async fn rerun_prompt_row_shadows_the_turn_it_replaces() {
     // Seed the durable log with one completed turn: the
     // prompt at ordinal 1, its answer at ordinal 2.
     let sink = manager.sink("alice", "s1");
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "UserInput",
         "data": { "text": "original question" },
     }))
     .await
     .unwrap();
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "Model",
         "data": { "type": "text", "text": "old answer" },
@@ -191,7 +194,7 @@ async fn rerun_prompt_row_shadows_the_turn_it_replaces() {
 /// long-shadowed original turn.
 #[tokio::test]
 async fn chained_rerun_shadows_the_previous_rerun() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -218,12 +221,14 @@ async fn chained_rerun_shadows_the_previous_rerun() {
         make_manager_and_controller(Duration::from_secs(60), factory).await;
 
     let sink = manager.sink("alice", "s1");
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "UserInput",
         "data": { "text": "original question" },
     }))
     .await
     .unwrap();
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "Model",
         "data": { "type": "text", "text": "old answer" },
@@ -275,7 +280,7 @@ async fn chained_rerun_shadows_the_previous_rerun() {
 /// this pins the defensive fallback.
 #[tokio::test]
 async fn rerun_without_a_user_turn_appends_plainly() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -295,6 +300,7 @@ async fn rerun_without_a_user_turn_appends_plainly() {
 
     // No user turn: an assistant row only.
     let sink = manager.sink("alice", "s1");
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "Model",
         "data": { "type": "text", "text": "answer without a prompt" },
@@ -339,7 +345,7 @@ async fn rerun_without_a_user_turn_appends_plainly() {
 /// next — which would then answer the stale prompt.
 #[tokio::test]
 async fn rerun_during_an_active_run_still_starts_its_own_run() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(BlockingFactory {
             calls: Arc::clone(&calls),

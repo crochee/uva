@@ -1,377 +1,195 @@
-//! The reasoning-strategy seam: pluggable agent loops.
-//!
-//! [`crate::ReActAgent`] is one way to reason. This module makes that
-//! a choice rather than a fact: a [`ReasoningStrategy`] receives an
-//! [`AgentRuntime`] — the provider, the tool registry, the steering
-//! bundle, the context manager, the clock, the cancel token, everything
-//! the agent was assembled from — plus the caller's [`crate::AgentInput`],
-//! and publishes [`crate::events::AgentEvent`]s through an [`EventSink`].
-//!
-//! ```text
-//!   ReActAgent::new(provider, registry)
-//!       .with_steering(steering)             ─┐
-//!       .with_context_manager(cm)             │  assembled once
-//!       .with_typed_event_sink(sink)          │
-//!       .with_strategy(Arc::new(MyStrategy)) ─┘
-//! ```
-//!
-//! The workspace ships three: [`crate::agent::ReActStrategy`]
-//! (think → act → observe, with tools — the default),
-//! [`crate::agent::ChainOfThoughtStrategy`] (one step-by-step
-//! completion, no tools), and
-//! [`crate::agent::BestOfNStrategy`] (N concurrent samples, scored,
-//! winner published — plug a [`crate::agent::CandidateScorer`]).
-//! Swapping them changes the *reasoning*, not the plumbing: same
-//! provider, same tools, same guards, same context window policy,
-//! same durable event stream.
-//!
-//! ## Why one method, not two
-//!
-//! Reference implementations often expose `execute()` (returns a final
-//! output) and a separate `stream()` that defaults to an error, which
-//! makes streaming second-class. Here the event stream **is** the
-//! contract: a strategy publishes through [`EventSink`] and returns
-//! `()`. Everything the loop learned is already on the stream, every
-//! strategy streams, and the agent's `run` is a three-line adapter.
-//!
-//! ## Errors
-//!
-//! A strategy signals failure the way [`crate::Agent::run`]
-//! documents: by emitting `SystemEvent::SessionEnded { reason }` and
-//! returning. The stream itself never yields `Err`. [`EventSink`]
-//! carries the three boundary calls that makes uniform —
-//! [`EventSink::begin`], [`EventSink::finish`], [`EventSink::fail`].
-//!
-//! ## Layout
-//!
-//! The three shipped strategies live under this module because they
-//! are three answers to one question. Each file owns one concern, and
-//! the shared pieces are shared rather than copied:
-//!
-//! | File | Concern |
-//! |---|---|
-//! | `mod.rs` | Seam-level docs, [`ReasoningStrategy`], [`KNOWN_STRATEGY_NAMES`], [`from_name`] |
-//! | `runtime.rs` | [`AgentRuntime`] — everything a strategy is handed |
-//! | `sink.rs` | [`EventSink`] — publishing, plus the run boundaries |
-//! | `request.rs` | The shared one-pass, tool-free request both single-shot strategies ask |
-//! | `scorer.rs` | [`CandidateScorer`] + [`LongestAnswer`] — the best-of-N judgement seam |
-//! | `cot.rs` | [`ChainOfThoughtStrategy`] — one pass, labelled steps |
-//! | `best_of_n.rs` | [`BestOfNStrategy`] — N passes, scored, winner wins |
-//! | `llm_judge.rs` | [`LlmJudgeScorer`] — a [`CandidateScorer`] backed by a model call |
-
-mod best_of_n;
-mod cot;
-mod llm_judge;
-mod request;
-mod runtime;
-mod scorer;
-mod sink;
+//! Reasoning-strategy seam: pluggable agent loops.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
-pub use best_of_n::BestOfNStrategy;
-pub use cot::ChainOfThoughtStrategy;
-pub use llm_judge::{DEFAULT_JUDGE_PROMPT, LlmJudgeScorer};
-pub use runtime::AgentRuntime;
-#[cfg(test)]
-pub(crate) use runtime::default_for_test;
-pub use scorer::{CandidateScorer, LongestAnswer};
-pub use sink::EventSink;
+pub use caps::AgentRuntime;
 
-use crate::input::AgentInput;
+use crate::{
+    AgentCaps,
+    agent::{
+        caps::{self},
+        sink::EventSink,
+    },
+    input::AgentInput,
+};
 
-/// A pluggable reasoning loop.
-///
-/// Implement this to run a session your way: the runtime hands over
-/// every assembled piece and the sink publishes what happens. See the
-/// module docs for why there is one method and how errors travel.
-///
-/// # Object safety
-///
-/// Held as `Arc<dyn ReasoningStrategy>` — dispatch is dynamic on
-/// purpose: an LLM round trip is thousands of times the cost of a
-/// vtable call, and dynamic dispatch lets a deployment pick the
-/// strategy at runtime (from config, per session) without
-/// recompiling.
+/// Implement this to run a session your way: the runtime hands over every
+/// assembled piece and the sink publishes what happens.
 #[async_trait]
 pub trait ReasoningStrategy: Send + Sync + 'static {
-    /// Stable label for logs and introspection (`"react"`,
-    /// `"chain-of-thought"`, …).
+    /// Stable label for logs and introspection (`"react"`, `"cot"`, …).
     fn name(&self) -> &str;
 
-    /// Drive one session to completion, publishing events through
-    /// `sink`.
-    ///
-    /// The strategy owns its own concurrency: it may await, spawn
-    /// through [`AgentRuntime::spawner`], and consult
-    /// [`AgentRuntime::cancel`] between passes. It MUST emit exactly
-    /// one terminal `SystemEvent::SessionEnded` — that event is what
-    /// tells consumers (and the durable log) the run is over.
+    /// Drive one session to completion, publishing events through `sink`.
     async fn run(
         &self,
         runtime: AgentRuntime,
         input: AgentInput,
-        sink: EventSink,
+        sink: &EventSink,
     );
 }
 
-/// The strategies this crate ships, by the names a deployment may
-/// configure.
-///
-/// Kept in one place so the error message for an unknown name, the
-/// docs, and the server's config validation cannot drift apart.
-pub const KNOWN_STRATEGY_NAMES: &[&str] =
-    &["react", "chain-of-thought", "best-of-n"];
+fn builtin_strategy(name: &str) -> Option<Arc<dyn ReasoningStrategy>> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "react" | "re-act" | "re_act" => {
+            Some(Arc::new(crate::agent::ReActStrategy))
+        }
+        _ => None,
+    }
+}
 
-/// Resolve a strategy by name.
-///
-/// This is the deployment-facing half of the seam: an operator names a
-/// strategy in config (`strategy = "chain-of-thought"`) and the run
-/// factory installs it, with no code change. Names are
-/// case-insensitive and accept the obvious spellings
-/// (`chain-of-thought` / `cot`, `best-of-n` / `bon`).
-///
-/// The named variants are built with their defaults — `best-of-n` uses
-/// its built-in sample count (see `best_of_n::DEFAULT_CANDIDATES`) and
-/// [`LongestAnswer`] as the scorer. A deployment that
-/// wants a different sample count or a real scorer (a verifier, a
-/// test run) assembles the strategy in code via
-/// [`crate::agent::ReActAgent::with_strategy`](crate::agent::ReActAgent::with_strategy).
-///
-/// # Errors
-///
-/// Returns [`synthia_core::Error::Validation`] naming the accepted
-/// values when `name` matches nothing.
-pub fn from_name(
-    name: &str,
-) -> Result<Arc<dyn ReasoningStrategy>, synthia_core::Error> {
-    let normalized = name.trim().to_ascii_lowercase();
-    let resolved: Arc<dyn ReasoningStrategy> = match normalized.as_str() {
-        "react" | "re-act" | "re_act" => Arc::new(crate::agent::ReActStrategy),
-        "chain-of-thought" | "chain_of_thought" | "cot" => {
-            Arc::new(ChainOfThoughtStrategy::default())
-        }
-        "best-of-n" | "best_of_n" | "bon" => {
-            Arc::new(BestOfNStrategy::default())
-        }
-        _ => {
-            return Err(synthia_core::Error::validation(format!(
-                "unknown strategy {name:?}; expected one of {}",
-                KNOWN_STRATEGY_NAMES.join(", ")
-            )));
-        }
+/// Shared by both entry points so their messages cannot drift apart.
+fn unknown_strategy(name: &str, registered: &[String]) -> String {
+    format!(
+        "unknown reasoning strategy `{name}`; registered: [{}] \
+         (built-ins resolve without a register call: react, re-act, re_act)",
+        registered.join(", ")
+    )
+}
+
+/// The one request constructor both sampling paths use; everything
+/// not passed here is the request's own default.
+pub(crate) fn build_completion_request(
+    model: String,
+    prepared: Arc<Vec<synthia_provider::Message>>,
+    tools: Arc<Vec<synthia_provider::ToolDefinition>>,
+    tool_choice: synthia_provider::ToolChoice,
+    max_tokens: Option<usize>,
+) -> synthia_provider::CompletionRequest {
+    synthia_provider::CompletionRequest {
+        model,
+        messages: prepared,
+        tools,
+        tool_choice,
+        max_tokens,
+        ..synthia_provider::CompletionRequest::default()
+    }
+}
+
+/// `instruction` is appended to the run's assembled system prompt, for
+/// strategies that steer through the prompt.
+pub async fn single_shot_request(
+    caps: &AgentCaps,
+    input: &AgentInput,
+    instruction: Option<&str>,
+) -> synthia_provider::CompletionRequest {
+    let prepared = prepare_messages_for_shot(caps, input, instruction).await;
+    single_shot_request_shared(caps, prepared)
+}
+
+/// Assemble and fit the conversation exactly once.
+pub async fn prepare_messages_for_shot(
+    caps: &AgentCaps,
+    input: &AgentInput,
+    instruction: Option<&str>,
+) -> Arc<Vec<synthia_provider::Message>> {
+    use synthia_context::AgentState;
+
+    let base = crate::prompt::resolve_prompt_context(input, caps)
+        .assemble(&caps.model.descriptor);
+    let system = match instruction {
+        Some(instruction) => format!("{base}\n\n{instruction}"),
+        None => base,
     };
-    Ok(resolved)
+
+    // Same transcript assembly the ReAct loop sends: no placeholder
+    // system message on an empty prompt, single-part user input as
+    // `Content::Single`.
+    let messages = crate::prompt::base_transcript(
+        &system,
+        &input.history,
+        input.to_message(),
+    );
+
+    let config = caps.model.provider.model_config();
+    let mut state = AgentState::from_config(&config);
+    caps.control
+        .context_manager
+        .prepare_arc(Arc::new(messages), &mut state)
+        .await
+}
+
+/// Build a `CompletionRequest` from an already-prepared conversation.
+pub fn single_shot_request_shared(
+    caps: &AgentCaps,
+    prepared: Arc<Vec<synthia_provider::Message>>,
+) -> synthia_provider::CompletionRequest {
+    use synthia_provider::ToolChoice;
+
+    let config = caps.model.provider.model_config();
+    build_completion_request(
+        config.name.clone(),
+        prepared,
+        Arc::new(Vec::new()),
+        ToolChoice::None,
+        Some(config.max_output_tokens),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// StrategyRegistry
+// ---------------------------------------------------------------------------
+
+use synthia_core::Error;
+
+/// The built-in `"react"` resolves without a `register` call; a registration
+/// under the same name shadows it.
+pub struct StrategyRegistry {
+    inner: synthia_core::NameTable<Arc<dyn ReasoningStrategy>>,
+}
+
+impl StrategyRegistry {
+    /// Empty registry. Boot-time `register` calls fill it.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            inner: synthia_core::NameTable::new(),
+        }
+    }
+
+    /// Register `strategy` under `name`, returning the previous binding so a caller
+    /// can keep the old strategy alive while installing the new one.
+    pub fn register(
+        &self,
+        name: impl Into<String>,
+        strategy: Arc<dyn ReasoningStrategy>,
+    ) -> Option<Arc<dyn ReasoningStrategy>> {
+        self.inner.insert(name.into(), strategy)
+    }
+
+    fn registered(&self, name: &str) -> Option<Arc<dyn ReasoningStrategy>> {
+        self.inner.get(name)
+    }
+
+    /// Every registered name, sorted for deterministic listing.
+    #[must_use]
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.inner.names()
+    }
+
+    /// Registered names first, then built-ins. The miss message names every
+    /// registered entry — operators read it in a boot log.
+    pub fn resolve(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn ReasoningStrategy>, Error> {
+        self.registered(name)
+            .or_else(|| builtin_strategy(name))
+            .ok_or_else(|| {
+                synthia_core::Error::validation(unknown_strategy(
+                    name,
+                    &self.names(),
+                ))
+            })
+    }
+}
+
+impl Default for StrategyRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
-mod tests {
-    //! Seam-level tests for the reasoning-strategy module.
-    //!
-    //! Kept apart from `mod.rs` because the tests touch every piece of
-    //! the seam (the trait, the runtime factory, the sink's closed-state)
-    //! and the focused unit tests are easier to read when they sit in
-    //! their own file.
-
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
-
-    use async_trait::async_trait;
-    use futures::{StreamExt as _, channel::mpsc};
-    use synthia_core::Error as ProviderError;
-    use synthia_provider::{
-        CompletionRequest,
-        CompletionResponse,
-        Content,
-        ModelConfig,
-        ModelProvider,
-        ProviderConfig,
-    };
-
-    use super::*;
-    use crate::{
-        events::{AgentEvent, SessionEndReason, SystemEvent},
-        input::AgentInput,
-    };
-
-    /// A provider whose only job is to exist — these tests exercise the
-    struct NullProvider;
-
-    #[async_trait]
-    impl ModelProvider for NullProvider {
-        async fn initialize(
-            &mut self,
-            _config: ProviderConfig,
-        ) -> Result<(), ProviderError> {
-            Ok(())
-        }
-
-        fn name(&self) -> &str {
-            "null"
-        }
-
-        fn model_config(&self) -> ModelConfig {
-            ModelConfig {
-                name: "null-1".into(),
-                provider: "null".into(),
-                context_window: 8_192,
-                max_output_tokens: 1_024,
-                supports_tools: true,
-                supports_streaming: false,
-                supports_reasoning: false,
-            }
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, ProviderError> {
-            Ok(CompletionResponse {
-                content: Content::text("null"),
-                ..CompletionResponse::default()
-            })
-        }
-    }
-
-    fn runtime() -> AgentRuntime {
-        let provider: Arc<dyn ModelProvider> = Arc::new(NullProvider);
-        let mut rt = default_for_test(
-            provider,
-            synthia_core::AtomicCancelToken::shared(),
-        );
-        rt.descriptor.name = "seam".into();
-        rt.descriptor.kind = "seam".into();
-        rt
-    }
-
-    /// A strategy can be implemented outside the crate: it sees the
-    /// runtime, it can publish, and the trait is object-safe.
-    #[test]
-    fn a_foreign_strategy_runs_against_the_seam() {
-        struct Counting;
-
-        #[async_trait]
-        impl ReasoningStrategy for Counting {
-            fn name(&self) -> &str {
-                "counting"
-            }
-
-            async fn run(
-                &self,
-                runtime: AgentRuntime,
-                _input: AgentInput,
-                sink: EventSink,
-            ) {
-                sink.emit_typed(synthia_session::iteration_start(1));
-                sink.text_delta(format!(
-                    "{} tools are available",
-                    runtime.tool_registry.tool_count()
-                ));
-                sink.emit(AgentEvent::System(SystemEvent::SessionEnded {
-                    reason: SessionEndReason::Completed,
-                }));
-            }
-        }
-
-        let strategy: Arc<dyn ReasoningStrategy> = Arc::new(Counting);
-        assert_eq!(strategy.name(), "counting");
-
-        let (tx, mut rx) = mpsc::unbounded();
-        let sink = EventSink::new(Arc::new(tx), None);
-        let seen = AtomicUsize::new(0);
-        futures::executor::block_on(async {
-            strategy.run(runtime(), AgentInput::text("go"), sink).await;
-            while rx.next().await.is_some() {
-                seen.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-        assert_eq!(
-            seen.load(Ordering::SeqCst),
-            2,
-            "the text delta and the terminal event must both be published"
-        );
-    }
-
-    /// Dropping the receiver makes `emit` a no-op and `is_closed`
-    /// report it — a strategy can cheaply stop working for a consumer
-    /// that left.
-    #[test]
-    fn emit_after_the_consumer_left_is_a_no_op() {
-        let (tx, rx) = mpsc::unbounded();
-        let sink = EventSink::new(Arc::new(tx), None);
-        assert!(!sink.is_closed());
-        drop(rx);
-        assert!(sink.is_closed());
-        sink.text_delta("into the void");
-    }
-
-    /// The runtime exposes the two derivations every strategy needs:
-    /// the model config and the assembled system prompt.
-    #[test]
-    fn runtime_derives_model_config_and_system_prompt() {
-        let runtime = runtime();
-        assert_eq!(runtime.model_config().context_window, 8_192);
-        let prompt = runtime.system_prompt();
-        assert!(
-            prompt.contains("be brief"),
-            "the descriptor's instructions must reach the prompt: {prompt}"
-        );
-    }
-
-    /// `Debug` is available (strategies log the runtime) and does not
-    /// leak the whole registry.
-    #[test]
-    fn runtime_debug_names_the_agent_and_provider() {
-        let text = format!("{:?}", runtime());
-        assert!(text.contains("seam"), "{text}");
-        assert!(text.contains("null"), "{text}");
-    }
-
-    /// Every shipped strategy is reachable by the name a deployment
-    /// would write in config, and each spelling an operator is likely
-    /// to try resolves to the same strategy.
-    #[test]
-    fn from_name_resolves_every_shipped_strategy() {
-        for (name, expected) in [
-            ("react", "react"),
-            ("ReAct", "react"),
-            ("re-act", "react"),
-            ("chain-of-thought", "chain-of-thought"),
-            ("chain_of_thought", "chain-of-thought"),
-            ("cot", "chain-of-thought"),
-            (" CoT ", "chain-of-thought"),
-            ("best-of-n", "best-of-n"),
-            ("best_of_n", "best-of-n"),
-            ("bon", "best-of-n"),
-        ] {
-            let resolved = from_name(name)
-                .unwrap_or_else(|e| panic!("{name:?} must resolve: {e}"));
-            assert_eq!(resolved.name(), expected, "for {name:?}");
-        }
-        assert_eq!(KNOWN_STRATEGY_NAMES.len(), 3);
-    }
-
-    /// An unknown name is a validation error that names the accepted
-    /// values — the operator reads it in a boot log, so it has to be
-    /// actionable rather than "invalid config".
-    #[test]
-    fn from_name_rejects_an_unknown_name_with_the_accepted_list() {
-        let err = match from_name("mcts") {
-            Ok(strategy) => {
-                panic!("mcts must not resolve, got {}", strategy.name())
-            }
-            Err(err) => err,
-        };
-        let message = err.to_string();
-        assert!(message.contains("mcts"), "{message}");
-        for name in KNOWN_STRATEGY_NAMES {
-            assert!(
-                message.contains(name),
-                "the error must name {name}: {message}"
-            );
-        }
-    }
-}
+mod tests;

@@ -55,6 +55,22 @@ pub trait CancelToken: Send + Sync {
     fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
 }
 
+/// Blanket impl: `Arc<T>` derefs to `T`, so an `Arc<dyn CancelToken>`
+/// field can hold any concrete cancellation token.
+impl<T: CancelToken + ?Sized> CancelToken for Arc<T> {
+    fn is_cancelled(&self) -> bool {
+        (**self).is_cancelled()
+    }
+
+    fn cancel(&self) {
+        (**self).cancel();
+    }
+
+    fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        (**self).cancelled()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AtomicCancelToken — std-only implementation
 // ---------------------------------------------------------------------------

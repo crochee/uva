@@ -40,6 +40,13 @@ rusqlite = { workspace = true, optional = true }
 [features]
 # Enable `memory::sqlite` (`SqliteMemory`). Pulls in bundled SQLite.
 sqlite = ["dep:rusqlite"]
+# R-OPT-HPC Step 5: opt-in `frozen_segments` /
+# `prefetch_compaction` companion methods on
+# [`ContextManager`]. The trait keeps a default
+# implementation (`return &[]` / no-op) so default builds are
+# byte-identical to the pre-R-OPT-HPC tree. See
+# `docs/research/r-opt-hpc-round.md` for the contract.
+prefetch = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

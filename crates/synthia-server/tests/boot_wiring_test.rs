@@ -17,13 +17,99 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use futures::StreamExt;
 use http_body_util::BodyExt;
+use synthia::{
+    core::Error,
+    harness::Agent,
+    provider::{
+        CompletionRequest,
+        CompletionResponse,
+        Content,
+        ContentPart,
+        ModelConfig,
+        ModelProvider,
+        ProviderConfig,
+        SamplingResult,
+        StreamChunk,
+        TextContent,
+        ToolDefinition,
+    },
+};
 use synthia_server::{create_router, state::AppState};
 use tower::ServiceExt;
 
 mod support;
 
 use support::install_test_provider;
+
+/// Provider stub for observing the loop's wire projection: records
+/// every request's tool definitions, then answers with an immediate
+/// empty `IsDone` so a single-turn run finishes without tool calls.
+#[derive(Default)]
+struct CapturingProvider {
+    tools: Arc<std::sync::Mutex<Vec<Arc<Vec<ToolDefinition>>>>>,
+}
+
+#[synthia::async_trait]
+impl ModelProvider for CapturingProvider {
+    async fn initialize(
+        &mut self,
+        _config: ProviderConfig,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "capturing"
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        ModelConfig {
+            name: "capturing".into(),
+            provider: "test".into(),
+            context_window: 128_000,
+            max_output_tokens: 4096,
+            supports_tools: true,
+            supports_streaming: true,
+            supports_reasoning: false,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, Error> {
+        unreachable!("streaming path")
+    }
+
+    async fn complete_with_stream(
+        &self,
+        request: CompletionRequest,
+        _cancel: Option<Arc<dyn synthia::core::CancelToken>>,
+        mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
+    ) -> Result<CompletionResponse, Error> {
+        self.tools
+            .lock()
+            .expect("capture lock")
+            .push(request.tools.clone());
+        on_delta(StreamChunk::IsDone {
+            result: Box::new(SamplingResult::default()),
+        });
+        Ok(CompletionResponse {
+            id: "cap".into(),
+            model: "capturing".into(),
+            content: Content::Single(ContentPart::Text(TextContent {
+                text: String::new(),
+                cache_control: None,
+            })),
+            usage: Default::default(),
+            cached: false,
+            replay_state: None,
+            stop_reason: None,
+        })
+    }
+}
 
 /// A `sh` child that answers the MCP handshake, advertises one
 /// tool, then parks so the client's stdio pipes stay open.
@@ -212,13 +298,21 @@ async fn boot_wiring_applies_the_tools_section() {
         .tool_surface
         .policy()
         .expect("groups + cap were configured");
+    let provider = Arc::new(CapturingProvider::default());
     let agent = synthia::harness::ReActAgent::new(
-        Arc::clone(&state.default_provider),
+        Arc::clone(&provider) as Arc<dyn ModelProvider>,
         registry,
     )
     .with_tool_surface(policy);
-    let defs = agent.projected_tool_definitions(&[]);
-    let projected: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+    let cancel: Arc<dyn synthia::core::CancelToken> =
+        Arc::new(tokio_util::sync::CancellationToken::new());
+    let mut stream = agent
+        .run(synthia::harness::AgentInput::text("go"), cancel)
+        .await;
+    while stream.next().await.is_some() {}
+    let captured = provider.tools.lock().expect("capture lock");
+    let projected: Vec<&str> =
+        captured[0].iter().map(|d| d.name.as_str()).collect();
     assert_eq!(
         projected,
         vec!["read", "search", "shell"],

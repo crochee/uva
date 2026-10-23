@@ -135,7 +135,7 @@ impl<P: JudgeProvider> AsyncMetric for LlmJudgeMetric<P> {
 ///
 /// Re-export of [`synthia_core::parse_judge_score`] so a single
 /// parser backs both the offline grader ([`LlmJudgeMetric`]) and
-/// the in-loop scorer (`synthia_harness::LlmJudgeScorer`). The
+/// the in-loop scorer (`synthia_strategy_best_of_n::LlmJudgeScorer`). The
 /// previous local copy was case-sensitive on the `Score:`
 /// prefix; the shared one honours any case (matching the
 /// documented contract) and also handles the no-space variant

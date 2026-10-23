@@ -1,5 +1,5 @@
-//! R58 per-agent tool restriction: `denied_tools`, `allow_list`,
-//! and the interceptor seam. Drives one loop per scenario and
+//! Per-agent tool restriction: `denied_tools`, `allow_list`,
+//! and the synthetic tool seam. Drives one loop per scenario and
 //! asserts the advertised tool list + the post-call result.
 
 use std::sync::Arc;
@@ -10,6 +10,7 @@ use synthia_provider::{
     SamplingResult,
     StreamChunk,
     TokenUsage,
+    ToolDefinition,
     traits::ModelProvider,
 };
 use synthia_test_support::FakeTool;
@@ -18,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{support::*, *};
 
-/// Drive one run with a per-agent restriction installed.
 async fn run_and_collect_with_restriction(
     provider: Arc<dyn ModelProvider>,
     registry: Arc<ToolRegistry>,
@@ -48,9 +48,6 @@ fn restricted_test_registry() -> Arc<ToolRegistry> {
     registry
 }
 
-/// `denied_tools` is a control, not a hint: the denied tool is neither
-/// advertised nor executed, and the model is told why in the tool
-/// result it gets back — while the run still completes.
 #[tokio::test]
 async fn denied_tool_is_hidden_and_its_call_is_refused() {
     let ignored = ToolUse {
@@ -131,8 +128,6 @@ async fn denied_tool_is_hidden_and_its_call_is_refused() {
     ));
 }
 
-/// An allow-list narrows the advertised set to exactly its members: an
-/// unlisted tool is absent even though the registry holds it.
 #[tokio::test]
 async fn allow_list_narrows_the_advertised_set() {
     let provider = Arc::new(CapturingProvider::new(vec![empty_response()]));
@@ -155,12 +150,9 @@ async fn allow_list_narrows_the_advertised_set() {
     );
 }
 
-/// A restriction that does not name an interceptor's tool hides
-/// its definition, so a synthetic tool cannot slip past a list
-/// meant to narrow the agent.
 #[tokio::test]
-async fn restriction_without_the_interceptor_tool_hides_it() {
-    use crate::agent::interceptor::tests::EchoInterceptor;
+async fn restriction_without_the_synthetic_tool_hides_it() {
+    use crate::agent::re_act::synthetic::tests::EchoInterceptor;
 
     let provider = Arc::new(CapturingProvider::new(vec![empty_response()]));
     let registry = Arc::new(ToolRegistry::new());
@@ -171,9 +163,10 @@ async fn restriction_without_the_interceptor_tool_hides_it() {
     ));
 
     let agent = ReActAgent::new(provider.clone(), registry)
-        .with_interceptor(Arc::new(EchoInterceptor {
+        .with_synthetic_tool(Arc::new(EchoInterceptor {
             name: "intercepted_tool",
         }))
+        .expect("first install must succeed")
         .with_tool_restriction(synthia_tool::ToolRestriction::allow(["read"]));
     let mut stream = agent
         .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
@@ -185,7 +178,7 @@ async fn restriction_without_the_interceptor_tool_hides_it() {
         captured[0].iter().map(|d| d.name.as_str()).collect();
     assert!(
         !names.contains(&"intercepted_tool"),
-        "the interceptor is not in the allow-list, so its tool must not be \
+        "the synthetic tool is not in the allow-list, so its tool must not be \
          advertised: {names:?}"
     );
     assert!(
@@ -194,12 +187,9 @@ async fn restriction_without_the_interceptor_tool_hides_it() {
     );
 }
 
-/// The interceptor seam end-to-end inside the harness: the
-/// definition is advertised next to the registry's tools, and a
-/// claimed call is routed to the plugin instead of the registry.
 #[tokio::test]
-async fn interceptor_definition_advertised_and_call_routed() {
-    use crate::agent::interceptor::tests::EchoInterceptor;
+async fn synthetic_tool_definition_advertised_and_call_routed() {
+    use crate::agent::re_act::synthetic::tests::EchoInterceptor;
 
     let provider = Arc::new(CapturingProvider::new(vec![
         vec![StreamChunk::IsDone {
@@ -229,11 +219,11 @@ async fn interceptor_definition_advertised_and_call_routed() {
     ]));
     let registry = echo_registry().0;
 
-    let agent = ReActAgent::new(provider.clone(), registry).with_interceptor(
-        Arc::new(EchoInterceptor {
+    let agent = ReActAgent::new(provider.clone(), registry)
+        .with_synthetic_tool(Arc::new(EchoInterceptor {
             name: "intercepted_tool",
-        }),
-    );
+        }))
+        .expect("first install must succeed");
     let mut events = Vec::new();
     let mut stream = agent
         .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
@@ -248,7 +238,7 @@ async fn interceptor_definition_advertised_and_call_routed() {
         captured[0].iter().map(|d| d.name.as_str()).collect();
     assert!(
         names.contains(&"intercepted_tool"),
-        "interceptor definition rides the tool list: {names:?}"
+        "synthetic tool definition rides the tool list: {names:?}"
     );
     drop(captured);
 
@@ -262,6 +252,67 @@ async fn interceptor_definition_advertised_and_call_routed() {
     });
     assert!(
         intercepted_result,
-        "the claimed call must be answered by the interceptor: {events:?}"
+        "the claimed call must be answered by the synthetic tool: {events:?}"
+    );
+}
+
+#[test]
+fn with_synthetic_tool_rejects_duplicate_name() {
+    use crate::agent::re_act::synthetic::tests::EchoInterceptor;
+
+    let agent = ReActAgent::new(
+        Arc::new(CapturingProvider::new(vec![])),
+        echo_registry().0,
+    )
+    .with_synthetic_tool(Arc::new(EchoInterceptor {
+        name: "shared_tool",
+    }))
+    .expect("first install must succeed");
+
+    let result = agent.with_synthetic_tool(Arc::new(EchoInterceptor {
+        name: "shared_tool",
+    }));
+    let err = match result {
+        Ok(_) => panic!("duplicate synthetic-tool name must surface as Err"),
+        Err(name) => name,
+    };
+    assert_eq!(err, "shared_tool");
+}
+
+#[tokio::test]
+async fn the_agent_offers_the_tools_of_the_registry_it_was_built_with() {
+    let provider =
+        Arc::new(CapturingProvider::new(vec![done_chunk("all done")]));
+    let other = Arc::new(ToolRegistry::new());
+    other.register_entry(synthia_tool::ToolEntry::new(Arc::new(
+        FakeTool::new("echo", "echoed"),
+    )));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(synthia_tool::ToolEntry::new(Arc::new(
+        FakeTool::new("write", "wrote"),
+    )));
+
+    let agent = ReActAgent::new(provider.clone(), registry);
+    let mut stream = agent
+        .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
+        .await;
+    while stream.next().await.is_some() {}
+
+    let names: Vec<String> = provider
+        .captured_tools
+        .lock()
+        .await
+        .first()
+        .map(|defs: &Arc<Vec<ToolDefinition>>| {
+            defs.iter().map(|d| d.name.clone()).collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        names.iter().any(|n| n == "write"),
+        "the agent's own registry's tools must reach the model; got {names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "echo"),
+        "another registry's tools must not reach the model; got {names:?}"
     );
 }

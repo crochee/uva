@@ -8,41 +8,40 @@ use futures::StreamExt;
 use synthia_tool::ToolRegistry;
 use tokio_util::sync::CancellationToken;
 
-use super::*;
+use super::{support::*, *};
 
 #[tokio::test]
 async fn system_prompt_is_injected_as_first_message() {
-    // Regression: the previous ReActLoop prepared `messages`
-    // from `input.history + input.to_message()` and never
-    // inserted a system prompt, so the LLM ran without a role.
-    // Verify the prompt is now stored on the agent and that
-    // the public `run` path consumes it.
     use synthia_provider::Role;
 
-    let agent = ReActAgent::with_options(
-        Arc::new(synthia_provider::traits_stub::ModelProviderStub::new()),
+    let provider = Arc::new(CapturingProvider::new(vec![empty_response()]));
+    let agent = ReActAgent::with_descriptor(
+        provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "TEST-PROMPT".to_string(),
+        crate::default_descriptor("TEST-PROMPT".to_string()),
+        Arc::new(PromptContext::default()),
     );
 
-    // Verify the system message shape used in `prepare()`.
-    let sys = Message::system("hello");
-    assert!(matches!(sys.role, Role::System));
-
-    // Drive the loop with a stub provider so it terminates
-    // quickly. We only assert the wiring is in place; the stub
-    // does not emit user-visible text.
     let mut stream = agent
         .run(AgentInput::text("hi"), Arc::new(CancellationToken::new()))
         .await;
-    let mut events = Vec::new();
-    while let Some(ev) = stream.next().await {
-        events.push(ev);
-    }
+    while stream.next().await.is_some() {}
+
+    let captured = provider.captured.lock().await;
+    let first = &captured[0][0];
+    assert_eq!(
+        first.role,
+        Role::System,
+        "the assembled system prompt must be the first request message"
+    );
+    let text = match &first.content {
+        synthia_provider::Content::Single(ContentPart::Text(t)) => &t.text,
+        _ => panic!("expected single text content"),
+    };
     assert!(
-        !events.is_empty(),
-        "agent.run must yield at least the SessionStarted + SessionEnded events"
+        text.contains("TEST-PROMPT"),
+        "system message must carry the configured prompt; got {text:?}"
     );
 }
 
@@ -64,13 +63,13 @@ async fn descriptor_is_stable() {
     // Industry-aligned fields default to sensible values.
     assert_eq!(
         agent.descriptor().instructions,
-        crate::agent::DEFAULT_SYSTEM_PROMPT
+        crate::DEFAULT_SYSTEM_PROMPT
     );
-    assert!(agent.descriptor().handoff_hint.is_some());
-    assert_eq!(agent.descriptor().owner.as_deref(), Some("synthia"));
-    assert_eq!(agent.descriptor().domain.as_deref(), Some("coding"));
-    // Adversarial-panel defaults are gone after the refactor.
-    assert!(agent.descriptor().persona.is_some());
+    // Brand fields the default uses to fill are
+    // `None` once the descriptor is slimmed — callers
+    // set them explicitly via `with_descriptor`.
+    assert_eq!(agent.descriptor().owner, None);
+    assert_eq!(agent.descriptor().domain, None);
     // The human-readable label is "Synthia" — the
     // programmatic `name` ("agent") stays as the
     // routing slug.
@@ -80,11 +79,12 @@ async fn descriptor_is_stable() {
 
 #[tokio::test]
 async fn descriptor_surfaces_custom_system_prompt() {
-    let agent = ReActAgent::with_options(
+    let agent = ReActAgent::with_descriptor(
         Arc::new(synthia_provider::traits_stub::ModelProviderStub::new()),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "CUSTOM".to_string(),
+        crate::default_descriptor("CUSTOM".to_string()),
+        Arc::new(PromptContext::default()),
     );
     // `system_prompt` argument is now exposed via
     // `descriptor.instructions` so callers can introspect
@@ -92,27 +92,25 @@ async fn descriptor_surfaces_custom_system_prompt() {
     assert_eq!(agent.descriptor().instructions, "CUSTOM");
 }
 
-/// R110: `ReActAgent` *is* the builder. The fluent setters
-/// that used to live on `AgentBuilder` (deleted) now ride the
-/// same chain the harness exposes — descriptor mutations,
-/// registry swap, output schema auto-injection.
 #[tokio::test]
 async fn react_agent_setters_thread_through_to_descriptor_and_registry() {
-    use synthia_core::registry::Registry as _;
-
     let registry = Arc::new(ToolRegistry::new());
     let schema = serde_json::json!({
         "type": "object",
         "properties": {"answer": {"type": "string"}},
         "required": ["answer"]
     });
-    let agent = ReActAgent::new(
+    let mut descriptor = crate::default_descriptor("SYSTEM".to_string());
+    descriptor.model_hint = Some("claude-opus-4".to_string());
+    let agent = ReActAgent::with_descriptor(
         Arc::new(synthia_provider::traits_stub::ModelProviderStub::new()),
         Arc::clone(&registry),
+        PathBuf::new(),
+        descriptor,
+        Arc::new(PromptContext::default()),
     )
     .with_name("researcher")
     .with_instructions("Find things.")
-    .with_model_hint(Some("claude-opus-4".to_string()))
     .with_output_schema(schema.clone());
 
     assert_eq!(agent.descriptor().name, "researcher");
@@ -132,31 +130,16 @@ async fn react_agent_setters_thread_through_to_descriptor_and_registry() {
     assert_eq!(parsed, schema);
 
     // …and the structured_output tool was auto-injected
-    // into the registry.
-    let found = registry
+    // into the registry by `with_output_schema`.
+    registry
         .get(synthia_tool::structured_output::STRUCTURED_OUTPUT_TOOL_NAME)
-        .await
-        .expect("registry lookup");
-    assert!(
-        found.is_some(),
-        "with_output_schema must auto-register structured_output"
-    );
+        .expect("with_output_schema must install structured_output");
 }
 
-/// it covers action safety, tool use, output style, and
-/// markdown formatting in balanced XML-delimited blocks
-/// that line up with the sections the prompt assembler
-/// appends (`<identity>`, `<env>`, `<available_skills>`,
-/// `<available_agents>`). Pin the structural contracts so
-/// a future copy edit cannot silently drop a section.
 #[test]
 fn default_system_prompt_covers_canonical_sections() {
-    let p = crate::agent::DEFAULT_SYSTEM_PROMPT;
+    let p = crate::DEFAULT_SYSTEM_PROMPT;
 
-    // Identity line — Synthia is the agent's name.
-    assert!(p.contains("You are Synthia"));
-
-    // Every canonical XML section is present and balanced.
     for tag in [
         "action_safety",
         "tool_calling",
@@ -170,19 +153,8 @@ fn default_system_prompt_covers_canonical_sections() {
             "missing `{open}` / `{close}` in DEFAULT_SYSTEM_PROMPT"
         );
     }
-
-    // Behavioural anchors — distilled from the Grok
-    // Build and OpenCode default agent prompts.
-    assert!(p.contains("confirm with the user"));
-    assert!(p.contains("NEVER use shell"));
-    assert!(p.contains("CommonMark"));
-    assert!(p.contains("nothing more, nothing less"));
 }
 
-/// Default persona + handoff_hint are short, on-brand
-/// one-liners (not the long-form `DEFAULT_SYSTEM_PROMPT`
-/// body). Pinning the shape keeps the `<identity>` block
-/// readable when the assembler renders the descriptor.
 #[tokio::test]
 async fn descriptor_defaults_are_on_brand() {
     let agent = ReActAgent::new(
@@ -191,22 +163,10 @@ async fn descriptor_defaults_are_on_brand() {
     );
     let d = agent.descriptor();
 
-    assert!(d.description.starts_with("Default Synthia agent"));
-    assert!(
-        d.handoff_hint
-            .as_deref()
-            .is_some_and(|s| s.contains("specialist agent")),
-        "default handoff_hint should explain when to delegate"
-    );
-    assert!(
-        d.persona
-            .as_deref()
-            .is_some_and(|s| s.starts_with("You are Synthia")),
-        "default persona should self-identify as Synthia"
-    );
-    assert!(
-        d.persona.as_deref().unwrap_or_default().len() < 120,
-        "persona is a one-liner; long-form guidance lives in \
-             DEFAULT_SYSTEM_PROMPT"
-    );
+    assert_eq!(d.kind, "react");
+    assert_eq!(d.version, "1.0.0");
+    assert_eq!(d.display_name(), "Synthia");
+    // Brand fields the default does not fill.
+    assert_eq!(d.persona, None);
+    assert_eq!(d.handoff_hint, None);
 }

@@ -27,6 +27,10 @@ use tokio::sync::RwLock;
 use crate::config::{AuthConfig, CorsConfig};
 
 mod boot;
+pub(crate) mod cluster_ops;
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) mod demo_provider;
+pub(crate) mod eval_agent;
 mod evals;
 mod providers;
 mod schedules;
@@ -34,11 +38,15 @@ pub(crate) mod self_mcp;
 mod sessions;
 mod tools;
 mod usage;
+mod workflow_host;
 mod workflows;
 
 #[cfg(any(test, feature = "test-utils"))]
 mod for_test;
 
+#[cfg(test)]
+pub(crate) use boot::wrap_tier1_providers;
+pub use eval_agent::HarnessEvalAgent;
 pub use evals::EvalsState;
 pub use providers::{ModelSelectionError, ProviderCatalogue};
 pub use schedules::SchedulesState;
@@ -62,7 +70,7 @@ pub struct AppState {
     pub workspace_config: WorkspaceConfig,
     pub default_provider: Arc<dyn ModelProvider>,
     /// Every provider this deployment configures, keyed by its
-    /// `[providers.<name>]` entry name — the map a turn's `model`
+    /// `[providers.<name>]` entry name—the map a turn's `model`
     /// selection resolves against.
     ///
     /// [`Self::default_provider`] is `catalogue.default_handle()`:
@@ -81,7 +89,7 @@ pub struct AppState {
     /// `Router` so browser clients (e.g. synthia-web on
     /// http://localhost:5173) can call the API endpoints.
     pub cors_config: Arc<CorsConfig>,
-    /// R29: gate for the `POST .../operation` endpoint. Read by
+    /// R29: gate for the `POST.../operation` endpoint. Read by
     /// `create_router` to decide whether to register the route.
     pub operations_config: Arc<crate::config::OperationEndpointConfig>,
     /// Active session controllers keyed by `(user_id, session_id)`.
@@ -109,7 +117,7 @@ pub struct AppState {
     /// definitions) consumed by the
     /// [`synthia::harness::PromptContext::assemble`]
     /// method. Built once at startup and shared via `Arc` into
-    /// every [`crate::session::controller::RunDependencies`] —
+    /// every [`crate::session::controller::RunDependencies`]—
     /// the manifest never mutates after boot, so wrapping it
     /// in an `Arc` lets every dispatch and every per-agent
     /// `build_react_agent` call share the same allocation
@@ -146,7 +154,7 @@ pub struct AppState {
     pub default_compaction: Option<synthia::context::CompactionSettings>,
     /// The deployment configuration the boot resolved (R53/R54), kept
     /// whole so the operator-facing surfaces can answer "what was this
-    /// process started with?" without re-reading the file — and so
+    /// process started with?" without re-reading the file—and so
     /// `max_agents` and the bind address have one source.
     pub server_config: Option<crate::config::ServerConfig>,
     /// R58: the agent's allow/deny list resolved from
@@ -165,7 +173,7 @@ pub struct AppState {
     /// (`StdioTransport` kills its child on drop) and so a
     /// consumer can address the servers by name.
     pub mcp_clients: Vec<(String, Arc<synthia::mcp::McpClient>)>,
-    /// R30: per-server MCP health captured by the boot sweep —
+    /// R30: per-server MCP health captured by the boot sweep—
     /// one entry per configured server, healthy or not. Lets a
     /// consumer (readiness probe, operator endpoint) see which
     /// integrations are live without re-reading the config.
@@ -191,7 +199,7 @@ pub struct AppState {
     ///
     /// Shared with **every** session controller this state spawns
     /// (installed on their [`RunDependencies`] and, from there, on
-    /// the controller's event funnel — the single write site, which
+    /// the controller's event funnel—the single write site, which
     /// records each run's `SystemEvent::Usage` totals and counts the
     /// run on `SystemEvent::SessionEnded`). Read-only via
     /// [`AppState::usage_metrics`]; the `Arc` is what lets the
@@ -200,6 +208,12 @@ pub struct AppState {
     ///
     /// [`RunDependencies`]: crate::session::controller::RunDependencies
     pub usage_metrics: Arc<UsageMetrics>,
+    /// Cluster bus + this node's identity. `mode = "local"` (the
+    /// default) carries an in-process [`LocalBus`]; `mode = "redis"`
+    /// shares leases and frames with the other nodes.
+    ///
+    /// [`LocalBus`]: crate::cluster::LocalBus
+    pub cluster: Arc<crate::cluster::ClusterRuntime>,
     /// Multimodal attachment store (R11). Backs the
     /// `/api/v1/attachments` REST surface and lets the agent
     /// runtime fetch the inline base64 for a stored image
@@ -212,19 +226,28 @@ pub struct AppState {
     /// The cross-domain search engine: one `synthia_search`
     /// registry over tool / mcp / skill / memory / agent / session,
     /// registered as the model-facing `search` tool (deferred
-    /// exposure — capability 1) and projected by
+    /// exposure—capability 1) and projected by
     /// `GET /api/v1/search` (capability 2).
     pub search: Arc<crate::search::SearchService>,
-    /// Schedules subsystem — disk-backed `ScheduleStore` plus a
+    /// Schedules subsystem—disk-backed `ScheduleStore` plus a
     /// runtime-neutral `Scheduler`. Backs
     /// `/api/v1/schedules/{list,get,create,patch,delete,tick}`.
     pub schedules: SchedulesState,
-    /// Workflows subsystem — in-memory `WorkflowSpec` registry
+    /// Workflows subsystem—in-memory `WorkflowSpec` registry
     /// plus plan validation. Backs `/api/v1/workflows/*`. Real
     /// execution lands in a follow-up turn (the runtime needs a
     /// `WorkflowHost` that calls back into the agent harness).
     pub workflows: WorkflowsState,
-    /// Evals subsystem — in-memory `EvalSuite` registry plus a
+    /// The workflow-runtime bridge—every planned call in a
+    /// workflow run dispatches through `workflow_host.spawn_agent`.
+    /// Today the bridge is the `ServerWorkflowHost` stub (see the
+    /// `workflow_host` module of this crate), a stub that returns a
+    /// typed `AgentOutcome::failed` with "agent runtime not
+    /// configured"—a real host (a follow-up PR) replaces the
+    /// body to build a `ReActAgent` directly from the resolved
+    /// provider + tool registry.
+    pub workflow_host: Arc<dyn synthia::workflow::WorkflowHost>,
+    /// Evals subsystem—in-memory `EvalSuite` registry plus a
     /// keyword-only runner. Backs `/api/v1/evals/*`. LLM-judge /
     /// schema-validation metrics land with a real `EvalAgent`.
     pub evals: EvalsState,
@@ -284,13 +307,13 @@ impl AppState {
     /// Accepted spellings, on every surface that carries a model
     /// selection:
     ///
-    /// - `None` / blank — the deployment's default provider;
-    /// - `"<provider>/<model>"` — the shape `/api/v1/models`
+    /// - `None` / blank—the deployment's default provider;
+    /// - `"<provider>/<model>"`—the shape `/api/v1/models`
     ///   advertises per entry, and what the chat UI posts. The split
     ///   is at the *first* slash, so a model id that contains one
     ///   (`meta-llama/llama-3.3-70b-instruct`) still resolves;
     /// - a bare `"<model>"` that exactly one configured provider
-    ///   advertises — the Anthropic protocol's `model` field is a
+    ///   advertises—the Anthropic protocol's `model` field is a
     ///   bare model id, so `/v1/messages` needs this spelling.
     ///
     /// A value that resolves to nothing is an error naming it: an
@@ -342,7 +365,7 @@ impl AppState {
     ///
     /// Each tuple is `(check_name, passed)`. The server reports
     /// ready only when every check passes. Checks are cheap
-    /// in-process reads — no network round-trips — so a probe
+    /// in-process reads—no network round-trips—so a probe
     /// firing once per second cannot pile up latency:
     /// - `chat_service`: the chat surface (the sole agent
     ///   interaction surface) is initialized. `create_router`

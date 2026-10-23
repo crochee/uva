@@ -15,6 +15,7 @@ categories.workspace = true
 synthia-core.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+parking_lot.workspace = true
 
 # Optional halves. `metrics` is the Prometheus text-exposition surface
 # (`/metrics`, tool counters); `otlp` is the trace exporter. Both are
@@ -38,6 +39,8 @@ otlp = [
     "dep:opentelemetry-otlp",
     "dep:tracing-opentelemetry",
 ]
+redact = ["otlp"]
 
 [dev-dependencies]
 tempfile.workspace = true
+futures.workspace = true

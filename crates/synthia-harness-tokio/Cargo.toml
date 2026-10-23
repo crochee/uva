@@ -1,0 +1,41 @@
+[package]
+name = "synthia-harness-tokio"
+description = "Tokio-backed Spawner implementation for synthia-harness; opt-in companion crate that bridges the runtime-neutral agent loop onto a tokio executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+# `synthia-core` is the only lib dependency: the adapter implements
+# the runtime-neutral `Spawner` trait and needs nothing from the
+# harness itself. The harness types appear only in docs, examples,
+# and rustdoc prose — all dev-side.
+synthia-core = { workspace = true }
+# `rt` is the only feature needed: `tokio::spawn` requires a runtime
+# handle which `rt` provides. The crate avoids `full` so a build of
+# this crate never pulls `tokio::process` / `tokio::fs` / `tokio::net`.
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+# The example composes a real `ReActAgent` with this spawner; the
+# lib itself never imports the harness.
+synthia-harness = { workspace = true }
+# The example uses `#[tokio::main]` to spin a runtime the spawner
+# can attach to.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `Stream::next` over the agent event stream.
+futures.workspace = true
+# `#[async_trait]` for the scripted provider.
+async-trait.workspace = true
+# The scripted provider / tool registry the example composes.
+synthia-provider.workspace = true
+synthia-tool.workspace = true
+
+[[example]]
+name = "tokio_spawner"

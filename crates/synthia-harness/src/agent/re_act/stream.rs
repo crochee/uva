@@ -1,151 +1,83 @@
-//! Streaming chunk ingestion for the ReAct loop.
-//!
-//! Turns the provider's [`StreamChunk`] stream into [`AgentEvent`]s
-//! and accumulates the assistant turn.
-//!
-//! The accumulation itself is **not** re-implemented here: it is
-//! [`synthia_provider::BlockAssembler`], the provider crate's tested
-//! chunk-to-message fold. This module owns the other half — the
-//! *timing* — deciding when an assembled part becomes an
-//! [`AgentEvent::Model`] on the wire, and holding the single cursor
-//! that keeps a part from being published twice.
-//!
-//! Before this module used the assembler it carried a second copy of
-//! the fold (partial tool buffers, `seen_tool_ids` dedup, the
-//! `IsDone` re-list rules) and had drifted from the original in three
-//! ways: it dropped reasoning entirely, parsed malformed tool
-//! arguments without the JSON repair the provider crate applies, and
-//! had no single place that owned the ordering rules.
-//!
-//! Interface to the parent module: [`StreamSink`] (typed emitters
-//! over the event channel) and [`ChunkState`] (the accumulator owned
-//! by one sampling pass). Everything else — the publish cursor and
-//! its tests — is private to this module.
-
+//! Provider `StreamChunk` -> [`AgentEvent`] translator.
+//! The only module that knows chunk shapes.
 use std::sync::Arc;
 
+#[cfg(test)]
 use futures::channel::mpsc;
 use synthia_provider::{BlockAssembler, ContentPart, StreamChunk};
 
-use super::SampleOutcome;
-use crate::events::{AgentEvent, SystemEvent};
+use super::state::SampleOutcome;
+use crate::{agent::sink::EventSink, events::AgentEvent};
 
-/// Mutable state owned by [`StreamSink`] during a single LLM sampling
-/// pass. Wrapped in `Arc<Mutex<>>` because the streaming provider's
-/// callback (`FnMut + Send + 'static`) outlives the borrow scope of
-/// `sample_once`.
-///
-/// `parking_lot::Mutex`, not `std`'s: the guard is taken on every
-/// streamed chunk, and a poisoned `std` mutex would turn a panic
-/// anywhere under the lock into a panic here too — on a path that has
-/// no `SessionEnded` to report it with.
+/// `Arc<Mutex>` because the provider's `'static` callback outlives the borrow scope; `parking_lot` (not
+/// `std`) because a poisoned mutex would propagate a panic on a path with no `SessionEnded` to report it with.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ChunkState(Arc<parking_lot::Mutex<ChunkStateInner>>);
+struct ChunkState(Arc<parking_lot::Mutex<ChunkStateInner>>);
 
 #[derive(Debug, Default)]
 struct ChunkStateInner {
-    /// The provider crate's chunk-to-message fold. Owns the partial
-    /// tool buffers, the `IsDone` dedup, the reasoning accumulator,
-    /// the usage/stop-reason slots, and the JSON repair applied to
-    /// malformed tool arguments.
     assembler: BlockAssembler,
-    /// How many of the assembler's parts have already been published
-    /// as [`AgentEvent::Model`]. Parts only ever append, so everything
-    /// from this cursor on is exactly the set the wire has not seen.
     published: usize,
-    /// R29-Phase-L: monotonic ordinal of the next streamed
-    /// chunk within this sampling pass. Stamped onto every
-    /// emitted `SessionEvent::AssistantChunk` so the durable
-    /// log preserves the exact delta order and
-    /// `assemble_chunks` can rebuild the text deterministically.
+    /// Monotonic ordinal stamped on every `SessionEvent::AssistantChunk` so
+    /// the durable log preserves delta order and `assemble_chunks` rebuilds
+    /// the text deterministically.
     chunk_seq: u64,
 }
 
-/// Typed wrapper over the mpsc sender. Owns an `Arc` to the sender
-/// so it can be cloned into `'static` streaming callbacks.
-#[derive(Clone)]
-pub(crate) struct StreamSink {
-    pub(super) tx: Arc<mpsc::UnboundedSender<AgentEvent>>,
-    /// R29-Phase-L: optional durable-chunk sink. When present,
-    /// every streamed delta is preserved verbatim as
-    /// [`synthia_session::SessionEvent::AssistantChunk`] alongside
-    /// the assembled `assistant_message` — replay can then
-    /// reproduce the exact streaming sequence, not just the
-    /// final concatenation.
-    pub(super) typed_sink: Option<synthia_session::TypedEventSink>,
+/// `Clone` shares the pass-local fold state (an `Arc`) so the provider's
+/// `'static` callback can own one next to a sink clone.
+#[derive(Debug, Default, Clone)]
+pub(super) struct ChunkAssembler {
+    state: ChunkState,
 }
 
-impl StreamSink {
-    /// Translate one streaming chunk into events + state mutation.
-    pub(in crate::agent::re_act) fn ingest_chunk(
-        &self,
-        state: &ChunkState,
-        chunk: StreamChunk,
-    ) {
-        let mut guard = state.0.lock();
-        // R29-Phase-L: preserve the raw delta durably BEFORE
-        // folding it into the assembled turn. Only emitted when a
-        // typed sink is wired, so the in-memory test harness pays
-        // nothing.
-        if let Some(sink) = &self.typed_sink {
-            let (delta, finish_reason) = describe_chunk(&chunk);
-            let chunk_seq = guard.chunk_seq;
-            guard.chunk_seq += 1;
-            sink.record(synthia_session::TypedEventRecord::new(
-                synthia_session::SessionEvent::AssistantChunk {
-                    seq: 0,
-                    ts: String::new(),
-                    chunk_seq,
-                    finish_reason,
-                    data: serde_json::json!({ "delta": delta }),
-                },
-            ));
-        }
-        handle_chunk(chunk, &mut guard, &self.tx);
+impl ChunkAssembler {
+    pub(super) fn new() -> Self {
+        Self::default()
     }
 
-    /// Finish the sampling pass and hand back the assembled turn.
-    ///
-    /// Safe to call before `IsDone`: the assembler drains any tool
-    /// buffer the stream never closed (network cut-off, missing
-    /// `ToolCallEnd`), so a partial tool call still reaches both the
-    /// wire and the history exactly once.
-    pub(in crate::agent::re_act) fn finalize_outcome(
-        &self,
-        state: &ChunkState,
-    ) -> SampleOutcome {
-        let mut guard = state.0.lock();
+    pub(super) fn ingest(&self, sink: &EventSink, chunk: StreamChunk) {
+        let mut guard = self.state.0.lock();
+        // Preserve the raw delta durably BEFORE folding it into the
+        // assembled turn. Only emitted when a typed sink is wired,
+        // so the in-memory test harness pays nothing.
+        if sink.has_typed() {
+            let chunk_seq = guard.chunk_seq;
+            guard.chunk_seq += 1;
+            // `describe_chunk` performs the single delta clone;
+            // the single-key `data` object is built by hand so
+            // the cloned String moves straight into the durable
+            // record — byte-identical to the `json!` wire shape.
+            let (delta, finish_reason) = describe_chunk(&chunk);
+            let mut data = serde_json::Map::with_capacity(1);
+            data.insert(
+                String::from("delta"),
+                serde_json::Value::String(delta),
+            );
+            sink.emit_typed(synthia_session::SessionEvent::AssistantChunk {
+                seq: 0,
+                ts: String::new(),
+                chunk_seq,
+                finish_reason,
+                data: serde_json::Value::Object(data),
+            });
+        }
+        handle_chunk(chunk, &mut guard, sink);
+    }
+
+    /// Safe to call before `IsDone`: the assembler drains any tool buffer the
+    /// stream never closed (network cut-off, missing `ToolCallEnd`), so a
+    /// partial tool call reaches the wire and history once.
+    pub(super) fn finalize_outcome(&self, sink: &EventSink) -> SampleOutcome {
+        let mut guard = self.state.0.lock();
         let (result, parts, _incomplete) = guard.assembler.finalize_assistant();
         // The drain above can append tool calls the stream never
         // closed; publish whatever is new before returning.
-        publish_parts(&parts, &mut guard.published, &self.tx);
+        publish_parts(&parts, &mut guard.published, sink);
         SampleOutcome {
-            assistant_text: result.text,
-            tool_uses: result.tool_calls,
-            // The terminal stop reason rides the provider's
-            // `CompletionResponse`, which the caller
-            // (`sample_once`) holds; the chunk accumulator does
-            // not need a second copy of it.
-            stop_reason: None,
+            result: Arc::new(result),
             parts,
         }
-    }
-
-    // -- typed emit helpers ----------------------------------------------
-
-    pub(in crate::agent::re_act) fn emit(&self, event: AgentEvent) {
-        let _ = self.tx.unbounded_send(event);
-    }
-
-    pub(in crate::agent::re_act) fn system(&self, event: SystemEvent) {
-        self.emit(AgentEvent::System(event));
-    }
-
-    /// Publish one assembled assistant part. Used by the commit path
-    /// for tool results, which are not part of the sampled stream and
-    /// so never pass through the cursor above.
-    pub(in crate::agent::re_act) fn model(&self, part: ContentPart) {
-        self.emit(AgentEvent::Model(part));
     }
 }
 
@@ -153,14 +85,6 @@ impl StreamSink {
 // Free helpers — kept because they operate on plain data, no state.
 // ---------------------------------------------------------------------------
 
-/// Project one chunk onto the `(delta, finish_reason)` pair the
-/// durable `assistant_chunk` event carries.
-///
-/// Only text content contributes a delta; tool-call traffic is
-/// already covered by the `tool_call` / `tool_result` events, and
-/// re-serialising it into the chunk log would double-count on
-/// replay. A terminal stop reason rides on the chunk that carries
-/// it (`Stop` or the final `IsDone`).
 fn describe_chunk(chunk: &StreamChunk) -> (String, Option<String>) {
     match chunk {
         StreamChunk::Content(ContentPart::Text(t)) => (t.text.clone(), None),
@@ -172,42 +96,21 @@ fn describe_chunk(chunk: &StreamChunk) -> (String, Option<String>) {
     }
 }
 
-/// Publish every part from `published` onward as
-/// [`AgentEvent::Model`], advancing the cursor to the end.
-///
-/// This is the whole reason the module holds a cursor: the assembler
-/// tells us what the turn contains, but the wire wants each part
-/// exactly once and in wire order. Parts are append-only, so one
-/// index is enough — and it is the *same* index whether the part came
-/// from a streamed chunk or from the assembler's end-of-stream drain,
-/// which is what makes the straggler case (a tool call the stream
-/// never closed) publish once rather than twice.
 fn publish_parts(
     parts: &[ContentPart],
     published: &mut usize,
-    tx: &Arc<mpsc::UnboundedSender<AgentEvent>>,
+    sink: &EventSink,
 ) {
     while *published < parts.len() {
-        let _ = tx.unbounded_send(AgentEvent::Model(parts[*published].clone()));
+        sink.emit(AgentEvent::Model(parts[*published].clone()));
         *published += 1;
     }
 }
 
-/// Fold one chunk into the accumulator, then publish whatever parts
-/// it produced.
-///
-/// The `IsDone` chunk is the only one that also carries terminal
-/// traffic (the authoritative usage, then `ModelDone`), and it is
-/// emitted *after* its parts so a consumer sees the turn before the
-/// summary of it. Intermediate `Usage` chunks are deliberately not
-/// surfaced: providers such as Anthropic emit `message_delta.usage`
-/// before the terminal `message.usage`, and the latter is the
-/// authoritative count, so consumers see exactly one `Usage` per
-/// iteration instead of two.
 fn handle_chunk(
     chunk: StreamChunk,
     state: &mut ChunkStateInner,
-    tx: &Arc<mpsc::UnboundedSender<AgentEvent>>,
+    sink: &EventSink,
 ) {
     let done = match &chunk {
         StreamChunk::IsDone { result } => Some((**result).clone()),
@@ -222,19 +125,19 @@ fn handle_chunk(
             published,
             ..
         } = state;
-        publish_parts(assembler.parts(), published, tx);
+        publish_parts(assembler.parts(), published, sink);
     }
     let Some(result) = done else {
         return;
     };
     let usage = &result.usage;
-    let _ = tx.unbounded_send(AgentEvent::usage(
+    sink.emit(AgentEvent::usage(
         usage.prompt_tokens,
         usage.completion_tokens,
         usage.cache_read_tokens,
         usage.cache_write_tokens,
     ));
-    let _ = tx.unbounded_send(AgentEvent::ModelDone(result));
+    sink.emit(AgentEvent::ModelDone(result));
 }
 
 #[cfg(test)]
@@ -245,24 +148,16 @@ mod tests {
     //! contract and is tested there. What is only true *here* is the
     //! publishing rule: every part reaches the wire exactly once, in
     //! order, no matter which half of the stream produced it. These
-    //! tests drive real chunks through [`StreamSink`] so the cursor is
-    //! exercised through its production entry points.
+    //! tests drive real chunks through [`ChunkAssembler`] so the
+    //! cursor is exercised through its production entry points.
 
     use super::*;
 
-    fn sink() -> (StreamSink, mpsc::UnboundedReceiver<AgentEvent>) {
+    fn sink() -> (EventSink, mpsc::UnboundedReceiver<AgentEvent>) {
         let (tx, rx) = mpsc::unbounded();
-        (
-            StreamSink {
-                tx: Arc::new(tx),
-                typed_sink: None,
-            },
-            rx,
-        )
+        (EventSink::new(Arc::new(tx), None, None), rx)
     }
 
-    /// Every `AgentEvent::Model` text/reasoning/tool-id published so
-    /// far, in order.
     fn model_parts(
         rx: &mut mpsc::UnboundedReceiver<AgentEvent>,
     ) -> Vec<String> {
@@ -280,14 +175,10 @@ mod tests {
         seen
     }
 
-    /// A text delta, a reasoning delta and a completed tool call are
-    /// each published exactly once, in the order the provider sent
-    /// them — reasoning included, which the in-module fold used to
-    /// drop.
     #[test]
     fn publishes_every_part_once_in_wire_order() {
         let (sink, mut rx) = sink();
-        let state = ChunkState::default();
+        let assembler = ChunkAssembler::new();
 
         for chunk in [
             StreamChunk::Content(ContentPart::Text(
@@ -315,7 +206,7 @@ mod tests {
                 id: "c1".to_string(),
             },
         ] {
-            sink.ingest_chunk(&state, chunk);
+            assembler.ingest(&sink, chunk);
         }
 
         assert_eq!(
@@ -329,35 +220,31 @@ mod tests {
         );
     }
 
-    /// A tool call the stream never closed is still published — once —
-    /// when the pass is finalized.
-    ///
-    /// The cursor is what makes this true: the assembler's drain
-    /// appends the straggler to the same parts vec the cursor walks,
-    /// so the drain cannot double-publish what the stream already
-    /// closed, and cannot skip what it did not.
+    /// A tool call the stream never closed still publishes — once — at finalize.
+    /// The cursor makes it true: the drain appends the straggler to the same
+    /// parts vec the cursor walks, so it neither double-publishes nor skips.
     #[test]
     fn publishes_unclosed_tool_call_once_at_finalize() {
         let (sink, mut rx) = sink();
-        let state = ChunkState::default();
+        let assembler = ChunkAssembler::new();
 
-        sink.ingest_chunk(
-            &state,
+        assembler.ingest(
+            &sink,
             StreamChunk::ToolCallStart {
                 id: "partial".to_string(),
                 name: "echo".to_string(),
                 arguments: serde_json::json!({}),
             },
         );
-        sink.ingest_chunk(
-            &state,
+        assembler.ingest(
+            &sink,
             StreamChunk::ToolCallDelta {
                 id: "partial".to_string(),
                 arguments_delta: "{}".to_string(),
             },
         );
         // No `ToolCallEnd`: the stream is cut off mid-call.
-        let outcome = sink.finalize_outcome(&state);
+        let outcome = assembler.finalize_outcome(&sink);
 
         assert_eq!(
             model_parts(&mut rx),
@@ -366,7 +253,8 @@ mod tests {
         );
         assert_eq!(
             outcome
-                .tool_uses
+                .result
+                .tool_calls
                 .iter()
                 .map(|t| t.id.as_str())
                 .collect::<Vec<_>>(),
@@ -375,15 +263,13 @@ mod tests {
         );
     }
 
-    /// Calling `finalize_outcome` twice publishes nothing the second
-    /// time — the cursor has already passed every part.
     #[test]
     fn finalize_is_idempotent_on_the_wire() {
         let (sink, mut rx) = sink();
-        let state = ChunkState::default();
+        let assembler = ChunkAssembler::new();
 
-        sink.ingest_chunk(
-            &state,
+        assembler.ingest(
+            &sink,
             StreamChunk::Content(ContentPart::Text(
                 synthia_provider::TextContent {
                     text: "answer".to_string(),
@@ -391,12 +277,12 @@ mod tests {
                 },
             )),
         );
-        let first = sink.finalize_outcome(&state);
+        let first = assembler.finalize_outcome(&sink);
         let _ = model_parts(&mut rx);
 
-        let second = sink.finalize_outcome(&state);
+        let second = assembler.finalize_outcome(&sink);
 
-        assert_eq!(first.assistant_text, "answer");
+        assert_eq!(first.result.text, "answer");
         assert!(
             model_parts(&mut rx).is_empty(),
             "a second finalize must not republish the turn"

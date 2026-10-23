@@ -52,8 +52,12 @@
 //! See `DEPLOYMENT.md` for the deployment contract (config keys,
 //! variables, probes, Nginx notes).
 
+mod agent_assembly;
+pub mod agent_run_config;
+pub mod agent_run_config_types;
 pub mod api;
 pub mod build_info;
+pub mod cluster;
 pub mod config;
 pub mod event_stream;
 pub mod middleware;
@@ -61,6 +65,7 @@ pub mod routes;
 pub mod search;
 pub mod server;
 pub mod session;
+pub mod spawner;
 pub mod state;
 
 pub use config::server::ServerConfig;

@@ -223,7 +223,6 @@ pub fn register_skill_tool(registry: &ToolRegistry) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use synthia_core::registry::Registry;
     use synthia_tool::{Context, Tool, ToolOutput};
 
     use super::{SkillTool, register_skill_tool};
@@ -482,8 +481,8 @@ mod tests {
     #[tokio::test]
     async fn register_skill_tool_inserts_skill_into_registry() {
         let registry = synthia_tool::ToolRegistry::new();
-        assert!(registry.get("skill").await.unwrap().is_none());
+        assert!(registry.get("skill").is_none());
         assert!(register_skill_tool(&registry));
-        assert!(registry.get("skill").await.unwrap().is_some());
+        assert!(registry.get("skill").is_some());
     }
 }

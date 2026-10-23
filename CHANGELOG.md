@@ -10,6 +10,759 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 2026) lives under **Historical round log** below the unreleased section
 — frozen per the precedent set in `optimization-report-R46`.
 
+## [Unreleased]
+
+### Changed (harness v2 foundation: the log owns the ordinal)
+
+- **The sink owns the ordinal; the writer stamps it.**
+  `SessionSink::alloc_seq` hands out the next ordinal and
+  `SessionSink::append` no longer assigns one (`-> Result<(), _>`).
+  Every appender on a session — the server's run log, its
+  out-of-band `Feedback` rows, the shutdown marker, the harness's
+  `LogWriter` — draws from that one counter, so a second writer can
+  no longer collide with the run's ordinals and make a compaction
+  checkpoint's provenance unresolvable. `append_with_key` and
+  `append_many` follow the same shape.
+- **`synthia-harness` grew a `LogWriter`.** It stamps each row's
+  ordinal, buffers it in a bounded queue (a synchronous producer
+  waits in a spill rather than dropping the row), and flushes the
+  batch at every step boundary — the only moment the run waits for
+  the disk. `ReActAgent::with_log_writer` installs one over the
+  host's `SessionSink`; `Durability` selects the cadence
+  (`StepBoundary` / `Batched` / `Sync` / `Off`).
+- **Dead harness APIs removed**: the `RunInbox` family
+  (`RunInbox` / `MpscInbox` / `RunInboxHandle` /
+  `with_run_inbox` / `run_inbox`) and the loop's steering-drain and
+  follow-up-revival wiring it fed; `ReActAgent`'s
+  `with_tool_registry` / `with_model_hint` / `with_clock`;
+  `SystemEvent::SteeringInjected`, `SteeringSource` and
+  `WarningKind::Inbox`. `AgentCaps::defaults` is crate-private
+  now; `CheckpointSnapshot::at`, `AgentInput::to_message` and
+  `StrategyRegistry::names` shrank to crate-private, and
+  `Checkpointer::list_keys` became an inherent
+  `InMemoryCheckpointer` method.
+
+### Changed (harness refinement: spawn-free dispatch, zero-feature paradigm crate)
+
+- **`synthia-tool` dispatch is spawn-free.** `ToolRegistry::run_stream`
+  resolves the whole batch under one read lock, then drives the
+  per-tool drains from a single `flatten_unordered` stream — no
+  per-call task, channel, or spawner. Dropping the stream still
+  cancels every in-flight call; the panic / missing-`Result` /
+  progress contracts are unchanged (tests pin them). The registry
+  no longer has `with_spawner`; `synthia-tool`'s `[dependencies]`
+  names no runtime crate at all (tokio moved to
+  `[dev-dependencies]`; `make check-no-runtime` asserts the
+  direct-deps discipline).
+- **`ToolRegistry::resolve_dispatch`** is the single source of the
+  hidden-refusal + argument-validation decision. The harness loop's
+  tool routing (`route.rs`), `run_stream`, and `dispatch_one` all
+  dispatch on it; refusal rendering lives on
+  `DispatchRefusal::tool_output`.
+- **Removed `hpc-coalesce`.** The `coalesce` feature
+  (`CoalescingRegistry`, `ToolDescriptor::non_coalescible`) had no
+  consumers beyond its own example; the paradigm crate is
+  zero-feature now and the facade drops `hpc-coalesce`.
+- **Dead harness APIs removed**: `from_name` (use
+  `StrategyRegistry::register` + `resolve`), `ReActAgent`'s
+  inherent `descriptor()` / `clock()` getters and
+  `StrategyRegistry::get` (the `Agent` trait and `resolve` cover
+  them), and the output-spill cleanup task (`CleanupTask` /
+  `start_cleanup_task` / `OutputBound.retention` /
+  `cleanup_interval`); the spill writer uses blocking `std::fs`.
+- **Sampling and projection share one build.** Both request
+  constructors go through `build_completion_request`; the loop
+  collects every synthetic definition once per run (fingerprint +
+  projection share the vec).
+- **`synthia-server` assembles agents in one place.**
+  `AgentAssembly` (private module) is the only `with_*` chain and
+  the only `TaskDelegator` install site; boot's default member, the
+  session run factory, dynamic agent registration, and the eval
+  agent all build through it. `encode_event` serializes once
+  (`to_value`) instead of `to_vec` + `from_slice`.
+
+### Added (durable workflows / evals, real eval runner)
+
+- **`WorkflowStore`** (`synthia-workflow`, re-exported): atomic JSON
+  persistence for `WorkflowSpec`s under `<workspace>/workflows/` —
+  `temp + sync_all + rename` writes, lazy directory creation, and a
+  `load` that skips unreadable or malformed files with a `warn!`
+  (the `ScheduleStore` honest-recovery posture). Ids that could not
+  name a plain file (`../`, separators, empty) are refused.
+- **`EvalStore`** (`synthia-eval`, re-exported): the same contract for
+  `EvalSuite`s under `<workspace>/evals/`, keyed by suite name.
+- **`synthia-server` workflows / evals are durable now.**
+  `WorkflowsState::build(&workspace_root)` / `EvalsState::build(..)`
+  load from the stores at boot (a load failure degrades to empty with
+  a `warn!`), and `create` / `replace` / `remove` write through under
+  the state lock — `remove` now returns `Result<bool, String>` and the
+  route / self-MCP callers map the error. A restart (or a second node
+  over a shared filesystem) sees the same catalogue.
+- **Eval runs drive the real harness.** The `StubAgent` echo path is
+  gone; `HarnessEvalAgent` (server `state` module) assembles a
+  one-shot `ReActAgent` per case from the live provider + a snapshot
+  of the tool registry, drains the run to its final assistant text,
+  and `EvalRunner::run` scores it. `POST /api/v1/evals/{name}/run`
+  returns a real agent-driven report.
+- **Server agents detach on the tokio runtime.** Every server-side
+  `ReActAgent` assembly (the run factory, the registry default, the
+  eval agent) installs a local tokio-backed `Spawner`
+  (`synthia_server::spawner::ServerSpawner`). The harness default
+  (`InlineSpawner`) runs the loop on a bare std thread with no
+  reactor, so any tool awaiting `tokio::fs` (`read` / `write`)
+  panicked mid-run; that failure was latent because most tests never
+  executed a file tool.
+
+### Added (multi-node cluster bus)
+
+- **`[cluster]` config + `SessionBus` seam.** `mode = "local"` (default)
+  is the in-process `LocalBus`; `mode = "redis"` (server feature
+  `cluster-redis`) is `RedisBus`: `SET NX EX` session leases with Lua
+  compare-and-renew/release, and pub/sub for session frames +
+  control frames. Delivery is best-effort by design — the durable
+  truth stays the shared workspace JSONL, and an SSE client recovers
+  with its `from` cursor.
+- **Session ownership is leased.** The node holding
+  `"{ns}:lease:session:{user}:{session}"` runs the controller and
+  renews at TTL/3. A node that loses the race gets a remote
+  `SessionController` handle (`is_remote()`): submit → control frame,
+  event tail → bus → local broadcaster (so the SSE handler is
+  unchanged). A crashed owner's lease expires and any node's next
+  request takes over — including upgrading a cached remote handle —
+  and rebuilds the session from disk.
+- **Cluster-wide tool-registry mutations.** `POST/DELETE /api/v1/tools`
+  publish an `InvalidateTools` control frame; one process-wide
+  dispatcher applies peer mutations to the local registry
+  (`ToolEntry::dynamic` is complete, so a peer replays it verbatim).
+  `ForwardOp`/`CancelSession` frames route to the local owner.
+- **Docs**: `crates/synthia-server/README.md` gains the multi-node
+  deployment contract (shared filesystem, lease/TTL, per-node
+  `/metrics` and usage, no background scheduler tick today).
+
+### Added (keyless demo provider)
+
+- **`[providers.<name>] type = "demo"`** (alias `"fake"`, requires the
+  server's `test-utils` feature): a keyless echo provider for demos
+  and CI — no network, no API key. It echoes the user's turn and skips
+  the harness's injected runtime-context snapshot. The `config.yaml`
+  bridge now honours the typed provider fields (`type`, `api_key_env`,
+  `default_model`, capability flags) instead of silently inferring
+  `openai` and demanding a key.
+
+### Fixed
+
+- **Server-side agents detach on the tokio runtime.** The harness
+  default (`InlineSpawner`, a bare std thread) gave the loop no tokio
+  reactor, so a tool awaiting `tokio::fs` (`read` / `write`) panicked
+  mid-run. All server assembly sites (run factory, registry default,
+  eval agent) install the local `ServerSpawner`. Latent before because
+  no test had executed a file tool through the real run factory.
+- **Chat submissions no longer pin the default provider.** A provider
+  pin holds a live handle and cannot cross nodes; only an explicit
+  `model` selection pins now, so a submission to a remotely owned
+  session runs the owner's configured default instead of failing.
+
+### Changed (harness refinement: touched projection home, cheap checkpoints, `after_step` hook)
+
+- **`TouchedPair` / `touched_target` moved to `synthia-context`** and are
+  re-exported from it: the `read` / `write` projection feeds
+  `CompactionDetails`, so the compaction layer owns it and the loop no
+  longer knows tool names.
+- **`CheckpointSnapshot::messages` is `Arc<Vec<Message>>` now** — persisting
+  a snapshot of a live transcript is a refcount bump instead of a full
+  deep copy per persist. `CheckpointSnapshot::at` takes
+  `impl Into<Arc<Vec<Message>>>`, so existing `Vec` callers compile
+  unchanged.
+- **New hook event `after_step`** (pi `finishTurn` parity):
+  `HookEvent::AfterStep { agent_name, run_idx, iteration }` fires at the
+  end of each loop iteration, after the iteration's tool results are
+  committed and before the next iteration is sampled. `Terminate` ends
+  the run with `SessionEndReason::Error(reason)`; `Block` is meaningless
+  after a step already ran and is treated as `Allow`. Zero-hook runs keep
+  the `is_empty` fast path.
+
+### Changed (harness refinement: module convergence, one assembly path, sync tool lookup)
+
+- **AfterTool now carries the real `call_id`** — the success path used
+  to hard-code an empty string, so a hook observer could not correlate
+  the observation with the `ToolUse` it belongs to (the veto path
+  already passed it). Regression-tested in `steering_hooks.rs`.
+- **Single-shot helpers share the ReAct transcript assembly.**
+  `prepare_messages_for_shot` / `single_shot_request` now build their
+  conversation through the same `base_transcript` the loop sends: an
+  empty system prompt no longer injects a placeholder system message,
+  and single-part user input is `Content::Single` instead of a
+  one-element `Content::Multi`.
+- **`ToolRegistry::get` is an inherent sync method** (one read lock +
+  one clone, LIFO top). The `synthia_core::registry::Registry` impl
+  delegates to it, and the ReAct dispatch path no longer boxes a
+  future per tool call. In-tree callers migrated off the async form.
+- **Module layout converged** (no public paths changed): `agent/run/`
+  flattened to `agent/run.rs` (tests inlined), the projection module
+  moved from `loop/` up to `re_act/` and `tool_definitions` no longer
+  takes the loop struct, per-tool-call file-activity tracking moved to
+  `loop/touched.rs`, and the `text_parts` helper merged into
+  `loop/tools/mod.rs`.
+- **Dead code removed**: `RunState::started_at` (written, never read),
+  `ReActAgent::strategy()` / `ReActAgent::checkpointer()` (zero-
+  reference getters), the `Arc<T>: ReasoningStrategy` blanket impl
+  (every consumer coerces explicitly), the per-tool-call wall-clock
+  read the after-hook ignored, the per-sample provider timing nothing
+  consumed, and the double "no dispatch path claimed it" fallback in
+  `commit_all_results` (counter renamed `unclaimed` to say what it
+  counts).
+
+### Removed
+
+- **`Agent::run` no longer takes a `scope` argument** (breaking).
+  The signature is now
+  `run(&self, input: AgentInput, cancel: Arc<dyn CancelToken>) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send>>`.
+  Migration: drop the third argument — `agent.run(input, cancel, AgentScope::new())`
+  becomes `agent.run(input, cancel)`. Every in-tree call site
+  (server, `task`, the three strategies, the facade, both examples,
+  both consumer crates, `MINIMAL.md`) is migrated in the same change.
+- **`AgentScope` deleted.** It had zero non-test callers, and its
+  three setters (`with_synthetic_tool` / `with_tool_restriction` /
+  `with_steering`) were literal duplicates of `ReActAgent`'s, which
+  also ran `validate_synthetic` twice for the same install path.
+  Per-run variation is unchanged in practice — `synthia-server`
+  rebuilt the whole `ReActAgent` per request anyway.
+- **`AgentHandle` / `DetachedAgent` deleted.** The deferred-run pair
+  had zero consumers in the workspace and no equivalent in either
+  reference design (pi spawns a separate process for a subagent;
+  dsh has no detached handle). `Agent::run`'s event stream is the
+  single run entry point; `RunInbox` / `MpscInbox` stay for
+  steering a live run.
+- **The background prefetch seam deleted** (`ReActLoop::maybe_prefetch`).
+  It called `ContextManager::frozen_segments`, whose only
+  implementation returns `&[]`, so every iteration allocated a
+  `Vec` copy check to reach a guaranteed-empty result. The
+  `ContextManager` trait methods stay in `synthia-context` (removing
+  them would break every impl); the harness simply stops calling them.
+- **Duplicate accessors collapsed.** `AgentCaps::{model_config,
+  system_prompt}` and `ReActAgent::{model_config, system_prompt}`
+  were one-line delegation with no state of their own; callers read
+  `caps.model.provider.model_config()` and
+  `caps.model.prompt_context.assemble(&caps.model.descriptor)`
+  directly. `AgentInput::new_with_history` is gone — `multi_with_history`
+  is the constructor and `history` delegates to it.
+- **EventSink gains `end(reason)` and enforces one terminal event
+  per run** — see the Changed entry below.
+
+### Changed
+
+- **One spelling per lifecycle event on the `EventSink`.** The ReAct
+  loop emitted `SessionStarted` / `SessionEnded` itself while the
+  three strategy crates went through `EventSink::begin` / `finish` /
+  `fail`, so a consumer's pairing depended on which path produced it.
+  The loop now uses `sink.begin(&cancel)` in `drive_setup` and
+  `sink.end(reason)` in `finalize`, and `EventSink` carries an
+  `ended` flag so a run publishes exactly one `SessionEnded` no
+  matter how many code paths try.
+  **Behaviour change:** a token that already fired when `Agent::run`
+  is called now ends the session at setup — `SessionStarted` then
+  `SessionEnded { Cancelled }` — instead of running setup and failing
+  at the first in-loop cancel check. No iteration starts, so no
+  `request_header`, no `SessionInterrupted`, no provider call. A
+  *mid-run* cancel is unchanged: the loop reports
+  `SessionInterrupted` and then the terminal event.
+
+### Fixed
+
+- **`with_output_schema` installs the `structured_output` tool
+  again** (behaviour regression): the setter only stamped
+  `descriptor.output_schema` and left the model with nothing to
+  call, so every run that advertised structured output silently got
+  no tool. The two-step form
+  (`register_output_schema_tool(schema)` +
+  `with_output_schema(schema)`) had become the only working recipe,
+  which is what `README.md`, `MINIMAL.md`, `AGENTS.md` and the two
+  assembly examples all documented while no production caller used
+  the second step. `with_output_schema` now builds the tool, stamps
+  the descriptor from the same value, and registers it; a registry
+  that already holds `structured_output` (two agents sharing one
+  `ToolRegistry`) keeps the first schema and logs the conflict, so
+  the setter stays infallible and chainable. `register_output_schema_tool`
+  is removed — the two-step form *was* the bug.
+
+### Fixed (harness refinement: dispatch race, dead code, loop cohesion)
+
+- **Synthetic dispatch no longer hangs on a leaked `emit` sender.**
+  `try_synthetic` awaited the executor *and* the close of the
+  plugin's event channel (`join`); a plugin that leaks its
+  `SyntheticCall::emit` sender into a task outliving `execute` —
+  exactly what a delegator spawning subagents does — kept the
+  channel open forever and hung the dispatch. The executor now
+  races the channel and, once resolved, drains what it buffered
+  with a non-blocking poll loop. Regression-tested in
+  `tests/synthetic_emit_leak.rs` (fails by hang before the fix).
+- **`ToolSurfacePolicy::max_visible` no longer counts MCP
+  self-management tools.** The cap ran before the self-tool filter,
+  so deferred `mcp__self__*` entries consumed the budget and a
+  server with MCP self servers plus a capped surface advertised
+  *zero* tools to the model (`boot_wiring_applies_the_tools_section`
+  was already failing on main with an empty projection).
+  `visible_tool_names` now skips self tools before spending budget,
+  matching the documented "unadvertisable tools take no cap slot".
+
+### Changed (harness refinement, continued)
+
+- **One hook-dispatch helper** (`loop/hooks::dispatch_hook`) replaces
+  the eight inline `if hooks.is_empty() … dispatch` sites in
+  prepare / sample / guard / finalize. The event closure stays lazy,
+  so a zero-hook run still allocates nothing; `Allow` is the
+  no-hook outcome every site already assumed.
+- **`checkpoint` takes `context_applied: bool`** — the loop no longer
+  reconstructs a `Step` just so the checkpoint can read one flag off
+  it. Stream-cancel now goes through `ReActLoop::cancelled` (same
+  `SessionInterrupted` wire event; one extra `warn!` line).
+  `provider_failed` builds its log and wire strings from
+  `(context, detail)` parts. The two parallel-bucket closures share
+  `run_one_parallel`; three `async fn`s with no `await`
+  (`bucket_by_execution_mode`, `apply_guard_pipeline`,
+  `commit_assistant`) are plain `fn`s. The denial-path tracker call
+  is panic-isolated like the success path. `commit.rs` imports its
+  siblings directly instead of through `tools/mod.rs` aliases.
+  `drive()` records the `agent.id` / `session.id` span fields it
+  declared. `Agent::run` drops one redundant `Arc` clone.
+- **Prompt-context fallback has one spelling**:
+  `prompt::resolve_prompt_context(input, caps)` — used by both the
+  loop's `assemble_system_prompt` and the single-shot strategies.
+- **`synthia-harness-tokio` demotes `synthia-harness` to a
+  dev-dependency.** The adapter's lib only implements
+  `synthia_core::spawn::Spawner`; the harness types appear in the
+  example and doc prose, which now use plain code spans instead of
+  cross-crate intra-doc links.
+- **`crates/synthia-harness/README.md`** replaces the seam table
+  with a "Where new behavior goes" extension map (one row per need →
+  the seam that answers it) and drops the hook example duplicated
+  from "Extending the loop" (283 → 247 lines).
+
+### Removed (harness refinement, continued)
+
+- **`Agent::effective_max_iterations`** (defaulted trait method +
+  override): the loop reads `caps.control.max_iterations` directly;
+  the one example caller prints `ReActAgent::max_iterations()`.
+- **`ReActAgent::projected_tool_definitions`**: the in-crate test
+  compares `compose_tool_definitions` output directly; the server's
+  `boot_wiring_applies_the_tools_section` now drives a real one-turn
+  run with a capturing provider and asserts on the wire request —
+  which is how the `max_visible` bug above surfaced.
+- **`EventSink::is_closed` / `EventSink::text_delta`** (test-only
+  shorthands; `EventSink::emit(AgentEvent::text_delta(..))` is the
+  single spelling), a `pub(super)` re-export of
+  `commit_all_results`, the `pub(super)` on `guard::Verdict`, and a
+  duplicate `projection_cache_record_call_is_idempotent` test.
+
+### Changed (harness core refactor: the loop owns its bundle, the cost of a run is measured)
+
+- **`ReActLoop` owns `Arc<AgentCaps>`** — the `'a` lifetime is gone.
+  `AgentRuntime.caps` is already an `Arc` (so a strategy can move the
+  runtime into a spawned task), and `drive_from_runtime` was doing
+  `Arc::try_unwrap` plus a full `AgentCaps::clone()` on the shared
+  arm: every `Arc` plane, the `Vec<Arc<dyn SyntheticTool>>` and the
+  `PathBuf`, on every `Agent::run`. The loop now shares the handle
+  it was handed.
+- **One `ModelConfig` per run.** `AgentCaps::model_config` asked the
+  provider and returned an owned `ModelConfig` (two `String`s + five
+  scalars); the loop called it once per iteration for two `&str`
+  labels and twice more in `prepare` — six reads for a
+  three-iteration run. `ReActLoop` reads it once when it is built and
+  borrows from that copy. `AgentCaps::model_config`'s doc claimed it
+  was "snapshotted at construction so the hot path does not re-ask
+  the provider on every iteration"; it never was, and now it is.
+- **Allocations that outlived their guards are gone**: the prefetch
+  seam tested `frozen_segments(..).is_empty()` *after* copying, so
+  every iteration of every default deployment allocated a `Vec` to
+  discover that the default truncating manager freezes nothing (and
+  its `prefetch: bool` knob had exactly one call site, passing
+  `true`); the tool-result preview joined the entire output before
+  truncating to 160 chars; the hook fan-out cloned the whole
+  `CompletionResponse` once per installed hook instead of sharing one
+  `Arc`; `json_len` allocated a `String` per JSON number on the
+  per-event `size_hint` path; the projection rebuilt its visible-name
+  set from two copies of the same predicate and fetched the
+  descriptor list twice per rebuild.
+- **Forwarding layers collapsed**: five `phase_*` wrappers plus
+  `commit_assistant_and_step_end` and the `ReActLoop::drive` method
+  are gone; `iteration_body` is the one place the five-phase order is
+  written. The two provider-failure arms and the two tool-slot-fill
+  bodies are one function each.
+- **`AgentCaps::minimal` → `AgentCaps::for_provider`**, with
+  `max_iterations` from `DEFAULT_MAX_ITERATIONS` instead of a
+  hard-coded `4`, and a descriptor from `default_descriptor` instead
+  of a literal whose name and kind were both `"test"` — a test
+  fixture shipped in production code. `AgentInput::multi` is
+  removed; it was a strict special case of
+  `multi_with_history(Vec::new(), parts)`.
+- **The seam rule is written down** (`seam.rs` module doc + the crate
+  README): a type is `dyn` iff a downstream crate must install it at
+  runtime. It already held; it had never been written, which is why
+  `AgentRuntime`'s three fields and `ReActLoop`'s ownership read as
+  accidents. Alongside it: an accessor's callers are the library's
+  consumers, not this repository — do not delete a read accessor on a
+  zero-reference count.
+- **Comment budget ratcheted** (`make check-harness-docs`): 717 → 523
+  doc-comment lines on non-`pub` items under
+  `crates/synthia-harness/src`. The public surface is unchanged.
+- **Docs that contradicted the code are corrected**: the facade no
+  longer promises `from_name("chain-of-thought")` (it resolves
+  `"react"` / `"re-act"` / `"re_act"` and errors otherwise — CoT and
+  BestOfN ship as `synthia-strategy-cot` / `-best-of-n` behind the
+  facade features); `SEAMS.md` §1 moved them to their real crates;
+  the ~50 `Report:` links to `docs/optimization-report-R*.md` and
+  `docs/reference-parity.md` are gone (those files are not in this
+  repository) with each sentence's text kept; `AGENTS.md` points at
+  `re_act/synthetic.rs` and at 5 shellchecked gate scripts; the
+  `events` module doc now states which four variants are reserved
+  for a consumer's own `AgentHook` / policy layer.
+- **Bench**: the `"caps borrow vs per-iteration Arc clone"` invariant
+  stopped describing the loop once it started sharing the bundle. It
+  is now `"per-run Arc clone vs AgentCaps::clone"` — the fast side is
+  an `Arc::clone` plus two field reads, which is what the loop now
+  does. The other six ratios are untouched.
+
+### Changed (harness kernel refinement: capability planes + loop consolidation)
+
+- **`AgentCaps` regrouped into capability planes** (breaking,
+  0.x): the 16-field flat bundle is now `strategy` +
+  `model: ModelCaps` (provider / descriptor / prompt context) +
+  `tools: ToolCaps` (registry / surface / restriction /
+  synthetic) + `control: ControlCaps` (steering / iteration
+  cap / context manager) + `env: EnvCaps` (workspace / clock /
+  spawner / inbox / checkpointer / typed sink). No field added
+  or removed; every access moves one segment down
+  (`caps.provider` → `caps.model.provider`). `AgentScope`
+  overlays patch only the `tools` and `control` planes.
+- **Loop consolidation**: the 21 files under
+  `re_act/orchestrator/` + `re_act/runtime/` + `re_act/state/`
+  are now 8 phase-aligned files under `re_act/loop/`
+  (`mod` = drive/iteration/prefetch, `prepare`, `sample`,
+  `tools`, `guard`, `hooks`, `finalize`, `projection`), plus
+  `re_act/state.rs` and `re_act/synthetic.rs` as direct
+  siblings. Pure moves; item names and the wire contract are
+  unchanged.
+- **Hot-path allocations**: the tool `Context` is built once per
+  run on `ReActLoop` instead of cloning `workspace_root` per
+  dispatch; hook fan-outs share one `Arc<str>` payload per
+  event instead of a `String` per hook; `AgentEvent::size_hint`
+  is a shape-aware estimate (no `serde_json` serialization on
+  the metrics path).
+- **Reason-tagged recovery for unanswered tool calls**: a
+  sequential-bucket call skipped by cancellation answers
+  `"... did not run: tool call cancelled before dispatch; safe
+  to retry."`, one skipped by a sibling error answers `"... did
+  not run: skipped after sibling sequential tool error; outcome
+  unknown — verify external state before retrying."` — instead
+  of the old generic "tool did not produce a result".
+- **Dead surface removed**: `AgentRuntime::caps_ref` (zero
+  callers) and the `is_length_stop` alias are gone; panic
+  isolation consolidates to `panic::caught` / `panic::isolate`
+  (one `catch_unwind` per calling convention instead of five
+  near-identical wrappers); the empty-hook fast path is the
+  single `caps::has_hooks` predicate.
+
+### Changed (harness refactor: runtime-free + plugin strategies)
+
+- **`AgentRuntime` → `AgentCaps` + `AgentRuntime<'_>` (borrowed)**:
+  the god-object (18 owned fields, 19 accessors) is split into
+  `AgentCaps` (the immutable per-agent capability bundle,
+  `ReActAgent` owns it) and a 3-field per-run `AgentRuntime`
+  view (`caps: Arc<AgentCaps>`, `cancel`, `subagent_depth`)
+  handed to `ReasoningStrategy::run`. The 13 accessors with
+  zero workspace call sites are deleted; the 6 live ones are
+  field reads on `AgentCaps` now.
+- **`ToolInterceptor` → `SyntheticTool`** (and `InterceptorCall` →
+  `SyntheticCall`): the trait is, after all, a tool the model sees
+  but the registry does not own — the new name says so.
+  `ReActAgent::with_interceptor` → `with_synthetic_tool`
+  (`try_with_interceptor` → `try_with_synthetic_tool`). The file
+  path stays `runtime/interceptors.rs`. Consumer update:
+  `synthia-tool-task`'s `DelegatorInterceptor` implements the
+  renamed trait; the server's three call sites renamed.
+
+- **`synthia-harness` is runtime-free**: its `[dependencies]` carries
+  zero tokio. `TokioSpawner` moved to the new sibling crate
+  `synthia-harness-tokio` (`synthia::TokioSpawner` does not exist —
+  the facade would fail `make check-public-api-runtime`; depend on
+  the sibling crate directly). `cargo tree -p synthia-harness -e
+  normal` names no tokio / async-std / smol.
+- **Alternative reasoning strategies moved to plugin crates**:
+  `ChainOfThoughtStrategy` → `synthia-strategy-cot` (facade feature
+  `strategy-cot`), `BestOfNStrategy` / `CandidateScorer` /
+  `LongestAnswer` / `LlmJudgeScorer` / `DEFAULT_JUDGE_PROMPT` →
+  `synthia-strategy-best-of-n` (facade feature
+  `strategy-best-of-n`). The harness ships only the canonical
+  `ReActStrategy`; `from_name("react")` still works, and plugin
+  strategies resolve through `StrategyRegistry::register` or the
+  server-side resolver. `ReActAgent::with_chain_of_thought` /
+  `with_best_of_n` / `AgentBuilder::chain_of_thought` /
+  `best_of_n` sugar setters deleted — install the plugin strategies
+  via `with_strategy(Arc::new(...))`.
+- **`AgentRunConfig` / `RunOverrides` moved to `synthia-server`**
+  (`crate::agent_run_config`): server-only wire types, not part of
+  the library's public surface.
+- **`CompactionEmitters` /
+  `context_manager_for_compaction_with_emitters` moved to
+  `synthia-server`**: the harness's `runtime_for_run` inlines the
+  same decision core; hand-built factories call the server-side
+  entry.
+- **`AgentRuntime` fields are now `pub(crate)`** — the 19
+  accessors are the sole public read surface, so a strategy plugin
+  reads `runtime.provider()` / `runtime.cancel()` instead of the
+  field. Two accessors return an owned handle (`provider()`,
+  `cancel()`) because `EventSink::begin` / `finish` and
+  `ModelProvider::complete_with_stream` take `&Arc<dyn …>`;
+  mutating one now goes through the existing chainable
+  `with_descriptor` / `with_spawner` / `with_context_manager` /
+  `with_cancel`. Migrated: `synthia-strategy-cot`,
+  `synthia-strategy-best-of-n`, `synthia-strategy-plan-execute`.
+- **`synthia_harness::extension` deleted** (breaking): the
+  `Extensions` registry / `Extension<T>` trait were fully
+  implemented, exported, documented — and never called by the
+  orchestrator, so every consumer wiring (the `lib_grade` example
+  among them) exercised code that could not run end-to-end. The
+  already-wired seam is `synthia_steering::AgentHook`, and the
+  orchestrator calls that one. `ReActAgent::with_extensions` /
+  `extensions()` and `AgentRuntime::extensions` go with it. No
+  deprecated alias — the type was unreachable in practice, so
+  nothing outside the crate could have depended on it.
+- **`synthia_harness::agent::re_act::runtime::registry` deleted**:
+  `AgentEntry` moved next to the `AgentRegistry` that stores it
+  (`synthia_harness::agent::AgentEntry`, unchanged path). The old
+  module only existed because the registry imported its own entry
+  type through a cross-module hop, and it re-exported
+  `AgentDescriptor` as a side effect.
+- **`ReActAgent::try_with_synthetic_tool` deleted** (breaking): it
+  was an infallible alias of `with_synthetic_tool`, which already
+  returns the conflicting-name `Err`. `strategy::minimal` deleted
+  for the same reason — `AgentRuntime::minimal` is the same
+  function under a shorter path.
+- **`ReActAgent` no longer has `descriptor_mut`**: the
+  `#[cfg(test)]` accessor existed for two tests that now pass their
+  descriptor to `with_descriptor` at construction.
+
+### Added
+
+- **`hpc-pool`** — HTTP connection pooling for the provider adapters.
+  `PoolConfig` tunes the per-host idle cap, idle window, connect
+  timeout, and warm-up; `PooledHttpClient` is the wrapper the
+  adapters store; `PoolStats` reports `idle` / `in_flight` / `reused`
+  / `established`. `AnthropicProvider::warm_up_pool` and
+  `OpenAICompatibleProvider::warm_up_pool` seed the pool at boot.
+  Off by default; with the feature disabled the adapters keep
+  building `reqwest::Client::new()`.
+- **`hpc-simd`** — arch-specific dot products for vector search
+  (`synthia-search` feature `simd`): AVX2 / SSE2 on x86_64, NEON on
+  aarch64, scalar elsewhere, selected at runtime and reported by
+  `DotRoute`; `SimdVectorStore` dispatches to the selected kernel.
+  Off by default.
+- **`hpc-batch`** — new `synthia-hpc-batch` crate. `BatchEmbedder`
+  wraps any `Arc<dyn Embedder>`, `BatchCompleter` wraps any
+  `Arc<dyn ModelProvider>`; both are governed by
+  `BatchPolicy { chunk_size, max_inflight }` and report `BatchStats`.
+  No HTTP, telemetry, or database dependencies. Off by default.
+- **`hpc-pipeline`** — out-of-band context compaction
+  (`synthia-harness` feature `pipeline`, forwarded from
+  `synthia-context/prefetch`). `ReActAgent::with_pipeline` overlaps
+  compaction of frozen message segments with the next LLM request,
+  detaching through the consumer's `Spawner`; `ContextManager` gains
+  default no-op `frozen_segments` / `prefetch_compaction` methods, so
+  existing implementations compile unchanged. Off by default.
+- **`safety`** — new `synthia-safety` crate. A `SafetyScanner`
+  checks four stages — Input, ToolCall, ToolOutput, Output — for
+  injection / jailbreak / PII-exfiltration patterns. The crate ships
+  scanners, not harness wiring: a consumer installs one through its
+  own `synthia_steering::AgentHook` (`on_provider_start` for input,
+  `before_tool_execute` / `after_tool_execute` for the tool stages);
+  the harness loop itself calls no scanner. Off by default.
+- **`resilience`** — new `synthia-resilience` crate:
+  `ResilientProvider` / `ResilientTool` wrap any provider or tool
+  with a circuit breaker, adaptive backoff, and jitter, on top of
+  the new runtime-neutral `synthia_core::BreakerState`. Off by
+  default.
+- **`semantic-cache`** — new `synthia-semantic-cache` crate:
+  `SemanticCacheProvider` wraps a `ModelProvider` and short-circuits
+  near-duplicate completions via embedding cosine similarity over a
+  pluggable store. Off by default.
+- **`tool-memo`** — new `synthia-tool-memo` crate: `MemoizedTool`
+  wraps any tool and short-circuits identical invocations through an
+  LRU + TTL store. Off by default.
+- **`strategy-plan-execute`** — new `synthia-strategy-plan-execute`
+  crate: a `ReasoningStrategy` that decomposes the prompt into
+  numbered steps and runs each step through the model's tool loop.
+  Registers through the new `StrategyRegistry`. Off by default.
+- **`reflection`** — new `synthia-reflection` crate: a
+  `ReflectionHook` that every `every_n_steps` tool calls asks a
+  cheap critic model to critique the trajectory and steer the next
+  step. Off by default.
+- **`budget`** — new `synthia-budget` crate: `BudgetProvider` /
+  `BudgetTool` enforce token / latency / cost ceilings per provider
+  and tool, with per-model pricing. Off by default.
+- **`checkpoint`** — durable human-in-the-loop pauses: a
+  `Checkpointer` persists session snapshots and `RunResult::Paused`
+  resumes from them. Off by default.
+- **`transcript`** — `synthia-eval` gains a `Transcript` axis that
+  records what the agent actually did per evaluation case (tool
+  calls, token counts), alongside the metric scores. Off by default.
+- **OpenTelemetry metrics, span taxonomy, and redaction**
+  (`synthia-telemetry`): an OTLP meter path alongside the existing
+  Prometheus one, a typed `SpanKind` annotating every lifecycle
+  span, and exporter-side redaction of `sensitive_keys` span
+  attributes.
+- **`ToolRegistry::dispatch_one`** — per-call sibling of
+  `run_stream` with the same hidden-refusal, schema-validation, and
+  panic-recovery contract. The stream yields zero or more `Progress`
+  items plus exactly one `Result`; dropping it aborts the in-flight
+  task.
+- **`Visibility`** — `ToolDescriptor::visibility()` derives a single
+  visibility state from `is_hidden` and `exposure`, so the
+  projection consumes one source of truth instead of two independent
+  fields.
+- **`AgentRuntimeFactory`** — materialise an agent runtime from a
+  bare descriptor, letting hosts run agents without naming a
+  concrete agent type.
+- **`JobAction::Agent`** — typed wire payload for "run one agent
+  session" in the scheduler, plus an `AgentSpawner` seam that keeps
+  the scheduler agent-agnostic.
+- **`StrategyRegistry`** — register custom `ReasoningStrategy`
+  implementations under a name and resolve them through the same
+  lookup as `react` / `chain-of-thought` / `best-of-n`.
+- **`LifecycleHookRegistry`** — fan telemetry out at every `SpanKind`
+  boundary the orchestrator crosses; installed via
+  `ReActAgent::with_lifecycle_hooks`. Hook panics are swallowed so
+  telemetry cannot take down the loop.
+- **`ServerWorkflowHost`** — the server's `WorkflowHost` wiring now
+  spawns registry agents for real instead of stubbing the effect.
+- **Repo gates** — `check-plugin-shape` pins a function-length and
+  nesting budget for plugin crates; `check-pub-surface-strict`
+  ratchets per-crate pub-use re-exports.
+- **`ReActAgent::builder(...)`** — canonical constructor: returns an
+  `AgentBuilder` pre-populated with the harness's defaults
+  (`TruncatingContextManager`, `Steering::noop()`, `InlineSpawner`,
+  `SharedClock::system()`); the builder carries chainable setters
+  for `provider`, `tools`, `workspace`, `context_manager`,
+  `interceptor`/`try_interceptor`, `spawner`, `steering`,
+  `lifecycle_hooks`, `checkpointer`, `strategy`, `inbox`, `prompt`,
+  `clock`, `max_iterations`, `safety_scanner`, `descriptor`,
+  `typed_sink`, plus sugar methods `chain_of_thought` /
+  `best_of_n`. The legacy `ReActAgent::new(...).with_*(...)` chain
+  remains as a post-construction mutator surface.
+- **`crates/synthia-harness/docs/extension-points.md`** — public
+  extension guide: one section per extension trait (`Provider`,
+  `Tool` / `ToolRegistry`, `ContextManager`, `ReasoningStrategy`,
+  `ToolInterceptor`, `LifecycleHook`, `Checkpointer`, `RunInbox`,
+  `Spawner`, `Steering::{Guard, Hint, OutputTransformer}`,
+  `SafetyScanner`) with the trait signature, default impl, when to
+  override, and a worked example.
+- **`examples/zero_deps_agent.rs`** — smoke test that exercises
+  `ReActAgent::builder(...).build()` against a `FakeProvider`.
+
+### Changed
+- **Breaking:** the six harness cargo features
+  (`tokio-spawner`, `otel`, `safety`, `chain-of-thought`,
+  `best-of-n`, `llm-judge`) are removed. `synthia-harness`
+  ships a single always-on build; the same symbol table (byte-
+  identical `libsynthia_harness.rlib` across default /
+  `--all-features` / `--no-default-features`) is the verification
+  artifact. What used to be feature-gated is opt-in via types and
+  traits: `TokioSpawner` is unconditional, the four safety scan
+  helpers (`scan_input` / `scan_tool_call` / `scan_tool_output` /
+  `scan_assistant_output`) compile unconditionally and return
+  `Continue` when the scanner is `None`, `ChainOfThoughtStrategy` /
+  `BestOfNStrategy` / `LlmJudgeScorer` are unconditional, and OTel
+  emission is enabled through `synthia-telemetry/otlp` (not via the
+  harness).
+- **Breaking:** the `LoopInputs` per-run mutable shim
+  (`src/agent/re_act/runtime/inputs.rs`) is removed; the three
+  values it carried (`cancel`, `depth`, `inbox_at_run_start`) live
+  on `AgentRuntime` directly, so `ReActLoop::from_runtime` takes
+  the runtime by value with no shim.
+- **Breaking:** the `harness-tokio-spawner` facade feature is
+  removed (the harness's default spawner is now `InlineSpawner` in
+  the always-on build; consumers that want `TokioSpawner` install
+  it via `ReActAgent::builder(...).spawner(Arc::new(TokioSpawner))`).
+- **Breaking:** the `synthia-harness/safety` feature is removed;
+  the facade's `safety` feature still forwards `synthia-safety`
+  (the small scanner crate), but the harness's scan points compile
+  unconditionally.
+
+- **Breaking:** `ReActAgentBuilder` (the typed builder) is removed.
+  Construct agents with `ReActAgent::new` / `with_descriptor` /
+  `with_prompt_context` plus the `with_*` setters — the only
+  construction story the guides document. The `typed_builder_smoke`
+  example is removed with it.
+- **Breaking:** zero-caller convenience items are removed:
+  `PipelineConfig::disabled`, `PrefetchOutcome` (`maybe_prefetch`
+  now returns `()`), `StrategyRegistry::unregister` and
+  `StrategyRegistry::resolve_builtin`, `AgentEvent::progress` /
+  `warning_kind` / `recovery` (construct `AgentEvent::System(
+  SystemEvent::…)` directly), `BestOfNStrategy::candidates` /
+  `scorer`, `ChainOfThoughtStrategy::max_steps`, and the `pub
+  SNAPSHOT_FRAME` re-export (now crate-private).
+- **Breaking:** `AgentEvent::warning` is removed (zero callers,
+  hard-coded `WarningKind::Hook`). Construct
+  `AgentEvent::System(SystemEvent::Warning { .. })` directly with
+  the intended kind.
+- `WarningKind` gains an `Inbox` variant (serde `"inbox"`): a
+  consumer-supplied run-inbox seam panicked; the run continues
+  from what was already drained. Additive for consumers that
+  treat the tag as a string.
+- `act_loop/dispatch.rs` is renamed `act_loop/iteration.rs`
+  (iteration outcome routing), ending the name collision with
+  `act_loop/seams/dispatch.rs` (single tool-call routing).
+- `synthia-harness` internal layout: the 688-line
+  `act_loop/seams.rs` is split into `seams/{veto,dispatch}`;
+  `builder/agent.rs` moves to `re_act/agent.rs`; the default
+  dependency bundles get single-source constructors
+  (`deps::default_loop_deps` / `default_dispatch_deps`); the
+  `touched_target` projection and the compaction-emitter helpers
+  live in `compaction.rs`.
+- Hot-path allocations: the default (no-`safety`) assistant
+  commit no longer clones the full text for its empty check,
+  and the per-LLM-pass `provider_id` string is only built when
+  otel metrics or a lifecycle hook actually consumes it.
+- **Breaking:** `ToolSurfacePolicy::apply` is split into `validate`
+  and `write_to_registry`. Callers that applied a policy in one step
+  now check the verdict first, then write it to the registry.
+- **ReAct loop restructured** into a shared resource bundle and
+  per-phase functions with no public API change: `ReActAgent`,
+  `AgentRuntime`, and every `with_*` setter keep their signatures.
+
+### Fixed
+- **Cancelled-before-tool runs now persist their checkpoint.**
+  The path returned a pre-built `AgentOutput` and skipped the
+  shared finalize tail, so a cancelled run with a checkpointer
+  armed left no snapshot — it could not be resumed. Finalization
+  is unified in `drive_finalize` (`IterationOutcome::EarlyReturn`
+  is gone), which also restores the missing-output warning for
+  schema-declaring runs cancelled at that seam.
+
+- Broken intra-doc link in the `dispatch_one` rustdoc.
+
+### Performance
+
+- **`hpc-pool`:** after boot warm-up the first user request no
+  longer pays the TCP/TLS handshake; the pool workload reuses
+  64/64 connections.
+- **`hpc-simd`:** 768-dim kNN dot runs ~1.65× faster on the AVX2
+  lane; the scalar path remains as the fallback.
+- **`hpc-batch`:** batched embeds and completions hold in-flight
+  concurrency at `max_inflight` while preserving input order.
+- **Tool projection:** the descriptor-to-projection walk is
+  single-pass, the projection memo is keyed by one `u64`
+  fingerprint, and closing an iteration drains steering once
+  instead of twice.
+- **Event sizing:** `AgentEvent::serialized_size` counts JSON
+  bytes through a null `io::Write` sink instead of materializing
+  a `Vec` per event (the server calls it on every event).
+- **Veto seam:** the pre-execution hook loop clones the tool
+  name and JSON input once per tool call (shared `Arc`) instead
+  of deep-cloning both once and again per hook.
+- **Best-of-n:** candidate scoring is concurrent — an
+  `llm-judge` scorer's N provider calls overlap instead of
+  queueing behind the arrival loop.
+
 ## [0.1.0] - 2026-09-30
 
 The first open-source cut of Synthia. A modular, runtime-neutral AI
@@ -1875,7 +2628,7 @@ The bar is now enforced, not hand-swept:
 
 AGENTS.md §3.6 documents both targets.
 
-Report: [`docs/optimization-report-R109-2026-09-18.md`](docs/optimization-report-R109-2026-09-18.md).
+Report: `docs/optimization-report-R109-2026-09-18.md`.
 
 Verification: provider **690/690** byte-identical list; agent
 **247/247** + tool **215/215** re-run post-R108-cleanup;
@@ -1895,7 +2648,7 @@ its body byte-identical). Every `synthia_tool::*` facade path is
 unchanged; stale `// 1.`–`// 11.` section-number comments removed
 with their sections.
 
-Report: [`docs/optimization-report-R108-2026-09-18.md`](docs/optimization-report-R108-2026-09-18.md).
+Report: `docs/optimization-report-R108-2026-09-18.md`.
 
 Verification: tool **215/215** byte-identical test list; agent
 **247/247**, delegation **66/66**, server **403/403**, offline
@@ -1912,7 +2665,7 @@ factory seam, `RunDependencies`, the `SessionController` handle,
 `run_log` 164). Every `crate::session::controller::X` path is
 unchanged; cross-module seams are `pub(super)` only.
 
-Report: [`docs/optimization-report-R107-2026-09-18.md`](docs/optimization-report-R107-2026-09-18.md).
+Report: `docs/optimization-report-R107-2026-09-18.md`.
 
 Verification: server **403/403** with a byte-identical test list;
 `make ci` **7/7**; workspace clippy 0 warnings.
@@ -1931,7 +2684,7 @@ Inline test blocks in production files are now uniformly
 < 400 lines workspace-wide (two remain at 400–401, 22 in the
 300–400 band).
 
-Report: [`docs/optimization-report-R106-2026-09-17.md`](docs/optimization-report-R106-2026-09-17.md).
+Report: `docs/optimization-report-R106-2026-09-17.md`.
 
 Verification: core **151/151**, tool **215/215**, session
 **147/147**, provider **690/690**, context **95/95**, workflow
@@ -1957,7 +2710,7 @@ interleaved tests. All five are resolved:
 Exactly one ≥500-line inline test block remains workspace-wide
 (`session/compaction_checkpoint.rs`, 501).
 
-Report: [`docs/optimization-report-R105-2026-09-17.md`](docs/optimization-report-R105-2026-09-17.md).
+Report: `docs/optimization-report-R105-2026-09-17.md`.
 
 Verification: workflow **64/64**, provider **690/690**,
 delegation **66/66**, context **95/95** (+ sqlite **103/103**)
@@ -1975,7 +2728,7 @@ filter-matrix / pagination tests.
 Pure code motion: `registry/mod.rs` (178) + `registry/tests.rs`.
 The `agent::registry` re-export surface is untouched.
 
-Report: [`docs/optimization-report-R104-2026-09-17.md`](docs/optimization-report-R104-2026-09-17.md).
+Report: `docs/optimization-report-R104-2026-09-17.md`.
 
 Verification: synthia-agent lib **247/247** (baseline-identical);
 `make ci` **7/7 green**; server **403/403**; delegation **66/66**.
@@ -1999,7 +2752,7 @@ Pure code motion in the established `foo/mod.rs` +
 `system_event/tests.rs` 228. The `events::` re-export surface
 is untouched.
 
-Report: [`docs/optimization-report-R103-2026-09-17.md`](docs/optimization-report-R103-2026-09-17.md).
+Report: `docs/optimization-report-R103-2026-09-17.md`.
 
 Verification: synthia-agent lib **247/247** (baseline-identical;
 65/65 in the events module, same as pre-split); `make ci`
@@ -2020,7 +2773,7 @@ Pure code motion in the established `foo.rs` + `foo/tests.rs`
 layout: `best_of_n.rs` 348 + `best_of_n/tests.rs` 326;
 `cot.rs` 285 + `cot/tests.rs` 302. No public surface touched.
 
-Report: [`docs/optimization-report-R102-2026-09-17.md`](docs/optimization-report-R102-2026-09-17.md).
+Report: `docs/optimization-report-R102-2026-09-17.md`.
 
 Verification: synthia-agent lib **247/247** (baseline-identical);
 `make ci` **7/7 green**; `strategy_swap` proof line prints; fmt +
@@ -2045,7 +2798,7 @@ the `agent/mod.rs` re-export block and every consumer
 (`agent_teams` example, `cot.rs` doc link, `synthia-delegation`)
 resolves unchanged.
 
-Report: [`docs/optimization-report-R101-2026-09-17.md`](docs/optimization-report-R101-2026-09-17.md).
+Report: `docs/optimization-report-R101-2026-09-17.md`.
 
 Verification: `make ci` **7/7 green**; synthia-agent lib
 **247/247** (baseline-identical); server **403/403**; delegation
@@ -2071,7 +2824,7 @@ The crate-root re-exports (`synthia_agent::CompactionEmitters`,
 unchanged; `resolve_context_manager` widened file-private →
 `pub(super)` so the sibling tests keep driving its decision table.
 
-Report: [`docs/optimization-report-R100-2026-09-17.md`](docs/optimization-report-R100-2026-09-17.md).
+Report: `docs/optimization-report-R100-2026-09-17.md`.
 
 Verification: `make ci` **7/7 green**; synthia-agent lib
 **247/247** (baseline-identical); synthia-server **403/403** (the
@@ -2106,7 +2859,7 @@ KNOWN_STRATEGY_NAMES, from_name}` and the crate-root re-exports
 were never touched; `default_for_test` stays `pub(crate)` +
 `#[cfg(test)]` so `cot.rs` / `best_of_n.rs` compile unchanged.
 
-Report: [`docs/optimization-report-R99-2026-09-17.md`](docs/optimization-report-R99-2026-09-17.md).
+Report: `docs/optimization-report-R99-2026-09-17.md`.
 
 Verification: `make ci` **7/7 green**; synthia-agent lib tests
 **247/247** (baseline-identical, verified via `git stash`
@@ -2203,7 +2956,7 @@ split into [`dispatch_truncated_batch`] /
 [`dispatch_execute_tools`] (orchestrator is now a
 flat 3-arm dispatch). Final clippy complexity scan
 reports zero violations across the workspace.
-Report: [`docs/optimization-report-R98-2026-09-17.md`](docs/optimization-report-R98-2026-09-17.md).
+Report: `docs/optimization-report-R98-2026-09-17.md`.
 
 Verification: `make ci` **7/7 green**; `make test-unit`
 **2453/2453** (no count change — pure code motion);
@@ -2277,7 +3030,7 @@ protocol of the dispatch seam (consumed by `route`'s
 `lookup_tool_entry` and `seams`'s `apply_guard_pipeline`),
 never reaching outside the `re_act` sub-tree.
 
-Report: [`docs/optimization-report-R97-2026-09-17.md`](docs/optimization-report-R97-2026-09-17.md).
+Report: `docs/optimization-report-R97-2026-09-17.md`.
 
 Verification: `make ci` **7/7 green**; `make test-unit`
 **2453/2453** (no count change — pure code motion);
@@ -4112,7 +4865,7 @@ Report: this turn's commit `7cd50666`.
 
 ### Changed (R64 — ergonomics-after-parity: five small traitclaw/pi ports)
 
-Report: [`docs/optimization-report-R64-2026-09-14.md`](docs/optimization-report-R64-2026-09-14.md).
+Report: `docs/optimization-report-R64-2026-09-14.md`.
 
 R62's parity audit closed the big-port loop (R14–R34 absorbed
 traitclaw/dsh/pi/pi-subagents). This round is the **ergonomics** round:
@@ -4145,7 +4898,7 @@ audit surfaced.
 
 ### Added (R63 — session search: the one gap the parity audit found)
 
-Report: [`docs/reference-parity.md`](docs/reference-parity.md) row R63;
+Report: `docs/reference-parity.md` row R63;
 the standalone report file (`optimization-report-R63-2026-09-12.md`)
 is tracked in a separate working copy.
 
@@ -4180,8 +4933,8 @@ trust the store.
 
 ### Fixed (R62 — no runtime type in a library's public API, and the reference map)
 
-Report: [`docs/optimization-report-R62-2026-09-12.md`](docs/optimization-report-R62-2026-09-12.md);
-current map: [`docs/reference-parity.md`](docs/reference-parity.md).
+Report: `docs/optimization-report-R62-2026-09-12.md`;
+current map: `docs/reference-parity.md`.
 
 - **`synthia-tool`'s `CleanupTask` held a `tokio::task::JoinHandle`** in a
   public struct, while its own doc claimed "no `tokio` type appears in
@@ -4205,7 +4958,7 @@ current map: [`docs/reference-parity.md`](docs/reference-parity.md).
 
 ### Fixed (R61 — the start-here tutorial is compiled, and it was broken)
 
-Report: [`docs/optimization-report-R61-2026-09-12.md`](docs/optimization-report-R61-2026-09-12.md).
+Report: `docs/optimization-report-R61-2026-09-12.md`.
 
 `MINIMAL.md` is the document a new consumer reads first. Nothing had ever
 compiled it, and when a doctest gate was finally pointed at it:
@@ -4235,7 +4988,7 @@ and compiles without a scripted provider inline.
 
 ### Changed (R60 — the two oldest performance wins are enforceable too)
 
-Report: [`docs/optimization-report-R60-2026-09-12.md`](docs/optimization-report-R60-2026-09-12.md).
+Report: `docs/optimization-report-R60-2026-09-12.md`.
 
 R52 built a ratio gate for the catalog memos, which could be compared
 against the expression they replaced because that expression is still in
@@ -4258,7 +5011,7 @@ code that is *gone*, so their claims stayed untested prose in two reports.
 
 ### Performance (R59 — the tool projection is computed once per run, not once per iteration)
 
-Report: [`docs/optimization-report-R59-2026-09-12.md`](docs/optimization-report-R59-2026-09-12.md).
+Report: `docs/optimization-report-R59-2026-09-12.md`.
 
 A tool-using turn asks the loop for the model-facing tool list once per
 iteration, and the answer costs ~21.5 µs at 40 tools (the largest single
@@ -4287,7 +5040,7 @@ the only moving input is the set of already-called `Deferred` tools.
 
 ### Added (R58 — the last inert config keys are real, and enforced)
 
-Report: [`docs/optimization-report-R58-2026-09-12.md`](docs/optimization-report-R58-2026-09-12.md).
+Report: `docs/optimization-report-R58-2026-09-12.md`.
 
 R55 made the inert keys *loud*; this round makes two of them work.
 `agents.<name>.allowed_tools` / `denied_tools` were the pair with a
@@ -4322,7 +5075,7 @@ restricted nothing.
 
 ### Fixed (R57 — the frontend passes the gates AGENTS.md §4 already required)
 
-Report: [`docs/optimization-report-R57-2026-09-12.md`](docs/optimization-report-R57-2026-09-12.md).
+Report: `docs/optimization-report-R57-2026-09-12.md`.
 
 `AGENTS.md` §4 asks the web frontend for 0 lint, formatting, a build,
 tests, and UI tests. Nothing enforced the first three: CI ran the
@@ -4348,7 +5101,7 @@ pull request.
 
 ### Docs (R56 — a map for the docs, crate docs for the crates that had none, and a rustdoc gate)
 
-Report: [`docs/optimization-report-R56-2026-09-12.md`](docs/optimization-report-R56-2026-09-12.md).
+Report: `docs/optimization-report-R56-2026-09-12.md`.
 
 The repo's premise is that its documentation *is* the assembly tutorial.
 Two holes in that premise: there was no index over 47 files in `docs/`,
@@ -4386,7 +5139,7 @@ assembly).
 
 ### Changed (R55 — no config key is silently ignored)
 
-Report: [`docs/optimization-report-R55-2026-09-12.md`](docs/optimization-report-R55-2026-09-12.md).
+Report: `docs/optimization-report-R55-2026-09-12.md`.
 
 R53 and R54 fixed knobs that were read from the wrong place and knobs
 that were read by nobody. One surface was left: `agents.<name>` accepts
@@ -4419,7 +5172,7 @@ out.
 
 ### Fixed (R54 — the address and the caps the deployment asks for)
 
-Report: [`docs/optimization-report-R54-2026-09-12.md`](docs/optimization-report-R54-2026-09-12.md).
+Report: `docs/optimization-report-R54-2026-09-12.md`.
 
 `SYNTHIA_HOST` and `SYNTHIA_PORT` were set by `Dockerfile.server` and
 both compose files, documented in `DEPLOYMENT.md` — and read by nothing.
@@ -4457,7 +5210,7 @@ read by nobody either, and `max_agents` capped nothing.
 
 ### Fixed (R53 — the config file the operator names is the config file the server reads)
 
-Report: [`docs/optimization-report-R53-2026-09-12.md`](docs/optimization-report-R53-2026-09-12.md).
+Report: `docs/optimization-report-R53-2026-09-12.md`.
 
 `--config <path>` configured **only the provider bridge**. Every other
 section read at boot — `agents` (`max_steps` / `compaction` /
@@ -4493,7 +5246,7 @@ not apply.
 
 ### Changed (R52 — the performance claims are enforced, not just measured)
 
-Report: [`docs/optimization-report-R52-2026-09-12.md`](docs/optimization-report-R52-2026-09-12.md).
+Report: `docs/optimization-report-R52-2026-09-12.md`.
 
 R42–R51 made the framework's own overhead measurable and then smaller;
 nothing stopped it from coming back, because the harness only *printed*
@@ -4519,7 +5272,7 @@ numbers and absolute timings do not survive a shared CI runner.
 ### Performance (R51 — the visible catalog is a memo, not a scan)
 
 Results, measurements and the in-run baselines:
-[`docs/optimization-report-R51-2026-09-12.md`](docs/optimization-report-R51-2026-09-12.md).
+`docs/optimization-report-R51-2026-09-12.md`.
 
 Every consumer that answers "what should the model be told about?"
 started from `ToolRegistry::snapshot()` — which clones two `String`s per
@@ -4550,7 +5303,7 @@ for forty descriptions to keep five names.
 ### Added (R50 — the third paradigm, and the seam's deployment hop)
 
 Results and evidence:
-[`docs/optimization-report-R50-2026-09-12.md`](docs/optimization-report-R50-2026-09-12.md).
+`docs/optimization-report-R50-2026-09-12.md`.
 
 R49 made the loop a part. R50 makes it a *useful* one — a second
 shipped paradigm that uses the runtime's concurrency, and a config knob
@@ -4602,7 +5355,7 @@ so the choice is not compiled in.
 ### Added (R49 — the reasoning loop is a part, not a fact)
 
 Results and evidence:
-[`docs/optimization-report-R49-2026-09-12.md`](docs/optimization-report-R49-2026-09-12.md).
+`docs/optimization-report-R49-2026-09-12.md`.
 
 Every other capability in this framework is a swappable trait —
 provider, tools, context manager, steering, sink, cancel token,
@@ -4644,7 +5397,7 @@ different paradigm meant reimplementing the plumbing.
 ### Performance (R48 — the turn is now 2× R42's baseline)
 
 Results and evidence:
-[`docs/optimization-report-R48-2026-09-12.md`](docs/optimization-report-R48-2026-09-12.md).
+`docs/optimization-report-R48-2026-09-12.md`.
 
 R42's harness measured `estimate_messages_token_count` at 197 µs for a
 100-message history and every round since has paid it once per
@@ -4717,7 +5470,7 @@ four documents were still describing the state before them.
 ### Changed (R45 — the wall clock goes through one seam, and a spill file stops colliding)
 
 Results and evidence:
-[`docs/optimization-report-R45-2026-09-12.md`](docs/optimization-report-R45-2026-09-12.md).
+`docs/optimization-report-R45-2026-09-12.md`.
 
 R36 introduced `synthia_core::Clock` and R40 wired it into the agent.
 An audit for AGENTS.md §3.8 ("new code must not call
@@ -4748,7 +5501,7 @@ and that one of them was a real bug.
 ### Changed (R44 — the server stops re-copying the telemetry crate; the bench stops measuring the scheduler)
 
 Results and evidence:
-[`docs/optimization-report-R44-2026-09-12.md`](docs/optimization-report-R44-2026-09-12.md).
+`docs/optimization-report-R44-2026-09-12.md`.
 
 - **`synthia-server`'s `middleware/trace_context.rs` now uses
   `synthia_telemetry::propagation`** instead of carrying its own copy of
@@ -4777,7 +5530,7 @@ Results and evidence:
 ### Performance (R43 — the turn got 33% faster)
 
 Results and evidence:
-[`docs/optimization-report-R43-2026-09-12.md`](docs/optimization-report-R43-2026-09-12.md).
+`docs/optimization-report-R43-2026-09-12.md`.
 
 R42 built the harness and fixed two quadratic paths. Extending it with
 an end-to-end number made the per-iteration preparation visible: the
@@ -4802,7 +5555,7 @@ including a **deep clone of every tool's JSON schema**.
 ### Performance (R42 — the first numbers, and two quadratic paths they exposed)
 
 Results and evidence:
-[`docs/optimization-report-R42-2026-09-12.md`](docs/optimization-report-R42-2026-09-12.md).
+`docs/optimization-report-R42-2026-09-12.md`.
 
 The docs made performance claims ("no per-call allocation in the hot
 paths", "cheap heuristic") with nothing measuring them. R42 adds a
@@ -4840,7 +5593,7 @@ immediately found two problems worth more than the harness:
 ### Added (R41 — the gates run in CI, from one place)
 
 Results and evidence:
-[`docs/optimization-report-R41-2026-09-12.md`](docs/optimization-report-R41-2026-09-12.md).
+`docs/optimization-report-R41-2026-09-12.md`.
 
 R37–R40 established five invariants (the MVP subset pulls no HTTP
 client, `synthia --no-default-features` compiles, the runtime-free
@@ -4865,7 +5618,7 @@ contract-closure scanner and Playwright.
 ### Changed (R40 — every crate declares the runtime it actually needs)
 
 Results and evidence:
-[`docs/optimization-report-R40-2026-09-12.md`](docs/optimization-report-R40-2026-09-12.md).
+`docs/optimization-report-R40-2026-09-12.md`.
 
 `[workspace.dependencies]` handed every crate `tokio = { features =
 ["full"] }`. That meant `synthia-session` compiled tokio's `net`,
@@ -4903,7 +5656,7 @@ assumed the runtime owned everything.
 ### Added (R39 — the loop does not choose your runtime)
 
 Results and evidence:
-[`docs/optimization-report-R39-2026-09-12.md`](docs/optimization-report-R39-2026-09-12.md).
+`docs/optimization-report-R39-2026-09-12.md`.
 
 Two rounds cut what the MVP *compiles*; this one cut what the loop
 *requires*. `Agent::run` detaches one task per turn (a caller that
@@ -4946,7 +5699,7 @@ that needs an executor at all.
 ### Added (R38 — HTTP is a feature, not a default)
 
 Results and evidence:
-[`docs/optimization-report-R38-2026-09-12.md`](docs/optimization-report-R38-2026-09-12.md).
+`docs/optimization-report-R38-2026-09-12.md`.
 
 R37 proved the smallest agent compiles and runs; it still linked the
 whole HTTP stack. R38 makes the transport opt-in, so a consumer with
@@ -4993,7 +5746,7 @@ all**: no `reqwest`, `hyper`, `rustls`, `h2`, or `tower`.
 ### Added (R37 — the minimal agent, made provable and lean)
 
 Plan + audit: [`MINIMAL.md`](MINIMAL.md), results and evidence:
-[`docs/optimization-report-R37-2026-09-12.md`](docs/optimization-report-R37-2026-09-12.md).
+`docs/optimization-report-R37-2026-09-12.md`.
 
 This round attacked the gap between the repo's promise ("use it as a
 library, from zero") and what a consumer actually had to compile.
@@ -5052,8 +5805,8 @@ library, from zero") and what a consumer actually had to compile.
 
 ### Added (R34 — one dependency to assemble, a policy for the tool surface, judged selection, durable checkpoints)
 
-Plan: [`docs/optimization-report-R34-2026-09-12-plan.md`](docs/optimization-report-R34-2026-09-12-plan.md).
-Results + evidence: [`docs/optimization-report-R34-2026-09-12.md`](docs/optimization-report-R34-2026-09-12.md).
+Plan: `docs/optimization-report-R34-2026-09-12-plan.md`.
+Results + evidence: `docs/optimization-report-R34-2026-09-12.md`.
 The round's audit found a durable checkpoint one call short of
 working, a tool-surface seam reachable only from code, and no
 single-dependency entry point.
@@ -5128,8 +5881,8 @@ single-dependency entry point.
 
 ### Added (R33 — the tool surface, wire hygiene, and workflow selection)
 
-Plan: [`docs/optimization-report-R33-2026-09-12-plan.md`](docs/optimization-report-R33-2026-09-12-plan.md).
-Results + evidence: [`docs/optimization-report-R33-2026-09-12.md`](docs/optimization-report-R33-2026-09-12.md).
+Plan: `docs/optimization-report-R33-2026-09-12-plan.md`.
+Results + evidence: `docs/optimization-report-R33-2026-09-12.md`.
 Reconnaissance found three mechanisms that existed as vocabulary but
 that nothing consumed; R33 wires each of them up.
 
@@ -5189,8 +5942,8 @@ that nothing consumed; R33 wires each of them up.
 
 ### Added (R32 — tool groups, SQLite memory, output transformers, teams + rule routing, example ladder)
 
-Plan: [`docs/optimization-report-R32-2026-09-12-plan.md`](docs/optimization-report-R32-2026-09-12-plan.md).
-Results + evidence: [`docs/optimization-report-R32-2026-09-12.md`](docs/optimization-report-R32-2026-09-12.md).
+Plan: `docs/optimization-report-R32-2026-09-12-plan.md`.
+Results + evidence: `docs/optimization-report-R32-2026-09-12.md`.
 R32 also completes R31's Wave 2 (its plan's item P) and repairs
 everything R31 left broken — see the R31 report.
 
@@ -5268,7 +6021,7 @@ everything R31 left broken — see the R31 report.
 Four reference designs landed, plus the two Wave-2 pieces R31's plan
 named but did not ship (they are in R32 below). Results and the
 repair record:
-[`docs/optimization-report-R31-2026-09-12.md`](docs/optimization-report-R31-2026-09-12.md).
+`docs/optimization-report-R31-2026-09-12.md`.
 
 - **`synthia-context::memory::file`** (pi-subagents §memory) —
   `FileMemory`: scoped long-term memory (`local` / `project` / `user`
@@ -5320,9 +6073,9 @@ repair record:
 Phases A–F of the R29 plan shipped in `8f1821cf`; these are
 G–M, the rest of the same plan. Plan + the binding contract
 (including every deviation) live in
-[`docs/optimization-report-R29-2026-09-11-plan.md`](docs/optimization-report-R29-2026-09-11-plan.md)
+`docs/optimization-report-R29-2026-09-11-plan.md`
 and
-[`docs/optimization-report-R29-remaining-contract.md`](docs/optimization-report-R29-remaining-contract.md).
+`docs/optimization-report-R29-remaining-contract.md`.
 
 - **`synthia-scheduler`** (new crate, pi-subagents §3) — a
   runtime-neutral cron/interval/once dispatcher. Three modules:

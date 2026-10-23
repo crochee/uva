@@ -200,8 +200,7 @@ async fn main() {
         .with_name("minimal-consumer")
         .with_instructions("Answer in one short sentence.");
 
-    let mut stream = agent
-        .run(AgentInput::text("Use the echo tool, then answer."), cancel)
+    let mut stream = agent.run(AgentInput::text("Use the echo tool, then answer."), cancel)
         .await;
 
     let mut answer = String::new();

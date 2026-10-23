@@ -14,7 +14,7 @@ use std::{
 use synthia::provider::{Content, ContentPart, Role, TextContent};
 
 use super::{
-    super::{AgentEvent, SessionOp, SessionState},
+    super::{AgentEvent, AgentInput, SessionOp, SessionState},
     support::{RecordingFactory, make_manager_and_controller},
 };
 
@@ -27,7 +27,7 @@ use super::{
 /// fresh conversation — losing multi-turn memory.
 #[tokio::test]
 async fn test_second_prompt_seeds_history_from_persisted_turns() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     // First run emits one durable assistant text chunk; second
     // run emits another. Both must be observable to the agent.
     let factory: Arc<dyn super::super::RunStreamFactory> =
@@ -171,7 +171,7 @@ async fn test_second_prompt_seeds_history_from_persisted_turns() {
 /// messages and the LLM treats every turn as a fresh conversation.
 #[tokio::test]
 async fn test_user_prompt_persists_and_reacts_to_role_user_in_history() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -288,7 +288,7 @@ async fn resumed_history_shows_the_durable_compaction_checkpoint() {
         })
     };
 
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -305,20 +305,25 @@ async fn resumed_history_shows_the_durable_compaction_checkpoint() {
     // 1..4 are the turn's messages, row 5 is the checkpoint the
     // run's checkpoint bridge wrote (span + cited log seqs).
     let sink = manager.sink("alice", "s1");
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "UserInput",
         "data": {"text": "hello"},
     }))
     .await
     .unwrap();
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "Model",
         "data": {"type": "text", "text": "working"},
     }))
     .await
     .unwrap();
+    sink.alloc_seq();
     sink.append(&tool_row("c1")).await.unwrap();
+    sink.alloc_seq();
     sink.append(&tool_row("c2")).await.unwrap();
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "type": "compaction",
         "seq": 5,

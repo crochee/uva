@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::{Value, json};
-use synthia_core::registry::Registry as _;
 use synthia_mcp::{
     InMemoryTransport,
     InMemoryTransportFactory,
@@ -297,7 +296,7 @@ async fn registration_publishes_the_mcp_tool_as_sequential() {
         Arc::clone(&fx.supervisor)
     ));
 
-    let entry = fx.registry.get("mcp").await.unwrap().expect("registered");
+    let entry = fx.registry.get("mcp").expect("registered");
     let tool = entry.tool_instance();
     assert_eq!(tool.name(), "mcp");
     assert_eq!(tool.mode(), synthia_tool::ExecutionMode::Sequential);
@@ -307,7 +306,7 @@ async fn registration_publishes_the_mcp_tool_as_sequential() {
     );
     // The remote tools the supervisor published keep their
     // namespaced names, so the bare `mcp` name is free.
-    assert!(fx.registry.get("mcp__alpha__echo").await.unwrap().is_some());
+    assert!(fx.registry.get("mcp__alpha__echo").is_some());
 }
 
 /// A deployment that hides a remote tool means it: the tool is absent
@@ -428,8 +427,6 @@ async fn a_resync_keeps_the_deployments_visibility_settings() {
     let entry = fx
         .registry
         .get("mcp__alpha__echo")
-        .await
-        .unwrap()
         .expect("the tool is still registered");
     assert!(entry.is_hidden(), "the privacy flag must survive a re-sync");
     assert_eq!(

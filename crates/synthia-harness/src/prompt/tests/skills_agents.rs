@@ -1,22 +1,20 @@
 //! Tests for the `<available_skills>` and
 //! `<available_agents>` renderers.
 //!
-//! The XML envelope is pinned to the opencode / Anthropic
-//! Agent Skills verbose shape so models trained on those
-//! reference SDKs parse the block the same way. Peer
-//! agents with empty `handoff_hint` must not render a
-//! stray `(use when: )` marker; the assembler is the
-//! single source of truth for the manifest set so
-//! disabled skills never reach the prompt.
+//! The XML envelope wraps every skill as a `<skill>`
+//! element with `<name>` / `<description>` / `<location>`
+//! children — the verbose-shape format models are
+//! trained on. Peer agents with empty `handoff_hint`
+//! must not render a stray `(use when: )` marker; the
+//! assembler is the single source of truth for the
+//! manifest set so disabled skills never reach the
+//! prompt.
 
 use super::{
     super::PromptContext,
     support::{descriptor_with_instructions, peer_descriptor},
 };
 
-/// Disabled skills MUST NOT be pushed in by the caller —
-/// the assembler trusts the manifest as the canonical
-/// set of enabled skills.
 #[test]
 fn disabled_skills_are_never_pushed_by_caller() {
     let d = descriptor_with_instructions("BASE");
@@ -29,15 +27,7 @@ fn disabled_skills_are_never_pushed_by_caller() {
     assert!(!out.contains("<name>inactive</name>"));
 }
 
-/// The `<available_skills>` block MUST use the opencode
-/// XML-verbose envelope (matching
-/// `opencode/packages/opencode/src/skill/index.ts::fmt({verbose: true})`):
-/// each skill is a `<skill>` element with `<name>`,
-/// `<description>`, `<location>` children, all wrapped in
-/// `<skills>...</skills>`. Anthropic Agent Skills and
-/// Grok Build use the same shape; aligning lets models
-/// trained on either reference parse the block the same
-/// way they parse it on the other SDK.
+/// The verbose XML envelope is a model-training wire format, not a style choice.
 #[test]
 fn available_skills_uses_opencode_xml_envelope() {
     let d = descriptor_with_instructions("BASE");
@@ -83,8 +73,6 @@ fn available_skills_uses_opencode_xml_envelope() {
     );
 }
 
-/// Peer agents with empty-string `handoff_hint` must NOT
-/// render a stray `(use when: )` marker.
 #[test]
 fn agents_skip_empty_handoff_hint() {
     let d = descriptor_with_instructions("BASE");

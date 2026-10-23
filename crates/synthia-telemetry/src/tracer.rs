@@ -189,10 +189,25 @@ pub(crate) fn init_otlp_tracing(
     let sampler_spec = std::env::var(SYNTHIA_OTEL_SAMPLER_ENV).ok();
     let sampler = build_sampler(sampler_spec.as_deref());
 
+    // R-OPT-1 Step 4: when the `redact` feature is on, the
+    // exporter sits inside a `RedactingExporter` so sensitive
+    // attribute values are rewritten before OTLP receives
+    // them. Without the feature we use the raw exporter
+    // unchanged so a deployment that opts out pays zero cost.
+    #[cfg(all(feature = "otlp", feature = "redact"))]
+    let inner_processor = {
+        let sensitive_keys = crate::redaction::default_sensitive_keys();
+        crate::redaction::RedactingExporter::new(exporter, sensitive_keys)
+    };
+    #[cfg(not(all(feature = "otlp", feature = "redact")))]
+    let inner_processor = exporter;
+
     let tracer_provider = SdkTracerProvider::builder()
         .with_resource(resource)
         .with_sampler(sampler)
-        .with_span_processor(BatchSpanProcessor::builder(exporter).build())
+        .with_span_processor(
+            BatchSpanProcessor::builder(inner_processor).build(),
+        )
         .build();
 
     // Set as the global tracer provider
@@ -238,6 +253,18 @@ pub(crate) fn init_otlp_tracing(
         sampler = ?sampler_spec.unwrap_or_else(|| "always_on".to_string()),
         "OpenTelemetry OTLP tracing initialized"
     );
+
+    // Step 2 (R-OPT-1): bring the OTel metrics pipeline online
+    // against the same endpoint. `init_otel_meter` is a no-op
+    // when the endpoint is unset; calling it here keeps a
+    // single OTLP endpoint for traces and metrics.
+    if let Err(e) = crate::otel_metrics::init_otel_meter() {
+        eprintln!("Warning: OTel metrics init failed: {}", e);
+    }
+
+    // R-OPT-1 Step 3: stash the tracer handle so that
+    // `flush_traces` can shut it down on graceful shutdown.
+    crate::store_tracer_provider(tracer_provider.clone());
 
     Ok(TracingInit::Otlp(tracer_provider))
 }

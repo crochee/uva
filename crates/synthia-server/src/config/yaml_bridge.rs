@@ -39,7 +39,7 @@ use std::{collections::HashMap, fs, path::Path};
 use anyhow::{Context, Result, bail};
 use synthia::provider::config::{ProviderEntry, WorkspaceConfig};
 
-use super::provider::{ModelConfig as SourceModelConfig, ProviderConfig};
+use super::provider::ModelConfig as SourceModelConfig;
 
 /// Files we recognise as a provider configuration file.
 const SUPPORTED_EXTS: &[&str] = &["yaml", "yml", "toml"];
@@ -97,7 +97,42 @@ struct SourceFile {
     #[serde(default)]
     default_model: Option<String>,
     #[serde(default)]
-    providers: HashMap<String, ProviderConfig>,
+    providers: HashMap<String, SourceProvider>,
+}
+
+/// One `providers.<name>` entry in either accepted shape.
+///
+/// The legacy YAML shape (`api_key` / `base_url` / `models[]`) and the
+/// TOML `ProviderEntry` shape (`type` / `api_key_env` / `default_model`
+/// / capability flags) both deserialize into this struct; the bridge
+/// prefers the explicit typed fields and falls back to inference for
+/// the legacy ones. `SourceFile` used to borrow `ProviderConfig`, which
+/// silently dropped every typed field — a `type: demo` entry was
+/// inferred as `openai` and failed on a missing key.
+#[derive(Default, serde::Deserialize)]
+struct SourceProvider {
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    models: Vec<SourceModelConfig>,
+    #[serde(default, rename = "type")]
+    r#type: Option<String>,
+    #[serde(default)]
+    api_key_env: Option<String>,
+    #[serde(default)]
+    default_model: Option<String>,
+    #[serde(default)]
+    context_window: Option<usize>,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    supports_tools: Option<bool>,
+    #[serde(default)]
+    supports_streaming: Option<bool>,
+    #[serde(default)]
+    supports_reasoning: Option<bool>,
 }
 
 fn bridge(source: SourceFile) -> Result<WorkspaceConfig> {
@@ -108,8 +143,16 @@ fn bridge(source: SourceFile) -> Result<WorkspaceConfig> {
     let mut providers = HashMap::with_capacity(source.providers.len());
 
     for (name, entry) in source.providers {
-        let provider_type = infer_provider_type(&name, &entry);
-        let api_key_env = api_key_env_for(&name);
+        // The typed shape wins when present; the legacy shape is
+        // inferred exactly as before.
+        let provider_type = entry
+            .r#type
+            .clone()
+            .unwrap_or_else(|| infer_provider_type(&name, &entry));
+        let api_key_env = entry
+            .api_key_env
+            .clone()
+            .unwrap_or_else(|| api_key_env_for(&name));
 
         if let Some(key) = entry.api_key.as_deref() {
             let trimmed = key.trim();
@@ -124,8 +167,11 @@ fn bridge(source: SourceFile) -> Result<WorkspaceConfig> {
             }
         }
 
-        let (default_model, context_window, max_output_tokens) =
+        let (model_default, model_context, model_output) =
             pick_model_settings(Some(&entry.models));
+        let default_model = entry.default_model.clone().or(model_default);
+        let context_window = entry.context_window.or(model_context);
+        let max_output_tokens = entry.max_output_tokens.or(model_output);
 
         providers.insert(
             name.clone(),
@@ -136,9 +182,9 @@ fn bridge(source: SourceFile) -> Result<WorkspaceConfig> {
                 default_model,
                 context_window,
                 max_output_tokens,
-                supports_tools: Some(true),
-                supports_streaming: Some(true),
-                supports_reasoning: Some(false),
+                supports_tools: entry.supports_tools.or(Some(true)),
+                supports_streaming: entry.supports_streaming.or(Some(true)),
+                supports_reasoning: entry.supports_reasoning.or(Some(false)),
             },
         );
     }
@@ -176,7 +222,7 @@ fn bridge(source: SourceFile) -> Result<WorkspaceConfig> {
 /// `"openai"`, everything else -> `"anthropic"`. The repo's example
 /// `config.yaml` names its entries `openai` / `anthropic`, which lines
 /// up exactly.
-fn infer_provider_type(name: &str, entry: &ProviderConfig) -> String {
+fn infer_provider_type(name: &str, entry: &SourceProvider) -> String {
     if let Some(base_url) = entry.base_url.as_deref() {
         // OpenAI-compatible servers don't always live under
         // `api.openai.com`; the bare shape of the path is more reliable.
@@ -259,20 +305,18 @@ mod tests {
 
     #[test]
     fn infer_openai_by_name() {
-        let entry = ProviderConfig {
-            api_key: None,
+        let entry = SourceProvider {
             base_url: Some("https://example.com/v1".into()),
-            models: vec![],
+            ..SourceProvider::default()
         };
         assert_eq!(infer_provider_type("openai", &entry), "openai");
     }
 
     #[test]
     fn infer_anthropic_by_name() {
-        let entry = ProviderConfig {
-            api_key: None,
+        let entry = SourceProvider {
             base_url: Some("https://api.minimaxi.com/anthropic".into()),
-            models: vec![],
+            ..SourceProvider::default()
         };
         assert_eq!(infer_provider_type("anthropic", &entry), "anthropic");
     }

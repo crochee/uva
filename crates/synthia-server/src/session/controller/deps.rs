@@ -4,23 +4,23 @@
 use std::{path::PathBuf, sync::Arc};
 
 use synthia::{
-    harness::{CompactionEmitters, PromptContext},
+    harness::PromptContext,
     provider::traits::ModelProvider,
     tool::registry::ToolRegistry,
 };
 use tokio::sync::RwLock;
 
-use crate::state::UsageMetrics;
+use crate::{agent_run_config::CompactionEmitters, state::UsageMetrics};
 
 /// Minimal dependencies required to build an
-/// [`AgentRunConfig`](synthia::harness::AgentRunConfig) for
+/// [`AgentRunConfig`](crate::agent_run_config::AgentRunConfig) for
 /// the session.
 #[derive(Clone)]
 pub struct RunDependencies {
     pub provider: Arc<dyn ModelProvider>,
     pub tool_registry: Arc<RwLock<ToolRegistry>>,
     /// Working directory handed to built-in tools via
-    /// [`AgentRunConfig::workspace_root`](synthia::harness::AgentRunConfig::workspace_root). Replaces the
+    /// [`AgentRunConfig::workspace_root`](crate::agent_run_config::AgentRunConfig::workspace_root). Replaces the
     /// previous hard-coded `/tmp` so `read_file` / `shell`
     /// operate inside the user's project root, not the
     /// system temp dir.
@@ -104,6 +104,12 @@ pub struct RunDependencies {
     /// router so every child gets a first-class session.
     pub subagent_router:
         Option<Arc<crate::session::subagent_router::SubagentRouter>>,
+    /// The node's cluster bus + identity. Every controller publishes
+    /// its frames here and holds its session lease through it; the
+    /// test-only default is an in-process [`LocalBus`].
+    ///
+    /// [`LocalBus`]: crate::cluster::LocalBus
+    pub cluster: Arc<crate::cluster::ClusterRuntime>,
 }
 
 impl RunDependencies {
@@ -114,6 +120,17 @@ impl RunDependencies {
         router: Option<Arc<crate::session::subagent_router::SubagentRouter>>,
     ) -> Self {
         self.subagent_router = router;
+        self
+    }
+
+    /// Install this node's cluster bus + identity. The local default
+    /// keeps every test and embedder working unchanged.
+    #[must_use]
+    pub fn with_cluster(
+        mut self,
+        cluster: Arc<crate::cluster::ClusterRuntime>,
+    ) -> Self {
+        self.cluster = cluster;
         self
     }
 
@@ -140,6 +157,7 @@ impl RunDependencies {
             tool_restriction: None,
             usage_metrics: Arc::new(UsageMetrics::default()),
             subagent_router: None,
+            cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
         }
     }
 
@@ -251,7 +269,7 @@ impl RunDependencies {
         emitters: Option<CompactionEmitters>,
     ) -> Option<Arc<dyn synthia::context::ContextManager>> {
         self.compaction.map(|settings| {
-            synthia::harness::context_manager_for_compaction_with_emitters(
+            crate::agent_run_config::context_manager_for_compaction_with_emitters(
                 provider, settings, emitters,
             )
         })

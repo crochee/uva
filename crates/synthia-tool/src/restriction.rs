@@ -162,8 +162,8 @@ pub struct RestrictedRegistry {
 
 impl RestrictedRegistry {
     /// Wrap a registry with a restriction. The wrapper is
-    /// `Clone` and may be cheaply passed through the
-    ///   `ReActAgent::with_tool_registry(Arc)` slot.
+    /// `Clone` and may be cheaply passed as the registry
+    ///   `ReActAgent::new(provider, registry)` takes.
     pub fn new(inner: Arc<ToolRegistry>, restriction: ToolRestriction) -> Self {
         Self {
             inner,

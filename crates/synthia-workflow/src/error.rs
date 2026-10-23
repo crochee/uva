@@ -47,6 +47,11 @@ pub enum WorkflowError {
         message: String,
     },
 
+    /// A persistence operation on the [`WorkflowStore`](crate::WorkflowStore)
+    /// failed at the filesystem level.
+    #[error("workflow store I/O: {0}")]
+    Io(#[from] std::io::Error),
+
     /// The plan would exceed a [`WorkflowCaps`] limit.
     ///
     /// Raised while planning, so nothing has spawned yet.

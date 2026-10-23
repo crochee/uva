@@ -16,7 +16,7 @@ pub const DEFAULT_MAX_AGENTS: usize = 5;
 ///
 /// R54: this existed only as two `clap` defaults (`127.0.0.1:8080`),
 /// while the Dockerfile and both compose files set
-/// `SYNTHIA_HOST=0.0.0.0` and `SYNTHIA_PORT=8080` — so a containerized
+/// `SYNTHIA_HOST=0.0.0.0` and `SYNTHIA_PORT=8080`—so a containerized
 /// server bound loopback and its published port was unreachable, and
 /// `host` / `port` in the deployment config were read by nobody.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub struct BindAddress {
 impl BindAddress {
     /// Resolve the address, most specific source first:
     ///
-    /// 1. `cli` — the value `clap` produced, which already merged
+    /// 1. `cli`—the value `clap` produced, which already merged
     ///    `--host` / `--port` with `SYNTHIA_HOST` / `SYNTHIA_PORT`;
     /// 2. the deployment config's `host` / `port`;
     /// 3. [`DEFAULT_HOST`] / [`DEFAULT_PORT`].
@@ -114,11 +114,11 @@ pub struct ServerConfig {
     /// join the local tool registry, so remote tools flow
     /// through the same guard pipeline, dispatch, and metrics
     /// as builtins. A server that fails to start is logged and
-    /// skipped — it never blocks boot.
+    /// skipped—it never blocks boot.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
-    /// R29: the optional `POST .../operation` discriminated-union
-    /// endpoint. Off by default — the route is not registered at
+    /// R29: the optional `POST.../operation` discriminated-union
+    /// endpoint. Off by default—the route is not registered at
     /// all when disabled, so the path falls through to the
     /// standard 404 envelope.
     #[serde(default)]
@@ -129,14 +129,195 @@ pub struct ServerConfig {
     /// [`ToolsConfig`].
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// : optional semantic-cache wrap on the default
+    /// provider. See [`SemanticCacheConfig`].
+    #[serde(default)]
+    pub cache: SemanticCacheConfig,
+    /// : optional resilience wrap (breaker + adaptive
+    /// backoff). See [`ResilienceConfig`].
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
+    /// : optional budget enforcement (token / cost /
+    /// latency). See [`BudgetConfig`].
+    #[serde(default)]
+    pub budget: BudgetConfig,
+    /// `[cluster]`—the multi-node control-plane bus. Default
+    /// `mode = "local"` (single process, zero external deps).
+    #[serde(default)]
+    pub cluster: ClusterConfig,
+}
+
+/// `[cluster]`—multi-node control-plane configuration.
+///
+/// Multi-node deployment = stateless compute nodes + a shared
+/// workspace filesystem (sessions / workflows / evals / schedules are
+/// the durable truth) + a shared bus (Redis) for leases, session-frame
+/// fan-out, and control-plane mutations. `mode = "local"` is the
+/// single-process default and needs nothing.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClusterConfig {
+    /// `"local"` (default) or `"redis"`.
+    #[serde(default)]
+    pub mode: ClusterMode,
+    /// Redis URL for `mode = "redis"` (e.g. `redis://127.0.0.1:6379`).
+    #[serde(default)]
+    pub redis_url: Option<String>,
+    /// Key/channel prefix. Default `"synthia"`.
+    #[serde(default = "default_cluster_namespace")]
+    pub namespace: String,
+    /// Session-lease TTL in seconds. Default 15; a crashed owner's
+    /// sessions become takeover-able after this long.
+    #[serde(default = "default_cluster_lease_ttl")]
+    pub lease_ttl_secs: u64,
+    /// Stable node id. `None` mints a ULID at boot.
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            mode: ClusterMode::default(),
+            redis_url: None,
+            namespace: default_cluster_namespace(),
+            lease_ttl_secs: default_cluster_lease_ttl(),
+            node_id: None,
+        }
+    }
+}
+
+/// Which bus backs the cluster control plane.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterMode {
+    /// In-process bus: single-node behaviour, zero external deps.
+    #[default]
+    Local,
+    /// Redis pub/sub + `SET NX EX` leases.
+    Redis,
+}
+
+fn default_cluster_namespace() -> String {
+    "synthia".to_string()
+}
+
+fn default_cluster_lease_ttl() -> u64 {
+    15
+}
+
+/// : semantic-cache wrap config.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SemanticCacheConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Cosine similarity cutoff (0.0–1.0). Default 0.92.
+    #[serde(default = "default_semantic_threshold")]
+    pub threshold: f32,
+    /// TTL in seconds. Default 3600.
+    #[serde(default = "default_semantic_ttl")]
+    pub ttl_secs: u64,
+}
+
+impl Default for SemanticCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_semantic_threshold(),
+            ttl_secs: default_semantic_ttl(),
+        }
+    }
+}
+
+fn default_semantic_threshold() -> f32 {
+    0.92
+}
+fn default_semantic_ttl() -> u64 {
+    3600
+}
+
+/// : resilience wrap config (breaker + adaptive backoff).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ResilienceConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum attempts (1 = no retries). Default 3.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// Consecutive failures before the breaker opens. Default 5.
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+    /// Wall-clock seconds the breaker stays open before half-open
+    /// probe. Default 15.
+    #[serde(default = "default_half_open_after")]
+    pub half_open_after_secs: u64,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: default_max_attempts(),
+            failure_threshold: default_failure_threshold(),
+            half_open_after_secs: default_half_open_after(),
+        }
+    }
+}
+
+fn default_max_attempts() -> u32 {
+    3
+}
+fn default_failure_threshold() -> u32 {
+    5
+}
+fn default_half_open_after() -> u64 {
+    15
+}
+
+/// : budget enforcement config.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BudgetConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Token limit. Default 200,000.
+    #[serde(default = "default_tokens_limit")]
+    pub tokens_limit: u64,
+    /// Latency cap in seconds. Default 120.
+    #[serde(default = "default_latency_secs")]
+    pub latency_secs: u64,
+    /// USD cost limit in cents. Default 5000 (= $50).
+    #[serde(default = "default_cost_cents")]
+    pub cost_cents_limit: u64,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            tokens_limit: default_tokens_limit(),
+            latency_secs: default_latency_secs(),
+            cost_cents_limit: default_cost_cents(),
+        }
+    }
+}
+
+fn default_tokens_limit() -> u64 {
+    200_000
+}
+fn default_latency_secs() -> u64 {
+    120
+}
+fn default_cost_cents() -> u64 {
+    5000
 }
 
 /// The `[tools]` section (R34): which registered tools the model is
 /// told about, and in what form.
 ///
-/// The section is applied to the live registry at boot — after the
+/// The section is applied to the live registry at boot—after the
 /// builtins, the `skill` tool, and any configured MCP server's tools
-/// have registered — so it can name remote tools too. Every name is
+/// have registered—so it can name remote tools too. Every name is
 /// resolved against that registry; an unknown name is **skipped with
 /// a warning** rather than failing startup, because an MCP server
 /// that fails to connect must not take the server down. The effective
@@ -176,11 +357,11 @@ pub struct ToolsConfig {
     pub max_visible: Option<usize>,
 }
 
-/// The `POST .../operation` endpoint gate (R29).
+/// The `POST.../operation` endpoint gate (R29).
 ///
 /// One flag, one endpoint. Kept as a struct (rather than a bare
 /// `bool` on `ServerConfig`) so future operation-level knobs
-/// land here without another top-level field — the same shape
+/// land here without another top-level field—the same shape
 /// `cors` already uses.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct OperationEndpointConfig {
@@ -314,6 +495,10 @@ impl Default for ServerConfig {
             mcp_servers: Vec::new(),
             operations: OperationEndpointConfig::default(),
             tools: ToolsConfig::default(),
+            cache: SemanticCacheConfig::default(),
+            resilience: ResilienceConfig::default(),
+            budget: BudgetConfig::default(),
+            cluster: ClusterConfig::default(),
         }
     }
 }
@@ -338,7 +523,7 @@ mod tests {
     // -- BindAddress (R54) -------------------------------------------
 
     /// The CLI wins over the config, and the config wins over the
-    /// defaults — the precedence a deployment expects.
+    /// defaults—the precedence a deployment expects.
     #[test]
     fn bind_address_resolution_precedence() {
         let config = ServerConfig {
@@ -558,7 +743,7 @@ mod tests {
     fn load_unknown_extension_treated_as_json() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.txt");
-        // Write valid JSON — any non-yaml extension falls
+        // Write valid JSON—any non-yaml extension falls
         // through to JSON parsing.
         std::fs::write(&path, r#"{"port": 7777}"#).unwrap();
         let c = ServerConfig::load(&path).unwrap();
@@ -647,5 +832,55 @@ mod tests {
         assert!(c.allowed_origins.is_empty());
         assert!(c.allowed_methods.is_empty());
         assert!(c.allowed_headers.is_empty());
+    }
+
+    // -- Tier-1 provider wrap config sections -----------------------------------
+
+    #[test]
+    fn ropt_plugin_sections_default_to_disabled() {
+        let cfg = ServerConfig::default();
+        assert!(!cfg.cache.enabled);
+        assert!(!cfg.resilience.enabled);
+        assert!(!cfg.budget.enabled);
+        assert!((cfg.cache.threshold - 0.92).abs() < 1e-6);
+        assert_eq!(cfg.cache.ttl_secs, 3600);
+        assert_eq!(cfg.resilience.max_attempts, 3);
+        assert_eq!(cfg.resilience.failure_threshold, 5);
+        assert_eq!(cfg.resilience.half_open_after_secs, 15);
+        assert_eq!(cfg.budget.tokens_limit, 200_000);
+        assert_eq!(cfg.budget.latency_secs, 120);
+        assert_eq!(cfg.budget.cost_cents_limit, 5000);
+    }
+
+    #[test]
+    fn ropt_plugin_sections_parse_from_yaml() {
+        let yaml = r#"
+cache:
+  enabled: true
+  threshold: 0.5
+  ttl_secs: 120
+resilience:
+  enabled: true
+  max_attempts: 7
+  failure_threshold: 2
+  half_open_after_secs: 30
+budget:
+  enabled: true
+  tokens_limit: 42
+  latency_secs: 7
+  cost_cents_limit: 9
+"#;
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert!(cfg.cache.enabled);
+        assert!((cfg.cache.threshold - 0.5).abs() < 1e-6);
+        assert_eq!(cfg.cache.ttl_secs, 120);
+        assert!(cfg.resilience.enabled);
+        assert_eq!(cfg.resilience.max_attempts, 7);
+        assert_eq!(cfg.resilience.failure_threshold, 2);
+        assert_eq!(cfg.resilience.half_open_after_secs, 30);
+        assert!(cfg.budget.enabled);
+        assert_eq!(cfg.budget.tokens_limit, 42);
+        assert_eq!(cfg.budget.latency_secs, 7);
+        assert_eq!(cfg.budget.cost_cents_limit, 9);
     }
 }

@@ -26,6 +26,8 @@ pub mod json_repair;
 pub mod openai;
 #[cfg(feature = "openai")]
 pub(crate) mod openai_streaming;
+#[cfg(feature = "hpc-pool")]
+pub mod pool;
 pub mod profile;
 pub mod retry;
 pub mod streaming;
@@ -100,6 +102,7 @@ pub use retry::{
     retry_with_classification,
     retry_with_retry_after,
 };
+pub use stop_reason::is_length_stop_reason;
 #[cfg(feature = "anthropic")]
 pub use streaming::{
     AnthropicStreamContentBlock,
@@ -114,7 +117,9 @@ pub use streaming::{
 };
 pub use tier::{ModelTier, TierLimits, TierParseError};
 pub use token_counter::{TokenCounter, estimate_messages_token_count};
-pub use traits::{ModelProvider, StreamResult, completion_to_sampling};
+pub use traits::{ModelProvider, completion_to_sampling};
+
+mod stop_reason;
 pub use types::{
     BilledClass,
     CompletionRequest,

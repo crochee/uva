@@ -73,12 +73,13 @@
 //! until the session ends.
 //!
 //! The loop itself is a piece too: `ReActAgent::with_strategy(...)`
-//! picks the reasoning paradigm — `ReActStrategy` (the default),
-//! `synthia::harness::ChainOfThoughtStrategy`, or
-//! `synthia::harness::BestOfNStrategy` with a `CandidateScorer` — and
-//! `synthia::harness::from_name("chain-of-thought")` resolves one from a
-//! config string, which is how `synthia-server` exposes the choice as
-//! `agents.<name>.strategy`.
+//! picks the reasoning paradigm, `ReActStrategy` (the default) or a
+//! plugin strategy you supply as an `Arc<dyn ReasoningStrategy>`.
+//! `synthia::harness::StrategyRegistry` resolves names: the
+//! harness's own `"react"` / `"re-act"` / `"re_act"` built-ins
+//! resolve without a register call, every other paradigm is
+//! registered by name first — which is how `synthia-server`
+//! exposes the choice as `agents.<name>.strategy`.
 //!
 //! ### The whole assembly, using only the prelude
 //!
@@ -202,6 +203,15 @@
 //! | `eval` | `synthia::eval` | `synthia-eval` | no |
 //! | `workflow` | `synthia::workflow` | `synthia-workflow` | no |
 //! | `telemetry` | `synthia::telemetry` | `synthia-telemetry` | no |
+//! | `semantic-cache` | [`semantic_cache`] | `synthia-semantic-cache` | no |
+//! | `tool-memo` | [`tool_memo`] | `synthia-tool-memo` | no |
+//! | `resilience` | [`resilience`] | `synthia-resilience` | no |
+//! | `strategy-plan-execute` | [`strategy_plan_execute`] | `synthia-strategy-plan-execute` | no |
+//! | `reflection` | [`reflection`] | `synthia-reflection` | no |
+//! | `budget` | [`budget`] | `synthia-budget` | no |
+//! | `hpc-pool` | `synthia::hpc_pool` | `synthia-provider/hpc-pool` | no |
+//! | `hpc-simd` | `synthia::hpc_simd` | `synthia-search/simd` | no |
+//! | `hpc-batch` | `synthia::hpc_batch` | `synthia-hpc-batch` | no |
 //! | `sqlite` | `synthia::context::memory` | `synthia-context/sqlite` | no |
 //! | `test-support` | `synthia::test_support` | `synthia-test-support` | no |
 //!
@@ -406,6 +416,30 @@ use synthia::tool_scheduler::SchedulerTool;
 use synthia::tool_search::SearchTool;
 ```"#
 )]
+#![cfg_attr(
+    not(feature = "hpc-pool"),
+    doc = r#"```compile_fail
+// The `hpc-pool` feature is off: the connection-pool module must
+// not exist.
+use synthia::hpc_pool::PooledHttpClient;
+```"#
+)]
+#![cfg_attr(
+    not(feature = "hpc-simd"),
+    doc = r#"```compile_fail
+// The `hpc-simd` feature is off: the arch-specific SIMD dot
+// must not exist.
+use synthia::hpc_simd::DotRoute;
+```"#
+)]
+#![cfg_attr(
+    not(feature = "hpc-batch"),
+    doc = r#"```compile_fail
+// The `hpc-batch` feature is off: the batched embedder /
+// completer adapters must not exist.
+use synthia::hpc_batch::BatchEmbedder;
+```"#
+)]
 
 // The facade's async traits (`ModelProvider`, `Tool`, `Agent`,
 // `ContextManager`) are implemented with this attribute macro, so the
@@ -429,6 +463,10 @@ pub struct MinimalGuide;
 
 #[cfg(feature = "attachment")]
 pub mod attachment;
+#[cfg(feature = "budget")]
+pub mod budget;
+#[cfg(feature = "checkpoint")]
+pub mod checkpoint;
 #[cfg(feature = "context")]
 pub mod context;
 #[cfg(feature = "core")]
@@ -437,6 +475,14 @@ pub mod core;
 pub mod eval;
 #[cfg(feature = "harness")]
 pub mod harness;
+#[cfg(feature = "hnsw")]
+pub mod hnsw;
+#[cfg(feature = "hpc-batch")]
+pub mod hpc_batch;
+#[cfg(feature = "hpc-pool")]
+pub mod hpc_pool;
+#[cfg(feature = "hpc-simd")]
+pub mod hpc_simd;
 #[cfg(feature = "macros")]
 pub mod macros;
 #[cfg(feature = "mcp")]
@@ -444,22 +490,38 @@ pub mod mcp;
 pub mod prelude;
 #[cfg(feature = "provider")]
 pub mod provider;
+#[cfg(feature = "reflection")]
+pub mod reflection;
+#[cfg(feature = "resilience")]
+pub mod resilience;
+#[cfg(feature = "safety")]
+pub mod safety;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 #[cfg(feature = "search")]
 pub mod search;
+#[cfg(feature = "semantic-cache")]
+pub mod semantic_cache;
 #[cfg(feature = "session")]
 pub mod session;
 #[cfg(feature = "skill")]
 pub mod skill;
 #[cfg(feature = "steering")]
 pub mod steering;
+#[cfg(feature = "strategy-best-of-n")]
+pub mod strategy_best_of_n;
+#[cfg(feature = "strategy-cot")]
+pub mod strategy_cot;
+#[cfg(feature = "strategy-plan-execute")]
+pub mod strategy_plan_execute;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 #[cfg(feature = "tool")]
 pub mod tool;
+#[cfg(feature = "tool-memo")]
+pub mod tool_memo;
 #[cfg(feature = "tool-read")]
 pub mod tool_read;
 #[cfg(feature = "tool-scheduler")]
@@ -476,5 +538,7 @@ pub mod tool_todo;
 pub mod tool_web;
 #[cfg(feature = "tool-write")]
 pub mod tool_write;
+#[cfg(feature = "transcript")]
+pub mod transcript;
 #[cfg(feature = "workflow")]
 pub mod workflow;

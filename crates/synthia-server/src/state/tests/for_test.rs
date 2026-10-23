@@ -3,7 +3,7 @@
 //! production wiring (the `skill` tool lands on the
 //! default registry).
 
-use synthia::{core::registry::Registry, session::manager::SessionRegistry};
+use synthia::session::manager::SessionRegistry;
 
 use crate::state::AppState;
 
@@ -23,8 +23,6 @@ async fn for_test_tool_registry_includes_skill_tool() {
     let reg = state.tool_registry.read().await;
     let entry = reg
         .get("skill")
-        .await
-        .expect("skill lookup must succeed")
         .expect("skill tool must be registered in the default registry");
     assert_eq!(entry.tool_instance().name(), "skill");
 }

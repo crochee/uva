@@ -1,0 +1,44 @@
+[package]
+name = "synthia-strategy-cot"
+description = "Chain-of-Thought reasoning strategy for synthia-harness: one tool-free pass with a step-format instruction appended to the system prompt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+# The harness ships the `ReasoningStrategy` trait + the
+# orchestration glue this strategy hooks into. The strategy is
+# otherwise self-contained: one provider call, no tools.
+synthia-harness.workspace = true
+synthia-provider.workspace = true
+synthia-session.workspace = true
+synthia-core.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+# `#[tokio::test]` drives the test fixtures.
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+# The harness tests drive `CancellationToken` through the trait.
+synthia-core = { workspace = true, features = ["tokio-util"] }
+tokio-util.workspace = true
+tracing-subscriber.workspace = true
+synthia-test-support.workspace = true
+synthia-tool.workspace = true
+synthia-context.workspace = true
+
+[[example]]
+name = "chain_of_thought"

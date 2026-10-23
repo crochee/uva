@@ -13,8 +13,8 @@
 //! The workers here are simulated (this example is about the
 //! coordination seam, not a model call), but the sequence is
 //! exactly the one a host writes around
-//! `synthia_harness::AgentHandle::spawn_detached` +
-//! `DetachedAgent::join`/`try_event`.
+//! `synthia_harness::Agent::run` — one event stream per worker,
+//! drained on the coordinator's own task.
 //!
 //! ```bash
 //! cargo run --example fan_out_with_group_join -p synthia-tool-task

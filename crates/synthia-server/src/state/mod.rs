@@ -28,6 +28,7 @@ pub(crate) use app_state::plugin_tool_registry;
 pub use app_state::{
     AppState,
     AppliedToolSurface,
+    HarnessEvalAgent,
     ModelSelectionError,
     ProviderCatalogue,
     UsageMetrics,

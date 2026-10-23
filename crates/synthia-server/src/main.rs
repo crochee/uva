@@ -132,6 +132,15 @@ async fn main() -> Result<()> {
         })
         .await?;
 
+    // R-OPT-1 Step 3: drain pending OTLP spans + metrics
+    // *after* the listener has stopped accepting new
+    // connections and in-flight requests have completed, so
+    // the last batch of telemetry leaves the process. Without
+    // this call a SIGTERM run loses the trailing tail.
+    if let Err(e) = synthia::telemetry::flush_traces() {
+        error!("Failed to flush OTLP traces on shutdown: {}", e);
+    }
+
     info!("Server shutdown complete");
 
     Ok(())

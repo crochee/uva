@@ -17,7 +17,10 @@
 //! - a tool that fails and is recovered on the next iteration
 //! - a mid-stream cancellation that terminates cleanly
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use futures::StreamExt;
 use serde_json::json;
@@ -31,8 +34,8 @@ use synthia_provider::{Content, ContentPart, TextContent, ToolUse};
 use synthia_tool::registry::{ToolEntry, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
-mod test_support;
-use test_support::{FakeTool, ScriptedStreamProvider};
+mod support;
+use support::{FakeTool, ScriptedStreamProvider};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -308,18 +311,13 @@ async fn user_tool_failure_then_recovery() {
 
 #[tokio::test]
 async fn user_cancels_mid_stream() {
-    // Pre-cancel the token BEFORE calling `run`. This guarantees the
-    // very first cancellation check inside the loop fires, producing a
-    // deterministic "Cancelled before LLM call" event sequence.
-    let provider = Arc::new(ScriptedStreamProvider::from_content_responses(
-        (0..50)
-            .map(|i| Content::text(format!("still talking... chunk {i}")))
-            .collect(),
-    ));
-
-    let registry = registry_with(vec![]);
+    // Cancel during the LLM stream, not before `run`: the provider
+    // fires the token on its first delta, so the loop is past setup
+    // and reports the interruption before the terminal event.
     let cancel = Arc::new(CancellationToken::new());
-    cancel.cancel();
+    let provider =
+        Arc::new(MidStreamCancellingProvider::new(Arc::clone(&cancel)));
+    let registry = registry_with(vec![]);
 
     let agent = Arc::new(ReActAgent::new(provider, registry));
     let events =
@@ -359,11 +357,143 @@ async fn user_cancels_mid_stream() {
         Some(AgentEvent::System(SystemEvent::SessionStarted { .. }))
     ));
 
+    // Exactly one terminal event — a run reports its end once.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                AgentEvent::System(SystemEvent::SessionEnded { .. })
+            ))
+            .count(),
+        1,
+        "a cancelled run publishes exactly one terminal event, got {:?}",
+        events.iter().map(|e| e.kind()).collect::<Vec<_>>()
+    );
+}
+
+/// A token that already fired when `run` is called ends the session
+/// at setup: `SessionStarted` then `SessionEnded { Cancelled }`, with
+/// no LLM pass, no `ModelDone` and no interruption diagnostic — the
+/// run never got far enough to be interrupted.
+#[tokio::test]
+async fn user_cancels_before_the_run_starts() {
+    let provider = Arc::new(ScriptedStreamProvider::from_content_responses(
+        (0..50)
+            .map(|i| Content::text(format!("still talking... chunk {i}")))
+            .collect(),
+    ));
+
+    let registry = registry_with(vec![]);
+    let cancel = Arc::new(CancellationToken::new());
+    cancel.cancel();
+
+    let agent = Arc::new(ReActAgent::new(provider, registry));
+    let events =
+        drain(&agent, AgentInput::text("tell me a long story"), cancel).await;
+
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec!["System", "System"],
+        "a pre-cancelled run ends at setup; got {kinds:?}"
+    );
+    assert!(matches!(
+        events.first(),
+        Some(AgentEvent::System(SystemEvent::SessionStarted { .. }))
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(AgentEvent::System(SystemEvent::SessionEnded {
+            reason: SessionEndReason::Cancelled,
+        }))
+    ));
     // No ModelDone should appear — we never reached the LLM.
     assert!(
         !events.iter().any(|e| matches!(e, AgentEvent::ModelDone(_))),
         "no ModelDone when session is cancelled before any LLM pass"
     );
+}
+
+/// Fires the run's cancel token from inside the LLM stream, so the
+/// loop observes the cancellation after setup rather than at it.
+struct MidStreamCancellingProvider {
+    token: Arc<CancellationToken>,
+    fired: AtomicBool,
+}
+
+impl MidStreamCancellingProvider {
+    fn new(token: Arc<CancellationToken>) -> Self {
+        Self {
+            token,
+            fired: AtomicBool::new(false),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl synthia_provider::traits::ModelProvider for MidStreamCancellingProvider {
+    async fn initialize(
+        &mut self,
+        _config: synthia_provider::ProviderConfig,
+    ) -> Result<(), synthia_core::Error> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "mid-stream-cancelling"
+    }
+
+    fn model_config(&self) -> synthia_provider::ModelConfig {
+        synthia_provider::ModelConfig {
+            name: "fake".to_string(),
+            provider: "mid-stream".to_string(),
+            context_window: 128_000,
+            max_output_tokens: 4096,
+            supports_tools: true,
+            supports_streaming: true,
+            supports_reasoning: false,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: synthia_provider::CompletionRequest,
+    ) -> Result<synthia_provider::CompletionResponse, synthia_core::Error> {
+        unreachable!("streaming path should not call complete()")
+    }
+
+    async fn complete_with_stream(
+        &self,
+        _request: synthia_provider::CompletionRequest,
+        _cancel: Option<Arc<dyn synthia_core::CancelToken>>,
+        mut on_delta: Box<dyn FnMut(synthia_provider::StreamChunk) + Send>,
+    ) -> Result<synthia_provider::CompletionResponse, synthia_core::Error> {
+        on_delta(synthia_provider::StreamChunk::Content(ContentPart::Text(
+            TextContent {
+                text: "the story begins".to_string(),
+                cache_control: None,
+            },
+        )));
+        if !self.fired.swap(true, Ordering::SeqCst) {
+            self.token.cancel();
+        }
+        on_delta(synthia_provider::StreamChunk::IsDone {
+            result: Box::new(synthia_provider::SamplingResult::default()),
+        });
+        Ok(synthia_provider::CompletionResponse {
+            id: "cancelled".to_string(),
+            model: "fake".to_string(),
+            content: Content::Single(ContentPart::Text(TextContent {
+                text: String::new(),
+                cache_control: None,
+            })),
+            usage: synthia_provider::TokenUsage::default(),
+            cached: false,
+            replay_state: None,
+            stop_reason: None,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------

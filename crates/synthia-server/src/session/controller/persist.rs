@@ -35,12 +35,9 @@ impl ControllerInner {
         }
         let outer_kind = event.kind();
         let system_kind = Self::classify_system_kind(event);
-        let (payload_bytes, event_value) = Self::encode_event(event)?;
-        let byte_size = payload_bytes.len();
+        let (byte_size, event_value) = Self::encode_event(event)?;
         let event_type = event.kind();
-
         tracing::debug!(
-            target: "synthia.session",
             session_id = %self.session_id,
             event_kind = outer_kind,
             system_kind = system_kind.unwrap_or("-"),
@@ -59,10 +56,49 @@ impl ControllerInner {
         // cursor + `GET /api/v1/sessions/{id}` are the source
         // of truth for resume. See
         // `2026-09-24-stream-index.md` §4.3 / §10.
-        let _stream_index =
+        let stream_index =
             Self::append_if_durable(event, &event_value, log).await?;
         self.broadcast_event(event, outer_kind, system_kind);
+        self.publish_session_frame(stream_index, &event_value).await;
         Ok(())
+    }
+
+    /// Fan one run event out on the cluster bus (best-effort).
+    ///
+    /// The durable append already happened; a publish failure only
+    /// costs a remote subscriber a live frame, and its `from` cursor
+    /// re-reads the row from disk. `cursor` is the durable row's
+    /// `stream_index` (`None` for ephemeral events, which must never
+    /// be filtered against a resume cursor).
+    async fn publish_session_frame(
+        &self,
+        cursor: Option<u64>,
+        payload: &serde_json::Value,
+    ) {
+        // A single-node deployment never has another subscriber; the
+        // local broadcaster already served every SSE client. Skipping
+        // the publish keeps the default hot path free of an extra
+        // payload clone + channel send per event.
+        if !self.cluster.clustered {
+            return;
+        }
+        let frame = crate::cluster::SessionFrame {
+            origin: self.cluster.node_id.clone(),
+            cursor,
+            payload: payload.clone(),
+        };
+        let key = crate::cluster::SessionKey::new(
+            self.user_id.clone(),
+            self.session_id.clone(),
+        );
+        if let Err(e) = self.cluster.bus.publish_session(&key, frame).await {
+            tracing::debug!(
+                target: "synthia.session",
+                session_id = %self.session_id,
+                error = %e,
+                "cluster: session frame publish failed"
+            );
+        }
     }
 
     /// [`Self::record_usage`] over a whole sub-agent trace: the
@@ -106,21 +142,20 @@ impl ControllerInner {
         }
     }
 
-    /// Single serialization pass — `to_vec` keeps ownership
-    /// of the bytes for the size measurement AND the decode
-    /// recovers the `Value` the sink append needs (the
-    /// previous shape ran `to_value(...).to_string().len()`
-    /// (two passes) and re-serialized inside
-    /// `EventBroadcaster::send` (three passes total)).
+    /// Single serialization pass: `to_value` builds the tree the
+    /// sink append and the cluster frame share, and the byte
+    /// count comes from formatting that same tree — the previous
+    /// shape ran `to_vec` + `from_slice`, paying a full
+    /// deserialization half-trip per event.
     pub(super) fn encode_event(
         event: &AgentEvent,
-    ) -> Result<(Vec<u8>, serde_json::Value)> {
-        let payload_bytes = serde_json::to_vec(event)
+    ) -> Result<(usize, serde_json::Value)> {
+        let event_value: serde_json::Value = serde_json::to_value(event)
             .context("failed to serialize agent event")?;
-        let event_value: serde_json::Value =
-            serde_json::from_slice(&payload_bytes)
-                .context("failed to decode event payload for sink append")?;
-        Ok((payload_bytes, event_value))
+        let byte_size = serde_json::to_vec(&event_value)
+            .context("failed to measure event payload")?
+            .len();
+        Ok((byte_size, event_value))
     }
 
     /// Resolved kind for the structural log line, if `event`

@@ -78,7 +78,7 @@
 //! A streamed reasoning block usually carries no signature: the harness
 //! publishes each reasoning part as it arrives, and stamps the
 //! `signature_delta` value onto the assembled turn only afterwards
-//! (`synthia::harness::agent::re_act::stream`). The signature is
+//! (`synthia::provider::BlockAssembler`). The signature is
 //! therefore attached to the block when the part itself carries one,
 //! and left empty otherwise.
 

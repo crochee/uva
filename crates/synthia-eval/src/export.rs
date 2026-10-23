@@ -150,6 +150,9 @@ mod tests {
             average_score: 0.78,
             passed: 1,
             total: 2,
+            trials: 1,
+            per_case_passes: BTreeMap::new(),
+            per_case_attempts: BTreeMap::new(),
         }
     }
 
@@ -207,6 +210,9 @@ mod tests {
             average_score: 0.0,
             passed: 0,
             total: 1,
+            trials: 1,
+            per_case_passes: BTreeMap::new(),
+            per_case_attempts: BTreeMap::new(),
         };
         let csv = report.to_csv_string();
         let lines: Vec<&str> = csv.lines().collect();
@@ -222,6 +228,9 @@ mod tests {
             passed: 0,
             results: Vec::new(),
             total: 0,
+            trials: 1,
+            per_case_passes: BTreeMap::new(),
+            per_case_attempts: BTreeMap::new(),
         };
         let csv = report.to_csv_string();
         assert_eq!(csv, "case_id,metric,score,passed\n");

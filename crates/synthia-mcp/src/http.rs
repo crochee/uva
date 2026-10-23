@@ -79,6 +79,16 @@ impl StreamableHttpTransport {
     }
 
     /// POST one JSON-RPC envelope, returning the raw response.
+    ///
+    /// R-OPT-1 Step 6.3 (deferred): outbound `traceparent`
+    /// injection lives outside this PR. The MCP transport
+    /// doesn't yet carry an OTel dep, and the stdio /
+    /// loopback transports have no header API to extend.
+    /// The HTTP path would stamp `traceparent` here once
+    /// `synthia-mcp` gains a direct `opentelemetry` dep
+    /// (opt-in, behind the existing `otel` feature on the
+    /// consumer). For R-OPT-1 we keep the signature stable
+    /// and document the seam.
     async fn post(&self, envelope: &Value) -> Result<reqwest::Response, Error> {
         let mut request = self
             .client

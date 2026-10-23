@@ -57,6 +57,19 @@ impl ModelProvider for AnthropicProvider {
             retry_with_classification,
         };
 
+        // R-OPT-1 Step 5.4: parent `SpanKind::Llm` span over
+        // the GenAI-typed `llm.call` span. Always on (no
+        // feature gate) because `synthia_telemetry::SpanKind`
+        // is a zero-cost enum. The span handle is bound first
+        // because the temporary from `new_typed_span` does
+        // not live long enough to chain `.enter()` directly.
+        let _typed_outer_span = synthia_telemetry::new_typed_span(
+            synthia_telemetry::SpanKind::Llm,
+            "llm.complete",
+            &[],
+        );
+        let _typed_outer_guard = _typed_outer_span.enter();
+
         // `llm.call` span (OTel semantic conventions for GenAI).
         // All fields that are populated later MUST be declared as
         // `Empty` at the callsite — `Span::record(field, value)` is a
@@ -72,6 +85,8 @@ impl ModelProvider for AnthropicProvider {
             gen_ai.response.finish_reason = tracing::field::Empty,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             exception.type = tracing::field::Empty,
             exception.message = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
@@ -140,6 +155,11 @@ impl ModelProvider for AnthropicProvider {
                     llm_span.record("exception.type", e.to_string());
                     llm_span.record("exception.message", e.to_string());
                     llm_span.record("otel.status_code", "ERROR");
+                    synthia_telemetry::record_llm_call(
+                        crate::traits::ModelProvider::name(self),
+                        &request.model,
+                        "error",
+                    );
                 }
                 return Err(e);
             }
@@ -159,6 +179,26 @@ impl ModelProvider for AnthropicProvider {
             );
             llm_span.record(
                 "gen_ai.usage.output_tokens",
+                response.usage.completion_tokens,
+            );
+            if let Some(cache) = response.usage.cache_read_tokens {
+                llm_span.record("gen_ai.usage.cache_read_input_tokens", cache);
+            }
+            if let Some(cache) = response.usage.cache_write_tokens {
+                llm_span
+                    .record("gen_ai.usage.cache_creation_input_tokens", cache);
+            }
+            synthia_telemetry::record_llm_call(
+                crate::traits::ModelProvider::name(self),
+                &request.model,
+                "ok",
+            );
+            synthia_telemetry::record_llm_usage(
+                crate::traits::ModelProvider::name(self),
+                &request.model,
+                response.usage.prompt_tokens,
+                response.usage.cache_read_tokens.unwrap_or(0),
+                response.usage.cache_write_tokens.unwrap_or(0),
                 response.usage.completion_tokens,
             );
         }

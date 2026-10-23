@@ -43,7 +43,69 @@ impl AppState {
     ) -> synthia::core::Result<Arc<SessionController>> {
         let key = (user_id.to_string(), session_id.to_string());
         if let Some(entry) = self.active_sessions.get(&key) {
-            return Ok(entry.clone());
+            if !entry.is_remote() {
+                return Ok(entry.clone());
+            }
+            // A cached remote handle must re-check ownership: its
+            // owner may have died since, and a remote handle can
+            // never "upgrade" itself into a controller. If the lease
+            // is free now (expired TTL or released), drop the stale
+            // handle and fall through to the owner path; otherwise
+            // keep forwarding.
+            let cluster_key =
+                crate::cluster::SessionKey::new(user_id, session_id);
+            let lease = self.cluster.session_lease(&cluster_key);
+            match self
+                .cluster
+                .bus
+                .try_acquire(
+                    &lease,
+                    &self.cluster.node_id,
+                    self.cluster.lease_ttl,
+                )
+                .await
+            {
+                Ok(true) => {
+                    drop(entry);
+                    self.active_sessions.remove(&key);
+                }
+                Ok(false) => return Ok(entry.clone()),
+                Err(e) => {
+                    return Err(synthia::core::Error::internal(format!(
+                        "cluster lease for '{cluster_key}': {e}"
+                    )));
+                }
+            }
+        }
+
+        // Cluster ownership first: the node that holds the session
+        // lease runs the controller. A node that loses the race gets a
+        // remote handle that forwards ops and subscribes to frames —
+        // it must not create/repair the shared session files (the
+        // owner owns that side too).
+        let cluster_key = crate::cluster::SessionKey::new(user_id, session_id);
+        let lease = self.cluster.session_lease(&cluster_key);
+        let acquired = self
+            .cluster
+            .bus
+            .try_acquire(&lease, &self.cluster.node_id, self.cluster.lease_ttl)
+            .await
+            .map_err(|e| {
+                synthia::core::Error::internal(format!(
+                    "cluster lease for '{cluster_key}': {e}"
+                ))
+            })?;
+        if !acquired {
+            let remote = SessionController::spawn_remote(
+                cluster_key.user_id.clone(),
+                cluster_key.session_id.clone(),
+                Arc::clone(&self.cluster),
+            );
+            self.active_sessions.insert(
+                (cluster_key.user_id, cluster_key.session_id),
+                Arc::clone(&remote),
+            );
+            return Ok(remote);
         }
 
         if self.session_manager.get(session_id).await.is_none() {
@@ -123,9 +185,11 @@ impl AppState {
         // one: child sessions land in the same registry the sessions
         // API lists.
         .with_usage_metrics(Arc::clone(&self.usage_metrics))
-        .with_subagent_router(Some(Arc::clone(&self.subagent_router)));
+        .with_subagent_router(Some(Arc::clone(&self.subagent_router)))
+        .with_cluster(Arc::clone(&self.cluster));
 
-        let controller = SessionController::spawn(
+        // Owner path: spawn the controller with the lease it holds.
+        let controller = SessionController::spawn_with_lease(
             user_id,
             session_id,
             queue,
@@ -133,9 +197,13 @@ impl AppState {
             deps,
             crate::session::controller::DEFAULT_IDLE_TIMEOUT,
             Arc::new(AgentRunStreamFactory),
+            lease,
         );
 
-        self.active_sessions.insert(key, Arc::clone(&controller));
+        self.active_sessions.insert(
+            (cluster_key.user_id, cluster_key.session_id),
+            Arc::clone(&controller),
+        );
         Ok(controller)
     }
 }

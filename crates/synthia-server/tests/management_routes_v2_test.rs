@@ -126,8 +126,10 @@ async fn test_workflows_create_get_run_delete_round_trip() {
     let detail = body_json(get_resp).await;
     assert_eq!(detail["id"].as_str(), Some(id.as_str()));
 
-    // POST /api/v1/workflows/{id}/run — returns a stubbed
-    // WorkflowRunResult with one Superseded CallRun per planned call.
+    // POST /api/v1/workflows/{id}/run — dispatches the planned call
+    // through the workflow host. Today the host is the typed stub,
+    // so every call settles as Failed with the "agent runtime not
+    // configured" reason (see routes/workflows.rs doc).
     let run = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/workflows/{id}/run"))
@@ -139,7 +141,7 @@ async fn test_workflows_create_get_run_delete_round_trip() {
     assert!(run_json["run_id"].as_str().is_some());
     let calls = run_json["calls"].as_array().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0]["status"].as_str(), Some("superseded"));
+    assert_eq!(calls[0]["status"].as_str(), Some("failed"));
 
     // DELETE /api/v1/workflows/{id}
     let del = Request::builder()
@@ -155,7 +157,23 @@ async fn test_workflows_create_get_run_delete_round_trip() {
 
 #[tokio::test]
 async fn test_evals_create_run_delete_round_trip() {
-    let app = make_app().await;
+    // Script the provider's one response: the case's keywords are
+    // ["echo"], so the real harness agent's drained text must pass
+    // the keyword metric end to end.
+    let answer = synthia::provider::CompletionResponse {
+        content: synthia::provider::Content::text("echo: hello"),
+        ..synthia::provider::CompletionResponse::default()
+    };
+    let provider: Arc<dyn synthia::provider::traits::ModelProvider> =
+        Arc::new(synthia::test_support::FakeProvider::new(vec![answer]));
+    let temp = tempfile::TempDir::new().unwrap();
+    let session_manager = synthia::session::manager::SessionRegistry::new(
+        temp.path().to_path_buf(),
+    );
+    let mut state =
+        AppState::for_test(session_manager, temp.path().to_path_buf()).await;
+    state.default_provider = provider;
+    let app = create_router(Arc::new(state)).await;
     let name = format!("smoke_{}", std::process::id());
 
     // POST /api/v1/evals
@@ -181,9 +199,9 @@ async fn test_evals_create_run_delete_round_trip() {
     let created = body_json(create_resp).await;
     assert_eq!(created["name"].as_str(), Some(name.as_str()));
 
-    // POST /api/v1/evals/{name}/run — exercises the keyword metric
-    // path; the StubAgent returns "echo: hello" which matches the
-    // expected_output, so the case should pass.
+    // POST /api/v1/evals/{name}/run — the real harness agent drives
+    // the case against the scripted provider; the keyword metric
+    // scores its drained text.
     let run = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/evals/{name}/run"))
@@ -195,6 +213,10 @@ async fn test_evals_create_run_delete_round_trip() {
     assert_eq!(report["suite_name"].as_str(), Some(name.as_str()));
     assert_eq!(report["total"].as_u64(), Some(1));
     assert_eq!(report["passed"].as_u64(), Some(1));
+    assert_eq!(
+        report["results"][0]["actual_output"].as_str(),
+        Some("echo: hello")
+    );
 
     // DELETE /api/v1/evals/{name}
     let del = Request::builder()
@@ -204,6 +226,106 @@ async fn test_evals_create_run_delete_round_trip() {
         .unwrap();
     let del_resp = app.clone().oneshot(del).await.unwrap();
     assert_eq!(del_resp.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn test_workflows_and_evals_survive_state_rebuild() {
+    // The restart case: create a workflow and an eval suite, then
+    // build a brand-new AppState over the same workspace root —
+    // both must still be listed (stores under workflows/ + evals/).
+    let temp = tempfile::TempDir::new().unwrap();
+    let session_manager = synthia::session::manager::SessionRegistry::new(
+        temp.path().to_path_buf(),
+    );
+    let state =
+        AppState::for_test(session_manager, temp.path().to_path_buf()).await;
+    let app = create_router(Arc::new(state)).await;
+    let wf_id = format!("persist_{}", std::process::id());
+    let ev_name = format!("persist_eval_{}", std::process::id());
+
+    let create_wf = Request::builder()
+        .method("POST")
+        .uri("/api/v1/workflows")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({
+                "id": wf_id,
+                "steps": [{
+                    "kind": "agent",
+                    "id": "step1",
+                    "agent": "echo",
+                    "prompt": "say hi"
+                }],
+                "phases": []
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(create_wf).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "create workflow");
+
+    let create_ev = Request::builder()
+        .method("POST")
+        .uri("/api/v1/evals")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            json!({
+                "name": ev_name,
+                "cases": [{
+                    "id": "case1",
+                    "input": "echo",
+                    "expected_keywords": ["echo"],
+                    "expected_output": "echo: hello"
+                }]
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(create_ev).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED, "create eval");
+
+    // Rebuild the whole state over the same workspace directory.
+    let session_manager2 = synthia::session::manager::SessionRegistry::new(
+        temp.path().to_path_buf(),
+    );
+    let state2 =
+        AppState::for_test(session_manager2, temp.path().to_path_buf()).await;
+    let app2 = create_router(Arc::new(state2)).await;
+    let list_wf = Request::builder()
+        .uri("/api/v1/workflows")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app2.clone().oneshot(list_wf).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed = body_json(resp).await;
+    let ids = listed["data"]
+        .as_array()
+        .expect("workflow list data is an array")
+        .iter()
+        .filter_map(|w| w["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        ids.contains(&wf_id.as_str()),
+        "workflow must survive a state rebuild: {ids:?}"
+    );
+
+    let list_ev = Request::builder()
+        .uri("/api/v1/evals")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let resp = app2.clone().oneshot(list_ev).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let listed = body_json(resp).await;
+    let names = listed["data"]
+        .as_array()
+        .expect("eval list data is an array")
+        .iter()
+        .filter_map(|s| s["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names.contains(&ev_name.as_str()),
+        "eval suite must survive a state rebuild: {names:?}"
+    );
 }
 
 // --- Tasks ----------------------------------------------------------

@@ -18,7 +18,7 @@ use synthia::{
 };
 
 use super::{
-    super::SessionOp,
+    super::{AgentInput, SessionOp},
     support::{
         RecordingFactory,
         find_events_jsonl,
@@ -38,7 +38,7 @@ use super::{
 /// elsewhere, or runs with an empty input.
 #[tokio::test]
 async fn test_prompt_multi_round_trip_carries_parts() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),
@@ -132,7 +132,7 @@ async fn test_prompt_multi_round_trip_carries_parts() {
 /// durable.
 #[tokio::test]
 async fn test_prompt_multi_persists_its_text_as_a_user_input_row() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
             Arc::clone(&calls),

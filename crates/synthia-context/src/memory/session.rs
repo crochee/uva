@@ -204,13 +204,11 @@ impl Memory for SessionMemory {
             "data": serde_json::to_value(&message)
                 .map_err(|e| MemoryError::Decode(e.to_string()))?,
         });
-        // The `Memory` trait's `append` returns unit; the sink's
-        // ordinal is only meaningful to the surface ledger.
-        self.sink
-            .append(&envelope)
-            .await
-            .map_err(MemoryError::from)
-            .map(|_seq| ())
+        // The `Memory` trait's `append` returns unit; the row's
+        // ordinal is reserved here so the sink's counter stays the
+        // one every appender on this session draws from.
+        self.sink.alloc_seq();
+        self.sink.append(&envelope).await.map_err(MemoryError::from)
     }
 
     async fn get_context(
@@ -391,17 +389,22 @@ mod tests {
         };
         // Rows 1..4 are what the run persisted; row 5 is the record
         // `CompactionCheckpoint` wrote for the two tool results.
+        sink.alloc_seq();
         sink.append(&json!({"type": "UserInput", "data": {"text": "hello"}}))
             .await
             .unwrap();
+        sink.alloc_seq();
         sink.append(&json!({
             "type": "Model",
             "data": {"type": "text", "text": "working"},
         }))
         .await
         .unwrap();
+        sink.alloc_seq();
         sink.append(&tool_row("c1")).await.unwrap();
+        sink.alloc_seq();
         sink.append(&tool_row("c2")).await.unwrap();
+        sink.alloc_seq();
         sink.append(&json!({
             "type": "compaction",
             "seq": 5,

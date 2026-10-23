@@ -13,7 +13,6 @@ use std::{
 
 use synthia::{
     core::Clock,
-    harness::{AgentRunConfig, CompactionEmitters},
     provider::traits::ModelProvider,
     session::{
         CompactionCheckpoint,
@@ -29,7 +28,11 @@ use super::{
     ops::SessionState,
     run_stream::RunStreamFactory,
 };
-use crate::{event_stream::EventBroadcaster, state::UsageMetrics};
+use crate::{
+    agent_run_config::{AgentRunConfig, CompactionEmitters, RunOverrides},
+    event_stream::EventBroadcaster,
+    state::UsageMetrics,
+};
 
 /// One parked turn waiting for the next run: the lossless
 /// multimodal parts the text queue cannot carry, plus whether
@@ -103,6 +106,14 @@ pub(super) struct ControllerInner {
     /// `finalise_shutdown`; the first call wins so a
     /// shutdown-then-idle race cannot double-append.
     pub(super) shutdown_finalised: AtomicBool,
+    /// This node's cluster bus + identity: every durable/newly-live
+    /// event is fanned out here, and the session lease is renewed
+    /// through it.
+    pub(super) cluster: Arc<crate::cluster::ClusterRuntime>,
+    /// The session lease this controller holds. Empty for a controller
+    /// built outside `AppState` (tests / embedders): it then publishes
+    /// no frames and renews nothing.
+    pub(super) lease: String,
 }
 
 impl ControllerInner {
@@ -148,6 +159,10 @@ impl ControllerInner {
                 return;
             }
         };
+        // The shutdown marker bypasses the run's writer, so it
+        // reserves its ordinal from the sink's counter — the same
+        // one the run's writer draws from.
+        self.session_store.alloc_seq();
         if let Err(e) = self.session_store.append(&value).await {
             tracing::warn!(
                 target: "synthia.session",
@@ -254,7 +269,7 @@ impl ControllerInner {
         explicit: Option<&str>,
         provider: Option<Arc<dyn ModelProvider>>,
         checkpoint: Option<&Arc<CompactionCheckpoint>>,
-    ) -> AgentRunConfig {
+    ) -> (AgentRunConfig, RunOverrides) {
         let deps = self.deps.lock();
         let provider = provider.unwrap_or_else(|| Arc::clone(&deps.provider));
         let tool_registry = deps
@@ -263,12 +278,6 @@ impl ControllerInner {
             .map(|r| Arc::new((*r).clone()))
             .unwrap_or_else(|_| Arc::new(ToolRegistry::new()));
 
-        // Sync agent-name resolution via the
-        // `AppState::resolve_agent_name` helper. The dispatch
-        // path is unified: every request — chat
-        // scheduler — flows through `SessionController` and
-        // shares this single ladder
-        // (`explicit > configured default > first registered`).
         let default_name = deps
             .default_agent_name
             .as_ref()
@@ -281,43 +290,7 @@ impl ControllerInner {
             )
         });
 
-        AgentRunConfig {
-            provider: Arc::clone(&provider),
-            tool_registry,
-            workspace_root: deps.workspace_root.clone(),
-            system_prompt: deps.system_prompt.clone(),
-            prompt_context: deps.prompt_context.clone(),
-            agent_resolver: deps.agent_registry.as_ref().map(|reg| {
-                let reg = Arc::clone(reg);
-                Arc::new(move |name: String| {
-                    reg.resolve_sync(&name).map(|a| a.descriptor().clone())
-                })
-                    as Arc<
-                        dyn Fn(
-                                String,
-                            )
-                                -> Option<synthia::core::agent::AgentDescriptor>
-                            + Send
-                            + Sync,
-                    >
-            }),
-            agent_name,
-            max_iterations: Some(deps.default_max_iterations),
-            steering: Arc::clone(&deps.steering),
-            // Pass the registry through so callers (and future
-            // fan-out strategies) can resolve peer agents.
-            // Cheap to clone (Arc).
-            agent_registry: deps.agent_registry.clone(),
-            // R6-B: the typed-event sink is created per-run by
-            // `maybe_start_run` (channel + drain task); this
-            // default builder leaves it unset.
-            typed_event_sink: None,
-            // R16: the deployment's compaction capability composes
-            // into one context manager. `None` keeps the loop's
-            // default manager. R34: the
-            // compaction checkpoint's emitters ride along, so a
-            // splice is recorded durably (or, when its provenance
-            // cannot be proven, recorded log-only).
+        let overrides = RunOverrides {
             context_manager: deps.compose_context_manager_with_emitters(
                 Arc::clone(&provider),
                 checkpoint.map(|checkpoint| {
@@ -327,14 +300,23 @@ impl ControllerInner {
                     )
                 }),
             ),
-            // R34: the deployment's `[tools]` surface policy (groups
-            // + `max_visible`). The registry already carries the
-            // boot-applied exposures; the cap is request-side.
             tool_surface: deps.tool_surface.clone(),
-            // R50: the deployment's configured reasoning loop.
             strategy: deps.strategy.clone(),
-            // R58: the agent's own allow/deny list.
             tool_restriction: deps.tool_restriction.clone(),
-        }
+        };
+
+        let config = AgentRunConfig {
+            provider: Arc::clone(&provider),
+            tool_registry,
+            workspace_root: deps.workspace_root.clone(),
+            system_prompt: deps.system_prompt.clone(),
+            prompt_context: deps.prompt_context.clone(),
+            agent_name,
+            max_iterations: Some(deps.default_max_iterations),
+            steering: Arc::clone(&deps.steering),
+            agent_registry: deps.agent_registry.clone(),
+            typed_event_sink: None,
+        };
+        (config, overrides)
     }
 }

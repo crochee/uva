@@ -986,6 +986,14 @@ pub async fn fork_session(
     // either every inherited row lands or none do, so the
     // controller's resume against the child sees the full
     // transcript immediately.
+    // The child's ordinal counter has to cover the inherited rows:
+    // they are the child's first rows, and every later row the
+    // child writes takes the next ordinal. The rows themselves keep
+    // the parent's `seq` stamps — the counter only decides what
+    // comes after them.
+    for _ in &inherited {
+        child.alloc_seq();
+    }
     child
         .append_many(&inherited)
         .await
@@ -1116,6 +1124,7 @@ mod tests {
     #[tokio::test]
     async fn infer_status_reports_completed_without_live_controller() {
         let sink = synthia::session::in_memory::InMemorySessionSink::new("s1");
+        sink.alloc_seq();
         sink.append(&serde_json::json!({
             "type": "Model",
             "data": {"text": "hi"},
@@ -1151,6 +1160,7 @@ mod tests {
     #[tokio::test]
     async fn infer_status_reports_canceled_for_cancelled_controller() {
         let sink = synthia::session::in_memory::InMemorySessionSink::new("s1");
+        sink.alloc_seq();
         sink.append(&serde_json::json!({
             "type": "UserInput",
             "data": {"text": "go"},
@@ -1490,6 +1500,7 @@ mod tests {
         let parent = state
             .session_manager
             .sink(SERVER_DEFAULT_USER_ID, "meta-origin");
+        parent.alloc_seq();
         parent
             .append(&serde_json::json!({
                 "type": "UserInput",
@@ -1497,6 +1508,7 @@ mod tests {
             }))
             .await
             .expect("seed parent row 1");
+        parent.alloc_seq();
         parent
             .append(&serde_json::json!({
                 "type": "Model",
@@ -1634,7 +1646,8 @@ mod tests {
         let child_sink = state
             .session_manager
             .sink(SERVER_DEFAULT_USER_ID, &forked.session_id);
-        let seq = child_sink
+        child_sink.alloc_seq();
+        child_sink
             .append(&serde_json::json!({
                 "type": "UserInput",
                 "ts": "2026-09-25T09:00:00+00:00",
@@ -1642,7 +1655,11 @@ mod tests {
             }))
             .await
             .expect("append to the child");
-        assert_eq!(seq, 3, "the inherited rows occupy 1..=2");
+        let snapshot = child_sink.snapshot().await.expect("snapshot");
+        assert_eq!(
+            snapshot.last_event_seq, 3,
+            "the inherited rows occupy 1..=2"
+        );
 
         let Json(child) = get_session(
             State(Arc::clone(&state)),
@@ -1800,6 +1817,7 @@ mod tests {
         let sink = state
             .session_manager
             .sink(SERVER_DEFAULT_USER_ID, "pre-restart");
+        sink.alloc_seq();
         sink.append(&serde_json::json!({
             "type": "UserInput",
             "ts": "2026-09-19T08:00:00+00:00",
@@ -1807,6 +1825,7 @@ mod tests {
         }))
         .await
         .expect("seed row 1");
+        sink.alloc_seq();
         sink.append(&serde_json::json!({
             "type": "Model",
             "ts": "2026-09-19T08:00:05+00:00",

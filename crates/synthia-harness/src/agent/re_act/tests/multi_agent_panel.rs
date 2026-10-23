@@ -26,13 +26,6 @@ fn tools_with(name: &str, desc: &str) -> synthia_provider::ToolDefinition {
     }
 }
 
-/// Build the canonical panel fixture:
-///
-/// - 4 tools: `read_file`, `shell`, `list_skills`, `submit_vote`.
-/// - 3 skills: `summarize` (enabled), `audit` (enabled),
-///   `deprecated` (disabled).
-/// - 5 peer agents with handoff hints: planner / critic /
-///   redteam / judge / formatter.
 fn build_panel_fixture() -> (
     Vec<synthia_provider::ToolDefinition>,
     crate::prompt::PromptContext,
@@ -69,7 +62,6 @@ fn build_panel_fixture() -> (
     (tools, ctx)
 }
 
-/// Build a Critic-role descriptor matching the panel fixture.
 fn build_critic_descriptor() -> AgentDescriptor {
     AgentDescriptor {
         name: "critic".into(),
@@ -91,12 +83,6 @@ fn build_critic_descriptor() -> AgentDescriptor {
     }
 }
 
-/// Drive one full ReAct loop and drain every
-/// [`AgentEvent`] through the channel. Returns the captured
-/// event sequence. The provider handle is also returned
-/// (via the `provider` parameter) so the caller can read
-/// `call_count` and `captured.messages` after the session
-/// ends.
 async fn drive_loop_with_provider(
     provider: Arc<CapturingProvider>,
     agent: ReActAgent,
@@ -130,14 +116,13 @@ async fn mock_panel_clean_scenario_passes_through() {
     let provider = Arc::new(CapturingProvider::new(vec![
         empty_response(), // pass 1: critic emits a critique (text only)
     ]));
-    let mut agent = ReActAgent::with_options(
+    let agent = ReActAgent::with_descriptor(
         provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "PANEL_BASE".to_string(),
+        build_critic_descriptor(),
+        Arc::new(ctx),
     );
-    agent.descriptor_mut(build_critic_descriptor());
-    agent.set_prompt_context(ctx);
 
     let events = drive_loop_with_provider(
         provider.clone(),

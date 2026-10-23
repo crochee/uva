@@ -2,18 +2,33 @@
 //! per-tool drain that turns a `Tool::stream` into exactly one
 //! result. Method continuation of
 //! [`ToolRegistry`](super::ToolRegistry).
+//!
+//! Dispatch is spawn-free: the merged stream returned by
+//! [`ToolRegistry::run_stream`] is itself the executor. Polling it
+//! drives every in-flight tool drain; dropping it cancels them
+//! where they stand. No per-call task, channel, or runtime is
+//! involved, so the crate stays runtime-free.
 
-use std::{panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    future::Future,
+    panic::AssertUnwindSafe,
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+};
 
 use futures::{FutureExt, Stream, StreamExt};
-use tokio::sync::{Semaphore, mpsc};
-use tokio_stream::wrappers::ReceiverStream;
+use parking_lot::Mutex;
 
-use super::ToolRegistry;
+use super::{DispatchPlan, ToolRegistry};
 use crate::{
     traits::{StreamOutput, Tool},
     types::{Context, ToolOutput},
 };
+
+/// The slot a draining tool call hands its items to the consumer
+/// through, one at a time.
+type Slot = Arc<Mutex<Option<StreamOutput>>>;
 
 impl ToolRegistry {
     /// Dispatch a batch of tool uses as a stream of `(call_id,
@@ -22,208 +37,243 @@ impl ToolRegistry {
     /// underlying stream closes without a `Result`, this method
     /// synthesizes an error `Result`. Concurrency is bounded by
     /// `self.max_concurrent`. Cancellation is implicit: dropping the
-    /// returned stream aborts all in-flight tasks.
+    /// returned stream aborts every in-flight tool call.
     pub fn run_stream(
         &self,
         tool_uses: Vec<synthia_provider::ToolUse>,
         context: Context,
     ) -> impl Stream<Item = (String, StreamOutput)> + Send + 'static {
         let max_concurrent = self.max_concurrent.max(1);
-        let semaphore = Arc::new(Semaphore::new(max_concurrent));
-
-        // Phase 1: resolve every tool_use entry under the lock; build a
-        // plan; release the lock before any await point.
-        #[allow(clippy::large_enum_variant)]
-        enum Plan {
-            Call(Arc<dyn Tool>, serde_json::Value),
-            NotFound(String),
-            /// The call's input failed JSON-Schema validation against
-            /// the tool's `parameters()`. The dispatcher synthesises
-            /// an `is_error` `Result` listing the dotted-path
-            /// violations so the model can self-correct in the same
-            /// turn.
-            Invalid {
-                name: String,
-                violations: Vec<synthia_core::SchemaViolation>,
-            },
-        }
-        let validate_arguments = self.validate_arguments;
-        let plan: Vec<(String, Plan)> = {
+        // Phase 1: resolve every call under one read-lock span, so
+        // the whole batch pays for the lock once and no await point
+        // ever holds it.
+        let resolved: Vec<(String, DispatchPlan)> = {
             let inner = self.inner.read();
             tool_uses
                 .into_iter()
                 .map(|tu| {
-                    let key = tu.name.clone();
-                    match inner.tools.get(&key).and_then(|e| e.last()) {
-                        // `is_hidden` is the registry's privacy flag:
-                        // a hidden tool is never advertised and is
-                        // refused here. `ToolExposure::Hidden` is the
-                        // softer, advertisement-only level and stays
-                        // dispatcheable.
-                        Some(entry) if entry.is_hidden => {
-                            (tu.id, Plan::NotFound(tu.name))
-                        }
-                        Some(entry) => {
-                            // Optional pre-dispatch validation. The
-                            // cost is one schema walk per call, paid
-                            // under the same read lock as the tool
-                            // lookup so a misbehaving call costs a
-                            // synthesized error Result instead of a
-                            // spawned task that runs a tool it
-                            // shouldn't.
-                            if validate_arguments
-                                && let Err(violations) =
-                                    synthia_core::validate_against_schema(
-                                        &entry.tool.parameters(),
-                                        &tu.input,
-                                    )
-                            {
-                                return (
-                                    tu.id,
-                                    Plan::Invalid {
-                                        name: tu.name,
-                                        violations,
-                                    },
-                                );
-                            }
-                            (tu.id, Plan::Call(entry.tool.clone(), tu.input))
-                        }
-                        None => (tu.id, Plan::NotFound(tu.name)),
-                    }
+                    let plan =
+                        self.resolve_plan_locked(&inner, &tu.name, tu.input);
+                    (tu.id, plan)
                 })
                 .collect()
         };
+        // Phase 2: drive the per-call streams from the merged
+        // stream. `flatten_unordered` keeps at most
+        // `max_concurrent` drains in flight (the old semaphore's
+        // bound) and yields items in arrival order.
+        futures::stream::iter(resolved)
+            .map(move |(call_id, plan)| {
+                let stream = execute_dispatch_plan(plan, context.clone());
+                stream.map(move |item| (call_id.clone(), item))
+            })
+            .flatten_unordered(max_concurrent)
+    }
 
-        // Phase 2: per plan item, create a channel + spawn a task.
-        let mut per_tool_streams = Vec::with_capacity(plan.len());
-        for (call_id, item) in plan {
-            let (tx, rx) = mpsc::channel::<StreamOutput>(16);
-            let ctx = context.clone();
-            let semaphore = semaphore.clone();
-            self.spawner.spawn(Box::pin(async move {
-                let _permit = match semaphore.acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => return, // semaphore closed
-                };
-                match item {
-                    Plan::Call(tool, input) => {
-                        let tool_name = tool.name();
-                        let span = tracing::info_span!(
-                            "tool.execute",
-                            tool.name = %tool_name,
-                            exception.type = tracing::field::Empty,
-                            exception.message = tracing::field::Empty,
-                            otel.status_code = tracing::field::Empty,
-                        );
-                        // Panic recovery lives inside
-                        // `consume_tool_stream_into` so the Sender —
-                        // moved into the helper — stays accessible for
-                        // the synthesized error Result. By the time
-                        // control returns here, the per-tool task is
-                        // finished.
-                        consume_tool_stream_into(tool, input, &ctx, tx, span)
-                            .await;
-                    }
-                    Plan::NotFound(name) => {
-                        let _ = tx
-                            .send(StreamOutput::Result(ToolOutput::error(
-                                format!("tool not found: {}", name),
-                            )))
-                            .await;
-                    }
-                    Plan::Invalid { name, violations } => {
-                        // Format the violations as a numbered list so
-                        // the model gets every field it needs to fix
-                        // in one read. An empty `violations` is
-                        // unreachable in practice
-                        // (`validate_against_schema` returns
-                        // `Err(vec)` only on failure), but we handle
-                        // it defensively to keep the error path
-                        // total.
-                        let body = if violations.is_empty() {
-                            format!("invalid arguments for tool `{name}`")
-                        } else {
-                            let lines: Vec<String> = violations
-                                .iter()
-                                .map(|v| format!("- {v}"))
-                                .collect();
-                            format!(
-                                "invalid arguments for tool `{name}` ({}                                  violation{}):
-{}",
-                                violations.len(),
-                                if violations.len() == 1 { "" } else { "s" },
-                                lines.join("
-"),
-                            )
-                        };
-                        let _ = tx
-                            .send(StreamOutput::Result(ToolOutput::error(body)))
-                            .await;
-                    }
-                }
-                // tx drops here, closing rx for this tool.
-            }));
-            let s = ReceiverStream::new(rx).map({
-                let call_id = call_id.clone();
-                move |item| (call_id.clone(), item)
-            });
-            per_tool_streams.push(s);
-        }
-
-        futures::stream::select_all(per_tool_streams)
+    /// Dispatch a single `ToolUse` and stream its `StreamOutput` items.
+    /// Per-call sibling of [`Self::run_stream`]: same hidden-refusal +
+    /// JSON-schema-validation contract, same panic-recovery +
+    /// missing-`Result` synthesis, without the batch plumbing.
+    ///
+    /// Stream yields zero-or-more `Progress` + exactly one `Result`
+    /// (synthesised on contract violation / panic). Dropping the
+    /// stream aborts the in-flight call. NotFound / Invalid / Hidden
+    /// cases synthesise a single `is_error` `Result` and close.
+    pub fn dispatch_one(
+        &self,
+        call: synthia_provider::ToolUse,
+        context: &Context,
+    ) -> Pin<Box<dyn Stream<Item = StreamOutput> + Send + 'static>> {
+        let plan = self.resolve_dispatch(&call.name, call.input);
+        execute_dispatch_plan(plan, context.clone())
     }
 }
 
-/// Outcome of a stream-drain attempt (used internally).
-enum StreamOutcome {
-    /// The tool's `Tool::stream` closed without panicking or being
-    /// cancelled.
-    Completed,
-    /// The consumer dropped the returned stream (or the per-tool
-    /// Receiver). The task exits without synthesizing a Result.
-    ConsumerDropped,
+/// Turn one resolved [`DispatchPlan`] into a stream: an executable
+/// call becomes a panic-isolated drain, a refusal becomes a single
+/// `is_error` `Result`.
+fn execute_dispatch_plan(
+    plan: DispatchPlan,
+    ctx: Context,
+) -> Pin<Box<dyn Stream<Item = StreamOutput> + Send + 'static>> {
+    match plan {
+        DispatchPlan::Execute(tool, input) => {
+            tool_call_stream(tool, input, ctx)
+        }
+        DispatchPlan::Refused { tool_name, reason } => {
+            Box::pin(futures::stream::iter([StreamOutput::Result(
+                reason.tool_output(&tool_name),
+            )]))
+        }
+    }
 }
 
-/// Drain a tool's `Tool::stream`, forward items to `tx`, record the
-/// outcome on `span`, and synthesize a `Result` if the stream closes
-/// without one OR if the underlying future panics. The `tx` is held
-/// inside an `AssertUnwindSafe` wrapper because panicking out of an
-async fn consume_tool_stream_into(
+/// One tool call draining as a [`Stream`]: the drain logic (span +
+/// metrics recording, panic recovery, missing-`Result` synthesis)
+/// runs inside a boxed future that hands items to the consumer one
+/// at a time through a slot. The consumer's `poll_next` is what
+/// drives the future, so there is no spawn and no channel —
+/// dropping the stream stops the call wherever it is.
+struct ToolCallStream {
+    /// The drain future; never polled after `Ready` (see
+    /// `finished`).
+    producer: Pin<Box<dyn Future<Output = ()> + Send>>,
+    slot: Slot,
+    /// Set once `producer` has completed — a boxed future must not
+    /// be polled again after `Ready`.
+    finished: bool,
+}
+
+impl Stream for ToolCallStream {
+    type Item = StreamOutput;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        // Drive the drain with the consumer's waker: the underlying
+        // tool stream registers it, so its wakeups reach this poll.
+        if self.producer.as_mut().poll(cx).is_ready() {
+            self.finished = true;
+        }
+        // Whatever the producer did, surface an item if it placed
+        // one in the slot — a `Pending` producer with a full slot is
+        // the "item published, waiting to be taken" state.
+        match self.slot.lock().take() {
+            item @ Some(_) => Poll::Ready(item),
+            None if self.finished => Poll::Ready(None),
+            None => Poll::Pending,
+        }
+    }
+}
+
+/// Build the panic-isolated drain stream for one tool call.
+fn tool_call_stream(
     tool: Arc<dyn Tool>,
     input: serde_json::Value,
-    ctx: &Context,
-    tx: mpsc::Sender<StreamOutput>,
+    ctx: Context,
+) -> Pin<Box<dyn Stream<Item = StreamOutput> + Send + 'static>> {
+    let slot: Slot = Arc::new(Mutex::new(None));
+    // R-OPT-1 Step 5.3: layer `synthia.span.kind` + `otel.kind`
+    // onto the `tool.execute` span so the harness-side wrap (see
+    // `route.rs::dispatch_tool_call`) and the registry-side span
+    // share the same typed-kind fields. The harness side also
+    // emits the OTel metric (`record_tool_call`)—the registry side
+    // doesn't, to keep synthia-tool runtime-feature-clean.
+    let span = tracing::info_span!(
+        "tool.execute",
+        synthia.span.name = "tool.execute",
+        synthia.span.kind =
+            synthia_telemetry::SpanKind::Tool.as_str(),
+        otel.kind = synthia_telemetry::SpanKind::Tool.otel_kind(),
+        tool.name = %tool.name(),
+        exception.type = tracing::field::Empty,
+        exception.message = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    let producer =
+        drive_tool_call(Arc::clone(&tool), input, ctx, Arc::clone(&slot), span);
+    Box::pin(ToolCallStream {
+        producer: Box::pin(producer),
+        slot,
+        finished: false,
+    })
+}
+
+/// Hand `item` to the consumer and wait until it has been taken
+/// before the drain pulls the next one — the backpressure that
+/// keeps a runaway tool from out-pacing its consumer.
+async fn publish(slot: &Slot, item: StreamOutput) {
+    {
+        let mut guard = slot.lock();
+        debug_assert!(
+            guard.is_none(),
+            "dispatch slot must be empty before publish"
+        );
+        *guard = Some(item);
+    }
+    // The consumer is the driver: it takes the item in the same
+    // poll that observed this `Pending` and re-polls this future on
+    // its next `poll_next`, so no waker registration is needed —
+    // waking here would only spin.
+    futures::future::poll_fn(|_| {
+        if slot.lock().is_some() {
+            Poll::Pending
+        } else {
+            Poll::Ready(())
+        }
+    })
+    .await;
+}
+
+/// Terminal bookkeeping (span fields + counters) for one tool call,
+/// paid BEFORE the item is handed over: a consumer that stops at
+/// the `Result` — the common shape, one Result per call — may drop
+/// the stream, and the recording must not depend on that.
+fn record_terminal(
+    span: &tracing::Span,
+    tool_name: &str,
+    out: &ToolOutput,
+    started: std::time::Instant,
+) {
+    record_tool_outcome(span, out);
+    synthia_telemetry::record_tool_outcome_metric(
+        tool_name,
+        out.is_error.unwrap_or(false),
+    );
+    synthia_telemetry::record_tool_duration(
+        tool_name,
+        started.elapsed().as_secs_f64(),
+    );
+}
+
+/// Drain a tool's `Tool::stream` into the slot, recording the
+/// outcome on `span`, and synthesise a `Result` if the stream
+/// closes without one OR the underlying future panics.
+async fn drive_tool_call(
+    tool: Arc<dyn Tool>,
+    input: serde_json::Value,
+    ctx: Context,
+    slot: Slot,
     span: tracing::Span,
 ) {
-    let tool_name = tool.name();
     let started = std::time::Instant::now();
-    let stream = tool.stream(input, ctx);
+    let stream = tool.stream(input, &ctx);
     let mut stream = std::pin::pin!(stream);
-    let tx = AssertUnwindSafe(tx);
+    let mut saw_result = false;
 
-    // Tracks the most recent Result for span recording.
-    let mut last_result: Option<ToolOutput> = None;
-
-    let drain_result = AssertUnwindSafe(async {
+    let drain = AssertUnwindSafe(async {
         while let Some(item) = stream.next().await {
-            if let StreamOutput::Result(output) = &item {
-                last_result = Some(output.clone());
+            if let StreamOutput::Result(out) = &item {
+                saw_result = true;
+                record_terminal(&span, tool.name(), out, started);
             }
-            // tx.0 is the inner Sender; dereference through AssertUnwindSafe.
-            if tx.0.send(item).await.is_err() {
-                return StreamOutcome::ConsumerDropped;
-            }
+            publish(&slot, item).await;
         }
-        StreamOutcome::Completed
     })
     .catch_unwind()
     .await;
 
-    let outcome = match drain_result {
-        Ok(o) => o,
+    match drain {
+        Ok(()) => {
+            // Tool stream closed without a Result — synthesise the
+            // contract-violation error (with a Result, everything
+            // was already recorded above).
+            if !saw_result {
+                let out = ToolOutput::error(format!(
+                    "tool `{}` stream yielded no Result—contract violation",
+                    tool.name()
+                ));
+                record_terminal(&span, tool.name(), &out, started);
+                publish(&slot, StreamOutput::Result(out)).await;
+            }
+        }
         Err(payload) => {
-            // Tool panicked. Record on the span, synthesize an error
-            // Result, and forward to the consumer.
+            // Tool panicked. Record on the span, synthesise an error
+            // Result, and hand it to the consumer.
             let msg = synthia_core::panic_message(payload);
             let out = ToolOutput::error(format!(
                 "tool `{}` panicked during execution: {}",
@@ -236,40 +286,9 @@ async fn consume_tool_stream_into(
                 tool.name(),
                 started.elapsed().as_secs_f64(),
             );
-            let _ = tx.0.send(StreamOutput::Result(out)).await;
-            return;
-        }
-    };
-
-    match outcome {
-        StreamOutcome::ConsumerDropped => (), // tx already closed
-        StreamOutcome::Completed => {
-            if let Some(out) = last_result {
-                record_tool_outcome(&span, &out);
-                synthia_telemetry::record_tool_outcome_metric(
-                    tool.name(),
-                    out.is_error.unwrap_or(false),
-                );
-            } else {
-                // Tool stream closed without a Result — synthesize.
-                let out = ToolOutput::error(format!(
-                    "tool `{}` stream yielded no Result — contract violation",
-                    tool.name()
-                ));
-                record_tool_outcome(&span, &out);
-                synthia_telemetry::record_tool_outcome_metric(
-                    tool.name(),
-                    true,
-                );
-                let _ = tx.0.send(StreamOutput::Result(out)).await;
-            }
-            synthia_telemetry::record_tool_duration(
-                tool.name(),
-                started.elapsed().as_secs_f64(),
-            );
+            publish(&slot, StreamOutput::Result(out)).await;
         }
     }
-    let _ = tool_name; // suppress unused-variable warning
 }
 
 /// Record the tool outcome into the `tool.execute` span.
@@ -278,10 +297,10 @@ async fn consume_tool_stream_into(
 /// `crates/synthia-tool/tests/tool_span.rs`:
 /// - On success: leaves `exception.*` and `otel.status_code` empty.
 /// - On error: classifies by output message:
-///   - `"timed out"` → `exception.type = "TimeoutError"`
-///   - anything else → `exception.type = "ToolError"`
+/// - `"timed out"` → `exception.type = "TimeoutError"`
+/// - anything else → `exception.type = "ToolError"`
 ///
-///   and records `otel.status_code = "ERROR"`.
+/// and records `otel.status_code = "ERROR"`.
 fn record_tool_outcome(span: &tracing::Span, out: &ToolOutput) {
     let is_err = out.is_error.unwrap_or(false);
     if !is_err {

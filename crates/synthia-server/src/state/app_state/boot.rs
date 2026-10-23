@@ -1,6 +1,6 @@
 //! `AppState` construction: resolve the deployment config,
 //! compose the tool surface, build the default agent, and
-//! assemble every field. One concern — the boot.
+//! assemble every field. One concern—the boot.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -104,9 +104,9 @@ impl AppState {
     /// [`AppState::new`] with the deployment configuration already
     /// resolved by the caller.
     ///
-    /// The CLI needs the resolved config *before* any state exists — to
+    /// The CLI needs the resolved config *before* any state exists—to
     /// compute the bind address from `--host`/`SYNTHIA_HOST`/`host`
-    /// precedence (R54) — so it resolves once and hands the value in
+    /// precedence (R54)—so it resolves once and hands the value in
     /// rather than letting this function read the file a second time.
     pub async fn with_server_config(
         workspace_root: PathBuf,
@@ -121,7 +121,7 @@ impl AppState {
 
         // R55: `agents.<name>` accepts keys the boot does not apply
         // (`description`, `model`, `allowed_tools`, `denied_tools`,
-        // `hidden`, `color`). Silence is the bug — an operator who wrote
+        // `hidden`, `color`). Silence is the bug—an operator who wrote
         // `denied_tools = ["shell"]` believes the tool is gone. Name the
         // keys, once per agent, at boot.
         if let Some(config) = server_config.as_ref() {
@@ -132,7 +132,7 @@ impl AppState {
 
         // Build every configured provider once, here: a turn then
         // resolves a name to a handle without touching the
-        // environment, and the boot's failure mode stays explicit —
+        // environment, and the boot's failure mode stays explicit—
         // the *default* provider must build, a secondary one may not.
         let provider_catalogue =
             ProviderCatalogue::from_workspace_config(&workspace_config);
@@ -140,16 +140,40 @@ impl AppState {
             provider_catalogue.default_handle().map_err(|e| {
                 tracing::error!(error = %e, "Failed to create default provider");
                 format!(
-                    "No LLM provider available: {e}. Configure .agents/config.toml or set \
+                    "No LLM provider available: {e}. Configure.agents/config.toml or set \
                      OPENAI_API_KEY/ANTHROPIC_API_KEY environment variables."
                 )
             })?;
 
+        // Tier-1 provider wraps (semantic-cache →
+        // resilience → budget) compose onto the default provider
+        // when their config keys are enabled. Each wrapper is
+        // opt-in: the boot reads the relevant `[cache.semantic]`,
+        // `[resilience]`, and `[budget]` sections and composes
+        // them in inner-to-outer order so the cache decision sees
+        // real (unwrapped) provider errors, the breaker sees real
+        // cache misses, and the budget gate is the last gate the
+        // call goes through.
         // One clock for the whole process: every timestamped
         // component (session log rows, operation snapshots, the
         // attachment store, the MCP supervisor's tick) reads it from
         // here rather than calling the wall clock itself.
         let clock = synthia::core::SharedClock::system();
+
+        // Tier-1 provider wraps (semantic-cache →
+        // resilience → budget) compose onto the default provider
+        // when their config keys are enabled. Each wrapper is
+        // opt-in: the boot reads the relevant `[cache.semantic]`,
+        // `[resilience]`, and `[budget]` sections and composes
+        // them in inner-to-outer order so the cache decision sees
+        // real (unwrapped) provider errors, the breaker sees real
+        // cache misses, and the budget gate is the last gate the
+        // call goes through.
+        let default_provider = wrap_tier1_providers(
+            default_provider,
+            server_config.as_ref(),
+            clock.clone(),
+        );
 
         let session_search =
             jsonl_session_search(workspace_root.join("sessions"));
@@ -167,7 +191,7 @@ impl AppState {
         register_skill_tool(&tool_registry_built);
         // R21/R30: connect the configured MCP servers through the
         // supervisor and publish their tools. A server that fails
-        // to start is logged (with its health state) and skipped —
+        // to start is logged (with its health state) and skipped—
         // boot must never be blocked by an optional integration.
         let (mcp_clients, mcp_health) = match server_config.as_ref() {
             Some(config) => {
@@ -183,7 +207,7 @@ impl AppState {
         // R34: apply the deployment's `[tools]` surface after every
         // registration source (builtins, skill tool, MCP tools) has had
         // its say, so the config can name remote tools too. Unknown
-        // names are warnings, never boot failures — see
+        // names are warnings, never boot failures—see
         // `apply_tools_config`.
         let tool_surface = apply_tools_config(
             &tool_registry_built,
@@ -194,7 +218,7 @@ impl AppState {
         );
         // Smaller per-request load: with cross-domain search wired
         // below, MCP tools stop carrying their full JSON schemas on
-        // every completion request — they advertise name +
+        // every completion request—they advertise name +
         // description (`ToolExposure::Deferred`) and the schema
         // promotes on the first call. Only `Direct` flips, so an
         // operator's explicit `deferred` / `hidden` verdict stands.
@@ -235,8 +259,8 @@ impl AppState {
         let system_prompt = synthia::harness::DEFAULT_SYSTEM_PROMPT.to_string();
 
         // Seed the workflow skills on disk so the v1 HTTP
-        // `GET /api/v1/skills` endpoint — which scans the workspace's
-        // `.agents/skills/` directory — has visible data on a fresh
+        // `GET /api/v1/skills` endpoint—which scans the workspace's
+        // `.agents/skills/` directory—has visible data on a fresh
         // checkout. Existing user-installed skills are never
         // overwritten.
         if let Err(err) = seed_default_skills(&workspace_root) {
@@ -245,7 +269,7 @@ impl AppState {
 
         // Build the multi-agent registry, the server-wide
         // steering policy, and register the default ReAct agent.
-        // Extracted so the orchestrator stays flat — the
+        // Extracted so the orchestrator stays flat—the
         // largest block in `with_server_config` (50+ lines
         // threading tool registry / provider / policy /
         // restriction / strategy through the
@@ -267,7 +291,7 @@ impl AppState {
         .await;
 
         // Tool schemas travel on the completion request's
-        // `tools` channel, not in the prompt — the runtime's
+        // `tools` channel, not in the prompt—the runtime's
         // `ToolRegistry` is the source of truth and the live
         // snapshot is computed inside the ReAct loop on each
         // call. The prompt context here therefore only carries
@@ -302,7 +326,7 @@ impl AppState {
         // scopes (`.synthia/memory-local` writes, `.synthia/memory`
         // as a checked-in overlay). A failed construction (path
         // guards) degrades to the in-memory tier rather than
-        // blocking boot — same contract as every optional
+        // blocking boot—same contract as every optional
         // integration above.
         let memory: Arc<dyn synthia::context::Memory> =
             match synthia::context::FileMemory::new(
@@ -325,7 +349,7 @@ impl AppState {
                 }
             };
 
-        // The cross-domain search engine over six domains — the
+        // The cross-domain search engine over six domains—the
         // same registry serves the model-facing `search` tool
         // (capability 1) and `GET /api/v1/search` (capability 2).
         let search =
@@ -338,7 +362,7 @@ impl AppState {
                 clock: clock.clone(),
             });
         // Capability 1: the agent's discovery tool. Deferred
-        // exposure — the cold-start tool list carries name +
+        // exposure—the cold-start tool list carries name +
         // description, and the real schema promotes on the first
         // call.
         {
@@ -353,13 +377,13 @@ impl AppState {
             }
         }
 
-        // The four HTTP-backed management subsystems. Schedules
-        // use the existing `ScheduleStore`; workflows / evals are
-        // in-memory this turn (BTreeMaps behind a Tokio RwLock),
-        // mirroring the existing SearchService's pattern.
+        // The four HTTP-backed management subsystems. Schedules,
+        // workflows and evals all persist under the workspace
+        // (schedules/ + workflows/ + evals/); boot loads them and
+        // every mutation writes through.
         let schedules = SchedulesState::build(&workspace_root);
-        let workflows = WorkflowsState::build();
-        let evals = EvalsState::build();
+        let workflows = WorkflowsState::build(&workspace_root);
+        let evals = EvalsState::build(&workspace_root);
 
         // Sub-agent session router over the same registry + cache
         // the HTTP surface uses: delegated children get sessions
@@ -371,10 +395,32 @@ impl AppState {
                 Arc::clone(&active_sessions),
                 clock.clone(),
             ));
+        // Workflow-runtime bridge over the same agent registry the
+        // interactive routes resolve through—cloned here because
+        // the struct literal below moves the original.
+        let workflow_host = super::workflow_host::as_arc(
+            super::workflow_host::ServerWorkflowHost::new(Arc::clone(
+                &agent_registry,
+            )),
+        );
+        // The cluster bus: `mode = "local"` (default) is the
+        // in-process bus; `mode = "redis"` fails the boot when the
+        // bus is unreachable, because a multi-node deployment that
+        // cannot coordinate must not serve split-brain sessions.
+        let cluster_config = server_config
+            .as_ref()
+            .map(|c| c.cluster.clone())
+            .unwrap_or_default();
+        let cluster =
+            crate::cluster::ClusterRuntime::from_config(&cluster_config)
+                .await
+                .map_err(|e| format!("[cluster] {e}"))?;
+        let cluster = Arc::new(cluster);
         // The state handle is bound before the self-management
-        // registration below — its tools close over the Arc.
+        // registration below—its tools close over the Arc.
         let state = Arc::new_cyclic(|_weak| Self {
             clock,
+            cluster,
             tool_registry,
             agent_registry,
             session_search,
@@ -410,13 +456,18 @@ impl AppState {
             search,
             schedules,
             workflows,
+            workflow_host,
             evals,
         });
         // The self-management MCP server needs the finished state
         // handle (its tools call back into it), so it registers
-        // after construction — the shared registry makes the tools
+        // after construction—the shared registry makes the tools
         // visible to every later run.
         super::self_mcp::register_self_mcp(&state).await;
+        // One process-wide control consumer: applies registry
+        // mutations from peer nodes and forwards remote ops to the
+        // local controller that owns the session.
+        super::cluster_ops::spawn_control_dispatcher(Arc::clone(&state));
         Ok(state)
     }
 }
@@ -424,7 +475,7 @@ impl AppState {
 /// Output of `AppState::load_per_section_config`: every
 /// per-section config block the orchestrator hands to
 /// `AppState::with_server_config`'s final `Arc::new_cyclic`
-/// block. Private — the boot is the only caller.
+/// block. Private—the boot is the only caller.
 struct PerSectionConfig {
     auth_config: Arc<AuthConfig>,
     cors_config: Arc<CorsConfig>,
@@ -504,7 +555,7 @@ impl AppState {
 
         // R50: resolve the configured reasoning loop from
         // `agents.<default>.strategy`. An unknown name is
-        // logged and treated as unset (ReAct) — a typo in one
+        // logged and treated as unset (ReAct)—a typo in one
         // agent's config must not stop the server from booting.
         let default_strategy = load_default_strategy(
             server_config.as_ref(),
@@ -525,7 +576,7 @@ impl AppState {
 
     /// Build the multi-agent registry and register the default
     /// ReAct agent. Pulled out of `with_server_config` because
-    /// the original was the largest single block in the boot —
+    /// the original was the largest single block in the boot—
     /// ~50 lines threading tool registry / provider / policy /
     /// restriction / strategy through the `ReActAgent::with_*`
     /// builder chain, plus a `try_read()` snapshot and four
@@ -558,34 +609,33 @@ impl AppState {
                 Err(_) => Arc::new(ToolRegistry::new()),
             }
         };
-        let mut default_agent = synthia::harness::ReActAgent::new(
-            Arc::clone(default_provider),
-            tool_registry_snapshot,
-        )
-        // The default member carries the delegation plugin so
-        // `task` calls resolve the same catalog the session
-        // factory builds. (Its prompt manifest is assembled
-        // once `prompt_context` exists, after this call.)
-        .with_interceptor(Arc::new(TaskDelegator::new(Arc::clone(
-            &agent_registry,
-        ))))
-        .with_steering(steering)
-        .with_max_iterations(default_max_iterations);
-        // R34: the default registry member advertises the
-        // configured surface as well, so it agrees with every
-        // run the factory builds.
-        if let Some(policy) = tool_surface_policy {
-            default_agent = default_agent.with_tool_surface(policy);
-        }
-        // R50: same idea for the reasoning loop.
-        if let Some(strategy) = default_strategy {
-            default_agent = default_agent.with_strategy(strategy);
-        }
-        // R58: and for the agent's allow/deny list.
-        if let Some(restriction) = default_tool_restriction {
-            default_agent =
-                default_agent.with_tool_restriction((*restriction).clone());
-        }
+        let default_agent =
+            crate::agent_assembly::AgentAssembly {
+                provider: Arc::clone(default_provider),
+                tool_registry: tool_registry_snapshot,
+                workspace_root: std::path::PathBuf::new(),
+                descriptor: synthia::harness::default_descriptor(
+                    synthia::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
+                ),
+                prompt_context: Arc::new(
+                    synthia::harness::PromptContext::default(),
+                ),
+                steering,
+                max_iterations: default_max_iterations,
+                // The default member carries the delegation plugin so
+                // `task` calls resolve the same catalog the session
+                // factory builds. (Its prompt manifest is assembled
+                // once `prompt_context` exists, after this call.)
+                synthetic: vec![Arc::new(TaskDelegator::new(Arc::clone(
+                    &agent_registry,
+                )))],
+                tool_surface: tool_surface_policy,
+                strategy: default_strategy,
+                tool_restriction: default_tool_restriction,
+                typed_event_sink: None,
+                context_manager: None,
+            }
+            .build();
         if let Err(e) = agent_registry
             .put(AgentEntry::new(Arc::new(default_agent)))
             .await
@@ -597,4 +647,99 @@ impl AppState {
         }
         agent_registry
     }
+}
+
+/// Compose the Tier-1 provider wraps in inner-to-outer
+/// order on the default provider. Each wrap is opt-in and reads
+/// its own config section; the function is a no-op when none of
+/// the sections are enabled.
+pub(crate) fn wrap_tier1_providers(
+    inner: Arc<dyn ModelProvider>,
+    config: Option<&crate::config::ServerConfig>,
+    clock: synthia::core::SharedClock,
+) -> Arc<dyn ModelProvider> {
+    use synthia::{
+        resilience::{
+            BreakerConfig,
+            Jitter,
+            ResiliencePolicy,
+            ResilientProvider,
+        },
+        search::Embedder,
+        semantic_cache::{
+            InMemorySemanticCache,
+            SemanticCacheConfig,
+            SemanticCacheProvider,
+        },
+    };
+    let Some(cfg) = config else { return inner };
+
+    // 1. Semantic cache (innermost, so the breaker sees real errors).
+    let mut next: Arc<dyn ModelProvider> = if cfg.cache.enabled {
+        let store: Arc<dyn synthia::semantic_cache::SemanticCacheStore> =
+            Arc::new(InMemorySemanticCache::default());
+        let embedder: Arc<dyn Embedder> =
+            Arc::new(synthia::search::HashingEmbedder::new(
+                64,
+                Arc::new(synthia::search::CjkTokenizer),
+            ));
+        let clock_arc: Arc<dyn synthia::core::Clock> = Arc::new(clock.clone());
+        Arc::new(SemanticCacheProvider::new(
+            inner.clone(),
+            store,
+            embedder,
+            SemanticCacheConfig::default()
+                .threshold(cfg.cache.threshold)
+                .ttl(std::time::Duration::from_secs(cfg.cache.ttl_secs)),
+            clock_arc,
+        ))
+    } else {
+        inner.clone()
+    };
+
+    // 2. Resilience (breaker + adaptive backoff).
+    if cfg.resilience.enabled {
+        let clock_arc: Arc<dyn synthia::core::Clock> = Arc::new(clock.clone());
+        next = Arc::new(ResilientProvider::new(
+            next,
+            ResiliencePolicy::default()
+                .max_attempts(cfg.resilience.max_attempts)
+                .breaker(BreakerConfig {
+                    failure_threshold: cfg.resilience.failure_threshold,
+                    half_open_after: std::time::Duration::from_secs(
+                        cfg.resilience.half_open_after_secs,
+                    ),
+                    success_threshold_in_half_open: 1,
+                })
+                .jitter(Jitter::Full),
+            clock_arc,
+        ));
+    }
+
+    // 3. Budget (last gate; trips on token / cost / latency).
+    if cfg.budget.enabled {
+        use synthia::budget::{
+            Budget,
+            BudgetProvider,
+            CostBudget,
+            LatencyBudget,
+            PricingTable,
+            StaticPricingTable,
+            TokenBudget,
+        };
+        let pricing_table = StaticPricingTable::anthropic_2026();
+        let pricing: Arc<dyn PricingTable> = pricing_table;
+        let clock_arc: Arc<dyn synthia::core::Clock> = Arc::new(clock.clone());
+        let budget = Budget::builder()
+            .tokens(TokenBudget::new(cfg.budget.tokens_limit))
+            .latency(LatencyBudget::new(
+                std::time::Duration::from_secs(cfg.budget.latency_secs),
+                clock_arc,
+            ))
+            .cost(CostBudget::new(cfg.budget.cost_cents_limit, pricing))
+            .build();
+        next = Arc::new(BudgetProvider::new(next, budget));
+    }
+
+    next
 }

@@ -2,7 +2,9 @@
 
 本文件汇总项目环境与编码规范，供所有 agent 统一遵循。
 
-> **关于仓库根的隐藏目录**：`./.agents/` `./.omo/` `./.superpowers/` `./.synthia/` `./.trae/` `./.worktrees/` `./.attachments/` `./.cargo/` 是**AI agent / 本地工具链的状态 / 草稿 / 会话**，不是本项目资产；均在 [`.gitignore`](.gitignore) 中显式排除。**不要**把它们的文件 / 路径写入 commit message、PR 描述或本文件；它们的存在不影响仓库对位 4w+ star 项目的"完整度"。同理 `./.env` 含真实 LLM API 配置，仅本地加载，**不入库**。
+> **关于仓库根的隐藏目录**：`./.agents/` `./.omo/` `./.superpowers/` `./.synthia/` `./.trae/` `./.worktrees/` `./.attachments/` 是**AI agent / 本地工具链的状态 / 草稿 / 会话**，不是本项目资产；均在 [`.gitignore`](.gitignore) 中显式排除。**不要**把它们的文件 / 路径写入 commit message、PR 描述或本文件；它们的存在不影响仓库对位 4w+ star 项目的"完整度"。同理 `./.env` 与 `./config.yaml` 含真实 LLM API 配置，仅本地加载，**不入库**。
+>
+> **例外 — `./.cargo/config.toml` 是项目资产**：traced，作为 CI / 一致的本地可达性的工具链入口；`.gitignore` 不排除它（也不应排除）。
 
 ***
 
@@ -14,13 +16,13 @@
   - `synthia-telemetry/metrics` — gate `prometheus` 向量与 `gather_text()`；
   - `synthia-telemetry/otlp` — gate OTel exporter、`tracer` / `propagation` 模块及全部 `opentelemetry*` + 传输依赖。
   - 仓库内成员显式声明所需 feature：`synthia-tool` 仅 `metrics`（保持 agent 依赖树无 exporter），`synthia-server` 显式 `["metrics", "otlp"]`；facade 的 `telemetry` feature 同时打开两者。详见 [crates/synthia-telemetry/README.md](crates/synthia-telemetry/README.md)。
-- [synthia-server](file:///home/crochee/workspace/synthia/crates/synthia-server/) 对自身而言可观测性始终开启（OTLP tracing、Prometheus RED 指标、`GET /metrics` 端点与 `track_metrics` 中间件），仅保留一个 `test-utils` feature（转发 facade 的 `test-support`）用于测试 wiring。
+- [synthia-server](file:///home/crochee/workspace/synthia/crates/synthia-server/) 对自身而言可观测性始终开启（OTLP tracing、Prometheus RED 指标、`GET /metrics` 端点与 `track_metrics` 中间件），保留两个 feature：`test-utils`（转发 facade 的 `test-support`，用于测试 wiring 与 `[providers.<name>] type = "demo"` 免 key 演示 provider）与 `cluster-redis`（多节点控制面的 Redis 后端：pub/sub + `SET NX EX` 会话租约；单节点构建零 Redis 依赖）。多节点部署 = 无状态计算节点 + 共享 workspace 文件系统（sessions / workflows / evals / schedules 的 durable 真源）+ `[cluster] mode = "redis"`；`/metrics` 与 usage 计数按节点语义（加节点 = 加 scrape 目标），lease 名与投递语义见 [crates/synthia-server/README.md](crates/synthia-server/README.md) 的「多节点部署」节。
 - **synthia-server 只依赖 `synthia` facade**（R121 单一收口规则）：`crates/synthia-server/Cargo.toml` 的 synthia 依赖只有 `synthia = { workspace = true, features = [...] }` 一行，全部 SDK 类型（provider / harness / tool / session / skill / attachment / mcp / telemetry / core / 各 tool 插件）一律经 `synthia::module::…` 路径引用，不再直接依赖任何 `synthia-*` 库 crate。因此 facade **没有** `server` feature——facade 反向 re-export `synthia-server` 会构成依赖环；需要部署二进制的消费方在 `synthia` 之外自行添加 `synthia-server`。
 - 网络传输（HTTP client）一律通过 crate 级 feature 可选，禁止无条件依赖 `reqwest`：
   - `synthia-provider/anthropic`、`synthia-provider/openai` — 两个内置 adapter（各自拉起 `reqwest` 与 `synthia-core/reqwest`），默认开启；只写自己的 `ModelProvider` 时用 `default-features = false`。
   - `synthia-tool-web` — `web_fetch` 工具，唯一允许拉起 `reqwest` 的 tool crate；其余 tool crate（`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-task` / `-scheduler` / `-search`）保持离线。
-  - facade 对应 feature：`provider-anthropic` / `provider-openai` / `tool-read` / `tool-write` / `tool-shell` / `tool-todo` / `tool-web` / `tool-task`（均在默认集合内）；`provider` 仅指 trait 与 wire types，`tool` 仅指范式（registry + `Tool` trait + `workspace` 路径约束），**不含面向 agent 的内建工具集**——`read` / `write` / `shell` / `todo` / `web` / `task` 各自独立成 crate；范式 crate 内只保留两个合成契约工具（`RetrieveFullOutputTool`、`StructuredOutputTool`，后者由 `AgentBuilder::output_schema` 自动注入）与 registry 的 `ToolEntry::dynamic` 直通实现。`tool-scheduler`（`synthia-tool-scheduler`）、`tool-search`（`synthia-tool-search`）与 `mcp` 一样是**可选** feature：三者的宿主都必须先构造运行时对象（`ScheduleStore` / 待检索的 `synthia-search::Registry` / `McpSupervisor`），因此不进入默认集合。`cron` 同样是 opt-in feature（`cron = 0.17`，`synthia-tool-scheduler/cron` 转发 `synthia-scheduler/cron`）：默认构建零 cron 解析器——`JobKind::Cron` 只退回一分钟占位、`schedule` 工具逐字拒绝 `kind: "cron"`。facade 的 `cron` feature 把这条路径**两半一起**打开（`scheduler` + `synthia-scheduler/cron` + `tool-scheduler` + `synthia-tool-scheduler/cron`）：只开解析器而工具仍拒绝 `kind: "cron"` 是半截切换，本轮"模型能创建 cron 任务"这个用户可见收益就落不了地；它不在默认集合内。立场文本在 [crates/synthia-scheduler/src/lib.rs](crates/synthia-scheduler/src/lib.rs) 与 [crates/synthia-tool-scheduler/src/lib.rs](crates/synthia-tool-scheduler/src/lib.rs)。
-  - 仓库内成员必须显式声明所需 feature（`synthia-server` 经 facade 一行声明全集，见上；其余成员按各自 Cargo.toml）。`make check-mvp-deps` 保证七 feature 最小子集与七个离线 tool crate 均不引入 `reqwest|hyper|rustls|h2|tower`（离线 tool crate：`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-task` / `-scheduler` / `-search`）；synthia-search 由专段断言（default + `provider` 两种配置）；`synthia-tool-scheduler` 同样由专段断言（default + `--features cron` 两种配置），且其后紧跟 cron 表面的 rustdoc 检查（`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p synthia-scheduler --features cron`）——`doc-check` 只建默认 features，没有这一行则 cron 门后的文档在整个 `make ci` 里从不被检查。
+  - facade 对应 feature：`provider-anthropic` / `provider-openai` / `tool-read` / `tool-write` / `tool-shell` / `tool-todo` / `tool-web` / `tool-task`（均在默认集合内）；`provider` 仅指 trait 与 wire types，`tool` 仅指范式（registry + `Tool` trait + `workspace` 路径约束），**不含面向 agent 的内建工具集**——`read` / `write` / `shell` / `todo` / `web` / `task` 各自独立成 crate；范式 crate 内只保留两个合成契约工具（`RetrieveFullOutputTool`、`StructuredOutputTool`，后者由 `ReActAgent::with_output_schema` 自动注入）与 registry 的 `ToolEntry::dynamic` 直通实现。`tool-scheduler`（`synthia-tool-scheduler`）、`tool-search`（`synthia-tool-search`）与 `mcp` 一样是**可选** feature：三者的宿主都必须先构造运行时对象（`ScheduleStore` / 待检索的 `synthia-search::Registry` / `McpSupervisor`），因此不进入默认集合。`cron` 同样是 opt-in feature（`cron = 0.17`，`synthia-tool-scheduler/cron` 转发 `synthia-scheduler/cron`）：默认构建零 cron 解析器——`JobKind::Cron` 只退回一分钟占位、`schedule` 工具逐字拒绝 `kind: "cron"`。facade 的 `cron` feature 把这条路径**两半一起**打开（`scheduler` + `synthia-scheduler/cron` + `tool-scheduler` + `synthia-tool-scheduler/cron`）：只开解析器而工具仍拒绝 `kind: "cron"` 是半截切换，本轮"模型能创建 cron 任务"这个用户可见收益就落不了地；它不在默认集合内。立场文本在 [crates/synthia-scheduler/src/lib.rs](crates/synthia-scheduler/src/lib.rs) 与 [crates/synthia-tool-scheduler/src/lib.rs](crates/synthia-tool-scheduler/src/lib.rs)。
+  - 仓库内成员必须显式声明所需 feature（`synthia-server` 经 facade 一行声明全集，见上；其余成员按各自 Cargo.toml）。`make check-mvp-deps` 保证七 feature 最小子集与七个离线 tool crate 均不引入 `reqwest|hyper|rustls|h2|tower`（离线 tool crate：`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-task` / `-scheduler` / `-search` / `-tool-memo`；R-OPT-HPC 六个新插件 crate `synthia-semantic-cache` / `-tool-memo` / `-resilience` / `-strategy-plan-execute` / `-reflection` / `-budget` 由同段 `ROPT_PLUGIN_CRATES` 专段断言；另有 `synthia-hpc-batch`（批量 embed / 批量 complete）与 inline `simd` feature 由同一 `check-mvp-deps` 的 `R_OPT_HPC_PLUGIN_CRATES` / `synthia-search --features simd` 两段断言）；synthia-search 由专段断言（default + `provider` 两种配置）；`synthia-tool-scheduler` 同样由专段断言（default + `--features cron` 两种配置），且其后紧跟 cron 表面的 rustdoc 检查（`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p synthia-scheduler --features cron`）——`doc-check` 只建默认 features，没有这一行则 cron 门后的文档在整个 `make ci` 里从不被检查。
 - 异步运行时同样按 crate 声明，禁止从 workspace 继承 `tokio` 的 `full`：
   - 每个 crate 的 `tokio` 行只写自己代码真正用到的 feature（例：`synthia-provider` 用 `["macros", "time"]`，`synthia-session` 用 `["rt", "sync", "time", "macros"]`），并附一行原因注释。
   - 仅在测试中使用 tokio 的 crate（`synthia-core` / `context` / `steering` / `skill` / `eval` / `macros` / `workflow` / `synthia-tool-scheduler` / `synthia-tool-search`）一律放 `[dev-dependencies]`。
@@ -79,11 +81,11 @@
 - [scripts/harness-shape/clippy.toml](file:///home/crochee/workspace/synthia/scripts/harness-shape/clippy.toml) — **形状预算** `too-many-lines-threshold = 100` 与 `excessive-nesting-threshold = 4`。它**故意不放在根 `clippy.toml`**：把这两个键写进根配置会**全局启用**这两个默认关闭的 lint（`excessive_nesting` 的默认值 0 即禁用），从而让 `make lint-rust -D warnings` 在本轮未改动的 crate 上报错。该文件只由 `scripts/check-harness-shape.sh` 通过 `CLIPPY_CONF_DIR` 注入，是这两个阈值的**唯一真源**。
 - [Cargo.toml](file:///home/crochee/workspace/synthia/Cargo.toml) — workspace `resolver = "2"`、`edition = "2024"`、`rust-version = "1.98"`；release profile 已固定 `opt-level = 3` / `lto = "thin"` / `codegen-units = 1` / `strip = "symbols"`，**不得随意调整**。
 - [deny.toml](file:///home/crochee/workspace/synthia/deny.toml) — `cargo-deny` 的许可证 / 来源 / ban 审计入口（已落地的最低策略：bans/licenses/sources 三项在 `make check-deny` 跑通；advisories 由 `cargo-audit` 单独负责，见 `.github/workflows/security-audit.yml`）。新增依赖须保证通过该审计。
-- [.markdownlint.json](file:///home/crochee/workspace/synthia/.markdownlint.json) — markdown lint 锁，作用于 26 个 crate 顶层 `README.md` 与 `CONTRIBUTORS.md`（与 `make fmt-check` 互不重叠；CI 入口 `.github/workflows/markdown-lint.yml`）。
+- [.markdownlint.json](file:///home/crochee/workspace/synthia/.markdownlint.json) — markdown lint 锁，作用于 27 个 crate 顶层 `README.md` 与 `CONTRIBUTORS.md`（与 `make fmt-check` 互不重叠；CI 入口 `.github/workflows/markdown-lint.yml`）。
 - [.editorconfig](file:///home/crochee/workspace/synthia/.editorconfig) — 编辑期 LF / UTF-8 / `trim_trailing_whitespace` / `final_newline` / Makefile `indent_style = tab`。**与 rustfmt / prettier 互补而非重复**：只覆盖它们不触达的文件类型（shell / TOML / Markdown 等），不与 formatter 抢同一文件的格式规则。
 - [.gitattributes](file:///home/crochee/workspace/synthia/.gitattributes) — git 期 LF 强制 + binary 标记 + linguist 关闭 vendor/generated + `CHANGELOG.md` / `Cargo.lock` 用 `merge = union` 防冲突 + `Cargo.lock` 不进 diff。
 - `[workspace.lints]` in [Cargo.toml](file:///home/crochee/workspace/synthia/Cargo.toml) — workspace 级 rustdoc 棘轮：`missing_docs = warn` / `broken_intra_doc_links = warn` / `private_doc_tests = warn` / `missing_crate_level_docs = warn`（Cargo 1.74+ 的单一收口，所有成员 crate 自动继承，除非该 crate 在自己的 `[lints]` 表覆盖）。基线已实测 0 命中（`cargo clippy --all-targets --all-features --tests --all -- -D warnings` + `cargo doc --no-deps --workspace` 双绿）。`warn` 而非 `deny` 是给历史留余地；某天升 `deny` 时本条 + `[workspace.lints]` 同步更新即可。
-- `[workspace.metadata.docs.rs]` in [Cargo.toml](file:///home/crochee/workspace/synthia/Cargo.toml) — 驱动 `docs.rs/<crate>` 渲染：默认渲染是"default features only"，会让 `cron` / `mcp` / `search` / `eval` / `workflow` / `scheduler` / `telemetry` / `sqlite` / `attachment` / `skill` / `tool-scheduler` / `tool-search` 等 opt-in 表面渲染为空模块。本仓显式声明 `all-features = true` + `targets = ["x86_64-unknown-linux-gnu"]`，让 docs.rs 渲染完整 opt-in 契约（与 `check-mvp-deps` 已证明的 7-feature 最小子集零 HTTP/OTel/DB 依赖兼容）。
+- `[workspace.metadata.docs.rs]` in [Cargo.toml](file:///home/crochee/workspace/synthia/Cargo.toml) — 驱动 `docs.rs/<crate>` 渲染：默认渲染是"default features only"，会让 `cron` / `mcp` / `search` / `eval` / `workflow` / `scheduler` / `telemetry` / `sqlite` / `attachment` / `skill` / `tool-scheduler` / `tool-search` / `semantic-cache` / `tool-memo` / `resilience` / `strategy-plan-execute` / `reflection` / `budget` 等 opt-in 表面渲染为空模块。本仓显式声明 `all-features = true` + `targets = ["x86_64-unknown-linux-gnu"]`，让 docs.rs 渲染完整 opt-in 契约（与 `check-mvp-deps` 已证明的 7-feature 最小子集零 HTTP/OTel/DB 依赖兼容）。
 - [CLAUDE.md](file:///home/crochee/workspace/synthia/CLAUDE.md) — Anthropic Claude Code 标准的 agent 行为守则（"Think before coding / Simplicity first / …"），138 行；与 [AGENTS.md](file:///home/crochee/workspace/synthia/AGENTS.md) 配套——AGENTS.md 给"做什么 / 不做什么"，CLAUDE.md 给"怎么做"（思考优先级、避免常见 LLM 编码错误、推到完成）。修改 CLAUDE.md 必须知道它不是项目特定规则，而是与 Anthropic 上游共识对齐的 agent 工作流；与本仓约定的冲突部分以本仓为准。
 
 ## 3.5 圈复杂度与代码异味
@@ -133,20 +135,24 @@
 | `make test-crates` | 逐个 crate 运行完整测试（禁止 `cargo test --workspace`，见 §3.3）             |
 | `make test-sqlite` | 运行可选 SQLite 记忆层测试（`cargo test -p synthia-context --features sqlite`） |
 | `make examples`  | 运行全部 example 与两个独立 consumer crate（各自打印 proof line）               |
-| `make check-mvp-deps` | 断言七 feature 最小子集与七个离线 tool crate 不引入 HTTP/OTel/DB 依赖，且 `--no-default-features` 可编译 ；synthia-search 专段断言 default+provider 两种配置；synthia-tool-scheduler 专段断言 default+`--features cron`，并检查 cron 表面 rustdoc 无警告 |
-| `make check-no-runtime` | 断言 runtime-free crate 的 lib 构建不含 tokio                          |
+| `make check-mvp-deps` | 断言七 feature 最小子集与七个离线 tool crate（含 `synthia-tool-memo`）不引入 HTTP/OTel/DB 依赖，且 `--no-default-features` 可编译 ；synthia-search 专段断言 default+provider 两种配置；synthia-tool-scheduler 专段断言 default+`--features cron`，并检查 cron 表面 rustdoc 无警告；`ROPT_PLUGIN_CRATES`（`synthia-semantic-cache` / `-tool-memo` / `-resilience` / `-strategy-plan-execute` / `-reflection` / `-budget`）由专段断言同样保持离线；`R_OPT_HPC_PLUGIN_CRATES`（`synthia-hpc-batch`）与 `synthia-search --features simd` 也各有一段 |
+| `make check-no-runtime` | 断言 runtime-free crate 的 lib 构建不含 tokio；另断言 `synthia-tool` 直接依赖零运行时 crate（传递性 tokio 来自 `synthia-provider`，见目标注释） |
 | `make check-public-api-runtime` | 断言库 crate 的**公开 API** 不出现运行时类型（`synthia-server` 与 `synthia-mcp-server` 豁免，二者皆为应用 / 二进制 crate，`main()` 是唯一允许出现具体运行时类型的地方；R125 同步修复了多行 `use` brace body 未注册的盲区）：现读每个文件对 `tokio` / `tokio_util` / `tokio_stream` / `async_std` / `smol` / `futures::executor` 的 `use` 别名，再跨签名续行扫描 `pub` 项，因此 `use tokio::sync::mpsc;` + `pub fn new(tx: Arc<mpsc::UnboundedSender<…>>)` 这类别名泄漏也会被抓到（见 [scripts/check-public-api-runtime.sh](file:///home/crochee/workspace/synthia/scripts/check-public-api-runtime.sh)） |
 | `make check-test-layout` | 棘轮：生产文件内联 `#[cfg(test)] mod` 测试块不得 ≥400 行（硬上限），300 行档位已清零（基线 0）；新增测试放同级 `tests.rs` |
 | `make check-pub-surface` | 棘轮：`crates/*/src` 内禁止 `pub use <内部模块>::*;`（facade 传播 `synthia_xxx::*` 除外） |
 | `make check-harness-shape` | 断言 `synthia-harness` **生产代码**无函数超过 100 行或嵌套超过 4 层（`too_many_lines` + `excessive_nesting`，阈值现读 [scripts/harness-shape/clippy.toml](file:///home/crochee/workspace/synthia/scripts/harness-shape/clippy.toml)；见 [scripts/check-harness-shape.sh](file:///home/crochee/workspace/synthia/scripts/check-harness-shape.sh)，仅限该 crate） |
+| `make check-harness-features` | 棘轮：`synthia-harness` 的 Cargo.toml 不得出现 `[features]` 表，直接依赖不得引入 tokio / async-std / smol / futures-executor（零 feature 基座的两条不变量） |
+| `make check-harness-docs` | 棘轮：`crates/synthia-harness/src` 里**非 `pub`** 项上的 `///` 注释行总数不得超过 `scripts/harness-docs/baseline`；分类器跳过属性行 / `impl` / 闭合括号再判断被注释的声明（见 [scripts/check-harness-docs.sh](file:///home/crochee/workspace/synthia/scripts/check-harness-docs.sh)）。公开面（`pub`）的文档不计入——那是 docs.rs 的读者；私有项上"复述签名 / 叙述接下来三行"的注释才是阅读税，**记录非显然约束的必须保留**。不要改 `rustfmt.toml`（`wrap_comments` 会把整个 workspace 的注释重排成无法 review 的 diff），靠删除达成 |
+| `make check-plugin-shape` | 棘轮：插件 tool crate（`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-web` / `-task` / `-scheduler` / `-search` 与 `synthia-mcp` / `-skill` / `-attachment`）的单个生产源文件不得超过 `scripts/plugin-shape/baseline` 行（见 [scripts/check-plugin-shape.sh](file:///home/crochee/workspace/synthia/scripts/check-plugin-shape.sh)）——插件的标准形态是 `lib.rs` + 同级聚焦文件，超预算的补救是拆文件 |
+| `make check-pub-surface-strict` | 棘轮：7 个范式 crate 的 `pub use` 逐 crate 不超过 `scripts/paradigm-surface/baselines/` 下的基线；`make check-pub-surface` 只禁 `pub use <内部模块>::*;`，本目标额外禁止任何方向的重新导出增长（见 [scripts/check-pub-surface-strict.sh](file:///home/crochee/workspace/synthia/scripts/check-pub-surface-strict.sh)） |
 | `make test-guides` | 编译 `MINIMAL.md` 的 `rust` 围栏（doctest）：先默认 feature，再七 feature MVP 子集。`doc-check` 只**生成**文档、不**编译**示例，所以向导里的配方只能靠这个目标（和 CI）拦住 |
 | `make test-layout-audit` | 打印当前所有 ≥300 行的内联测试块位置，便于核对棘轮                        |
 | `make check-claim-language` | 棘轮：`README.md` / `MINIMAL.md` / `SEAMS.md` / `CHANGELOG.md` [Unreleased] / `crates/*/README.md` / facade 与范式 lib crate 的 rustdoc 里若出现 "paradigm only" / "zero tool implementations" / "default tool set" / "ships no implementations" / "the built-ins" 等与代码事实矛盾的绝对化措辞即失败；冻结的 `docs/optimization-report-R*.md` / `docs/superpowers/` / 已发布 CHANGELOG 条目豁免（与本文件 §3.7 配套） |
 | `make check-clock` | 棘轮：库 crate 生产代码不得有 `chrono::Utc::now()` 直接调用（基线 0；app crate `synthia-server` 豁免，`#[cfg(test)]` 豁免）——一律走 `synthia_core::Clock`（§3.8） |
 | `make check-deny` | 跑 `cargo deny check licenses bans sources`（公告检查 `advisories` 由 `.github/workflows/security-audit.yml` 单独负责）；新增依赖必须保证通过 |
 | `make check-web` | 前端门禁：`tsc --noEmit` + `eslint` + `prettier --check`；本项目**不**留前端 e2e 套件（详见 §4.2） |
-| `make lint-sh` | 对 `scripts/check-harness-shape.sh` 与 `scripts/check-public-api-runtime.sh` 跑 shellcheck（`SC1091`/`SC2086` 豁免，`-S warning`）——`.github/workflows/shellcheck.yml` 是 CI 对应入口 |
-| `make ci`        | 快速门禁 = `fmt-check` + `lint-rust` + doc-check + test-guides + 依赖/布局/形状/时钟/许可证不变量目标            |
+| `make lint-sh` | 对 5 个门禁脚本跑 shellcheck——`scripts/check-harness-shape.sh` / `scripts/check-public-api-runtime.sh` / `scripts/check-plugin-shape.sh` / `scripts/check-pub-surface-strict.sh` / `scripts/check-harness-docs.sh`（`SC1091`/`SC2086` 豁免，`-S warning`）——`.github/workflows/shellcheck.yml` 是 CI 对应入口 |
+| `make ci`        | 快速门禁 = `fmt-check` + `lint-rust` + doc-check + test-guides + 依赖/布局/形状/注释预算/时钟/许可证不变量目标            |
 
 CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）只调用上述 `make` 目标，分 `gates` / `tests` / `examples` / `web` / `bench` 五个 job（`cargo fetch` / `npm ci` 属依赖安装，不是门禁）；测试与示例均无需 API key。
 
@@ -160,7 +166,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
 | `security-audit.yml` | push / PR + 周一 03:00 UTC | `cargo audit`（rustsec/advisory-db）+ `cargo deny check` |
 | `contract-closure.yml` | push / PR | 双侧接口契约闭环扫描（advisory；§6 闭环时升级为 gating） |
 | `dependabot-auto-merge.yml` | Dependabot PR | patch/minor 自动合（major 走人审） |
-| `markdown-lint.yml` | push / PR + 每天 UTC 04:00 | `markdownlint-cli2` 跑 26 个 crate README + `CONTRIBUTORS.md` |
+| `markdown-lint.yml` | push / PR + 每天 UTC 04:00 | `markdownlint-cli2` 跑 27 个 crate README + `CONTRIBUTORS.md` |
 | `shellcheck.yml` | push / PR + 每天 UTC 05:00 | `shellcheck` 跑 `scripts/check-harness-shape.sh` + `scripts/check-public-api-runtime.sh` |
 | `stale.yml` | 每天 UTC 02:00 | CNCF 范式：停滞 issue / PR 自动 stale → close（详见 `.github/stale.yml`） |
 
@@ -256,8 +262,8 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   悄悄改变另一个工具的行为）。
 - **harness 与插件分离**：`synthia-harness` 只保留核心循环 + registry
   组装 + 类型定义；需要循环内部能力（事件转发、取消、深度）的合成工具
-  走 [`synthia_harness::ToolInterceptor`](crates/synthia-harness/src/agent/interceptor.rs)
-  seam（`with_interceptor` / `ReActAgent::with_interceptor`）。多智能体委派
+  走 [`synthia_harness::SyntheticTool`](crates/synthia-harness/src/agent/re_act/synthetic.rs)
+  seam（`with_synthetic_tool` / `ReActAgent::with_synthetic_tool`）。多智能体委派
   是这条 seam 的第一个实现，整体位于 `synthia-tool-task`（`task` 工具、
   gate、worktree 隔离、`@agent:` router、subagent 池）。新增同类合成工具
   一律新建 plugin crate 实现该 trait，**不得**回填进 `synthia-harness`。
@@ -267,7 +273,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   的抽象（[`synthia_core::registry::Registry`](crates/synthia-core/src/registry.rs)
   + [`RegistryItem`](crates/synthia-core/src/registry.rs) +
   [`paginate_registry_list`](crates/synthia-core/src/registry.rs) 辅助函数）
-  都从 `synthia-core` 出发。[`AgentRegistry`](crates/synthia-harness/src/agent/registry/mod.rs)
+  都从 `synthia-core` 出发。[`AgentRegistry`](crates/synthia-harness/src/agent/registry.rs)
   通过这套 trait 完整暴露；[`ToolRegistry`](crates/synthia-tool/src/registry/mod.rs)
   在私有 `mod registry_trait` 子模块里以同套语义实现（不公开 `ToolFilter` /
   `ToolEntry` 这些内部类型，外层仍可用固有方法 `register_entry` /

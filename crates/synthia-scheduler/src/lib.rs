@@ -30,12 +30,26 @@
 //! `subagent-notification` flow in pi-subagents is the
 //! reference consumer).
 
+pub mod agent_action;
 pub mod job;
 pub mod scheduler;
 pub mod store;
 pub mod trigger;
 pub mod wheel;
 
+pub use agent_action::{
+    ActionDecodeError,
+    AgentOutcome,
+    AgentRef,
+    AgentSpawnError,
+    AgentSpawner,
+    AgentSpawnerError,
+    AgentStepError,
+    JobAction,
+    PromptContext,
+    PromptTemplate,
+    step_agent_action,
+};
 pub use job::{
     Job,
     JobId,

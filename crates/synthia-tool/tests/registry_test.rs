@@ -59,9 +59,19 @@ async fn test_tool_registry_register_and_get() {
     assert!(snapshots.iter().any(|s| s.name == "test_tool"));
     assert!(snapshots.iter().all(|s| s.name != "nonexistent"));
 
-    let retrieved = registry.get("test_tool").await.unwrap();
+    let retrieved = registry.get("test_tool");
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().name(), "test_tool");
+    // Re-registering under the same name shadows the earlier
+    // provider: the LIFO top is what dispatch resolves.
+    registry.register_entry(ToolEntry::new(Arc::new(MockTool::new(
+        "test_tool",
+        "Shadowing provider",
+    ))));
+    assert_eq!(
+        registry.get("test_tool").unwrap().description(),
+        "Shadowing provider"
+    );
 }
 
 #[tokio::test]
@@ -84,7 +94,7 @@ async fn test_tool_registry_list_tools() {
 async fn test_tool_registry_empty() {
     let registry = ToolRegistry::new();
     assert!(registry.snapshot().is_empty());
-    assert!(registry.get("anything").await.unwrap().is_none());
+    assert!(registry.get("anything").is_none());
 }
 
 #[tokio::test]

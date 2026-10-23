@@ -13,7 +13,7 @@
 //!
 //! The hook is panic-isolated at the call site so a buggy hook
 //! cannot poison the compaction; the same fail-soft contract as
-//! `synthia_steering::AgentHook` applies.
+//! `synthia_steering::HookMap` `on_compaction` handler applies.
 
 use std::sync::Arc;
 

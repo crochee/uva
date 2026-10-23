@@ -19,7 +19,7 @@ use synthia::{
 
 use super::{
     super::{AgentEvent, SessionOp, SessionState},
-    support::{VecFactory, make_manager_and_controller},
+    support::{RecordedCall, VecFactory, make_manager_and_controller},
 };
 
 #[tokio::test]
@@ -39,7 +39,7 @@ async fn test_events_are_persisted_and_broadcast() {
             reason: SessionEndReason::Completed,
         }),
     ];
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(VecFactory::new(events, Arc::clone(&calls), None));
     let (controller, manager, _temp) =

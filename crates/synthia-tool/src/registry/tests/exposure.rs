@@ -106,11 +106,7 @@ async fn registry_get_and_list_preserve_exposure() {
             .with_exposure(ToolExposure::Hidden),
     );
 
-    let fetched = registry
-        .get("query_db")
-        .await
-        .unwrap()
-        .expect("query_db is registered");
+    let fetched = registry.get("query_db").expect("query_db is registered");
     assert_eq!(fetched.exposure(), ToolExposure::Deferred);
 
     let listed = registry.list(None).await.unwrap();

@@ -112,7 +112,10 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	}
 	shellcheck -x -e SC1091,SC2086 -S warning \
 	  scripts/check-harness-shape.sh \
-	  scripts/check-public-api-runtime.sh
+	  scripts/check-public-api-runtime.sh \
+	  scripts/check-plugin-shape.sh \
+	  scripts/check-pub-surface-strict.sh \
+	  scripts/check-harness-docs.sh
 
 check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 	cd $(WEB_DIR) && npx tsc --noEmit
@@ -134,7 +137,21 @@ MVP_FORBIDDEN := opentelemetry|tonic|axum|rusqlite|sqlx|reqwest|hyper|rustls|h2|
 # The offline tool plugins must stay offline on their own, independent
 # of the facade: `synthia-tool-web` is the only tool crate allowed an
 # HTTP client.
-OFFLINE_TOOL_CRATES := synthia-tool-read synthia-tool-write synthia-tool-shell synthia-tool-todo synthia-tool-task synthia-tool-scheduler synthia-tool-search
+OFFLINE_TOOL_CRATES := synthia-tool-read synthia-tool-write synthia-tool-shell synthia-tool-todo synthia-tool-task synthia-tool-scheduler synthia-tool-search synthia-tool-memo
+# R-OPT-HPC round (5-plug-in perf + concurrency set): every
+# new surface stays offline by default. `synthia-hpc-batch`
+# is the batched embedder / completer adapter — it carries
+# only the `synthia-provider` / `synthia-search` wire
+# traits, no HTTP stack. The `hpc-pool` / `hpc-simd` /
+# `hpc-coalesce` / `hpc-pipeline` features live inside
+# existing crates and pull no new external dep (the only
+# "new" dep each carries is already in the workspace graph).
+R_OPT_HPC_PLUGIN_CRATES := synthia-hpc-batch
+# R-OPT-HPC round (Tier 1 performance + concurrency, Tier 2 reasoning
+# + quality): six new opt-in plugin crates, all in the offline tier
+# (no HTTP/OTel/DB by default — proved by the `mvp-forbidden` check
+# below).
+ROPT_PLUGIN_CRATES := synthia-semantic-cache synthia-tool-memo synthia-resilience synthia-strategy-plan-execute synthia-reflection synthia-budget
 # The two crates whose interesting configuration the plain loops never
 # check each get their own section: `synthia-search` under
 # `--features provider`, `synthia-tool-scheduler` under `--features
@@ -165,7 +182,27 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  fi; \
 	done
 	@echo "OK: $(OFFLINE_TOOL_CRATES) pull no ($(MVP_FORBIDDEN))"
-	@for f in "" "--features provider"; do \
+	@for c in $(ROPT_PLUGIN_CRATES); do \
+	  if cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
+	    echo "FAIL: $$c (the R-OPT-HPC plugin) pulled a forbidden dependency:"; \
+	    cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "OK: $(ROPT_PLUGIN_CRATES) pull no ($(MVP_FORBIDDEN))"
+	@for c in $(R_OPT_HPC_PLUGIN_CRATES); do \
+	  if cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
+	    echo "FAIL: $$c (the R-OPT-HPC plugin) pulled a forbidden dependency:"; \
+	    cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "OK: $(R_OPT_HPC_PLUGIN_CRATES) pull no ($(MVP_FORBIDDEN))"
+	@for f in "" "--features simd"; do \
 	  if cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
 	    echo "FAIL: synthia-search $$f pulled a forbidden dependency:"; \
@@ -174,7 +211,17 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: synthia-search (default + --features provider) pulls no ($(MVP_FORBIDDEN))"
+	@echo "OK: synthia-search (default + --features simd) stays offline"
+	@for f in "" "--features provider" "--features hnsw"; do \
+	  if cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
+	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
+	    echo "FAIL: synthia-search $$f pulled a forbidden dependency:"; \
+	    cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
+	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "OK: synthia-search (default + --features provider + --features hnsw) pulls no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features cron"; do \
 	  if cargo tree -p synthia-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
@@ -185,6 +232,23 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  fi; \
 	done
 	@echo "OK: synthia-tool-scheduler (default + --features cron) pulls no ($(MVP_FORBIDDEN))"
+	@for f in ""; do \
+	  if cargo tree -p synthia-harness $$f -e normal --prefix none 2>/dev/null \
+	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
+	    echo "FAIL: synthia-harness $$f pulled a forbidden dependency:"; \
+	    cargo tree -p synthia-harness $$f -e normal --prefix none 2>/dev/null \
+	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "OK: synthia-harness (default) pulls no ($(MVP_FORBIDDEN))"
+	@cargo check -q -p synthia-harness --no-default-features 2>/dev/null \
+	  && echo "OK: synthia-harness --no-default-features compiles"
+	@for p in synthia-strategy-cot synthia-strategy-best-of-n; do \
+	  cargo check -q -p $$p 2>/dev/null \
+	    || { echo "FAIL: $$p does not build standalone"; exit 1; }; \
+	done
+	@echo "OK: each strategy plugin crate builds standalone"
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p synthia-scheduler \
 	    --features cron 2>/dev/null \
 	  && echo "OK: synthia-scheduler --features cron rustdoc is warning-free"
@@ -201,6 +265,12 @@ RUNTIME_FREE := synthia-core synthia-scheduler synthia-macros synthia-eval synth
 
 .PHONY: check-no-runtime
 
+# `synthia-tool` keeps its OWN [dependencies] runtime-free (dispatch
+# runs on the caller's poll; tokio lives in [dev-dependencies] only).
+# It cannot join RUNTIME_FREE: the wire types it consumes come from
+# `synthia-provider`, whose SSE pump names tokio unconditionally, so
+# the crate gets the same depth-1 "declares no runtime" assertion
+# `check-harness-features` applies to `synthia-harness`.
 check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	@for c in $(RUNTIME_FREE); do \
 	  n=$$(cargo tree -p $$c -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
@@ -212,8 +282,22 @@ check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	  if [ "$$n" != "0" ]; then \
 	    echo "FAIL: synthia-telemetry --no-default-features pulls tokio ($$n crates)"; exit 1; \
 	  fi
-	@echo "OK: $(RUNTIME_FREE) and synthia-telemetry --no-default-features are tokio-free"
+	@n=$$(cargo tree -p synthia-tool -e normal --depth 1 --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -cE '^(tokio|tokio-stream|tokio-util|async-std|smol|futures-executor)' || true); \
+	  if [ "$$n" != "0" ]; then \
+	    echo "FAIL: synthia-tool declares a runtime dependency ($$n crates)"; exit 1; \
+	  fi
+	@echo "OK: $(RUNTIME_FREE), synthia-telemetry --no-default-features, and synthia-tool's own deps are tokio-free"
 
+
+.PHONY: check-harness-features
+
+check-harness-features: ## Assert synthia-harness declares zero features and no direct runtime dependency
+	@if grep -q '^\[features\]' crates/synthia-harness/Cargo.toml; then \
+	  echo "FAIL: synthia-harness must not declare a [features] table"; exit 1; fi
+	@if cargo tree -p synthia-harness -e normal --depth 1 --prefix none 2>/dev/null \
+	  | cut -d' ' -f1 | sort -u | grep -Eq '^(tokio|tokio-util|async-std|smol|futures-executor)'; then \
+	  echo "FAIL: synthia-harness declares a runtime dependency"; exit 1; fi
+	@echo "OK: synthia-harness has no features and no direct runtime dependency"
 
 # ---- Claim-language gate ----
 # Forbidden phrasings that contradict facts the code enforces (the
@@ -282,7 +366,7 @@ CRATES := $(notdir $(wildcard crates/*))
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-public-api-runtime check-pub-surface check-claim-language check-clock check-harness-shape check-test-layout check-deny ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + clock + license/ban invariants
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-claim-language check-clock check-harness-shape check-harness-docs check-plugin-shape check-test-layout check-deny ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + clock + license/ban invariants
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -340,6 +424,41 @@ check-pub-surface: ## Fail on a glob re-export inside a synthia-* crate
 	fi; \
 	echo "OK: no glob re-export inside a synthia-* crate (facade exempt)"
 
+# ---- Strict paradigm-crate surface (R-G --strict-paradigm) ----
+# The glob `pub use <module>::*;` check above catches the worst
+# failure mode (every new `pub` in the named module leaks out
+# without anyone choosing it), but a crate can still drift toward
+# the same problem by *counting* — 50 explicit re-exports are not
+# meaningfully safer than one glob. AGENTS.md §3.7 says each
+# `synthia-*` crate's lib.rs is the *single* place that decides
+# what is public, so a tighter ratchet is appropriate: each
+# non-facade lib crate gets a per-crate line-count budget, encoded
+# in `scripts/paradigm-surface/baselines/<crate>=<N>`, and any
+# growth fails the gate. Intentional additions go in the same
+# commit as a baseline bump — mirrors the `check-plugin-shape`
+# precedent.
+#
+# Facade (`crates/synthia/`) is exempt by the same reasoning as the
+# glob gate: `pub use synthia_xxx::*;` is the documented propagation
+# pattern, and the surface budget lives on the underlying crates.
+# `synthia-server` and `synthia-mcp-server` are app / binary
+# crates; their lib.rs is a thin wiring entry, not a curated
+# surface, so they're exempt too.
+.PHONY: check-pub-surface-strict paradigm-surface-audit
+
+paradigm-surface-audit: ## Print current per-crate pub-use counts (largest first)
+	@for c in crates/synthia-tool crates/synthia-harness crates/synthia-provider \
+	         crates/synthia-core crates/synthia-context crates/synthia-steering \
+	         crates/synthia-session; do \
+	  f="$$c/src/lib.rs"; \
+	  [ -f "$$f" ] || continue; \
+	  n=$$(grep -cE '^[[:space:]]*pub use ' "$$f" 2>/dev/null || echo 0); \
+	  printf "%2d  %s\n" "$$n" "$$f"; \
+	done | sort -rn
+
+check-pub-surface-strict: ## Fail when a paradigm crate's pub-use count grows past its per-crate baseline
+	@bash scripts/check-pub-surface-strict.sh
+
 # ---- License / source / bans gate ----
 # `cargo-deny` 是 R161 三件套里的公告 + 许可证检查; 与 `cargo-audit`
 # (rustsec/advisory-db) 冗余防御. 在 `make ci` 链路上跑一次, 等价于
@@ -365,6 +484,11 @@ bench: ## Run the hot-path benchmarks (hot_paths, dependency-free harness)
 bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
 	cargo bench -p synthia-harness --bench hot_paths -- --check
 
+# Note: `otel_collector_mock` is a long-running server that only
+# exits after a companion client POSTs to it; there is no client
+# here, so the inner loop skips it (it gets its 30-second smoke
+# in the telemetry workflow instead). The other conditionals add
+# the per-example `--features` flag a few examples require.
 examples: ## Run every example plus both consumer proofs (each prints a proof line)
 	@set -e; for d in $(wildcard crates/*/examples); do \
 	  ls $$d/*.rs >/dev/null 2>&1 || continue; \
@@ -372,7 +496,12 @@ examples: ## Run every example plus both consumer proofs (each prints a proof li
 	  for f in $$d/*.rs; do \
 	    name=$$(basename $$f .rs); \
 	    extra=""; \
-	    [ "$$name" = "sqlite_memory" ] && extra="--features sqlite"; \
+	    [ "$$name" = "sqlite_memory" ] && extra="--features sqlite" || true; \
+	    [ "$$name" = "hnsw_bench" ] && extra="--features hnsw" || true; \
+	    [ "$$name" = "provider_embedder" ] && extra="--features provider" || true; \
+	    [ "$$name" = "provider_pool_bench" ] && extra="--features hpc-pool" || true; \
+	    [ "$$name" = "simd_bench" ] && extra="--features simd" || true; \
+	    [ "$$name" = "otel_collector_mock" ] && continue || true; \
 	    echo "== $$pkg/$$name"; \
 	    cargo run -q -p $$pkg --example $$name $$extra > /dev/null; \
 	  done; \
@@ -403,11 +532,13 @@ clock-audit: ## List every chrono::Utc::now() call left in library code
 	# to the count.
 	@for f in $$(find crates -name '*.rs' -path '*/src/*' \
 	              ! -name 'clock.rs' \
+	              ! -name 'tests.rs' \
+	              ! -path '*/tests/*' \
 	              ! -path '*/synthia-server/src/*'); do \
 	  awk -v F="$$f" '\
 	    /^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
-	    /^[[:space:]]*}[[:space:]]*$$/ && in_test{in_test=0; next} \
-	    /Utc[.]now/{ line=$$0; sub(/^[ \t]+/,"",line); \
+	    /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
+	    /Utc::now/{ line=$$0; sub(/^[ \t]+/,"",line); \
 	                 if (substr(line,1,2)!="//" && !in_test) \
 	                   printf "%s:%d: %s\n", F, FNR, line }' "$$f"; \
 	done
@@ -420,10 +551,12 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	# injected `FixedClock`).
 	@n=$$(for f in $$(find crates -name '*.rs' -path '*/src/*' \
 	                   ! -name 'clock.rs' \
+	                   ! -name 'tests.rs' \
+	                   ! -path '*/tests/*' \
 	                   ! -path '*/synthia-server/src/*'); do \
 	  awk '/^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
-	       /^[[:space:]]*}[[:space:]]*$$/ && in_test{in_test=0; next} \
-	       /Utc[.]now/{ stripped=$$0; sub(/^[ \t]+/, "", stripped); \
+	       /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
+	       /Utc::now/{ stripped=$$0; sub(/^[ \t]+/, "", stripped); \
 	                    if (substr(stripped,1,2)!="//" && !in_test) c++ } \
 	       END{print c+0}' "$$f"; \
 	done | awk '{s+=$$1} END{print s+0}'); \
@@ -460,6 +593,44 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 
 check-harness-shape: ## Fail when a synthia-harness production fn grows past the length / nesting budget
 	@bash scripts/check-harness-shape.sh
+
+# ---- Harness comment budget ----
+# Doc comments on private items are reading tax when they restate
+# the signature or narrate the next three lines; the ones recording
+# a non-obvious constraint are the payload and stay. The gate fails
+# on growth so a later round cannot quietly put the tax back.
+check-harness-docs: ## Fail when synthia-harness private-item doc comments grow past the budget
+	@bash scripts/check-harness-docs.sh
+
+# ---- Plugin shape (R-G) ----
+# Plugin tool crates (`synthia-tool-read` / `-write` / `-shell` /
+# `-todo` / `-web` / `-task` / `-scheduler` / `-search` plus
+# `synthia-mcp` / `-skill` / `-attachment`) ship one tool (or one
+# tool-like facade) per crate and stay flat — `lib.rs` plus focused
+# siblings. Long-file drift hurts the same way it did in the harness,
+# so the gate is a sibling of `check-harness-shape` but scoped at the
+# **file** grain (plugins are small, the natural remediation is
+# splitting the file, not extracting inline helpers).
+#
+# Baseline is encoded as a single integer in
+# `scripts/plugin-shape/baseline` — the highest current line count
+# across the scanned file set, captured at gate introduction. The
+# gate fails on growth past that baseline; intentional cleanup that
+# lowers the max updates the baseline in the same commit (mirrors
+# the `check-test-layout` 300-band precedent).
+.PHONY: plugin-shape-audit check-plugin-shape
+
+plugin-shape-audit: ## List plugin-crate production files and their line counts (largest first)
+	@for root in crates/synthia-tool-read crates/synthia-tool-write crates/synthia-tool-shell \
+	             crates/synthia-tool-todo crates/synthia-tool-web crates/synthia-tool-task \
+	             crates/synthia-tool-scheduler crates/synthia-tool-search crates/synthia-mcp \
+	             crates/synthia-skill crates/synthia-attachment; do \
+	  [[ -d "$$root/src" ]] || continue; \
+	  find "$$root/src" -maxdepth 1 -name '*.rs' ! -name 'tests.rs' -exec wc -l {} +; \
+	done | sort -rn | head -20
+
+check-plugin-shape: ## Fail when a plugin-crate production file grows past the baseline
+	@bash scripts/check-plugin-shape.sh
 
 # ---- Inline test-module layout (R105–R109) ----
 # No production file may grow an inline `#[cfg(test)] mod` block to

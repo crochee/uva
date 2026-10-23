@@ -20,7 +20,7 @@
 //!
 //! ```text
 //! agent loop (single writer of AgentState)
-//!   ├─ hooks    async lifecycle observation, tool veto (before guards)
+//!   ├─ hooks    async interception: observe, veto, or terminate the run
 //!   ├─ hints    advisory [reminder] injections (before each LLM call)
 //!   ├─ tracker  sync observation + concurrency recommendation
 //!   ├─ guards   sync fail-closed policy pipeline (per tool call)
@@ -72,16 +72,7 @@ pub use hint::{
     NoopHint,
     TruncationHint,
 };
-pub use hook::{
-    AgentHook,
-    HookAction,
-    HookError,
-    HookFuture,
-    HookStage,
-    LoggingHook,
-    run_hook,
-    run_hook_gated,
-};
+pub use hook::{LoggingHook, logging_hook_map};
 pub use hook_map::{
     HookDecision,
     HookEvent,

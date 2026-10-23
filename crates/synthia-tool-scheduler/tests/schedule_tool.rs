@@ -578,8 +578,7 @@ async fn registration_publishes_a_sequential_json_tool() {
         SchedulerTool::new(Arc::clone(&fx.store)),
     ));
 
-    use synthia_core::registry::Registry as _;
-    let entry = registry.get("schedule").await.unwrap().expect("registered");
+    let entry = registry.get("schedule").expect("registered");
     let tool = entry.tool_instance();
     assert_eq!(tool.name(), "schedule");
     assert_eq!(tool.mode(), synthia_tool::ExecutionMode::Sequential);

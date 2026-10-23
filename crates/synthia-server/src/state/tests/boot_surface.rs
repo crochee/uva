@@ -1,7 +1,7 @@
 //! Tests for the optional integrations the boot wires —
 //! MCP server registration (R21/R30).
 
-use synthia::core::{Clock, registry::Registry};
+use synthia::core::Clock;
 
 use crate::state::{
     plugin_tool_registry,
@@ -57,8 +57,6 @@ sleep 5
 
     let entry = registry
         .get("mcp__boot-test__remote_add")
-        .await
-        .expect("lookup")
         .expect("namespaced remote_add must be registered");
     assert_eq!(entry.tool_instance().name(), "mcp__boot-test__remote_add");
     assert!(

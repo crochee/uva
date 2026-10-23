@@ -87,7 +87,34 @@ impl ProviderCatalogue {
     pub fn from_workspace_config(config: &WorkspaceConfig) -> Self {
         let mut profiles = ProviderRegistry::new();
         let mut failures: HashMap<String, String> = HashMap::new();
+        // Keyless demo providers (`type = "demo"`, alias `"fake"`,
+        // `test-utils` only) are built here, before the generic
+        // profile loop, so `profiles.build` does not overwrite the
+        // echo handle with the offline empty stub.
+        #[cfg_attr(not(any(test, feature = "test-utils")), allow(unused_mut))]
+        let mut prebuilt: HashMap<String, Arc<dyn ModelProvider>> =
+            HashMap::new();
         for (name, entry) in &config.providers {
+            #[cfg(any(test, feature = "test-utils"))]
+            if matches!(entry.r#type.as_str(), "demo" | "fake") {
+                use synthia::provider::{
+                    ProviderProfile,
+                    profile::StubProfile,
+                };
+                profiles =
+                    profiles.insert(ProviderProfile::Stub(StubProfile {
+                        name: name.clone(),
+                        default_model: entry
+                            .default_model
+                            .clone()
+                            .unwrap_or_else(|| UNDECLARED_MODEL.to_string()),
+                    }));
+                prebuilt.insert(
+                    name.clone(),
+                    Arc::new(super::demo_provider::DemoEchoProvider),
+                );
+                continue;
+            }
             match profile_of(name, entry) {
                 Ok(profile) => profiles = profiles.insert(profile),
                 Err(reason) => {
@@ -99,6 +126,10 @@ impl ProviderCatalogue {
         let mut handles: HashMap<String, Arc<dyn ModelProvider>> =
             HashMap::new();
         for name in profiles.names() {
+            if let Some(handle) = prebuilt.get(&name) {
+                handles.insert(name.clone(), Arc::clone(handle));
+                continue;
+            }
             match profiles.build(&name) {
                 Ok(provider) => {
                     handles.insert(name, Arc::from(provider));

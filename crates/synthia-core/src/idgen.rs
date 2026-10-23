@@ -7,8 +7,9 @@
 //!
 //! # Why a trait, not a free function
 //!
-//! The Synthia runtime hands `Arc<dyn IdGen>` to pieces that
-//! mint IDs (`ReActAgent`, `ToolRegistry`, the session sink).
+//! In-tree, `synthia-tool`'s bounded-output truncation stamps its
+//! markers through [`SharedIdGen`]; a host plugs in a custom
+//! scheme (UUIDv7, KSUID, prefixed ULID, …) the same way.
 //! A free function (`fn next_id() -> String`) cannot be swapped
 //! per-host; a closure (`Arc<dyn Fn() -> String>`) works but
 //! misses the type — a hand-rolled wrapper needs the same surface

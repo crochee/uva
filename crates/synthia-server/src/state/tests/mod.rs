@@ -29,11 +29,13 @@
 mod apply_tools;
 mod boot_surface;
 mod build_prompt_context;
+mod cluster;
 mod for_test;
 mod load_helpers;
 mod load_strategy;
 mod resolve_agent_name;
 mod resolve_server;
+mod ropt_tier1;
 mod self_mcp;
 mod support;
 mod unapplied_keys;

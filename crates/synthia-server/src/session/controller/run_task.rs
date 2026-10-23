@@ -85,11 +85,12 @@ impl ControllerInner {
         let checkpoint = compaction_configured.then(|| {
             CompactionCheckpoint::new(typed_sink.clone(), Arc::clone(&ledger))
         });
-        let mut config = self.build_run_config_with_explicit_agent(
-            explicit_agent_name.as_deref(),
-            provider,
-            checkpoint.as_ref(),
-        );
+        let (mut config, overrides) = self
+            .build_run_config_with_explicit_agent(
+                explicit_agent_name.as_deref(),
+                provider,
+                checkpoint.as_ref(),
+            );
         config.typed_event_sink = Some(typed_sink);
         let factory = Arc::clone(&self.run_factory);
         let inner = Arc::clone(self);
@@ -187,12 +188,6 @@ impl ControllerInner {
                     for (index, row) in events.iter().enumerate() {
                         ledger.record(index as u64 + 1, row);
                     }
-                    let last_seq = inner
-                        .session_store
-                        .snapshot()
-                        .await
-                        .map(|snapshot| snapshot.last_event_seq)
-                        .unwrap_or(events.len() as u64);
                     // A rerun shadows the turn it replaces, so
                     // the prompt row it is about to append
                     // carries replace semantics computed against
@@ -207,7 +202,6 @@ impl ControllerInner {
                         RunLog::new(
                             Arc::clone(&inner.session_store),
                             Arc::clone(&ledger),
-                            last_seq,
                             inner.deps.lock().clock.clone(),
                         ),
                         synthia::context::events_to_messages(&events),
@@ -225,7 +219,6 @@ impl ControllerInner {
                         RunLog::new(
                             Arc::clone(&inner.session_store),
                             Arc::clone(&ledger),
-                            0,
                             inner.deps.lock().clock.clone(),
                         ),
                         Vec::new(),
@@ -440,7 +433,7 @@ impl ControllerInner {
             //
             // 1. Multimodal path (`multimodal_parts.is_some()`):
             //    bypass the text-fold and feed the parts
-            //    directly via `AgentInput::multi`. The text
+            //    directly via `AgentInput::multi_with_history`. The text
             //    preview is still echoed into `history` so the
             //    NEXT turn's agent sees what the user said
             //    alongside the image (the bytes are in-memory
@@ -496,7 +489,8 @@ impl ControllerInner {
                     .clone()
                     .expect("run_cancel token must be set before run starts"),
             );
-            let mut stream = factory.run_stream(config, input, cancel);
+            let mut stream =
+                factory.run_stream(config, overrides, input, cancel);
             tracing::info!(
                 target: "synthia.session",
                 session_id = %inner.session_id,

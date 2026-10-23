@@ -17,6 +17,7 @@ use super::{
     super::{AgentEvent, RunStreamFactory, SessionOp, SessionState},
     support::{
         BlockingFactory,
+        RecordedCall,
         VecFactory,
         make_manager_and_controller_with_deps,
         test_deps,
@@ -43,7 +44,7 @@ async fn test_usage_and_session_end_events_reach_the_counters() {
             reason: SessionEndReason::Completed,
         }),
     ];
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn RunStreamFactory> =
         Arc::new(VecFactory::new(events, Arc::clone(&calls), None));
     let deps = test_deps().with_usage_metrics(Arc::clone(&metrics));
@@ -88,7 +89,7 @@ async fn test_usage_and_session_end_events_reach_the_counters() {
 async fn test_cancelled_run_still_counts_a_turn() {
     let metrics = Arc::new(UsageMetrics::default());
 
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn RunStreamFactory> = Arc::new(BlockingFactory {
         calls: Arc::clone(&calls),
         progress_count: Arc::new(AtomicUsize::new(0)),

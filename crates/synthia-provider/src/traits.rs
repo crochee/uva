@@ -1,9 +1,8 @@
 //! ModelProvider trait definition
 
-use std::{pin::Pin, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::Stream;
 use synthia_core::{CancelToken, Error, RegistryItem};
 
 use crate::{
@@ -19,9 +18,6 @@ use crate::{
         StreamChunk,
     },
 };
-
-pub type StreamResult =
-    Pin<Box<dyn Stream<Item = Result<StreamChunk, Error>> + Send>>;
 
 /// Convert a `CompletionResponse` (provider view) into a `SamplingResult` (agent view).
 /// Best-effort: extracts text/tool_calls/reasoning/usage from `content`.

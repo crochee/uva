@@ -10,12 +10,6 @@ use super::{
     support::{descriptor_with_instructions, peer_descriptor},
 };
 
-/// The `<identity>` opening line must use the descriptor's
-/// `display_name` (the human-readable label) when set,
-/// and fall back to the programmatic `name` slug
-/// otherwise. Pins the contract that the model
-/// self-identifies with the persona the user sees on
-/// the UI card, not the internal routing id.
 #[test]
 fn identity_line_uses_display_name_when_set() {
     let mut d = descriptor_with_instructions("BASE");
@@ -31,10 +25,6 @@ fn identity_line_uses_display_name_when_set() {
     );
 }
 
-/// Without `display_name`, the assembler falls back to
-/// the programmatic `name` slug so legacy descriptors
-/// keep rendering the same identity they did before the
-/// field was added.
 #[test]
 fn identity_line_falls_back_to_name_when_display_name_missing() {
     let d = descriptor_with_instructions("BASE");
@@ -46,10 +36,6 @@ fn identity_line_falls_back_to_name_when_display_name_missing() {
     );
 }
 
-/// Empty descriptor instructions still injects the
-/// manifest. The manifest sections carry the model's
-/// skills / peers regardless of whether the running
-/// agent's own prose is empty.
 #[test]
 fn empty_descriptor_instructions_still_injects_manifest() {
     let d = descriptor_with_instructions("");
@@ -62,8 +48,6 @@ fn empty_descriptor_instructions_still_injects_manifest() {
     assert!(out.contains("<available_agents>"));
 }
 
-/// `Some("")` persona / domain must NOT render a stray
-/// `Domain:` / `Persona:` line.
 #[test]
 fn identity_skips_empty_optional_fields() {
     let mut d = descriptor_with_instructions("");

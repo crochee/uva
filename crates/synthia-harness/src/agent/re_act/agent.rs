@@ -1,174 +1,61 @@
-//! [`ReActAgent`] — the canonical [`Agent`] implementation's factory.
-//!
-//! This module owns the agent struct, the four constructors
-//! (`new` / `with_options` / `with_prompt_context` / `with_descriptor`),
-//! and the [`default_descriptor`] helper every constructor
-//! delegates to. Every other concern lives in a focused sibling
-//! module:
-//!
-//! | Module | Concern |
-//! |---|---|
-//! | [`super::agent_descriptor`] | `with_name` / `with_instructions` / `with_model_hint` / `with_output_schema` / `set_prompt_context` / `descriptor_mut` |
-//! | [`super::agent_runtime`]    | `with_workspace` / `with_tool_registry` / `with_steering` / `with_context_manager` / `with_interceptor` / `with_max_iterations` / `with_tool_surface` / `with_tool_restriction` / `with_typed_event_sink` / `with_run_inbox` / `with_clock` / `with_spawner` / `with_strategy` / `with_compaction_settings` / `with_compaction_checkpoint` / `effective_context_manager` / `runtime_for_run` |
-//! | [`super::agent_impl`]       | `impl Agent for ReActAgent` + `impl RegistryItem for ReActAgent` |
-//!
-//! The ReAct loop itself lives in [`super::loop_`]; the default
-//! strategy in [`super::strategy`]; the system-prompt template
-//! in [`super::prompt`]. The harness *is* the builder — every
-//! `with_*` setter threads into this struct directly, no
-//! separate factory type, no `build()`.
-//!
-//! [`Agent`]: crate::agent::Agent
-//! [`RegistryItem`]: synthia_core::registry::RegistryItem
+//! [`ReActAgent`]: the public agent type, its constructors, the [`Agent`](crate::agent::Agent) / [`RegistryItem`](synthia_core::registry::RegistryItem) impls, and the per-run runtime helpers. State machine lives in the `loop` module.
+use std::{path::PathBuf, pin::Pin, sync::Arc};
 
-use std::{path::PathBuf, sync::Arc};
-
-use synthia_context::{ContextManager, TruncatingContextManager};
-use synthia_provider::traits::ModelProvider;
+use async_trait::async_trait;
+use futures::{Stream, channel::mpsc};
+use synthia_context::ContextManager;
+use synthia_core::{agent::AgentDescriptor, registry::RegistryItem};
+use synthia_provider::ModelProvider;
 use synthia_session::TypedEventSink;
 use synthia_steering::Steering;
 use synthia_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
 
 use crate::{
+    AgentCaps,
     agent::{
-        RunInbox,
-        descriptor::AgentDescriptor,
-        interceptor::ToolInterceptor,
-        spawn::TokioSpawner,
-        strategy::ReasoningStrategy,
+        AgentRuntime,
+        ReasoningStrategy,
+        checkpoint::Checkpointer,
+        re_act::synthetic::SyntheticTool,
     },
+    events::AgentEvent,
+    input::AgentInput,
+    log::LogWriter,
     prompt::PromptContext,
 };
 
-/// Concrete [`Agent`](crate::agent::Agent) implementing the ReAct loop.
-///
-/// Holds the shared dependencies (provider, tool registry) used by
-/// every session. Each call to
-/// [`Agent::run`](crate::agent::Agent::run) spawns a `ReActLoop`
-/// bound to those shared deps.
+/// Concrete [`Agent`](crate::agent::Agent) implementing the ReAct loop. Holds an [`AgentCaps`] bundle; per-run state (cancel +
+/// `subagent_depth`) comes from each [`Agent::run`](crate::agent::Agent::run) call's `input` and `cancel`.
 pub struct ReActAgent {
-    pub(super) descriptor: AgentDescriptor,
-    pub(super) provider: Arc<dyn ModelProvider>,
-    pub(super) tool_registry: Arc<ToolRegistry>,
-    /// Deployment-level tool-surface policy (R34), or `None` for the
-    /// unfiltered R33 projection. Stored behind an `Arc` so each
-    /// dispatched loop shares one allocation.
-    pub(super) tool_surface: Option<Arc<ToolSurfacePolicy>>,
-    /// This agent's own allow/deny list (R58), or `None` for
-    /// "every tool the surface advertises". Applied to the
-    /// advertised list *and* enforced at dispatch.
-    pub(super) tool_restriction: Option<Arc<ToolRestriction>>,
-    /// Working directory handed to built-in tools as
-    /// `Context::working_dir`.
-    pub(super) workspace_root: PathBuf,
-    /// Manifest context injected into the system prompt: tool
-    /// definitions, enabled skills, and registered peer agents.
-    /// See [`PromptContext`].
-    pub(super) prompt_context: Arc<PromptContext>,
-    /// Pluggable, async context-window manager. Default:
-    /// [`TruncatingContextManager`] — pairwise-drop strategy that
-    /// preserves the leading system prompt and evicts the oldest
-    /// user/assistant pair until the message list fits in the
-    /// resolved `ModelConfig::context_window`.
-    pub(super) context_manager: Arc<dyn ContextManager>,
-    /// Synthetic-tool plugins dispatched ahead of the registry (the
-    /// `task` delegation seam lives in `synthia-tool-task`). Empty
-    /// (the default) keeps the agent a single-loop harness with no
-    /// delegation surface.
-    pub(super) interceptors: Vec<Arc<dyn ToolInterceptor>>,
-    /// Steering bundle: guards (pre-execution policy), hooks
-    /// (async lifecycle), hints (advisory reminders), tracker
-    /// (observation + concurrency recommendation), and the output
-    /// transformer. Shared behind an `Arc` so every dispatched
-    /// `ReActLoop` sees the same policy.
-    pub(super) steering: Arc<Steering>,
-    /// Per-run iteration cap. Defaults to [`DEFAULT_MAX_ITERATIONS`]
-    /// when the agent is built via `new` / `with_options` /
-    /// `with_descriptor`; overridable via
-    /// [`with_max_iterations`](super::agent_runtime::ReActAgent::with_max_iterations).
-    pub(super) max_iterations: usize,
-    /// Typed-event sink for structural boundary events (R6-A).
-    /// `None` disables typed emission. Set via
-    /// [`with_typed_event_sink`](super::agent_runtime::ReActAgent::with_typed_event_sink).
-    pub(super) typed_sink: Option<TypedEventSink>,
-    /// Interactive message source for in-flight runs. `None` (the
-    /// default) disables every inbox seam.
-    pub(super) run_inbox: Option<Arc<dyn RunInbox>>,
-    /// Clock used to stamp the runtime-context snapshot.
-    pub(super) clock: synthia_core::SharedClock,
-    /// Where a run's detached task goes. Default = [`TokioSpawner`].
-    pub(super) spawner: Arc<dyn synthia_core::spawn::Spawner>,
-    /// The reasoning loop. Default [`super::strategy::ReActStrategy`].
-    pub(super) strategy: Arc<dyn ReasoningStrategy>,
-    /// R13-3 / R34: LLM-backed compaction policy. `None` (the
-    /// default) keeps the truncating context manager. When set,
-    /// the context manager is upgraded to the provider-backed
-    /// [`synthia_context::SummarizingContextManager`] (subject to
-    /// the policy being enabled + valid). See
-    /// [`with_compaction_settings`](super::agent_runtime::ReActAgent::with_compaction_settings).
-    pub(super) compaction_settings: Option<synthia_context::CompactionSettings>,
-    /// R34: externally owned compaction checkpoint (carries its
-    /// own sink + ledger). When set, takes precedence over any
-    /// auto-built checkpoint from
-    /// [`with_compaction_settings`](super::agent_runtime::ReActAgent::with_compaction_settings).
-    pub(super) compaction_checkpoint:
-        Option<Arc<synthia_session::CompactionCheckpoint>>,
+    /// Immutable capability bundle; every setter rewrites one field, and
+    /// `Clone` is cheap because every field holds an `Arc`.
+    pub(super) caps: AgentCaps,
 }
 
 impl ReActAgent {
+    /// Canonical constructor: assembles a [`ReActAgent`] with the harness's default descriptor + system prompt +
+    /// `TruncatingContextManager` + `Steering::noop()` + `InlineSpawner` + `SharedClock::system()`. Every other knob keeps its
+    /// default; per-run overrides go through the `with_*` setters.
+    #[must_use]
     pub fn new(
         provider: Arc<dyn ModelProvider>,
         tool_registry: Arc<ToolRegistry>,
     ) -> Self {
-        Self::with_options(
-            provider,
-            tool_registry,
-            PathBuf::new(),
-            super::DEFAULT_SYSTEM_PROMPT.to_string(),
-        )
-    }
-
-    /// Build a ReAct agent with full control over its prompt and
-    /// working directory.
-    pub fn with_options(
-        provider: Arc<dyn ModelProvider>,
-        tool_registry: Arc<ToolRegistry>,
-        workspace_root: PathBuf,
-        system_prompt: String,
-    ) -> Self {
-        let descriptor = default_descriptor(system_prompt);
         Self::with_descriptor(
             provider,
             tool_registry,
-            workspace_root,
-            descriptor,
+            PathBuf::new(),
+            super::descriptor::default_descriptor(
+                crate::prompt::DEFAULT_SYSTEM_PROMPT.to_string(),
+            ),
             Arc::new(PromptContext::default()),
         )
     }
 
-    /// Build a ReAct agent that injects the given prompt context
-    /// (skills, peer agents, tool manifest) into the assembled
-    /// system prompt.
-    pub fn with_prompt_context(
-        provider: Arc<dyn ModelProvider>,
-        tool_registry: Arc<ToolRegistry>,
-        workspace_root: PathBuf,
-        system_prompt: String,
-        prompt_context: Arc<PromptContext>,
-    ) -> Self {
-        Self::with_descriptor(
-            provider,
-            tool_registry,
-            workspace_root,
-            default_descriptor(system_prompt),
-            prompt_context,
-        )
-    }
-
-    /// Build a ReAct agent bound to an explicit [`AgentDescriptor`]
-    /// and prompt manifest. Every other field starts at its
-    /// "off" default and is composed in through the
-    /// `with_*` setters.
+    /// Assemble an agent around a caller-supplied descriptor, prompt context,
+    /// and workspace root. Every other field takes the default
+    /// [`Self::new`] would have chosen.
+    #[must_use]
     pub fn with_descriptor(
         provider: Arc<dyn ModelProvider>,
         tool_registry: Arc<ToolRegistry>,
@@ -177,74 +64,222 @@ impl ReActAgent {
         prompt_context: Arc<PromptContext>,
     ) -> Self {
         Self {
-            descriptor,
-            provider,
-            tool_registry,
-            tool_surface: None,
-            tool_restriction: None,
-            workspace_root,
-            prompt_context,
-            context_manager: Arc::new(TruncatingContextManager),
-            interceptors: Vec::new(),
-            steering: Arc::new(Steering::noop()),
-            max_iterations: super::DEFAULT_MAX_ITERATIONS,
-            typed_sink: None,
-            run_inbox: None,
-            clock: synthia_core::SharedClock::system(),
-            spawner: Arc::new(TokioSpawner),
-            strategy: Arc::new(super::strategy::ReActStrategy),
-            compaction_settings: None,
-            compaction_checkpoint: None,
+            caps: AgentCaps::defaults(
+                provider,
+                tool_registry,
+                workspace_root,
+                descriptor,
+                prompt_context,
+            ),
         }
     }
 }
 
-/// The default `AgentDescriptor` a `new` / `with_options` /
-/// `with_prompt_context` call installs. The descriptor is the
-/// only piece of agent state these constructors used to inline
-/// in literal form; centralising it in one helper keeps every
-/// constructor below a single function call deep and gives
-/// `with_descriptor` a clearly-stated contract: "caller supplies
-/// the descriptor verbatim, here is what we would have built
-/// for you otherwise".
-fn default_descriptor(system_prompt: String) -> AgentDescriptor {
-    AgentDescriptor {
-        name: "agent".to_string(),
-        // `display_name` is the human-readable label surfaced
-        // to the model (in the `<identity>` block) and to
-        // clients (on the `AgentCard`). Distinct from the
-        // programmatic `name` ("agent"), which stays as the
-        // registry / routing slug so existing user configs
-        // and tests keep working unchanged.
-        display_name: Some("Synthia".to_string()),
-        description:
-            "Default Synthia agent. Single-agent ReAct loop that uses \
-             tools to complete user tasks end-to-end."
-                .to_string(),
-        kind: "react".to_string(),
-        version: "1.0.0".to_string(),
-        instructions: system_prompt,
-        capabilities: vec![
-            "tools".to_string(),
-            "streaming".to_string(),
-            "cancellation".to_string(),
-        ],
-        tools: Vec::new(),
-        model_hint: None,
-        handoffs: Vec::new(),
-        handoff_hint: Some(
-            "Use for general coding and tool-use tasks when no \
-             specialist agent is a better fit."
-                .to_string(),
-        ),
-        output_schema: None,
-        owner: Some("synthia".to_string()),
-        domain: Some("coding".to_string()),
-        persona: Some(
-            "You are Synthia, a pragmatic senior engineer \
-             working alongside the user."
-                .to_string(),
-        ),
-        max_iterations: None,
+#[async_trait]
+impl crate::agent::Agent for ReActAgent {
+    fn descriptor(&self) -> &crate::agent::AgentDescriptor {
+        &self.caps.model.descriptor
     }
+
+    async fn run(
+        &self,
+        input: AgentInput,
+        cancel: Arc<dyn synthia_core::CancelToken>,
+    ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
+        let (tx, rx) = mpsc::unbounded::<AgentEvent>();
+        let sink = crate::agent::sink::EventSink::new(
+            Arc::new(tx),
+            self.caps.env.log_writer.clone(),
+            self.caps.env.typed_sink.clone(),
+        );
+        let runtime = AgentRuntime {
+            caps: Arc::new(self.caps.clone()),
+            cancel,
+            subagent_depth: input.subagent_depth,
+        };
+        let strategy = Arc::clone(&runtime.caps.strategy);
+        let spawner = Arc::clone(&runtime.caps.env.spawner);
+        let sink_for_panic = sink.clone();
+        spawner.spawn(Box::pin(async move {
+            if let Err(message) = crate::agent::re_act::panic::catching_panics(
+                strategy.run(runtime, input, &sink),
+            )
+            .await
+            {
+                sink_for_panic.fail(format!("strategy panicked: {message}"));
+            }
+        }));
+        Box::pin(rx)
+    }
+}
+
+impl RegistryItem for ReActAgent {
+    fn name(&self) -> &str {
+        &self.caps.model.descriptor.name
+    }
+
+    fn description(&self) -> &str {
+        &self.caps.model.descriptor.description
+    }
+}
+
+impl ReActAgent {
+    #[must_use]
+    pub fn with_spawner(
+        mut self,
+        spawner: Arc<dyn synthia_core::spawn::Spawner>,
+    ) -> Self {
+        self.caps.env.spawner = spawner;
+        self
+    }
+
+    #[must_use]
+    pub fn with_steering(mut self, steering: Arc<Steering>) -> Self {
+        self.caps.control.steering = steering;
+        self
+    }
+
+    #[must_use]
+    pub fn with_context_manager(
+        mut self,
+        manager: Arc<dyn ContextManager>,
+    ) -> Self {
+        self.caps.control.context_manager = manager;
+        self
+    }
+
+    /// Install a synthetic-tool plugin. Returns `Err` with the name when an installed synthetic tool already advertises it —
+    /// same-name dispatch has no defined precedence.
+    pub fn with_synthetic_tool(
+        mut self,
+        tool: Arc<dyn SyntheticTool>,
+    ) -> Result<Self, String> {
+        let defs = tool.definitions();
+        validate_synthetic(&self.caps.tools.synthetic, &defs)?;
+        self.caps.tools.synthetic.push(tool);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.caps.control.max_iterations = max_iterations.clamp(1, 4096);
+        self
+    }
+
+    #[must_use]
+    pub fn max_iterations(&self) -> usize {
+        self.caps.control.max_iterations
+    }
+
+    #[must_use]
+    pub fn with_tool_surface(mut self, policy: ToolSurfacePolicy) -> Self {
+        self.caps.tools.surface = Some(Arc::new(policy));
+        self
+    }
+
+    #[must_use]
+    pub fn with_tool_restriction(
+        mut self,
+        restriction: ToolRestriction,
+    ) -> Self {
+        self.caps.tools.restriction = Some(Arc::new(restriction));
+        self
+    }
+
+    #[must_use]
+    pub fn with_strategy(
+        mut self,
+        strategy: Arc<dyn ReasoningStrategy>,
+    ) -> Self {
+        self.caps.strategy = strategy;
+        self
+    }
+
+    #[must_use]
+    pub fn with_checkpointer(
+        mut self,
+        checkpointer: Arc<dyn Checkpointer>,
+    ) -> Self {
+        self.caps.env.checkpointer = Some(checkpointer);
+        self
+    }
+
+    #[must_use]
+    pub fn with_workspace(mut self, root: impl Into<PathBuf>) -> Self {
+        self.caps.env.workspace_root = root.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_typed_event_sink(mut self, sink: TypedEventSink) -> Self {
+        self.caps.env.typed_sink = Some(sink);
+        self
+    }
+
+    /// Install the run's log writer.
+    ///
+    /// The writer stamps each structural row's ordinal, buffers it,
+    /// and flushes the buffer at every step boundary — the only
+    /// moment the run waits for the disk. Without a writer the
+    /// structural rows go to the typed sink the host wired.
+    #[must_use]
+    pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self {
+        self.caps.env.log_writer = Some(writer);
+        self
+    }
+
+    #[must_use]
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.caps.model.descriptor.name = name.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_instructions(
+        mut self,
+        instructions: impl Into<String>,
+    ) -> Self {
+        self.caps.model.descriptor.instructions = instructions.into();
+        self
+    }
+
+    /// Declare a structured-output JSON Schema: stamps the descriptor so the prompt assembler adds the requirement, and registers
+    /// the matching `structured_output` tool so the model can answer the run through it. The tool is built first, so both always
+    /// carry the same schema; a registry that already holds `structured_output` (two agents sharing one [`ToolRegistry`]) keeps
+    /// the first schema and logs the conflict, so the setter stays infallible and chainable.
+    #[must_use]
+    pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
+        let tool = synthia_tool::structured_output_tool(schema.clone());
+        self.caps.model.descriptor.output_schema = Some(schema.to_string());
+        let inserted = self
+            .caps
+            .tools
+            .registry
+            .register_entry(synthia_tool::ToolEntry::new(tool));
+        if !inserted {
+            tracing::warn!(
+                agent = %self.caps.model.descriptor.name,
+                "structured_output already registered; keeping the first schema"
+            );
+        }
+        self
+    }
+}
+
+/// Reject a synthetic tool whose advertised name an installed one already claims: same-name dispatch has no defined precedence,
+/// so the loop cannot tell which plugin should handle the call. The `Result` carries the conflicting tool name. The candidate's
+/// already-built [`definitions`](SyntheticTool::definitions) arrive by reference — callers that hold them (the loop prebuilds
+/// every definition once per run) never rebuild them here. Existing plugins are asked
+/// [`claims`](SyntheticTool::claims) rather than `definitions`: building the advertised
+/// `Vec<ToolDefinition>` per already-installed plugin made installing n plugins O(n²) allocations.
+pub(crate) fn validate_synthetic(
+    existing: &[Arc<dyn SyntheticTool>],
+    new_definitions: &[synthia_provider::ToolDefinition],
+) -> Result<(), String> {
+    for def in new_definitions {
+        if existing.iter().any(|i| i.claims(&def.name)) {
+            return Err(def.name.clone());
+        }
+    }
+    Ok(())
 }

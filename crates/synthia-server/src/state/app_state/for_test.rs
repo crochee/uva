@@ -130,14 +130,13 @@ impl AppState {
             synthia::tool_search::register_search_tool(&g, search.registry());
         }
 
-        // The three management subsystems under test. Schedules
-        // use the real `ScheduleStore` rooted at the test
-        // workspace; workflows / evals are empty in-memory
-        // registries — tests populate them through the route
-        // handlers they're verifying.
+        // The three management subsystems under test. Schedules,
+        // workflows and evals use the real stores rooted at the
+        // test workspace — the persistence round-trip is part of
+        // what these tests verify.
         let schedules = SchedulesState::build(&workspace_root);
-        let workflows = WorkflowsState::build();
-        let evals = EvalsState::build();
+        let workflows = WorkflowsState::build(&workspace_root);
+        let evals = EvalsState::build(&workspace_root);
 
         let session_manager = Arc::new(session_manager);
         let active_sessions: Arc<
@@ -150,8 +149,17 @@ impl AppState {
                 clock.clone(),
             ));
 
+        // Workflow bridge over the same registry the fixture
+        // registered its default agent into — cloned here because
+        // the struct literal below moves the original.
+        let workflow_host = super::workflow_host::as_arc(
+            super::workflow_host::ServerWorkflowHost::new(Arc::clone(
+                &agent_registry,
+            )),
+        );
         Self {
             clock,
+            cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
             tool_registry,
             agent_registry,
             session_search,
@@ -194,6 +202,7 @@ impl AppState {
             search,
             schedules,
             workflows,
+            workflow_host,
             evals,
         }
     }

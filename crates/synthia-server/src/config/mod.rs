@@ -400,6 +400,10 @@ mod tests {
                 active_groups: vec!["files".to_string()],
                 max_visible: Some(12),
             },
+            cache: crate::config::server::SemanticCacheConfig::default(),
+            resilience: crate::config::server::ResilienceConfig::default(),
+            budget: crate::config::server::BudgetConfig::default(),
+            cluster: crate::config::server::ClusterConfig::default(),
         }
     }
 

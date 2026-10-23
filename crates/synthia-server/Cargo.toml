@@ -31,8 +31,14 @@ build = "build.rs"
 # for-test fixture. No direct `synthia-test-support` dependency:
 # every call site goes through the facade (single-dependency rule).
 test-utils = ["synthia/test-support"]
+# Multi-node control plane: `[cluster] mode = "redis"` needs this
+# feature (Redis pub/sub + SET NX EX leases). Off by default so the
+# single-node build keeps zero Redis dependency.
+cluster-redis = ["dep:redis"]
 
 [dependencies]
+# Optional Redis client, only pulled in by `cluster-redis`.
+redis = { workspace = true, optional = true }
 # Single-facade dependency rule (R121): the application crate talks to
 # the AI agent SDK lib through `synthia` (the facade) only. The
 # facade's feature set is the canonical "assemble the full server"
@@ -68,6 +74,14 @@ synthia = { workspace = true, features = [
   "eval",
   "workflow",
   "cron",
+  "semantic-cache",
+  "tool-memo",
+  "resilience",
+  "strategy-plan-execute",
+  "strategy-cot",
+  "strategy-best-of-n",
+  "reflection",
+  "budget",
 ] }
 validator.workspace = true
 async-trait.workspace = true

@@ -11,6 +11,7 @@ use super::{
     super::{RunStreamFactory, SessionOp, SessionState},
     support::{
         BlockingFactory,
+        RecordedCall,
         VecFactory,
         make_manager_and_controller,
         wait_for_runs,
@@ -19,7 +20,7 @@ use super::{
 
 #[tokio::test]
 async fn test_cancel_terminates_run() {
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn RunStreamFactory> = Arc::new(BlockingFactory {
         calls: Arc::clone(&calls),
         progress_count: Arc::new(AtomicUsize::new(0)),
@@ -65,7 +66,7 @@ async fn test_repeated_cancel_is_idempotent() {
     // unexpected state. `CancellationToken::cancel()` is
     // documented as idempotent and the handler must
     // preserve that property.
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn RunStreamFactory> = Arc::new(BlockingFactory {
         calls: Arc::clone(&calls),
         progress_count: Arc::new(AtomicUsize::new(0)),
@@ -116,7 +117,7 @@ async fn test_cancel_before_run_starts_is_safe_noop() {
     // that point, so the controller must treat the
     // cancel as a safe no-op — no panic, no
     // double-transition, no hang.
-    let calls = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn RunStreamFactory> =
         Arc::new(VecFactory::new(vec![], Arc::clone(&calls), None));
     let (controller, _manager, _temp) =

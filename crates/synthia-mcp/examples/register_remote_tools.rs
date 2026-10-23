@@ -87,10 +87,7 @@ async fn main() {
     //    still carries the raw name.
     let public = public_tool_name("alpha", "sum");
     assert_eq!(resolve_prefix(&public), Some(("alpha", "sum")));
-    let entry = {
-        use synthia_core::registry::Registry as _;
-        registry.get(&public).await.unwrap().expect("alpha sum")
-    };
+    let entry = registry.get(&public).expect("alpha sum");
     let out = entry
         .tool_instance()
         .call(json!({"a": 1, "b": 2}), &Context::default())

@@ -17,17 +17,46 @@ pub struct OpenAICompatibleProvider {
 
 impl OpenAICompatibleProvider {
     pub fn new(base_url: String, model_config: ModelConfig) -> Self {
+        let client = {
+            #[cfg(feature = "hpc-pool")]
+            {
+                crate::pool::ReqwestBackend::from_config(
+                    crate::pool::PoolConfig::default(),
+                )
+                .client()
+                .clone()
+            }
+            #[cfg(not(feature = "hpc-pool"))]
+            {
+                reqwest::Client::new()
+            }
+        };
         Self {
             api_key: None,
             base_url,
             model_config,
-            client: reqwest::Client::new(),
+            client,
         }
     }
 
     pub fn with_api_key(mut self, key: &str) -> Self {
         self.api_key = Some(key.to_string());
         self
+    }
+
+    /// : warm-up the connection pool by
+    /// issuing one `HEAD /` against the configured
+    /// `base_url`. No-op when the `hpc-pool` feature is
+    /// off (the default build keeps the same
+    /// `Client::new()` behaviour).
+    #[cfg(feature = "hpc-pool")]
+    pub async fn warm_up_pool(&self, extra_hosts: &[url::Url]) -> usize {
+        let mut hosts =
+            vec![url::Url::parse(&self.base_url).unwrap_or_else(|_| {
+                url::Url::parse("https://api.openai.com").unwrap()
+            })];
+        hosts.extend(extra_hosts.iter().cloned());
+        crate::pool::warm_up_with(&self.client, &hosts).await
     }
 }
 
@@ -105,7 +134,7 @@ mod tests {
     }
 
     /// Two `new()` calls MUST produce independent providers
-    /// (no shared state — no Arc fields, no static cache).
+    /// (no shared state—no Arc fields, no static cache).
     #[test]
     fn new_creates_independent_providers() {
         let p1 = OpenAICompatibleProvider::new(
@@ -188,12 +217,12 @@ mod tests {
     // -- reqwest::Client ------------------------------------------------
 
     /// `reqwest::Client` MUST be created internally (not
-    /// exposed via setter — verified by accessibility).
+    /// exposed via setter—verified by accessibility).
     #[test]
     fn client_field_is_constructed() {
         // The `client` field is `pub(in crate::openai)`, so
         // we can't directly access it from outside the
-        // `openai` module — but we can verify that
+        // `openai` module—but we can verify that
         // construction succeeds and the provider is usable
         // in other respects (via the public surface).
         let p = OpenAICompatibleProvider::new(

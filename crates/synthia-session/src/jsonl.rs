@@ -51,7 +51,10 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -148,8 +151,8 @@ pub fn is_metadata_header_row(row: &Value) -> bool {
 ///
 /// The mutex is `tokio::sync::Mutex` (not `std::sync::Mutex`)
 /// so the lock can be held across the `spawn_blocking` IO
-/// branches without requiring `Send` of the guard. Holding
-/// the mutex across `append` and `read` is intentional: it
+/// branches without requiring `Send` of the guard. Holding the
+/// mutex across `append` and `read` is intentional: it
 /// serializes the file, so a concurrent `read` can never
 /// observe a half-written line while another thread is
 /// appending.
@@ -158,6 +161,11 @@ pub struct JsonlSessionSink {
     root: PathBuf,
     id: String,
     state: Arc<Mutex<State>>,
+    /// The ordinal counter, beside the state it guards: the
+    /// reservation in [`alloc_seq`](SessionSink::alloc_seq) must not
+    /// await the file lock, or the loop's hot path would block on
+    /// the disk.
+    next_seq: Arc<AtomicU64>,
 }
 
 /// Maximum number of idempotency keys retained in memory. A
@@ -171,7 +179,11 @@ const IDEMPOTENCY_LRU_CAPACITY: usize = 1024;
 
 struct State {
     closed: bool,
-    next_seq: u64,
+    /// How many rows this sink has written. The metadata header is
+    /// written with the first row, so the header decision cannot
+    /// ride the ordinal counter any more: a writer reserves an
+    /// ordinal before it writes the row.
+    rows_written: u64,
     bytes_on_disk: u64,
     /// `schema_version` of the on-disk file, detected lazily on
     /// the first read. `None` until `read` / `read_from` has been
@@ -182,9 +194,9 @@ struct State {
     schema_version: Option<u32>,
     /// LRU of `(idempotency_key, assigned_seq)` pairs, oldest at
     /// the front. Insertion order = eviction order. A re-submit
-    /// that hits the LRU returns the stored `seq` and writes
-    /// nothing; a miss allocates a new entry, evicts the oldest
-    /// if at capacity, and proceeds with a normal append.
+    /// that hits the LRU writes nothing; a miss allocates a new
+    /// entry, evicts the oldest if at capacity, and proceeds with a
+    /// normal append.
     idem_keys: VecDeque<(String, u64)>,
 }
 
@@ -210,7 +222,7 @@ impl JsonlSessionSink {
             id: id.into(),
             state: Arc::new(Mutex::new(State {
                 closed: false,
-                next_seq,
+                rows_written: next_seq,
                 bytes_on_disk,
                 // Optimistic — refreshed by the read path on
                 // first observation. A fresh file's first append
@@ -219,6 +231,7 @@ impl JsonlSessionSink {
                 schema_version: Some(CURRENT_SCHEMA_VERSION),
                 idem_keys: VecDeque::with_capacity(IDEMPOTENCY_LRU_CAPACITY),
             })),
+            next_seq: Arc::new(AtomicU64::new(next_seq)),
         }
     }
 
@@ -233,7 +246,11 @@ impl SessionSink for JsonlSessionSink {
         &self.id
     }
 
-    async fn append(&self, event: &Value) -> Result<u64, SessionError> {
+    fn alloc_seq(&self) -> u64 {
+        self.next_seq.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    async fn append(&self, event: &Value) -> Result<(), SessionError> {
         let mut state = self.state.lock().await;
         if state.closed {
             return Err(SessionError::Closed);
@@ -242,16 +259,15 @@ impl SessionSink for JsonlSessionSink {
             SessionError::AppendFailed(format!("serialize event: {e}"))
         })?;
         let path = self.events_path();
-        state.next_seq += 1;
         let bytes = line.len() as u64 + 1;
 
         // The first append of a brand-new file writes the
         // header so subsequent readers can branch on
         // schema_version. Re-opening an existing v0 (no-header)
         // file does NOT backfill the header — that would
-        // invalidate every prior `next_seq` count. A v0 reader
+        // invalidate every prior row count. A v0 reader
         // just continues to treat every line as an event.
-        let needs_header = state.next_seq == 1 && !path.exists();
+        let needs_header = state.rows_written == 0 && !path.exists();
         let header_line = if needs_header {
             Some(
                 serde_json::to_string(&SessionMetadataHeader::fresh(&self.id))
@@ -279,20 +295,18 @@ impl SessionSink for JsonlSessionSink {
         })?;
 
         if let Err(e) = result {
-            state.next_seq -= 1;
             return Err(SessionError::AppendFailed(e));
         }
         state.bytes_on_disk += total_bytes;
-        // The ordinal reserved under this lock above — the same one
-        // `read` order and `snapshot().last_event_seq` report.
-        Ok(state.next_seq)
+        state.rows_written += 1;
+        Ok(())
     }
 
     async fn append_with_key(
         &self,
         key: Option<&str>,
         event: &Value,
-    ) -> Result<u64, SessionError> {
+    ) -> Result<(), SessionError> {
         let Some(key) = key else {
             return self.append(event).await;
         };
@@ -302,34 +316,31 @@ impl SessionSink for JsonlSessionSink {
         // append path re-acquires the lock for the actual write.
         {
             let mut state = self.state.lock().await;
-            if let Some(&(_, seq)) =
-                state.idem_keys.iter().find(|(k, _)| k == key)
-            {
+            let hit = state.idem_keys.iter().position(|(k, _)| k == key);
+            if let Some(pos) = hit {
                 // Refresh recency: move-to-front by removing and
                 // re-pushing. Cheap on a 1024-entry deque; the
                 // common case (cache hit on a recent key) only
                 // walks a short prefix.
-                if let Some(pos) =
-                    state.idem_keys.iter().position(|(k, _)| k == key)
-                {
-                    let entry = state.idem_keys.remove(pos).unwrap();
-                    state.idem_keys.push_back(entry);
-                }
-                return Ok(seq);
+                let entry = state.idem_keys.remove(pos).unwrap();
+                state.idem_keys.push_back(entry);
+                return Ok(());
             }
         }
-        let seq = self.append(event).await?;
+        self.append(event).await?;
         let mut state = self.state.lock().await;
         if state.idem_keys.len() >= IDEMPOTENCY_LRU_CAPACITY {
             state.idem_keys.pop_front();
         }
-        state.idem_keys.push_back((key.to_string(), seq));
-        Ok(seq)
+        state
+            .idem_keys
+            .push_back((key.to_string(), self.next_seq.load(Ordering::SeqCst)));
+        Ok(())
     }
 
-    async fn append_many(&self, events: &[Value]) -> Result<u64, SessionError> {
+    async fn append_many(&self, events: &[Value]) -> Result<(), SessionError> {
         if events.is_empty() {
-            return Ok(self.snapshot().await?.last_event_seq);
+            return Ok(());
         }
         let mut state = self.state.lock().await;
         if state.closed {
@@ -348,7 +359,7 @@ impl SessionSink for JsonlSessionSink {
             lines.push(line);
         }
         let path = self.events_path();
-        let needs_header = state.next_seq == 0 && !path.exists();
+        let needs_header = state.rows_written == 0 && !path.exists();
         let header_line = if needs_header {
             Some(
                 serde_json::to_string(&SessionMetadataHeader::fresh(&self.id))
@@ -366,14 +377,6 @@ impl SessionSink for JsonlSessionSink {
             .map(|h| h.len() as u64 + 1)
             .unwrap_or(0);
 
-        // Reserve the seq window before the IO so a concurrent
-        // `read` cannot observe a `last_event_seq` that lags the
-        // bytes. The guard is held across the `spawn_blocking`
-        // await, exactly as `append` holds it, so nothing interleaves.
-        // Any failure rolls the window back.
-        let end_seq = state.next_seq + events.len() as u64;
-        state.next_seq = end_seq;
-
         let written = tokio::task::spawn_blocking(move || {
             append_lines_batch_sync(&path, header_line.as_deref(), &lines)
         })
@@ -382,18 +385,13 @@ impl SessionSink for JsonlSessionSink {
         match written {
             Ok(Ok(())) => {
                 state.bytes_on_disk += total_bytes;
-                Ok(end_seq)
+                state.rows_written += events.len() as u64;
+                Ok(())
             }
-            Ok(Err(e)) => {
-                state.next_seq = end_seq - events.len() as u64;
-                Err(SessionError::AppendFailed(e))
-            }
-            Err(e) => {
-                state.next_seq = end_seq - events.len() as u64;
-                Err(SessionError::AppendFailed(format!(
-                    "join blocking task: {e}"
-                )))
-            }
+            Ok(Err(e)) => Err(SessionError::AppendFailed(e)),
+            Err(e) => Err(SessionError::AppendFailed(format!(
+                "join blocking task: {e}"
+            ))),
         }
     }
 
@@ -407,10 +405,11 @@ impl SessionSink for JsonlSessionSink {
 
     async fn snapshot(&self) -> Result<SessionSnapshot, SessionError> {
         let state = self.state.lock().await;
+        let last = self.next_seq.load(Ordering::SeqCst);
         Ok(SessionSnapshot {
             session_id: self.id.clone(),
-            last_event_seq: state.next_seq,
-            last_stream_index: state.next_seq,
+            last_event_seq: last,
+            last_stream_index: last,
             bytes_on_disk: state.bytes_on_disk,
         })
     }
@@ -601,16 +600,19 @@ mod tests {
         p
     }
 
+    /// Write one row the way a writer does: reserve its ordinal
+    /// first, then hand the row to the sink.
+    async fn write(sink: &JsonlSessionSink, row: Value) {
+        sink.alloc_seq();
+        sink.append(&row).await.expect("append");
+    }
+
     #[tokio::test]
     async fn jsonl_sink_round_trips_events_across_instances() {
         let dir = temp_dir().join("s1");
         let sink = JsonlSessionSink::new("s1", dir.clone());
-        sink.append(&json!({"role": "user", "text": "hi"}))
-            .await
-            .unwrap();
-        sink.append(&json!({"role": "assistant", "text": "hello"}))
-            .await
-            .unwrap();
+        write(&sink, json!({"role": "user", "text": "hi"})).await;
+        write(&sink, json!({"role": "assistant", "text": "hello"})).await;
         // Re-open the same dir — should see the same two events.
         let sink2 = JsonlSessionSink::new("s1", dir);
         let events = sink2.read().await.unwrap();
@@ -633,7 +635,7 @@ mod tests {
         let dir = temp_dir().join("s3");
         let sink = JsonlSessionSink::new("s3", dir);
         for i in 0..5 {
-            sink.append(&json!({"i": i})).await.unwrap();
+            write(&sink, json!({"i": i})).await;
         }
         let snap = sink.snapshot().await.unwrap();
         assert_eq!(snap.last_event_seq, 5);
@@ -651,6 +653,7 @@ mod tests {
         for i in 0..50 {
             let s = sink.clone();
             handles.push(tokio::spawn(async move {
+                s.alloc_seq();
                 s.append(&json!({"i": i})).await
             }));
         }
@@ -674,7 +677,7 @@ mod tests {
         let dir = temp_dir().join("s_from_zero");
         let sink = JsonlSessionSink::new("s_from_zero", dir);
         for i in 0..4 {
-            sink.append(&json!({"i": i})).await.unwrap();
+            write(&sink, json!({"i": i})).await;
         }
         let all = sink.read().await.unwrap();
         let from_zero = sink.read_from(0).await.unwrap();
@@ -689,7 +692,7 @@ mod tests {
         let dir = temp_dir().join("s_from_n");
         let sink = JsonlSessionSink::new("s_from_n", dir);
         for i in 0..6 {
-            sink.append(&json!({"i": i})).await.unwrap();
+            write(&sink, json!({"i": i})).await;
         }
         let from_three = sink.read_from(3).await.unwrap();
         assert_eq!(from_three.len(), 3);
@@ -704,7 +707,7 @@ mod tests {
         let dir = temp_dir().join("s_past_end");
         let sink = JsonlSessionSink::new("s_past_end", dir);
         for i in 0..2 {
-            sink.append(&json!({"i": i})).await.unwrap();
+            write(&sink, json!({"i": i})).await;
         }
         let beyond = sink.read_from(u64::MAX).await.unwrap();
         assert!(beyond.is_empty());
@@ -715,7 +718,7 @@ mod tests {
         let dir = temp_dir().join("s_resume");
         let sink = JsonlSessionSink::new("s_resume", dir.clone());
         for i in 0..3 {
-            sink.append(&json!({"i": i})).await.unwrap();
+            write(&sink, json!({"i": i})).await;
         }
         let snap = sink.snapshot().await.unwrap();
         drop(sink);
@@ -735,7 +738,7 @@ mod tests {
     async fn jsonl_sink_writes_metadata_header_on_first_append() {
         let dir = temp_dir().join("s_meta_first");
         let sink = JsonlSessionSink::new("s_meta_first", dir.clone());
-        sink.append(&json!({"i": 0})).await.unwrap();
+        write(&sink, json!({"i": 0})).await;
         let raw = std::fs::read_to_string(dir.join("events.jsonl")).unwrap();
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(lines.len(), 2, "header + 1 event");
@@ -750,7 +753,7 @@ mod tests {
         let dir = temp_dir().join("s_meta_count");
         let sink = JsonlSessionSink::new("s_meta_count", dir.clone());
         for i in 0..3 {
-            sink.append(&json!({"i": i})).await.unwrap();
+            write(&sink, json!({"i": i})).await;
         }
         let snap = sink.snapshot().await.unwrap();
         assert_eq!(snap.last_event_seq, 3, "header must not be counted");
@@ -782,29 +785,32 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[tokio::test]
-    async fn jsonl_sink_idempotent_append_returns_original_seq() {
+    async fn jsonl_sink_idempotent_append_writes_the_row_once() {
         let dir = temp_dir().join("s_idem_basic");
         let sink = JsonlSessionSink::new("s_idem_basic", dir);
-        let first = sink
-            .append_with_key(Some("evt-1"), &json!({"i": 0}))
+        sink.alloc_seq();
+        sink.append_with_key(Some("evt-1"), &json!({"i": 0}))
             .await
             .unwrap();
-        let second = sink
-            .append_with_key(Some("evt-1"), &json!({"i": 0}))
+        sink.alloc_seq();
+        sink.append_with_key(Some("evt-1"), &json!({"i": 0}))
             .await
             .unwrap();
-        assert_eq!(first, second, "dup key must return original seq");
         let snap = sink.snapshot().await.unwrap();
-        assert_eq!(snap.last_event_seq, 1, "no second row was written");
+        assert_eq!(snap.last_event_seq, 2, "both reservations were taken");
+        let events = sink.read().await.unwrap();
+        assert_eq!(events.len(), 1, "no second row was written");
     }
 
     #[tokio::test]
     async fn jsonl_sink_idempotent_distinct_keys_both_written() {
         let dir = temp_dir().join("s_idem_distinct");
         let sink = JsonlSessionSink::new("s_idem_distinct", dir);
+        sink.alloc_seq();
         sink.append_with_key(Some("a"), &json!({"i": 0}))
             .await
             .unwrap();
+        sink.alloc_seq();
         sink.append_with_key(Some("b"), &json!({"i": 1}))
             .await
             .unwrap();
@@ -823,7 +829,9 @@ mod tests {
         // pre-idempotency contract for callers that do not care.
         let dir = temp_dir().join("s_idem_none");
         let sink = JsonlSessionSink::new("s_idem_none", dir);
+        sink.alloc_seq();
         sink.append_with_key(None, &json!({"i": 0})).await.unwrap();
+        sink.alloc_seq();
         sink.append_with_key(None, &json!({"i": 0})).await.unwrap();
         let snap = sink.snapshot().await.unwrap();
         assert_eq!(snap.last_event_seq, 2);
@@ -838,8 +846,10 @@ mod tests {
         let dir = temp_dir().join("s_many_basic");
         let sink = JsonlSessionSink::new("s_many_basic", dir.clone());
         let batch: Vec<Value> = (0..10).map(|i| json!({"i": i})).collect();
-        let last = sink.append_many(&batch).await.unwrap();
-        assert_eq!(last, 10);
+        for _ in &batch {
+            sink.alloc_seq();
+        }
+        sink.append_many(&batch).await.unwrap();
         let snap = sink.snapshot().await.unwrap();
         assert_eq!(snap.last_event_seq, 10);
         let events = sink.read().await.unwrap();
@@ -853,8 +863,7 @@ mod tests {
     async fn jsonl_sink_append_many_empty_is_noop() {
         let dir = temp_dir().join("s_many_empty");
         let sink = JsonlSessionSink::new("s_many_empty", dir);
-        let last = sink.append_many(&[]).await.unwrap();
-        assert_eq!(last, 0);
+        sink.append_many(&[]).await.unwrap();
         let events = sink.read().await.unwrap();
         assert!(events.is_empty());
     }
@@ -872,11 +881,14 @@ mod tests {
     async fn jsonl_sink_append_many_combines_with_subsequent_appends() {
         let dir = temp_dir().join("s_many_combine");
         let sink = JsonlSessionSink::new("s_many_combine", dir.clone());
-        sink.append(&json!({"i": 0})).await.unwrap();
+        write(&sink, json!({"i": 0})).await;
+        for _ in 1..5 {
+            sink.alloc_seq();
+        }
         sink.append_many(&(1..5).map(|i| json!({"i": i})).collect::<Vec<_>>())
             .await
             .unwrap();
-        sink.append(&json!({"i": 5})).await.unwrap();
+        write(&sink, json!({"i": 5})).await;
         let snap = sink.snapshot().await.unwrap();
         assert_eq!(snap.last_event_seq, 6);
         drop(sink);

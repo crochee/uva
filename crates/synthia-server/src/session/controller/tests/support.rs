@@ -21,13 +21,7 @@ use std::{
 use anyhow::Result;
 use futures::{Stream, StreamExt};
 use synthia::{
-    harness::{
-        AgentEvent,
-        AgentInput,
-        AgentRunConfig,
-        SessionEndReason,
-        SystemEvent,
-    },
+    harness::{AgentEvent, AgentInput, SessionEndReason, SystemEvent},
     provider::{
         Content,
         ContentPart,
@@ -41,7 +35,10 @@ use synthia::{
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::session::controller::{RunStreamFactory, SessionController};
+use crate::{
+    agent_run_config::{AgentRunConfig, RunOverrides},
+    session::controller::{RunStreamFactory, SessionController},
+};
 
 /// Build a [`RunDependencies`] with no capabilities wired — every
 /// test that needs a fresh baseline calls this. Returns the
@@ -116,7 +113,7 @@ pub(super) async fn make_manager_and_controller_with_deps(
 /// observable; same idiom as
 /// `test_events_are_persisted_and_broadcast`.
 pub(super) async fn wait_for_runs(
-    calls: &Arc<Mutex<Vec<AgentRunConfig>>>,
+    calls: &Arc<Mutex<Vec<RecordedCall>>>,
     n: usize,
 ) {
     tokio::time::timeout(Duration::from_secs(2), async {
@@ -182,14 +179,21 @@ pub(super) fn find_events_jsonl(
 /// session input queue, useful for persistence and broadcast tests.
 pub(super) struct VecFactory {
     pub(super) events: Vec<AgentEvent>,
-    pub(super) calls: Arc<Mutex<Vec<AgentRunConfig>>>,
+    pub(super) calls: Arc<Mutex<Vec<RecordedCall>>>,
     pub(super) queue: Option<SessionInputQueue>,
+}
+
+#[allow(dead_code)]
+pub(super) struct RecordedCall {
+    pub(super) config: AgentRunConfig,
+    pub(super) overrides: RunOverrides,
+    pub(super) input: AgentInput,
 }
 
 impl VecFactory {
     pub(super) fn new(
         events: Vec<AgentEvent>,
-        calls: Arc<Mutex<Vec<AgentRunConfig>>>,
+        calls: Arc<Mutex<Vec<RecordedCall>>>,
         queue: Option<SessionInputQueue>,
     ) -> Self {
         Self {
@@ -204,10 +208,15 @@ impl RunStreamFactory for VecFactory {
     fn run_stream(
         &self,
         config: AgentRunConfig,
-        _input: AgentInput,
+        overrides: RunOverrides,
+        input: AgentInput,
         cancel: Arc<CancellationToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
-        self.calls.lock().unwrap().push(config.clone());
+        self.calls.lock().unwrap().push(RecordedCall {
+            config: config.clone(),
+            overrides,
+            input,
+        });
 
         let events = self.events.clone();
         let _queue = self.queue.clone();
@@ -222,7 +231,7 @@ impl RunStreamFactory for VecFactory {
 /// A factory that blocks until its cancellation token fires,
 /// useful for verifying that only one run is active at a time.
 pub(super) struct BlockingFactory {
-    pub(super) calls: Arc<Mutex<Vec<AgentRunConfig>>>,
+    pub(super) calls: Arc<Mutex<Vec<RecordedCall>>>,
     pub(super) progress_count: Arc<AtomicUsize>,
 }
 
@@ -230,10 +239,15 @@ impl RunStreamFactory for BlockingFactory {
     fn run_stream(
         &self,
         config: AgentRunConfig,
-        _input: AgentInput,
+        overrides: RunOverrides,
+        input: AgentInput,
         cancel: Arc<CancellationToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
-        self.calls.lock().unwrap().push(config.clone());
+        self.calls.lock().unwrap().push(RecordedCall {
+            config: config.clone(),
+            overrides,
+            input,
+        });
 
         let count = Arc::clone(&self.progress_count);
 
@@ -282,6 +296,7 @@ impl RunStreamFactory for RecordingFactory {
     fn run_stream(
         &self,
         _config: AgentRunConfig,
+        _overrides: RunOverrides,
         input: AgentInput,
         cancel: Arc<CancellationToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {

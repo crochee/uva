@@ -22,6 +22,14 @@ parking_lot.workspace = true
 chrono.workspace = true
 base64.workspace = true
 ulid.workspace = true
+# `futures::executor::block_on` is the runtime-neutral inline
+# executor for `spawn::InlineSpawner` — the runtime-free fallback
+# the harness installs as its default when the consumer does not
+# provide one. `futures` is a primitives library, not a runtime:
+# it has no reactor, no worker pool, and no I/O integration;
+# the only "executor" surface it ships is the `block_on` we use
+# here, which polls a future on the calling thread.
+futures.workspace = true
 
 # Both optional: this crate is the runtime-neutral foundation, so it
 # must not force an HTTP client or an async runtime on a consumer.

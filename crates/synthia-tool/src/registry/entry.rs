@@ -34,8 +34,8 @@ pub struct ToolEntry {
     ///
     /// This is the *privacy* flag: a hidden tool is never advertised
     /// **and** [`ToolRegistry::run_stream`] refuses a model-issued call
-    /// to it. For a tool that merely should not be advertised yet —
-    /// but stays callable — use [`ToolExposure::Hidden`] instead.
+    /// to it. For a tool that merely should not be advertised yet—
+    /// but stays callable—use [`ToolExposure::Hidden`] instead.
     pub(crate) is_hidden: bool,
     /// How much of the tool the model is shown, and when.
     pub(crate) exposure: ToolExposure,
@@ -165,7 +165,7 @@ impl RegistryItem for ToolEntry {
 
 impl Serialize for ToolEntry {
     /// Serialise as `{name, description}` only. The `tool` field is
-    /// intentionally **not** emitted — trait objects don't have a stable
+    /// intentionally **not** emitted—trait objects don't have a stable
     /// JSON shape, and the catalog consumers (CLI `tools list`, server
     /// introspection) only need the human metadata.
     fn serialize<S>(
@@ -184,7 +184,7 @@ impl Serialize for ToolEntry {
 }
 
 impl<'de> serde::Deserialize<'de> for ToolEntry {
-    /// Deserialisation is intentionally rejected — there's no portable
+    /// Deserialisation is intentionally rejected—there's no portable
     /// way to rebuild a `Tool` from JSON. Callers must use
     /// [`ToolRegistry::register_entry`](super::ToolRegistry::register_entry) (which takes an `Arc<dyn Tool>`
     /// wrapped in a [`ToolEntry`]) instead of round-tripping through
@@ -207,7 +207,7 @@ impl<'de> serde::Deserialize<'de> for ToolEntry {
 /// during registration.
 #[derive(Clone)]
 pub(crate) struct ProviderEntry {
-    /// Token that owns this registration — used for scoped unregistration.
+    /// Token that owns this registration—used for scoped unregistration.
     pub(crate) provider_token: RegistrationToken,
     pub(crate) tool: Arc<dyn Tool>,
     pub(crate) provenance: ToolProvenance,

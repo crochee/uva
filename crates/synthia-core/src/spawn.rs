@@ -9,9 +9,9 @@
 //! choose tokio.
 //!
 //! [`Spawner`] is that one operation, with no runtime in its
-//! signature: box a future in, nothing comes out. `synthia-harness`'s
-//! default spawner is tokio-backed (it already depends on tokio for
-//! its own internals), and a consumer on `smol`, `async-std`, or a
+//! signature: box a future in, nothing comes out. The harness's
+//! default is the runtime-free [`InlineSpawner`]; a consumer on
+//! `tokio` (via `synthia-harness-tokio`), `smol`, `async-std`, or a
 //! bare `futures::executor::ThreadPool` injects their own through
 //! `ReActAgent::with_spawner`. Nothing in the loop knows which one it got.
 //!
@@ -70,33 +70,77 @@ pub trait Spawner: Send + Sync + 'static {
     }
 }
 
+/// Blanket impl: `Arc<T>` derefs to `T`, so an `Arc<dyn Spawner>`
+/// field can hold any concrete spawner.
+impl<T: Spawner + ?Sized> Spawner for Arc<T> {
+    fn spawn(&self, task: BoxFuture<()>) {
+        (**self).spawn(task);
+    }
+
+    fn spawn_blocking(&self, f: Box<dyn FnOnce() + Send + 'static>) {
+        (**self).spawn_blocking(f);
+    }
+}
+
 /// A shared spawner handle — what the crates actually store.
 pub type SharedSpawner = Arc<dyn Spawner>;
 
+/// The runtime-free fallback spawner.
+///
+/// [`spawn`](Self::spawn) hands the future to a fresh OS thread
+/// (via [`std::thread::spawn`]) and drives it to completion on
+/// that thread with [`futures::executor::block_on`]. There is no
+/// background worker, no queue, and no async-runtime reactor —
+/// every `spawn` call pays for a `std::thread::spawn`. The
+/// harness installs this as its unconditional default; a consumer
+/// who wants detached work behind a real executor installs their
+/// own (the tokio-backed one lives in `synthia-harness-tokio`)
+/// through
+/// [`ReActAgent::with_spawner`](https://docs.rs/synthia-harness).
+///
+/// `spawn_blocking` runs the closure on a fresh thread directly
+/// (no `block_on` involved).
+///
+/// Why a fresh thread instead of `block_on` on the caller: when
+/// the caller is itself running inside an async runtime
+/// (e.g. `#[tokio::test]`), `block_on` on the caller would
+/// deadlock the runtime. Detaching via `std::thread::spawn`
+/// keeps the caller unblocked and avoids the deadlock; the cost
+/// is one OS thread per `spawn`.
+#[derive(Debug, Default)]
+pub struct InlineSpawner;
+
+impl Spawner for InlineSpawner {
+    fn spawn(&self, task: BoxFuture<()>) {
+        std::thread::spawn(move || {
+            futures::executor::block_on(task);
+        });
+    }
+
+    fn spawn_blocking(&self, f: Box<dyn FnOnce() + Send + 'static>) {
+        std::thread::spawn(f);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        task::{Context, Waker},
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     use super::*;
 
-    /// A spawner that polls the future once, inline. It is the smallest
-    /// possible implementation and it proves the trait needs no
-    /// runtime: this test compiles in a crate with no async executor.
-    struct InlineSpawner;
-
-    impl Spawner for InlineSpawner {
-        fn spawn(&self, mut task: BoxFuture<()>) {
-            let mut cx = Context::from_waker(Waker::noop());
-            // One poll is enough for a future that never awaits; a
-            // real executor would loop until `Poll::Ready`.
-            let _ = task.as_mut().poll(&mut cx);
+    /// `InlineSpawner` detaches onto a fresh OS thread, so the test
+    /// polls for the side effect instead of racing the scheduler.
+    fn settles(payload: &Arc<AtomicUsize>, expected: usize) {
+        for _ in 0..2_000 {
+            if payload.load(Ordering::SeqCst) == expected {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_micros(200));
         }
+        assert_eq!(payload.load(Ordering::SeqCst), expected);
     }
 
     #[test]
@@ -106,7 +150,7 @@ mod tests {
         InlineSpawner.spawn(Box::pin(async move {
             seen.store(7, Ordering::SeqCst);
         }));
-        assert_eq!(payload.load(Ordering::SeqCst), 7);
+        settles(&payload, 7);
     }
 
     #[test]
@@ -116,7 +160,7 @@ mod tests {
         InlineSpawner.spawn_blocking(Box::new(move || {
             seen.store(11, Ordering::SeqCst);
         }));
-        assert_eq!(cell.load(Ordering::SeqCst), 11);
+        settles(&cell, 11);
     }
 
     #[test]
@@ -127,6 +171,6 @@ mod tests {
         spawner.spawn(Box::pin(async move {
             seen.fetch_add(1, Ordering::SeqCst);
         }));
-        assert_eq!(ran.load(Ordering::SeqCst), 1);
+        settles(&ran, 1);
     }
 }

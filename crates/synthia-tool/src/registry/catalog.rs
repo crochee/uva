@@ -39,8 +39,8 @@ pub struct ToolDescriptor {
 /// MCP-shaped advisory hints carried on a [`ToolDescriptor`].
 ///
 /// All four hints are independent; a tool declares as many as it
-/// can stand behind. Synthia does **not** enforce them — a
-/// [`readOnlyHint = true`] tool that mutates still mutates — but
+/// can stand behind. Synthia does **not** enforce them—a
+/// [`readOnlyHint = true`] tool that mutates still mutates—but
 /// the harness reads them in `before_tool_call` and the operator
 /// listing surfaces them. Adopting the MCP field names keeps an
 /// MCP-published tool's annotations one round-trip away from
@@ -98,14 +98,16 @@ pub enum ToolProvenance {
 /// `ToolExposure` and [`ToolDescriptor::is_hidden`] say different
 /// things and are both honoured by the projection:
 ///
-/// - [`ToolExposure::Hidden`] — the tool is **not advertised at all**,
-///   in any form. It stays dispatcheable (a skill, a workflow step or
-///   the runtime itself can still call it), exactly like a tool whose
-///   [`crate::GroupedRegistry`] group is deactivated.
-/// - [`ToolDescriptor::is_hidden`] (`ToolEntry::with_is_hidden`) — the
+/// - [`ToolExposure::Hidden`]—the tool is **not advertised at
+///   all**, in any form. It stays dispatcheable (a skill, a
+///   workflow step or the runtime itself can still call it),
+///   exactly like a tool whose [`crate::GroupedRegistry`] group
+///   is deactivated.
+/// - [`ToolDescriptor::is_hidden`] (`ToolEntry::with_is_hidden`)—the
 ///   registry's privacy flag: the tool is not advertised **and**
-///   [`ToolRegistry::run_stream`](super::ToolRegistry::run_stream) refuses a model-issued call to it.
-///   The registry — not the projection — is the enforcement point.
+///   [`ToolRegistry::run_stream`](super::ToolRegistry::run_stream)
+///   refuses a model-issued call to it. The registry—not the
+///   projection—is the enforcement point.
 ///
 /// A tool with `is_hidden = true` is therefore absent from the model
 /// list no matter what its exposure says; `Hidden` exposure on a
@@ -125,6 +127,69 @@ pub enum ToolExposure {
     Deferred,
     /// Not advertised to the LLM; callable by the runtime only.
     Hidden,
+}
+
+/// Single visibility state for a tool—derived from the
+/// [`ToolDescriptor::is_hidden`] privacy flag and the
+/// [`ToolExposure`] prompt-economy knob.
+///
+/// Three orthogonal questions currently decide whether a tool is
+/// advertised, executed, or both:
+///
+/// - [`ToolDescriptor::is_hidden`]—the registry's privacy flag. A
+///   hidden tool is not advertised **and** the dispatcher refuses
+///   a model-issued call to it. The registry—not the
+///   projection—enforces it.
+/// - [`ToolDescriptor::exposure`] / [`ToolExposure`]—the
+///   prompt-economy knob. The softer levels (`Deferred` /
+///   `Hidden`) do **not** change dispatch; they only narrow what
+///   the projection sends to the model.
+///
+/// This enum collapses the two into a single answer the projection
+/// can consume without re-deriving it from a pair of fields that
+/// could otherwise disagree. The derivation rule is intentionally
+/// total (`is_hidden = true` is always `Hidden`; otherwise the
+/// `exposure` value passes through), and a contract test in
+/// `crates/synthia-tool/tests/visibility.rs` pins it.
+/// The projection (`crate::surface`) reads this derivation; the
+/// two fields stay public as the wire shape.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    /// Fully advertised + dispatchable.
+    #[default]
+    Visible,
+    /// Advertised as name + description only; full schema on first
+    /// call (transcript-driven promotion).
+    Deferred,
+    /// Not advertised; callable by the runtime only.
+    Hidden,
+}
+
+impl ToolDescriptor {
+    /// Collapse the `is_hidden` privacy flag + `exposure` prompt-
+    /// economy knob into a single [`Visibility`] answer.
+    ///
+    /// The derivation is total: `is_hidden = true` always wins (a
+    /// hidden tool is hidden, regardless of its `exposure`); for
+    /// non-hidden tools the `exposure` value passes through
+    /// directly. This matches the documented contract in
+    /// [`ToolExposure`] (the projection reads both, with `is_hidden`
+    /// having the final say); `crate::surface`'s advertisement
+    /// filter dispatches on this method.
+    #[must_use]
+    pub fn visibility(&self) -> Visibility {
+        if self.is_hidden {
+            return Visibility::Hidden;
+        }
+        match self.exposure {
+            ToolExposure::Direct => Visibility::Visible,
+            ToolExposure::Deferred => Visibility::Deferred,
+            ToolExposure::Hidden => Visibility::Hidden,
+        }
+    }
 }
 
 /// Tool category for routing decisions.

@@ -96,10 +96,10 @@ pub struct AgentContext {
 /// (the existing [`GroupJoin`](crate::GroupJoin)
 /// bus is the production consumer).
 ///
-/// Named `MentionCloneHandle` (not `DetachedAgent`) to avoid
-/// collision with [`synthia_harness::DetachedAgent`],
-/// which is the production handle the `AgentHandle` factory
-/// returns.
+/// Named `MentionCloneHandle` because the `task` tool already owns
+/// the delegation vocabulary: a host reading `Agent::run`'s stream and
+/// a host reading a clone's stream should not look like two different
+/// kinds of "run".
 pub struct MentionCloneHandle {
     /// The clone itself. Held so the caller can introspect
     /// the descriptor (for operator dashboards) and so the
@@ -151,11 +151,14 @@ impl MentionClone {
         //    that assertion to `names().count() == 1`.
         let tool_registry = Arc::new(ToolRegistry::new());
         let agent: Arc<dyn Agent> = Arc::new(
-            ReActAgent::with_options(
+            ReActAgent::with_descriptor(
                 Arc::clone(&ctx.provider),
                 tool_registry,
                 ctx.workspace_root.clone(),
-                ctx.system_prompt.clone(),
+                synthia_harness::agent::descriptor::default_descriptor(
+                    ctx.system_prompt.clone(),
+                ),
+                Arc::new(synthia_harness::PromptContext::default()),
             )
             .with_max_iterations(ctx.max_iterations),
         );

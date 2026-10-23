@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use synthia::{
     core::{Error, agent::AgentDescriptor, registry::Registry},
     harness::agent::{Agent, AgentEntry},
-    provider::ModelProvider,
     tool_task::TaskDelegator,
 };
 
@@ -168,7 +167,6 @@ pub(crate) fn build_react_agent(
     descriptor: AgentDescriptor,
     max_iterations: Option<usize>,
 ) -> std::sync::Arc<dyn Agent> {
-    let provider: Arc<dyn ModelProvider> = Arc::clone(&state.default_provider);
     let tool_registry = {
         match state.tool_registry.try_read() {
             Ok(g) => Arc::new(g.clone()),
@@ -181,41 +179,42 @@ pub(crate) fn build_react_agent(
             }
         }
     };
-    let agent = synthia::harness::ReActAgent::with_descriptor(
-        provider,
+    let agent = crate::agent_assembly::AgentAssembly {
+        provider: Arc::clone(&state.default_provider),
         tool_registry,
-        state.workspace_root.clone(),
+        workspace_root: state.workspace_root.clone(),
         descriptor,
-        state.prompt_context.clone(),
-    )
-    // Registered specialists delegate to any peer via the
-    // `task` tool plugin; the registry is shared so children
-    // resolve the same catalog (depth-capped to prevent cycles).
-    .with_interceptor(Arc::new(TaskDelegator::new(Arc::clone(&state.agent_registry))))
-    // Server-wide steering policy applies to dynamically
-    // registered agents and every session-factory run.
-    .with_steering(Arc::clone(&state.steering))
-    // Honour the per-request cap (`max_iterations` in the
-    // POST body) when supplied; otherwise the AppState
-    // default (resolved from `agents.<name>.max_steps`)
-    // wins via the session factory.
-    .with_max_iterations(max_iterations.unwrap_or(state.default_max_iterations));
-    // R50: a registered agent runs the deployment's configured
-    // reasoning loop, exactly like a session run does — the session
-    // factory is the other place the server assembles an agent, and
-    // the two must agree.
-    let agent = match state.default_strategy.clone() {
-        Some(strategy) => agent.with_strategy(strategy),
-        None => agent,
-    };
-    // R58: and the deployment's allow/deny list, so a registered agent
-    // and a session run are restricted the same way.
-    Arc::new(match state.default_tool_restriction.clone() {
-        Some(restriction) => {
-            agent.with_tool_restriction((*restriction).clone())
-        }
-        None => agent,
-    })
+        prompt_context: state.prompt_context.clone(),
+        // Server-wide steering policy applies to dynamically
+        // registered agents and every session-factory run.
+        steering: Arc::clone(&state.steering),
+        // Honour the per-request cap (`max_iterations` in the
+        // POST body) when supplied; otherwise the AppState
+        // default (resolved from `agents.<name>.max_steps`)
+        // wins via the session factory.
+        max_iterations: max_iterations.unwrap_or(state.default_max_iterations),
+        // Registered specialists delegate to any peer via the
+        // `task` tool plugin; the registry is shared so children
+        // resolve the same catalog (depth-capped to prevent
+        // cycles).
+        synthetic: vec![Arc::new(TaskDelegator::new(Arc::clone(
+            &state.agent_registry,
+        )))],
+        tool_surface: None,
+        // R50: a registered agent runs the deployment's configured
+        // reasoning loop, exactly like a session run does — the
+        // session factory is the other place the server assembles
+        // an agent, and the two must agree.
+        strategy: state.default_strategy.clone(),
+        // R58: and the deployment's allow/deny list, so a
+        // registered agent and a session run are restricted the
+        // same way.
+        tool_restriction: state.default_tool_restriction.clone(),
+        typed_event_sink: None,
+        context_manager: None,
+    }
+    .build();
+    Arc::new(agent)
 }
 /// GET /api/v1/agents — list registered agents (cursor paginated).
 pub async fn list_agents(

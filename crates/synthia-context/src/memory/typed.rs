@@ -143,6 +143,7 @@ pub async fn repair_session(
     for closer in &closers {
         let v = serde_json::to_value(closer)
             .map_err(|e| TypedProjectionError::Fold(e.to_string()))?;
+        sink.alloc_seq();
         sink.append(&v)
             .await
             .map_err(|e| TypedProjectionError::Sink(e.to_string()))?;
@@ -172,6 +173,7 @@ mod tests {
     async fn typed_user_message_projects_as_user_role() {
         let s = sink();
         let user = Message::user("hi");
+        s.alloc_seq();
         s.append(&json!({
             "seq": 0,
             "ts": "2026-09-10T00:00:00Z",
@@ -191,6 +193,7 @@ mod tests {
         let s = sink();
         // `{"type": "UserInput", "data": {"text": "hi"}}` — the
         // pre-R4 envelope the server controller emitted.
+        s.alloc_seq();
         s.append(&json!({
             "type": "UserInput",
             "data": {"text": "hi"}
@@ -206,6 +209,7 @@ mod tests {
     async fn mixed_typed_and_legacy_events_compose() {
         let s = sink();
         // Legacy first (the agent loop emitted this before R4).
+        s.alloc_seq();
         s.append(&json!({
             "type": "UserInput",
             "data": {"text": "old"}
@@ -215,6 +219,7 @@ mod tests {
         // Typed second (the agent loop after R4). The data
         // payload is a real `Message` serde value.
         let assistant = Message::assistant("new");
+        s.alloc_seq();
         s.append(&json!({
             "seq": 99,
             "ts": "2026-09-10T00:00:00Z",
@@ -237,6 +242,7 @@ mod tests {
         let s = sink();
         for i in 0..5 {
             let user = Message::user(format!("m{i}"));
+            s.alloc_seq();
             s.append(&json!({
                 "seq": i,
                 "ts": "2026-09-10T00:00:00Z",
@@ -256,6 +262,7 @@ mod tests {
         let s = sink();
         // Seed an interrupted log: turn/start + step/start +
         // assistant-with-tool-use + tool_call + nothing else.
+        s.alloc_seq();
         s.append(&json!({
             "seq": 1,
             "ts": "2026-09-10T00:00:00Z",
@@ -264,6 +271,7 @@ mod tests {
         }))
         .await
         .unwrap();
+        s.alloc_seq();
         s.append(&json!({
             "seq": 2,
             "ts": "2026-09-10T00:00:00Z",
@@ -272,6 +280,7 @@ mod tests {
         }))
         .await
         .unwrap();
+        s.alloc_seq();
         s.append(&json!({
             "seq": 3,
             "ts": "2026-09-10T00:00:00Z",
@@ -285,6 +294,7 @@ mod tests {
         }))
         .await
         .unwrap();
+        s.alloc_seq();
         s.append(&json!({
             "seq": 4,
             "ts": "2026-09-10T00:00:00Z",
@@ -314,6 +324,7 @@ mod tests {
     #[tokio::test]
     async fn repair_session_no_op_for_balanced_log() {
         let s = sink();
+        s.alloc_seq();
         s.append(&json!({
             "seq": 1,
             "ts": "2026-09-10T00:00:00Z",
@@ -331,6 +342,7 @@ mod tests {
     async fn fold_failure_surfaces_as_typed_projection_error() {
         let s = sink();
         // Bad replace: source_event_seqs cites a future seq.
+        s.alloc_seq();
         s.append(&json!({
             "seq": 1,
             "ts": "2026-09-10T00:00:00Z",
@@ -340,6 +352,7 @@ mod tests {
         }))
         .await
         .unwrap();
+        s.alloc_seq();
         s.append(&json!({
             "seq": 2,
             "ts": "2026-09-10T00:00:00Z",
@@ -380,6 +393,7 @@ mod tests {
                 "content": [{"type": "text", "text": "ONE"}],
             }}),
         ] {
+            sink.alloc_seq();
             sink.append(&row).await.unwrap();
         }
         let events = sink.read().await.unwrap();

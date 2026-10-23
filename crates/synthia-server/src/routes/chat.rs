@@ -228,9 +228,21 @@ pub async fn send_message(
     // selection the server cannot honour is the caller's to see, and
     // discovering it only after the turn was accepted would leave the
     // user watching a stream that already ran the wrong model.
-    let provider = state
-        .resolve_provider(req.model.as_deref())
-        .map_err(selection_error)?;
+    //
+    // Only an *explicit* selection becomes a provider pin. A pin
+    // cannot cross nodes (it holds a live provider handle), so
+    // pinning the default would make every submission to a
+    // remote-owned session fail; an unpinned op runs the owner's own
+    // configured default, which is the same provider when the
+    // deployment config is shared (it is — the config file is).
+    let pinned = match req.model.as_deref() {
+        Some(selection) => Some(
+            state
+                .resolve_provider(Some(selection))
+                .map_err(selection_error)?,
+        ),
+        None => None,
+    };
     let parts = build_parts(&req, Some(&state.attachment_store));
     let explicit_agent_name =
         state.resolve_agent_name_for(req.agent_name.as_deref());
@@ -254,7 +266,7 @@ pub async fn send_message(
             priority,
         }
     };
-    submit_session_op(&state, &session_id, op, Some(provider)).await
+    submit_session_op(&state, &session_id, op, pinned).await
 }
 
 /// Map a failed `model` resolution onto the unified error envelope.

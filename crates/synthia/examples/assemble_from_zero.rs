@@ -203,7 +203,7 @@ async fn main() {
     println!(
         "[7/7] agent          : {} (max {} iterations)",
         agent.descriptor().name,
-        agent.effective_max_iterations(),
+        agent.max_iterations(),
     );
 
     // --- 6. cancel token --------------------------------------------

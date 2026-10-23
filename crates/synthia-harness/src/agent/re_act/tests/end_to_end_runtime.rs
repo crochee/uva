@@ -36,11 +36,12 @@ async fn system_prompt_is_injected_into_llm_request_first_message() {
             }),
         }]]));
 
-    let agent = ReActAgent::with_options(
+    let agent = ReActAgent::with_descriptor(
         provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        PROMPT.to_string(),
+        crate::default_descriptor(PROMPT.to_string()),
+        Arc::new(PromptContext::default()),
     );
 
     let mut stream = agent
@@ -130,7 +131,7 @@ async fn empty_system_prompt_still_emits_assembled_identity() {
     // system message must never be empty" while preserving
     // the observability benefit of always knowing the
     // agent's identity.
-    use crate::{agent::descriptor::AgentDescriptor, prompt::PromptContext};
+    use crate::{agent::AgentDescriptor, prompt::PromptContext};
 
     let provider =
         Arc::new(CapturingProvider::new(vec![vec![StreamChunk::IsDone {
@@ -144,17 +145,7 @@ async fn empty_system_prompt_still_emits_assembled_identity() {
             }),
         }]]));
 
-    let agent = ReActAgent::with_prompt_context(
-        provider.clone(),
-        Arc::new(ToolRegistry::new()),
-        PathBuf::new(),
-        // empty system prompt
-        String::new(),
-        Arc::new(PromptContext::default()),
-    );
-
-    // Force the descriptor back to a bare shape so the
-    // assembler has nothing to render.
+    // A bare descriptor so the assembler has nothing to render.
     let bare = AgentDescriptor {
         name: "bare".into(),
         description: String::new(),
@@ -174,8 +165,14 @@ async fn empty_system_prompt_still_emits_assembled_identity() {
         display_name: None,
         max_iterations: None,
     };
-    let mut agent = agent;
-    agent.descriptor_mut(bare);
+
+    let agent = ReActAgent::with_descriptor(
+        provider.clone(),
+        Arc::new(ToolRegistry::new()),
+        PathBuf::new(),
+        bare,
+        Arc::new(PromptContext::default()),
+    );
 
     let mut stream = agent
         .run(
@@ -194,7 +191,6 @@ async fn empty_system_prompt_still_emits_assembled_identity() {
     }
 
     let captured = provider.captured.lock().await;
-    assert!(!captured.is_empty());
     use synthia_provider::Role;
     // Even with empty instructions the assembler emits the
     // identity section (containing the bare descriptor's

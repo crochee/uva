@@ -4,11 +4,10 @@
 //! `synthia_provider::types::ContentPart` for content parts.
 
 use std::{
+    fs,
+    io::Write,
     path::{Path, PathBuf},
-    time::Duration,
 };
-
-use tokio::{fs, io::AsyncWriteExt, time};
 
 use crate::types::{ToolOutput, TruncatedBy};
 
@@ -18,8 +17,6 @@ pub struct OutputBound {
     pub per_call_max_lines: usize,
     pub managed_dir: PathBuf,
     pub overflow_strategy: OverflowStrategy,
-    pub retention: Duration,
-    pub cleanup_interval: Duration,
     pub sanitization: SanitizationPolicy,
 }
 
@@ -30,8 +27,6 @@ impl Default for OutputBound {
             per_call_max_lines: 2000,
             managed_dir: PathBuf::from("/tmp/synthia-managed"),
             overflow_strategy: OverflowStrategy::TruncateHeadTail,
-            retention: Duration::from_secs(7 * 24 * 3600),
-            cleanup_interval: Duration::from_secs(3600),
             sanitization: SanitizationPolicy::StripControlChars,
         }
     }
@@ -73,7 +68,7 @@ pub enum SanitizationPolicy {
 /// Apply output bounds to a tool output.
 ///
 /// Truncates content if it exceeds per-call limits, and spills
-/// overflow to a managed file via `tokio::fs`.
+/// overflow to a managed file (blocking IO — see `spill_to_file`).
 pub async fn bound_output(
     output: &mut ToolOutput,
     config: &OutputBound,
@@ -163,98 +158,6 @@ pub async fn bound_output(
     }
 
     Ok(())
-}
-
-/// Handle to the managed-file cleanup task.
-///
-/// Runtime-neutral: the handle owns a **stop callback**, not a runtime's
-/// task handle, so no runtime type appears in this crate's public API and
-/// a consumer on any executor can hold, release, or build one
-/// ([`CleanupTask::from_stop`]). R62: the struct used to hold
-/// `tokio::task::JoinHandle`, which made the sentence above false — the
-/// `check-public-api-runtime` gate now enforces it.
-///
-/// Dropping the handle **stops** the task, so a long-lived service keeps
-/// it alive for its lifetime; [`CleanupTask::detach`] keeps the task
-/// running without the handle.
-pub struct CleanupTask(Option<Box<dyn Fn() + Send + Sync>>);
-
-impl CleanupTask {
-    /// Wrap any stop callback — the seam a consumer on another executor
-    /// uses: start your own cleanup loop, hand its stop path here, and
-    /// keep the same drop-stops-it contract.
-    ///
-    /// The callback runs **at most once**, however many times
-    /// [`CleanupTask::abort`] is called and whether or not the handle is
-    /// also dropped (`JoinHandle::abort` had that property incidentally;
-    /// a callback needs it on purpose).
-    #[must_use]
-    pub fn from_stop(stop: impl Fn() + Send + Sync + 'static) -> Self {
-        let fired =
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        Self(Some(Box::new(move || {
-            if !fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                stop();
-            }
-        })))
-    }
-
-    /// Stop the task. Idempotent.
-    pub fn abort(&self) {
-        if let Some(stop) = &self.0 {
-            stop();
-        }
-    }
-
-    /// Keep the task running after the handle goes away.
-    ///
-    /// Dropping the handle without calling `abort` releases the stop path
-    /// and leaves cleanup running — the runtime-neutral form of
-    /// "detaching" a task handle.
-    pub fn detach(mut self) {
-        drop(self.0.take());
-    }
-}
-
-impl std::fmt::Debug for CleanupTask {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CleanupTask")
-            .field("armed", &self.0.is_some())
-            .finish()
-    }
-}
-
-impl Drop for CleanupTask {
-    fn drop(&mut self) {
-        self.abort();
-    }
-}
-
-/// Start the managed file cleanup background task.
-///
-/// Deletes files under `managed_dir` whose mtime is older than
-/// `retention`, every `cleanup_interval`. Requires an async
-/// executor on the calling thread; returns a
-/// [`CleanupTask`] that aborts the loop when dropped.
-#[must_use]
-pub fn start_cleanup_task(
-    managed_dir: PathBuf,
-    retention: Duration,
-    cleanup_interval: Duration,
-) -> CleanupTask {
-    let handle = tokio::spawn(async move {
-        let mut interval = time::interval(cleanup_interval);
-        loop {
-            interval.tick().await;
-            if let Err(e) = cleanup_managed_files(&managed_dir, retention).await
-            {
-                tracing::warn!("managed file cleanup failed: {}", e);
-            }
-        }
-    });
-    // The runtime type stops here: the public handle carries only the
-    // stop path (see `CleanupTask`'s docs).
-    CleanupTask::from_stop(move || handle.abort())
 }
 
 /// Apply sanitization policy to output content.
@@ -372,7 +275,7 @@ async fn spill_to_file(
     session_id: &str,
     tool_name: &str,
 ) -> Result<PathBuf, std::io::Error> {
-    fs::create_dir_all(managed_dir).await?;
+    fs::create_dir_all(managed_dir)?;
 
     // A ULID, not a wall-clock stamp: it is the workspace's id
     // vocabulary (`synthia_core::IdGen`), it sorts by creation time
@@ -383,49 +286,25 @@ async fn spill_to_file(
     let filename = format!("{}-{}-{}.txt", session_id, tool_name, suffix);
     let path = managed_dir.join(&filename);
 
-    let mut file = fs::File::create(&path).await?;
-    file.write_all(text.as_bytes()).await?;
-    file.flush().await?;
+    // Blocking IO on purpose: the spill is a KiB-scale one-shot
+    // write inside a tool call, so the cost of a blocking write is
+    // negligible next to the tool's own work — and it keeps this
+    // crate free of any runtime dependency.
+    let mut file = fs::File::create(&path)?;
+    file.write_all(text.as_bytes())?;
+    file.flush()?;
 
     Ok(path)
 }
 
-/// Remove managed files older than retention period.
-async fn cleanup_managed_files(
-    managed_dir: &Path,
-    retention: Duration,
-) -> Result<(), std::io::Error> {
-    let cutoff = std::time::SystemTime::now() - retention;
-
-    let mut entries = fs::read_dir(managed_dir).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        let metadata = entry.metadata().await?;
-        if let Ok(modified) = metadata.modified()
-            && modified < cutoff
-        {
-            let path = entry.path();
-            if let Err(e) = fs::remove_file(&path).await {
-                tracing::warn!(
-                    "failed to remove managed file {:?}: {}",
-                    path,
-                    e
-                );
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod default_tests {
-    use std::time::Duration;
 
     use super::*;
 
     /// `OutputBound::default()` MUST
     /// set the documented defaults
-    /// for each of its 9 fields.
+    /// for each of its fields.
     /// This pins the documented
     /// spec at the type level so
     /// silent regressions surface
@@ -440,8 +319,6 @@ mod default_tests {
             b.overflow_strategy,
             OverflowStrategy::TruncateHeadTail
         ));
-        assert_eq!(b.retention, Duration::from_secs(7 * 24 * 3600));
-        assert_eq!(b.cleanup_interval, Duration::from_secs(3600));
         assert!(matches!(
             b.sanitization,
             SanitizationPolicy::StripControlChars
@@ -461,125 +338,11 @@ mod default_tests {
         assert_eq!(parsed.per_call_max_bytes, b.per_call_max_bytes);
         assert_eq!(parsed.per_call_max_lines, b.per_call_max_lines);
         assert_eq!(parsed.managed_dir, b.managed_dir);
-        assert_eq!(parsed.retention, b.retention);
-        assert_eq!(parsed.cleanup_interval, b.cleanup_interval);
-    }
-
-    /// The cleanup task really deletes stale managed files, and
-    /// the returned handle really stops it.
-    #[tokio::test]
-    async fn cleanup_task_deletes_stale_files_and_aborts_on_drop() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let stale = dir.path().join("stale.txt");
-        tokio::fs::write(&stale, "old output").await.expect("write");
-
-        // `retention = 0` makes every existing file eligible.
-        let task = start_cleanup_task(
-            dir.path().to_path_buf(),
-            Duration::from_millis(0),
-            Duration::from_millis(5),
-        );
-
-        let mut removed = false;
-        for _ in 0..100 {
-            if !stale.exists() {
-                removed = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(removed, "the cleanup loop must delete stale files");
-
-        // The handle owns the task: dropping it stops the loop,
-        // so a file created afterwards survives.
-        drop(task);
-        let fresh = dir.path().join("fresh.txt");
-        tokio::fs::write(&fresh, "new output").await.expect("write");
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        assert!(
-            fresh.exists(),
-            "dropping the handle must abort the cleanup loop"
-        );
-    }
-
-    /// `detach` keeps cleanup running without the handle.
-    #[tokio::test]
-    async fn cleanup_task_detach_keeps_running() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let task = start_cleanup_task(
-            dir.path().to_path_buf(),
-            Duration::from_millis(0),
-            Duration::from_millis(5),
-        );
-        task.detach();
-
-        let fresh = dir.path().join("after-detach.txt");
-        tokio::fs::write(&fresh, "new output").await.expect("write");
-        let mut removed = false;
-        for _ in 0..100 {
-            if !fresh.exists() {
-                removed = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(removed, "a detached task keeps cleaning");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    /// R62: the handle is a *stop callback*, so a consumer on another
-    /// executor can drive its own cleanup loop and keep the same
-    /// drop-stops-it contract — no runtime type involved.
-    #[test]
-    fn cleanup_task_from_stop_honours_drop_abort_and_detach() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-
-        // Dropping stops it.
-        let stops = Arc::new(AtomicUsize::new(0));
-        {
-            let counter = Arc::clone(&stops);
-            let _task = CleanupTask::from_stop(move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-            });
-        }
-        assert_eq!(stops.load(Ordering::SeqCst), 1, "drop must stop");
-
-        // `abort` stops it explicitly, and drop does not double-stop.
-        let task = CleanupTask::from_stop({
-            let counter = Arc::clone(&stops);
-            move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-        task.abort();
-        assert_eq!(stops.load(Ordering::SeqCst), 2);
-        drop(task);
-        assert_eq!(
-            stops.load(Ordering::SeqCst),
-            2,
-            "aborting twice must not call the stop path twice"
-        );
-
-        // `detach` releases the stop path without stopping.
-        let task = CleanupTask::from_stop({
-            let counter = Arc::clone(&stops);
-            move || {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-        });
-        task.detach();
-        assert_eq!(
-            stops.load(Ordering::SeqCst),
-            2,
-            "detach must leave the work running"
-        );
-    }
-
     use super::*;
 
     /// `strip_control_chars` is the MVP

@@ -83,7 +83,7 @@ pub fn for_tier(
 
     Steering {
         guards,
-        hooks: vec![Arc::new(LoggingHook)],
+        hooks: LoggingHook::hook_map(),
         hints,
         tracker,
         output_transformer: Arc::new(

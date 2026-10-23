@@ -18,7 +18,6 @@ async fn run_log_feeds_the_ledger_with_log_ordinals() {
     let mut log = RunLog::new(
         sink.clone(),
         Arc::clone(&ledger),
-        0,
         synthia::core::SharedClock::system(),
     );
 
@@ -83,6 +82,7 @@ async fn run_log_takes_its_ordinal_from_the_sink_not_a_local_counter() {
         Arc::new(synthia::session::in_memory::InMemorySessionSink::new("s1"));
     // Seed the writer as the run task does: the ordinal of the
     // last row already on disk.
+    sink.alloc_seq();
     sink.append(
         &serde_json::json!({"type": "UserInput", "data": {"text": "old"}}),
     )
@@ -92,7 +92,6 @@ async fn run_log_takes_its_ordinal_from_the_sink_not_a_local_counter() {
     let mut log = RunLog::new(
         sink.clone(),
         Arc::clone(&ledger),
-        1,
         synthia::core::SharedClock::system(),
     );
 
@@ -103,7 +102,10 @@ async fn run_log_takes_its_ordinal_from_the_sink_not_a_local_counter() {
     .await
     .unwrap();
 
-    // The other writer appends between two of the run's own.
+    // The other writer appends between two of the run's own. It
+    // draws its ordinal from the same sink counter, so the two
+    // writers cannot collide.
+    sink.alloc_seq();
     sink.append(&serde_json::json!({
         "kind": "feedback",
         "message_id": "m1",

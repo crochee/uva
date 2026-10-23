@@ -315,6 +315,7 @@ mod tests {
         let root = temp_dir();
         let r = SessionRegistry::new(root);
         let sink = r.sink("alice", "s1");
+        sink.alloc_seq();
         sink.append(&json!({"role": "user", "text": "hi"}))
             .await
             .unwrap();

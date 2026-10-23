@@ -1,45 +1,21 @@
-//! [`HookMap`] — typed, name-keyed hook registry (pi `HookMap` parity).
+//! [`HookMap`] — the loop's one interception vocabulary.
 //!
-//! R6-4 — typed `name → Vec<Handler<Name>>` registry that lets
-//! lib consumers register named lifecycle hooks with typed event
-//! payloads, rather than the positional
-//! `Vec<Arc<dyn AgentHook>>` Synthia shipped through R3.
+//! A typed, name-keyed `name → Vec<Handler>` registry: handlers
+//! register for one event name (`before_tool`, `after_run`, …) and
+//! receive that event's typed payload. Registering per name keeps
+//! each handler specialised to the payload it cares about instead of
+//! pattern-matching a sum-type; `HookEvent` stays a closed enum so
+//! adding an event forces every handler to update (no silent payload
+//! drift).
 //!
-//! ## Why alongside `Steering::hooks`?
-//!
-//! The positional `Vec<Arc<dyn AgentHook>>` registry is fine for
-//! the 5-6 builtin hooks the agent loop has shipped with
-//! (loop / context / tool / error / done). It does **not** scale
-//! to the 13 named structural events dsh / pi expose
-//! (`before_run` / `before_drive` / `transform_context` /
-//! `before_request` / `before_payload` / `after_response` /
-//! `before_tool` / `after_tool` / `before_compaction` /
-//! `before_navigation` / …). Each of those has a *different*
-//! event payload; typing them under a single
-//! `async fn on_event(...)` would force every hook to pattern
-//! match a sum-type.
-//!
-//! `HookMap` keeps the registry keyed by event name; the
-//! handler type is parameterised by the event payload via the
-//! [`HookEvent`] enum. A consumer that only needs
-//! `before_tool` registers one typed `Handler<BeforeToolEvent>`;
-//! a consumer that needs both `before_tool` and `after_tool`
-//! registers two typed handlers.
-//!
-//! ## Migration
-//!
-//! The existing `Steering::hooks: Vec<Arc<dyn AgentHook>>`
-//! stays, and it is what the agent loop reads: the loop walks
-//! `Steering::hooks` / `guards` / `hints` directly and never
-//! consults a `HookMap`. Build one with [`HookMap::new`] /
-//! [`HookMap::on`] (or `on_with_state`) and dispatch through it
-//! from your own code — `assemble_from_scratch` and
-//! `assemble_with_provider_profile` show that shape — when you
-//! want name-keyed, state-aware dispatch instead of one closure
-//! per lifecycle point.
+//! Handlers are `async` and borrow the event for the life of the
+//! future (the payloads are owned, so no per-handler clone). Plain
+//! handlers fire before state-aware ones; the first non-`Allow`
+//! decision short-circuits.
 
 use std::{collections::HashMap, sync::Arc};
 
+use futures::{FutureExt, future::BoxFuture};
 use synthia_context::AgentState;
 
 /// are deliberately a closed enum: adding a new event forces
@@ -83,6 +59,19 @@ pub enum HookEvent {
         call_id: String,
         /// `true` when the tool reported an error result.
         is_error: bool,
+    },
+    /// `after_step` — fired at the end of each loop iteration, after
+    /// the iteration's tool results are committed but before the
+    /// next iteration is sampled (pi `finishTurn` parity: a
+    /// step-end termination decision point that is not tied to a
+    /// specific tool call). `HookDecision::Block` is meaningless
+    /// here — the step already ran — and is treated as `Allow`;
+    /// `Terminate` ends the run with the supplied reason.
+    AfterStep {
+        agent_name: String,
+        run_idx: u32,
+        /// Zero-based index of the iteration that just finished.
+        iteration: u32,
     },
     /// `before_provider_call` — fired right before the LLM
     /// dispatch. Handlers can mutate the request before it
@@ -143,10 +132,15 @@ pub enum HookDecision {
 }
 
 /// One handler registered for one [`HookEvent`] variant. The
-/// handler is `Send + Sync` so the registry can be shared
-/// across tasks; the closure returns a [`HookDecision`].
-pub type HookHandler =
-    Arc<dyn Fn(&HookEvent) -> HookDecision + Send + Sync + 'static>;
+/// handler is `Send + Sync` so the registry can be shared across
+/// tasks. The event payload is fully owned, so the handler borrows
+/// it for the life of the future — no per-handler clone.
+pub type HookHandler = Arc<
+    dyn for<'a> Fn(&'a HookEvent) -> BoxFuture<'a, HookDecision>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 /// State-aware variant of [`HookHandler`]. Receives the live
 /// [`AgentState`] (read-only) alongside the event so handlers
@@ -160,7 +154,7 @@ pub type HookHandler =
 /// [`HookHandler`] when the decision depends only on the
 /// event payload.
 pub type HookHandlerWithState = Arc<
-    dyn for<'a> Fn(&'a HookEvent, &'a AgentState) -> HookDecision
+    dyn for<'a> Fn(&'a HookEvent, &'a AgentState) -> BoxFuture<'a, HookDecision>
         + Send
         + Sync
         + 'static,
@@ -206,7 +200,10 @@ impl HookMap {
     /// The function does not panic; it is a pure builder.
     pub fn on<F>(mut self, name: &'static str, handler: F) -> Self
     where
-        F: Fn(&HookEvent) -> HookDecision + Send + Sync + 'static,
+        F: for<'a> Fn(&'a HookEvent) -> BoxFuture<'a, HookDecision>
+            + Send
+            + Sync
+            + 'static,
     {
         self.inner.entry(name).or_default().push(Arc::new(handler));
         self
@@ -218,7 +215,10 @@ impl HookMap {
     /// count, context utilisation, …).
     pub fn on_with_state<F>(mut self, name: &'static str, handler: F) -> Self
     where
-        F: for<'a> Fn(&'a HookEvent, &'a AgentState) -> HookDecision
+        F: for<'a> Fn(
+                &'a HookEvent,
+                &'a AgentState,
+            ) -> BoxFuture<'a, HookDecision>
             + Send
             + Sync
             + 'static,
@@ -264,16 +264,17 @@ impl HookMap {
     /// Handler panics are caught and treated as `Allow` (the
     /// registry never poisons the agent run on a user code
     /// bug; the `tracing` layer logs the panic).
-    pub fn dispatch(&self, event: &HookEvent) -> HookDecision {
+    pub async fn dispatch(&self, event: &HookEvent) -> HookDecision {
         let name = event_name(event);
         let Some(handlers) = self.inner.get(name) else {
             return HookDecision::Allow;
         };
         for handler in handlers {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    handler(event)
-                }));
+            // `catch_unwind` cannot span an `.await`, so the
+            // future itself is caught instead of the closure.
+            let result = std::panic::AssertUnwindSafe(handler(event))
+                .catch_unwind()
+                .await;
             match result {
                 Ok(decision) if decision != HookDecision::Allow => {
                     return decision;
@@ -301,13 +302,13 @@ impl HookMap {
     /// Handler panics are caught and treated as `Allow` (the
     /// registry never poisons the agent run on a user code
     /// bug; the `tracing` layer logs the panic).
-    pub fn dispatch_with_state(
+    pub async fn dispatch_with_state(
         &self,
         event: &HookEvent,
         state: &AgentState,
     ) -> HookDecision {
         // 1. Plain handlers first (pure-payload vetoes win).
-        let plain = self.dispatch(event);
+        let plain = self.dispatch(event).await;
         if plain != HookDecision::Allow {
             return plain;
         }
@@ -317,10 +318,9 @@ impl HookMap {
             return HookDecision::Allow;
         };
         for handler in handlers {
-            let result =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    handler(event, state)
-                }));
+            let result = std::panic::AssertUnwindSafe(handler(event, state))
+                .catch_unwind()
+                .await;
             match result {
                 Ok(decision) if decision != HookDecision::Allow => {
                     return decision;
@@ -349,6 +349,7 @@ pub fn event_name(event: &HookEvent) -> &'static str {
         HookEvent::AfterRun { .. } => "after_run",
         HookEvent::BeforeTool { .. } => "before_tool",
         HookEvent::AfterTool { .. } => "after_tool",
+        HookEvent::AfterStep { .. } => "after_step",
         HookEvent::BeforeProviderCall { .. } => "before_provider_call",
         HookEvent::AfterProviderCall { .. } => "after_provider_call",
         HookEvent::OnError { .. } => "on_error",
@@ -362,33 +363,43 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn empty_map_dispatches_allow() {
+    #[tokio::test]
+    async fn empty_map_dispatches_allow() {
         let map = HookMap::new();
-        let decision = map.dispatch(&HookEvent::BeforeRun {
-            agent_name: "x".to_string(),
-            run_idx: 0,
-        });
+        let decision = map
+            .dispatch(&HookEvent::BeforeRun {
+                agent_name: "x".to_string(),
+                run_idx: 0,
+            })
+            .await;
         assert_eq!(decision, HookDecision::Allow);
         assert!(map.is_empty());
         assert_eq!(map.len(), 0);
     }
 
-    #[test]
-    fn before_tool_handler_vetoes_dispatch() {
-        let map = HookMap::new().on("before_tool", |event| match event {
-            HookEvent::BeforeTool { tool_name, .. } if tool_name == "shell" => {
-                HookDecision::Block {
-                    reason: "shell vetoed by test".to_string(),
+    #[tokio::test]
+    async fn before_tool_handler_vetoes_dispatch() {
+        let map = HookMap::new().on("before_tool", |event| {
+            Box::pin(async move {
+                match event {
+                    HookEvent::BeforeTool { tool_name, .. }
+                        if tool_name == "shell" =>
+                    {
+                        HookDecision::Block {
+                            reason: "shell vetoed by test".to_string(),
+                        }
+                    }
+                    _ => HookDecision::Allow,
                 }
-            }
-            _ => HookDecision::Allow,
+            })
         });
-        let decision = map.dispatch(&HookEvent::BeforeTool {
-            tool_name: "shell".to_string(),
-            call_id: "c1".to_string(),
-            arguments: json!({}),
-        });
+        let decision = map
+            .dispatch(&HookEvent::BeforeTool {
+                tool_name: "shell".to_string(),
+                call_id: "c1".to_string(),
+                arguments: json!({}),
+            })
+            .await;
         assert_eq!(
             decision,
             HookDecision::Block {
@@ -397,37 +408,87 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handler_runs_only_for_matching_event_name() {
+    #[tokio::test]
+    async fn handler_runs_only_for_matching_event_name() {
         // A handler registered for `before_tool` must NOT fire
         // on `after_tool`. Pin the variant isolation.
-        let map = HookMap::new().on("before_tool", |_| HookDecision::Block {
-            reason: "should not fire here".to_string(),
+        let map = HookMap::new().on("before_tool", |_| {
+            Box::pin(async move {
+                HookDecision::Block {
+                    reason: "should not fire here".to_string(),
+                }
+            })
         });
-        let decision = map.dispatch(&HookEvent::AfterTool {
-            tool_name: "shell".to_string(),
-            call_id: "c1".to_string(),
-            is_error: false,
-        });
+        let decision = map
+            .dispatch(&HookEvent::AfterTool {
+                tool_name: "shell".to_string(),
+                call_id: "c1".to_string(),
+                is_error: false,
+            })
+            .await;
         assert_eq!(decision, HookDecision::Allow);
     }
 
-    #[test]
-    fn first_non_allow_decision_wins() {
+    #[tokio::test]
+    async fn after_step_name_and_dispatch() {
+        assert_eq!(
+            event_name(&HookEvent::AfterStep {
+                agent_name: "a".to_string(),
+                run_idx: 0,
+                iteration: 3,
+            }),
+            "after_step"
+        );
+        let map = HookMap::new().on("after_step", |event| {
+            Box::pin(async move {
+                match event {
+                    HookEvent::AfterStep { iteration, .. } => {
+                        HookDecision::Terminate {
+                            reason: format!("stop after {iteration}"),
+                        }
+                    }
+                    _ => HookDecision::Allow,
+                }
+            })
+        });
+        let decision = map
+            .dispatch(&HookEvent::AfterStep {
+                agent_name: "a".to_string(),
+                run_idx: 0,
+                iteration: 3,
+            })
+            .await;
+        assert_eq!(
+            decision,
+            HookDecision::Terminate {
+                reason: "stop after 3".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn first_non_allow_decision_wins() {
         // Two handlers; the first returns Allow, the second
         // returns Terminate. The result is Terminate — first
         // non-allow short-circuits.
-        let map = HookMap::new().on("after_tool", |_| HookDecision::Allow).on(
-            "after_tool",
-            |_| HookDecision::Terminate {
-                reason: "second wins".to_string(),
-            },
-        );
-        let decision = map.dispatch(&HookEvent::AfterTool {
-            tool_name: "t".to_string(),
-            call_id: "c".to_string(),
-            is_error: false,
-        });
+        let map = HookMap::new()
+            .on("after_tool", |_| {
+                Box::pin(async move { HookDecision::Allow })
+            })
+            .on("after_tool", |_| {
+                Box::pin(async move {
+                    HookDecision::Terminate {
+                        reason: "second wins".to_string(),
+                    }
+                })
+            });
+        let decision = map
+            .dispatch(&HookEvent::AfterTool {
+                tool_name: "t".to_string(),
+                call_id: "c".to_string(),
+                is_error: false,
+            })
+            .await;
         assert_eq!(
             decision,
             HookDecision::Terminate {
@@ -436,47 +497,61 @@ mod tests {
         );
     }
 
-    #[test]
-    fn handler_panic_is_treated_as_allow() {
+    #[tokio::test]
+    async fn handler_panic_is_treated_as_allow() {
         let map = HookMap::new().on("before_run", |_| {
-            panic!("handler bug");
+            Box::pin(async move {
+                panic!("handler bug");
+            })
         });
-        let decision = map.dispatch(&HookEvent::BeforeRun {
-            agent_name: "x".to_string(),
-            run_idx: 0,
-        });
+        let decision = map
+            .dispatch(&HookEvent::BeforeRun {
+                agent_name: "x".to_string(),
+                run_idx: 0,
+            })
+            .await;
         assert_eq!(decision, HookDecision::Allow);
     }
 
-    #[test]
-    fn multiple_handlers_for_distinct_events_coexist() {
+    #[tokio::test]
+    async fn multiple_handlers_for_distinct_events_coexist() {
         let map = HookMap::new()
-            .on("before_tool", |event| match event {
-                HookEvent::BeforeTool { tool_name, .. }
-                    if tool_name == "read" =>
-                {
-                    HookDecision::Block {
-                        reason: "no reads".to_string(),
+            .on("before_tool", |event| {
+                Box::pin(async move {
+                    match event {
+                        HookEvent::BeforeTool { tool_name, .. }
+                            if tool_name == "read" =>
+                        {
+                            HookDecision::Block {
+                                reason: "no reads".to_string(),
+                            }
+                        }
+                        _ => HookDecision::Allow,
                     }
-                }
-                _ => HookDecision::Allow,
+                })
             })
-            .on("after_tool", |event| match event {
-                HookEvent::AfterTool { is_error, .. } if *is_error => {
-                    HookDecision::Terminate {
-                        reason: "tool error".to_string(),
+            .on("after_tool", |event| {
+                Box::pin(async move {
+                    match event {
+                        HookEvent::AfterTool { is_error, .. } if *is_error => {
+                            HookDecision::Terminate {
+                                reason: "tool error".to_string(),
+                            }
+                        }
+                        _ => HookDecision::Allow,
                     }
-                }
-                _ => HookDecision::Allow,
+                })
             });
         assert_eq!(map.len(), 2);
         assert!(!map.is_empty());
 
-        let read = map.dispatch(&HookEvent::BeforeTool {
-            tool_name: "read".to_string(),
-            call_id: "c".to_string(),
-            arguments: json!({}),
-        });
+        let read = map
+            .dispatch(&HookEvent::BeforeTool {
+                tool_name: "read".to_string(),
+                call_id: "c".to_string(),
+                arguments: json!({}),
+            })
+            .await;
         assert_eq!(
             read,
             HookDecision::Block {
@@ -484,11 +559,13 @@ mod tests {
             }
         );
 
-        let errored = map.dispatch(&HookEvent::AfterTool {
-            tool_name: "t".to_string(),
-            call_id: "c".to_string(),
-            is_error: true,
-        });
+        let errored = map
+            .dispatch(&HookEvent::AfterTool {
+                tool_name: "t".to_string(),
+                call_id: "c".to_string(),
+                is_error: true,
+            })
+            .await;
         assert_eq!(
             errored,
             HookDecision::Terminate {
@@ -497,15 +574,17 @@ mod tests {
         );
 
         // Unrelated event name — no handler registered.
-        let unrelated = map.dispatch(&HookEvent::OnError {
-            agent_name: "x".to_string(),
-            reason: "y".to_string(),
-        });
+        let unrelated = map
+            .dispatch(&HookEvent::OnError {
+                agent_name: "x".to_string(),
+                reason: "y".to_string(),
+            })
+            .await;
         assert_eq!(unrelated, HookDecision::Allow);
     }
 
-    #[test]
-    fn event_name_matches_variant() {
+    #[tokio::test]
+    async fn event_name_matches_variant() {
         assert_eq!(
             event_name(&HookEvent::BeforeRun {
                 agent_name: "a".to_string(),
@@ -554,22 +633,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn on_registration_preserves_order() {
+    #[tokio::test]
+    async fn on_registration_preserves_order() {
         // Three handlers in registration order; the third
         // returns Terminate. The dispatch must reach the third
         // (no early short-circuit on Allow).
         let map = HookMap::new()
-            .on("after_run", |_| HookDecision::Allow)
-            .on("after_run", |_| HookDecision::Allow)
-            .on("after_run", |_| HookDecision::Terminate {
-                reason: "third".to_string(),
+            .on("after_run", |_| {
+                Box::pin(async move { HookDecision::Allow })
+            })
+            .on("after_run", |_| {
+                Box::pin(async move { HookDecision::Allow })
+            })
+            .on("after_run", |_| {
+                Box::pin(async move {
+                    HookDecision::Terminate {
+                        reason: "third".to_string(),
+                    }
+                })
             });
-        let decision = map.dispatch(&HookEvent::AfterRun {
-            agent_name: "x".to_string(),
-            run_idx: 0,
-            reason: "y".to_string(),
-        });
+        let decision = map
+            .dispatch(&HookEvent::AfterRun {
+                agent_name: "x".to_string(),
+                run_idx: 0,
+                reason: "y".to_string(),
+            })
+            .await;
         assert_eq!(
             decision,
             HookDecision::Terminate {
@@ -578,17 +667,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn state_aware_handler_receives_agent_state() {
+    #[tokio::test]
+    async fn state_aware_handler_receives_agent_state() {
         let map =
             HookMap::new().on_with_state("before_run", |_event, state| {
-                if state.iteration_count >= 3 {
-                    HookDecision::Block {
-                        reason: "too many iterations".to_string(),
+                Box::pin(async move {
+                    if state.iteration_count >= 3 {
+                        HookDecision::Block {
+                            reason: "too many iterations".to_string(),
+                        }
+                    } else {
+                        HookDecision::Allow
                     }
-                } else {
-                    HookDecision::Allow
-                }
+                })
             });
         let mut state = AgentState::with_window(100);
         state.iteration_count = 0;
@@ -599,69 +690,88 @@ mod tests {
                     run_idx: 0
                 },
                 &state
-            ),
+            )
+            .await,
             HookDecision::Allow
         );
         state.iteration_count = 3;
-        let decision = map.dispatch_with_state(
-            &HookEvent::BeforeRun {
-                agent_name: "x".to_string(),
-                run_idx: 0,
-            },
-            &state,
-        );
+        let decision = map
+            .dispatch_with_state(
+                &HookEvent::BeforeRun {
+                    agent_name: "x".to_string(),
+                    run_idx: 0,
+                },
+                &state,
+            )
+            .await;
         assert!(matches!(decision, HookDecision::Block { .. }));
     }
 
-    #[test]
-    fn state_aware_handler_panic_is_swallowed() {
+    #[tokio::test]
+    async fn state_aware_handler_panic_is_swallowed() {
         let map = HookMap::new().on_with_state("before_run", |_, _| {
-            panic!("intentional panic for test");
+            Box::pin(async move {
+                panic!("intentional panic for test");
+            })
         });
         let state = AgentState::with_window(100);
         // Panicking handler must not poison dispatch — the
-        let decision = map.dispatch_with_state(
-            &HookEvent::BeforeRun {
-                agent_name: "x".to_string(),
-                run_idx: 0,
-            },
-            &state,
-        );
+        let decision = map
+            .dispatch_with_state(
+                &HookEvent::BeforeRun {
+                    agent_name: "x".to_string(),
+                    run_idx: 0,
+                },
+                &state,
+            )
+            .await;
         assert_eq!(decision, HookDecision::Allow);
     }
 
-    #[test]
-    fn plain_veto_wins_before_state_aware_check() {
+    #[tokio::test]
+    async fn plain_veto_wins_before_state_aware_check() {
         let map = HookMap::new()
-            .on("before_run", |_| HookDecision::Terminate {
-                reason: "plain".to_string(),
+            .on("before_run", |_| {
+                Box::pin(async move {
+                    HookDecision::Terminate {
+                        reason: "plain".to_string(),
+                    }
+                })
             })
-            .on_with_state("before_run", |_, _| HookDecision::Allow);
+            .on_with_state("before_run", |_, _| {
+                Box::pin(async move { HookDecision::Allow })
+            });
         let state = AgentState::with_window(100);
-        let decision = map.dispatch_with_state(
-            &HookEvent::BeforeRun {
-                agent_name: "x".to_string(),
-                run_idx: 0,
-            },
-            &state,
-        );
+        let decision = map
+            .dispatch_with_state(
+                &HookEvent::BeforeRun {
+                    agent_name: "x".to_string(),
+                    run_idx: 0,
+                },
+                &state,
+            )
+            .await;
         // Plain handler vetoes before state-aware handlers even
         // run.
         assert!(matches!(decision, HookDecision::Terminate { .. }));
     }
 
-    #[test]
-    fn on_with_state_does_not_affect_plain_dispatch() {
+    #[tokio::test]
+    async fn on_with_state_does_not_affect_plain_dispatch() {
         let map = HookMap::new().on_with_state("before_run", |_, _| {
-            HookDecision::Terminate {
-                reason: "state-aware".to_string(),
-            }
+            Box::pin(async move {
+                HookDecision::Terminate {
+                    reason: "state-aware".to_string(),
+                }
+            })
         });
         // Plain dispatch ignores state-aware handlers entirely.
-        let decision = map.dispatch(&HookEvent::BeforeRun {
-            agent_name: "x".to_string(),
-            run_idx: 0,
-        });
+        let decision = map
+            .dispatch(&HookEvent::BeforeRun {
+                agent_name: "x".to_string(),
+                run_idx: 0,
+            })
+            .await;
         assert_eq!(decision, HookDecision::Allow);
     }
 }

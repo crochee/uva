@@ -99,6 +99,7 @@ async fn write_events(
         session_id,
     );
     for ev in events {
+        sink.alloc_seq();
         sink.append(ev).await.unwrap();
     }
     let snap = sink.snapshot().await.unwrap();

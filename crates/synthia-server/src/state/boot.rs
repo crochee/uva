@@ -142,6 +142,35 @@ pub(crate) fn load_default_tool_restriction(
     }))
 }
 
+/// Resolve a strategy name through one [`StrategyRegistry`]: the plugin
+/// strategies this server's facade features enabled (`strategy-cot`,
+/// `strategy-best-of-n`) are registered under their config aliases, and the
+/// harness's built-in `react` resolves through the same call without a
+/// registration.
+pub(crate) fn resolve_strategy(
+    configured: &str,
+) -> Result<
+    Arc<dyn synthia::harness::agent::ReasoningStrategy>,
+    synthia::core::Error,
+> {
+    let registry = synthia::harness::agent::StrategyRegistry::new();
+    let cot = || {
+        Arc::new(synthia::strategy_cot::ChainOfThoughtStrategy::default())
+            as Arc<dyn synthia::harness::agent::ReasoningStrategy>
+    };
+    let bon = || {
+        Arc::new(synthia::strategy_best_of_n::BestOfNStrategy::default())
+            as Arc<dyn synthia::harness::agent::ReasoningStrategy>
+    };
+    for name in ["chain-of-thought", "cot", "chain_of_thought"] {
+        registry.register(name, cot());
+    }
+    for name in ["best-of-n", "bon", "best_of_n"] {
+        registry.register(name, bon());
+    }
+    registry.resolve(configured)
+}
+
 /// R50: reads `agents.<name>.strategy` and resolves it to a strategy
 /// instance for the run factory and the registered agents.
 ///
@@ -155,7 +184,7 @@ pub(crate) fn load_default_strategy(
 ) -> Option<Arc<dyn synthia::harness::agent::ReasoningStrategy>> {
     let name = default_agent_name?;
     let configured = cfg?.agents.get(name)?.strategy.as_deref()?;
-    match synthia::harness::agent::from_name(configured) {
+    match resolve_strategy(configured) {
         Ok(strategy) => {
             tracing::info!(
                 target: "synthia.agent",
@@ -277,7 +306,7 @@ pub(crate) fn apply_tools_config(
     activate_groups(&config.active_groups, &mut applied, &mut skipped);
     applied.skipped = skipped;
     if let Some(policy) = applied.policy()
-        && let Err(error) = policy.apply(registry)
+        && let Err(error) = policy.write_to_registry(registry)
     {
         // Unreachable after the filtering above; kept visible so a
         // future divergence degrades loudly instead of silently

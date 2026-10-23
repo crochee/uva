@@ -49,7 +49,7 @@ Synthia is a modular, high-performance AI Agent framework written in Rust. It im
                                        ▼
                 ┌────────────────────────────────────────┐
                 │     synthia-harness: ReAct loop        │
-                │  (Agent + ToolInterceptor + strategy)  │
+                │  (Agent + SyntheticTool + strategy)  │
                 └─────────────────────┬──────────────────┘
                                       ▼
                 ┌────────────────────────────────────────┐
@@ -119,7 +119,7 @@ The framework is organized as a Rust workspace with **25 members**, all under `c
 | [synthia-tool](crates/synthia-tool/) | Tool paradigm: `Tool` trait, registry, exposure projection, `workspace` path confinement, and the two synthetic contracts (`__get_full_output`, `structured_output`) — **no agent-facing tool set** |
 | [synthia-tool-read](crates/synthia-tool-read/) · [-write](crates/synthia-tool-write/) · [-shell](crates/synthia-tool-shell/) · [-todo](crates/synthia-tool-todo/) · [-web](crates/synthia-tool-web/) · [-task](crates/synthia-tool-task/) · [-scheduler](crates/synthia-tool-scheduler/) · [-search](crates/synthia-tool-search/) | The tool plugins, one brick each (the shell owns its OS execution policy; `-task` is the multi-agent `task` tool; `-scheduler` is the `schedule` tool over `synthia-scheduler`; `-search` is the cross-domain `search` tool over a host-built `synthia-search` registry) |
 | [synthia-session](crates/synthia-session/) | Session lifecycle and state management |
-| [synthia-harness](crates/synthia-harness/README.md) | The harness: core ReAct loop, `Agent` / `ToolInterceptor` / strategy seams, `AgentRegistry`, type definitions |
+| [synthia-harness](crates/synthia-harness/README.md) | The harness: core ReAct loop, `Agent` / `SyntheticTool` / strategy seams, `AgentRegistry`, type definitions |
 | [synthia-steering](crates/synthia-steering/) | Steering layer: guards / hooks / hints / tracker / output transformer + `HookMap` typed registry |
 | [synthia-telemetry](crates/synthia-telemetry/) | Observability in two switchable halves: console/file logging always, Prometheus (`metrics`) and OTLP export (`otlp`) as features |
 | [synthia-attachment](crates/synthia-attachment/) | Multimodal attachment store (image / audio / file bytes) with filesystem + in-memory backends |
@@ -189,8 +189,9 @@ typed-event channel is `futures::channel::mpsc`. The executor is the
 consumer's choice — including the one place the loop used to hard-code
 it: detached per-turn work now goes through
 [`synthia_core::spawn::Spawner`](crates/synthia-core/src/spawn.rs),
-installed via `ReActAgent::with_spawner` (and `ToolRegistry::with_spawner`
-for dispatch).
+installed via `ReActAgent::with_spawner`. (Tool dispatch needs no
+spawner at all: `run_stream` drives every call from the caller's
+poll.)
 
 ```bash
 cargo run --example runtime_agnostic -p synthia-harness
@@ -278,11 +279,13 @@ while let Some(event) = stream.next().await { /* SSE-style events */ }
 while let Ok(Some(rec)) = typed_rx.try_recv() { /* request_header / step / … */ }
 
 Per-crate responsibilities and the composition contracts are
-documented in each crate's `lib.rs` and `README.md`; the design
-records (what was adopted from traitclaw / dsh / pi / pi-subagents,
-and why) live in `docs/optimization-report-R*.md` — R4–R13 in their
-per-round files, R14–R28 consolidated in
-[`optimization-report-R14-R28-2026-09-11.md`](docs/optimization-report-R14-R28-2026-09-11.md).
+documented in each crate's `lib.rs` and `README.md`. The
+per-round design records — what was adopted from traitclaw / dsh /
+pi / pi-subagents, and why — were written as
+`docs/optimization-report-R*.md` (one file per round, R4 onward,
+with R14–R28 consolidated) plus `docs/reference-parity.md`; those
+files are not part of this repository, so the rounds are named here
+rather than linked.
 
 ### Composition primitives added in R9
 
@@ -296,8 +299,7 @@ skill registry, and runtime-neutral spawn surface:
 | 2 | `SkillProvider` + `SkillRegistry` | `synthia-skill` | Plug any source of skills (filesystem, in-memory, remote) into one deduplicated registry |
 | 3 | `SkillApplication` / `SkillApplicationContext` | `synthia-skill` | Opt-in structured I/O for procedural skills: `SkillRequest → SkillResponse` closure |
 | 4 | `HookMap::on_with_state` / `dispatch_with_state` | `synthia-steering` | Hook handlers that read `&AgentState` (pi `harness/hooks.ts` parity) |
-| 5 | `AgentHandle::spawn_detached` / `DetachedAgent` | `synthia-harness` | Deferred run control for a subagent — the run starts on the first `join` — with `cancel-the-wait` (drop the handle) vs `cancel-the-work` (`handle.cancel()`) |
-| 6 | `OperationSnapshot` / `OperationState` | `synthia-session` | Read-only status record (running / completing / failed / cancelled + iteration + usage + last error / compaction) |
+| 5 | `OperationSnapshot` / `OperationState` | `synthia-session` | Read-only status record (running / completing / failed / cancelled + iteration + usage + last error / compaction) |
 
 ### Composition primitives added in R10–R13
 
@@ -339,7 +341,7 @@ Later rounds kept growing the same lego axes:
 | 44 | `WorkflowSpec` / `Step::{Agent, FanOut, Pipeline}` / `WorkflowRuntime` / `WorkflowHost` / `WorkflowCaps` / `WorkflowControl` / `WorkflowJournal` | `synthia-workflow` (new) | Declarative workflow runtime (pi-subagents §workflow, JS VM replaced by serde data): one injected `WorkflowHost` effect seam (`spawn_agent` / `run_gate`) keeps caps + concurrency + abort enforceable and tests host-free; JSONL journal keyed by sha256 of each call's identity, torn-tail tolerant, replays the longest matching prefix and re-runs the tail; typed pause/resume/skip/retry/abort control |
 | 45 | `GroupedRegistry` + `GroupError` | `synthia-tool` | Named tool groups with independent activation (traitclaw `GroupedRegistry`): `visible_tool_names()` offers only active groups (plus tools no group claims) while dispatch is untouched, so a tool in a deactivated group **stays executable** — the visibility ≠ executability split skills, workflow steps and subagents rely on. Declarations are validated (unknown tool, duplicate, tool claimed twice) and one tool belongs to one group |
 | 46 | `FullOutputStore` + `InMemoryFullOutputStore` + `__get_full_output` tool + `TransformerChain` / `JsonExtractor` / `BudgetAwareTruncator` | `synthia-core`, `synthia-tool`, `synthia-steering` | Output too large to commit is transformed then *stashed* rather than dropped (traitclaw transformers): the store is bounded by entries **and** bytes with true LRU (a `get` refreshes recency, handles are never reused), the transformer chain extracts JSON before budgeting, and the published marker names a handle the model retrieves through `__get_full_output` |
-| 47 | Layered `synthia-harness`: private submodules + curated re-exports; `agent::{strategy, run}` | `synthia-harness`, `synthia-tool-task` | R122's harness cleanup. Every submodule of `synthia-harness` is **private** and re-exports only the names it is for, so internal structure is no longer public API and adding an item to an internal module cannot silently widen the contract. The three reasoning strategies moved under `agent::strategy` beside the seam they implement (with `CandidateScorer` its own file and one shared single-shot request builder), and run control — `AgentHandle`/`DetachedAgent` + `RunInbox`/`MpscInbox` — under `agent::run`. The out-of-band **team** layer (`BoundAgent` / `VerificationChain` / `RoundRobinGroupChat`) was **deleted**: a `prompt -> text` team chat has no caller in a harness whose delegation is the `task` tool, verify-then-retry is a `CandidateScorer` (or a `synthia-workflow` gate), and a stop condition is the loop's own |
+| 47 | Layered `synthia-harness`: private submodules + curated re-exports; `agent::{strategy, run}` | `synthia-harness`, `synthia-tool-task` | R122's harness cleanup. Every submodule of `synthia-harness` is **private** and re-exports only the names it is for, so internal structure is no longer public API and adding an item to an internal module cannot silently widen the contract. The three reasoning strategies moved under `agent::strategy` beside the seam they implement (with `CandidateScorer` its own file and one shared single-shot request builder), and run control — `RunInbox`/`MpscInbox` under `agent::run`; the `AgentHandle`/`DetachedAgent` deferred-run pair that sat beside them has since been **deleted** (no in-tree consumer — `Agent::run`'s event stream is the single run entry point). The out-of-band **team** layer (`BoundAgent` / `VerificationChain` / `RoundRobinGroupChat`) was **deleted**: a `prompt -> text` team chat has no caller in a harness whose delegation is the `task` tool, verify-then-retry is a `CandidateScorer` (or a `synthia-workflow` gate), and a stop condition is the loop's own |
 | 48 | `ConditionalRouter` + `RoutePatternError` | `synthia-tool-task` | Ordered regex routing rules, first match wins, with a default fallback (traitclaw `ConditionalRouter`) — implemented against the existing `Router` trait, so rules and `@agent:` mentions are two strategies behind one seam. A bad pattern is a typed error, never a panic |
 | 49 | `SqliteMemory` + `SqliteMemoryError` (feature `sqlite`) | `synthia-context` | Single-file durable memory (traitclaw-memory-sqlite): FTS5/BM25 long-term recall (queries are sanitised into quoted terms so `NEAR(` and `*` are text, not syntax), a durable working-memory table, a session registry, read-only opens, and typed errors that keep `SQLite`'s own message. The conversation tier still delegates to the session sink — one source of truth |
 | 50 | `ToolEntry::with_exposure` + `ToolDescriptor::exposure` + `project_tool_definitions` + `called_tool_names` + `ToolRegistry::descriptors` | `synthia-tool`, `synthia-harness`, `synthia-server` | The tool surface the model is offered, in one place: `Direct` sends the full schema, `Deferred` sends name + description with a permissive schema until the transcript shows the tool was called (then it is promoted), `Hidden`/`is_hidden` sends nothing. Promotion is derived from the transcript, so it is replay-stable and needs no mutable registry state; the same projection serves the agent loop and the operator listing, and the visible-name filter is how `AdaptiveRegistry`'s tier cap and `GroupedRegistry`'s groups plug in |
@@ -350,7 +352,7 @@ Later rounds kept growing the same lego axes:
 | 55 | `WorkflowHost::select_candidate` + `SelectionRequest` / `SelectionCandidate` / `CandidateOutcome` / `GateVerdict` + `JournalEntry.winner` | `synthia-workflow` | The host may judge candidates (a rubric, an LLM, the longest answer) instead of taking the first passing gate; the default implementation keeps R33's rule, the choice is **recorded** so a replay never re-asks the host, and naming a candidate that did not succeed is a typed error rather than a plausible-looking wrong winner |
 | 56 | `CompactionCheckpoint` + `SurfaceLedger` + `fold_log_surface` / `try_fold_log_surface` | `synthia-session`, `synthia-context`, `synthia-harness`, `synthia-server` | Durable compaction checkpoints, end to end: provenance is resolved through the log (the manager's in-memory indices cannot address the surface), the lifecycle pair is written immediately so a crash mid-compaction stays detectable, and a record whose span cannot be proven is dropped with a warning instead of writing a checkpoint with wrong provenance. The production resume projection folds the log, so a resumed session rebuilds the compacted surface instead of replaying (and re-paying for) the pre-compaction history |
 
-| 57 | `Spawner` + `SharedSpawner` + `ReActAgent::with_spawner` + `ToolRegistry::with_spawner` | `synthia-core`, `synthia-harness`, `synthia-tool` | The one operation that used to hard-code tokio — detached work — behind a trait with no runtime in its signature. The loop still detaches one task per run (a caller that stops polling must not cancel the run), but *where* that task goes is the consumer's choice: `cargo run --example runtime_agnostic -p synthia-harness` runs a full turn on `std::thread` + `futures::executor::block_on`. The tool plugin crates, the provider HTTP adapters and the JSONL sink remain tokio-bound plugins, and the crate docs say so |
+| 57 | `Spawner` + `SharedSpawner` + `ReActAgent::with_spawner` | `synthia-core`, `synthia-harness` | The one operation that used to hard-code tokio — detached work — behind a trait with no runtime in its signature. The loop still detaches one task per run (a caller that stops polling must not cancel the run), but *where* that task goes is the consumer's choice: `cargo run --example runtime_agnostic -p synthia-harness` runs a full turn on `std::thread` + `futures::executor::block_on`. Tool dispatch is spawn-free entirely (`run_stream` drives every call from the caller's poll); the tool plugin crates, the provider HTTP adapters and the JSONL sink remain tokio-bound plugins, and the crate docs say so |
 | 58 | Per-crate features: tool plugins (`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-web` / `-task` / `-scheduler` / `-search`, one tool each) + `synthia-telemetry` (`metrics`, `otlp`), `synthia-provider` (`anthropic`, `openai`), facade features (`provider-anthropic`, `provider-openai`, `tool-*`) + `make check-mvp-deps` | workspace-wide | Transport and tools are opt-in and *separable*: the seven-feature MVP subset compiles the `Tool` paradigm and **no agent-facing tool** (no HTTP client at all — `reqwest` / `hyper` / `rustls` / `h2` / `tower` absent), each tool plugin is a crate you either depend on or don't, the OTel exporter arrives only with `otlp`, and the gate asserts both the MVP subset and the seven offline tool crates stay clean |
 | 59 | `ReasoningStrategy` + `AgentRuntime` + `EventSink` + `ReActAgent::with_strategy` | `synthia-harness` | The reasoning loop as a swappable part: a strategy receives every assembled piece (provider, tools, steering, context manager, clock, cancel token, executor) and publishes events, so `ReActStrategy` and `ChainOfThoughtStrategy` run against one runtime — `cargo run --example strategy_swap -p synthia-harness` proves both from the provider's recorded requests. One method, streaming-first; errors travel as `SessionEnded { reason }` |
 | 60 | `McpControlTool` + `register_mcp_control_tool` (`MCP_TOOL_NAME`) | `synthia-mcp` | The `mcp` tool: the **dynamic** counterpart of the per-tool `McpTool` registration. Three actions (`servers` / `tools` / `call`) over a shared `McpSupervisor`, so a model can read the live catalog — including each remote tool's argument schema — and call a remote tool by its server-side name without the host publishing every remote schema up front. Unknown server vs disconnected server get different, corrective messages; a remote tool's `isError` and its image/audio blocks travel through the same projection as the pre-registered path (`cargo run --example mcp_control_tool -p synthia-mcp`) |
@@ -575,7 +577,7 @@ Run `make help` for the full list of targets.
 │   ├── synthia-session/        # session lifecycle, sinks, typed events
 │   ├── synthia-steering/       # guards / hooks / hints / tracker / transformers
 │   ├── synthia-harness/          # the harness: ReAct loop, reasoning strategies,
-│   │                           #   run control (handles + inbox), seams
+│   │                           #   run control (inbox), seams
 │   ├── synthia-attachment/     # content-addressed multimodal store
 │   ├── synthia-mcp/            # MCP client (stdio + HTTP transports)
 │   ├── synthia-scheduler/      # runtime-free cron / interval / once dispatcher

@@ -54,7 +54,8 @@ use synthia::{
 
 use crate::state::AppState;
 
-/// Server name the tools register under (`mcp__self__<tool>`).
+/// Server name the tools register under (`mcp__self__<tool>`,
+/// namespaced via [`synthia::tool::MCP_SELF_TOOL_PREFIX`]).
 const SELF_SERVER_NAME: &str = "self";
 
 /// Spawn the self-management MCP server and publish its tools.
@@ -98,7 +99,7 @@ pub(crate) async fn register_self_mcp(state: &Arc<AppState>) {
     // Same cold-start policy as every other `mcp__*` tool:
     // name + description up front, the schema on first call.
     for descriptor in registry.descriptors().iter().filter(|d| {
-        d.name.starts_with("mcp__self__")
+        synthia::tool::is_mcp_self_tool(&d.name)
             && d.exposure == synthia::tool::ToolExposure::Direct
     }) {
         registry.set_exposure(
@@ -321,13 +322,9 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
                         let name = str_field(&args, "name")
                             .ok_or("get requires `name`")?;
                         let registry = state.tool_registry.read().await;
-                        let entry = registry
-                            .get(&name)
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .ok_or_else(|| {
-                                format!("tool '{name}' not found")
-                            })?;
+                        let entry = registry.get(&name).ok_or_else(|| {
+                            format!("tool '{name}' not found")
+                        })?;
                         Ok(pretty(&json!({
                             "name": name,
                             "description": entry.description(),
@@ -345,12 +342,7 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
                             .cloned()
                             .unwrap_or_else(|| json!({"type": "object"}));
                         let registry = state.tool_registry.read().await;
-                        if registry
-                            .get(&name)
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .is_some()
-                        {
+                        if registry.get(&name).is_some() {
                             return Err(format!(
                                 "tool '{name}' already exists"
                             ));
@@ -367,12 +359,7 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
                         let name = str_field(&args, "name")
                             .ok_or("unregister requires `name`")?;
                         let registry = state.tool_registry.read().await;
-                        if registry
-                            .get(&name)
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .is_none()
-                        {
+                        if registry.get(&name).is_none() {
                             return Err(format!("tool '{name}' not found"));
                         }
                         registry
@@ -653,6 +640,7 @@ fn workflows_tool(state: Arc<AppState>) -> ServerTool {
                             .workflows
                             .remove(&id)
                             .await
+                            .map_err(|e| e.to_string())?
                             .then(|| format!("deleted workflow '{id}'"))
                             .ok_or_else(|| format!("workflow '{id}' not found"))
                     }
@@ -743,6 +731,7 @@ fn evals_tool(state: Arc<AppState>) -> ServerTool {
                             .evals
                             .remove(&name)
                             .await
+                            .map_err(|e| e.to_string())?
                             .then(|| format!("deleted eval suite '{name}'"))
                             .ok_or_else(|| {
                                 format!("eval suite '{name}' not found")
@@ -751,9 +740,15 @@ fn evals_tool(state: Arc<AppState>) -> ServerTool {
                     "run" => {
                         let name = str_field(&args, "name")
                             .ok_or("run requires `name`")?;
+                        let agent = super::eval_agent::HarnessEvalAgent::new(
+                            Arc::clone(&state.default_provider),
+                            Arc::clone(&state.tool_registry),
+                            state.system_prompt.clone(),
+                            state.workspace_root.clone(),
+                        );
                         let report = state
                             .evals
-                            .run(&name)
+                            .run(&name, &agent)
                             .await
                             .map_err(|e| e.to_string())?;
                         Ok(pretty(&json!(report)))

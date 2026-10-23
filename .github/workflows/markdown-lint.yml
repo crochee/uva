@@ -70,3 +70,4 @@ jobs:
             crates/synthia-tool-task/README.md
             crates/synthia-tool-scheduler/README.md
             crates/synthia-tool-search/README.md
+            crates/synthia-hpc-batch/README.md

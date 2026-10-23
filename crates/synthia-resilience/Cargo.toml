@@ -1,0 +1,31 @@
+[package]
+name = "synthia-resilience"
+description = "Circuit breaker + adaptive backoff + jitter per provider or tool: a single seam that wraps ModelProvider / Tool with classify → retry → breaker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+synthia-core.workspace = true
+synthia-provider = { workspace = true, default-features = false }
+synthia-tool.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+chrono.workspace = true
+tempfile.workspace = true

@@ -70,7 +70,12 @@ pub async fn delete_eval(
     State(state): State<Arc<AppState>>,
     AppPath(name): AppPath<String>,
 ) -> Result<StatusCode, AppError> {
-    if state.evals.remove(&name).await {
+    if state
+        .evals
+        .remove(&name)
+        .await
+        .map_err(|e| AppError::from(synthia::core::Error::internal(e)))?
+    {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::from(synthia::core::Error::not_found(format!(
@@ -84,9 +89,15 @@ pub async fn run_eval(
     State(state): State<Arc<AppState>>,
     AppPath(name): AppPath<String>,
 ) -> Result<Json<EvalReport>, AppError> {
+    let agent = crate::state::HarnessEvalAgent::new(
+        Arc::clone(&state.default_provider),
+        Arc::clone(&state.tool_registry),
+        state.system_prompt.clone(),
+        state.workspace_root.clone(),
+    );
     let report = state
         .evals
-        .run(&name)
+        .run(&name, &agent)
         .await
         .map_err(|e| AppError::from(synthia::core::Error::not_found(e)))?;
     Ok(Json(report))

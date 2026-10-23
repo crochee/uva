@@ -328,10 +328,10 @@ fn tool_count_and_snapshot_both_collapse_duplicate_names_to_one() {
 async fn test_tool_registry_register_and_get() {
     let registry = ToolRegistry::new();
     registry.register_entry(ToolEntry::new(Arc::new(TestEntryTool)));
-    let entry = registry.get("test").await.unwrap();
+    let entry = registry.get("test");
     assert!(entry.is_some());
     assert!(entry.unwrap().tool_instance().name() == "test");
-    assert!(registry.get("nonexistent").await.unwrap().is_none());
+    assert!(registry.get("nonexistent").is_none());
 }
 
 #[tokio::test]
@@ -539,8 +539,8 @@ async fn test_hidden_tools_not_in_list() {
     let visible = entries.iter().find(|e| e.name() == "test").unwrap();
     assert!(!visible.is_hidden());
 
-    assert!(registry.get("test").await.unwrap().is_some());
-    assert!(registry.get("hidden").await.unwrap().is_some());
+    assert!(registry.get("test").is_some());
+    assert!(registry.get("hidden").is_some());
 }
 
 #[tokio::test]
@@ -626,10 +626,10 @@ async fn test_registry_trait_get() {
     let registry = ToolRegistry::new();
     registry.register_entry(ToolEntry::new(Arc::new(TestEntryTool)));
 
-    let item = registry.get("test").await.unwrap();
+    let item = Registry::get(&registry, "test").await.unwrap();
     assert_eq!(item.unwrap().name(), "test");
 
-    let not_found = registry.get("nonexistent").await.unwrap();
+    let not_found = Registry::get(&registry, "nonexistent").await.unwrap();
     assert!(not_found.is_none());
 }
 

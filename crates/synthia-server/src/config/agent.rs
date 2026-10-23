@@ -24,11 +24,12 @@ pub struct AgentConfig {
     /// context-manager selection.
     #[serde(default)]
     pub compaction: Option<synthia::context::CompactionSettings>,
-    /// R50: the reasoning loop this agent runs. One of
-    /// `react`, `chain-of-thought`, or `best-of-n`
-    /// ([`synthia::harness::KNOWN_STRATEGY_NAMES`]);
-    /// unset means ReAct. An unrecognised value is logged at boot and
-    /// the agent falls back to ReAct rather than refusing to start.
+    /// The reasoning loop this agent runs. One of `react`,
+    /// `chain-of-thought`, or `best-of-n` (the names
+    /// [`StrategyRegistry`](synthia::harness::StrategyRegistry)
+    /// resolves); unset means ReAct. An unrecognised value is
+    /// logged at boot and the agent falls back to ReAct rather
+    /// than refusing to start.
     #[serde(default)]
     pub strategy: Option<String>,
     /// R62: per-agent OS sandbox policy override (Codex `[sandbox]`

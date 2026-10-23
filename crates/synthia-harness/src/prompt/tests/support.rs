@@ -8,7 +8,7 @@
 //! "Synthia has skills and peer agents" shape the model
 //! sees in production.
 
-use crate::{agent::AgentDescriptor, prompt::runtime_context::RuntimeContext};
+use crate::{agent::AgentDescriptor, prompt::RuntimeContext};
 
 /// A descriptor populated with the canonical "Synthia has
 /// skills and peer agents" shape the model sees in
@@ -62,15 +62,11 @@ pub(super) fn peer_descriptor(name: &str) -> AgentDescriptor {
     }
 }
 
-/// A `RuntimeContext` populated with values that exercise
-/// every render branch (git status `Some(true)`, all
-/// facts non-empty, model id set). Tests mutate fields to
-/// cover the `None` / `Some(false)` paths.
+/// A `RuntimeContext` populated with every fact non-empty.
 pub(super) fn fixed_runtime_context() -> RuntimeContext {
     RuntimeContext {
         cwd: "/tmp/cwd".into(),
         worktree: "/tmp/worktree".into(),
-        is_git_repo: Some(true),
         platform: "linux".into(),
         today: "Mon Jan 1 2026".into(),
         model_id: Some("anthropic/claude-4.6".into()),

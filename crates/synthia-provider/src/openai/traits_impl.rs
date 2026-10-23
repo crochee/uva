@@ -56,6 +56,15 @@ impl ModelProvider for OpenAICompatibleProvider {
             retry_with_classification,
         };
 
+        // R-OPT-1 Step 5.4: parent `SpanKind::Llm` span over
+        // the GenAI-typed `llm.call` span.
+        let _typed_outer_span = synthia_telemetry::new_typed_span(
+            synthia_telemetry::SpanKind::Llm,
+            "llm.complete",
+            &[],
+        );
+        let _typed_outer_guard = _typed_outer_span.enter();
+
         // `llm.call` span (OTel semantic conventions for GenAI).
         // All fields populated later are declared as `Empty` at the
         // callsite — `Span::record(field, value)` is a silent no-op if
@@ -72,6 +81,8 @@ impl ModelProvider for OpenAICompatibleProvider {
             gen_ai.response.finish_reason = tracing::field::Empty,
             gen_ai.usage.input_tokens = tracing::field::Empty,
             gen_ai.usage.output_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_read_input_tokens = tracing::field::Empty,
+            gen_ai.usage.cache_creation_input_tokens = tracing::field::Empty,
             exception.type = tracing::field::Empty,
             exception.message = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
@@ -141,6 +152,11 @@ impl ModelProvider for OpenAICompatibleProvider {
                     llm_span.record("exception.type", e.to_string());
                     llm_span.record("exception.message", e.to_string());
                     llm_span.record("otel.status_code", "ERROR");
+                    synthia_telemetry::record_llm_call(
+                        &self.model_config.provider,
+                        &request.model,
+                        "error",
+                    );
                 }
                 return Err(e);
             }
@@ -160,6 +176,26 @@ impl ModelProvider for OpenAICompatibleProvider {
             );
             llm_span.record(
                 "gen_ai.usage.output_tokens",
+                response.usage.completion_tokens,
+            );
+            if let Some(cache) = response.usage.cache_read_tokens {
+                llm_span.record("gen_ai.usage.cache_read_input_tokens", cache);
+            }
+            if let Some(cache) = response.usage.cache_write_tokens {
+                llm_span
+                    .record("gen_ai.usage.cache_creation_input_tokens", cache);
+            }
+            synthia_telemetry::record_llm_call(
+                &self.model_config.provider,
+                &request.model,
+                "ok",
+            );
+            synthia_telemetry::record_llm_usage(
+                &self.model_config.provider,
+                &request.model,
+                response.usage.prompt_tokens,
+                response.usage.cache_read_tokens.unwrap_or(0),
+                response.usage.cache_write_tokens.unwrap_or(0),
                 response.usage.completion_tokens,
             );
         }

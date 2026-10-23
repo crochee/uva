@@ -21,7 +21,7 @@
 //! | Typed event sink | `synthia-session` | `TypedEventSink::channel(32)` |
 //! | Agent assembly | `synthia-harness` | `ReActAgent::new(..)` chain → the agent is its own builder |
 //! | Structured output | `synthia-harness`/`synthia-tool` | `.with_output_schema(json!{..})` |
-//! | LLM compaction | `synthia-context` | `.with_compaction_settings(default)` |
+//! | LLM compaction | `synthia-context` | `SummarizingContextManager::new(..).with_settings(..)` via `.with_context_manager(..)` |
 //! | Multimodal store | `synthia-attachment` | `AttachmentStore::{save,read}_image` |
 //! | Runtime-neutral cancel | `synthia-core` | `AtomicCancelToken` (std only) |
 //! | Skill registry | `synthia-skill` | `SkillRegistry::new()` |
@@ -82,7 +82,12 @@ async fn main() {
             "properties": {"answer": {"type": "string"}},
             "required": ["answer"]
         }))
-        .with_compaction_settings(CompactionSettings::default())
+        .with_context_manager(Arc::new(
+            synthia_context::SummarizingContextManager::new(Arc::new(
+                |_batch| Box::pin(async { None }),
+            ))
+            .with_settings(CompactionSettings::default()),
+        ))
         .with_typed_event_sink(sink);
 
     println!(
@@ -116,7 +121,10 @@ async fn main() {
 
     // Drive a turn with NO tokio type in the public API surface.
     let mut stream = agent
-        .run(AgentInput::text("prove the consumer works"), cancel)
+        .run(
+            AgentInput::text("prove the consumer works"),
+            cancel,
+        )
         .await;
     let mut events = 0usize;
     let mut text = String::new();

@@ -1,0 +1,30 @@
+[package]
+name = "synthia-tool-memo"
+description = "Deterministic tool result memoization: a `Tool` wrapper that short-circuits identical invocations through an LRU + TTL store, single-flighting concurrent calls for the same key"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+synthia-core.workspace = true
+synthia-tool.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# BLAKE3 for stable, fast key hashing of canonicalised inputs.
+blake3 = "1.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+tempfile.workspace = true

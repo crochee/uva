@@ -13,19 +13,8 @@ use super::{
     support::{descriptor_with_instructions, peer_descriptor},
 };
 
-/// Default-pack smoke test: the canonical inputs produce
-/// the documented structure in the documented order, with
-/// every section wrapped in balanced XML tags. Tool
-/// schemas are deliberately absent — they ride the
-/// completion request, not the prompt text.
-///
-/// The descriptor carries an `output_schema` so the
-/// `<structured_output>` mandate is part of the asserted order.
-/// Without it this would be the *only* test pinning section
-/// position while being blind to the newest section — a reorder
-/// would then pass every test in the suite (the dedicated
-/// structured-output tests assert presence and absence, not
-/// place).
+/// Section order below is a prompt-cache wire contract: a reorder invalidates
+/// every cached prefix, and this is the only test pinning *place*, not presence.
 #[test]
 fn default_pack_renders_canonical_xml_order() {
     let mut d = descriptor_with_instructions("BASE");
@@ -88,10 +77,6 @@ fn default_pack_renders_canonical_xml_order() {
     );
 }
 
-/// Pure-string contract: same `(descriptor, ctx)` ⇒
-/// byte-identical output. Prompt caching requires this;
-/// if it ever regresses, cache hit-rate collapses
-/// silently.
 #[test]
 fn assemble_is_pure_and_deterministic() {
     let d = descriptor_with_instructions("BASE");
@@ -103,11 +88,6 @@ fn assemble_is_pure_and_deterministic() {
     assert_eq!(a, b);
 }
 
-/// Same `PromptContext` rendered against two different
-/// descriptors must yield different identity blocks but
-/// identical skill / agent blocks — that's the contract
-/// for treating `descriptor` as per-call input rather
-/// than builder state.
 #[test]
 fn assemble_supports_multiple_agents_via_one_builder() {
     let d1 = descriptor_with_instructions("AGENT_ONE");
@@ -123,13 +103,6 @@ fn assemble_supports_multiple_agents_via_one_builder() {
     assert!(b.contains("<name>transcribe</name>"));
 }
 
-/// Two `assemble` calls over the same `(descriptor, ctx)`
-/// must produce byte-identical output — that's the
-/// contract for prompt-cache hit-rate. Removed the
-/// `with_environment(env)` call from the legacy version
-/// because volatile facts no longer live in the system
-/// prompt; this version asserts the byte-stability
-/// contract directly.
 #[test]
 fn assemble_is_byte_stable_across_calls() {
     let d = descriptor_with_instructions("BASE");
@@ -143,12 +116,6 @@ fn assemble_is_byte_stable_across_calls() {
 
 // -- System-prompt stability ---------------------------------------
 
-/// The system prompt must NEVER carry per-dispatch volatile
-/// facts. Volatile facts (cwd, today, model id) live in
-/// the runtime-context snapshot seam (see
-/// [`RuntimeContext::render_snapshot`]) — surfacing them
-/// in the system message would invalidate provider
-/// prompt caches on every turn.
 #[test]
 fn assemble_never_emits_runtime_facts() {
     let d = descriptor_with_instructions("BASE");
@@ -179,8 +146,6 @@ fn assemble_never_emits_runtime_facts() {
     );
 }
 
-/// `trim()` whitespace-only descriptor instructions are
-/// treated as absent, mirroring the empty case.
 #[test]
 fn whitespace_only_descriptor_instructions_are_dropped() {
     let d = descriptor_with_instructions("   \n\t  ");
@@ -189,9 +154,6 @@ fn whitespace_only_descriptor_instructions_are_dropped() {
     assert!(out[..first_tag].is_empty());
 }
 
-/// Base instructions come straight from
-/// `descriptor.instructions` — there is no separate
-/// override knob on `PromptContext`.
 #[test]
 fn descriptor_instructions_are_the_base_prompt() {
     let d = descriptor_with_instructions("FIRST_AGENT_INSTRUCTIONS");
@@ -199,18 +161,12 @@ fn descriptor_instructions_are_the_base_prompt() {
     assert!(out.starts_with("FIRST_AGENT_INSTRUCTIONS"));
 }
 
-/// `PromptContext` has no `tools` field — pinned at the
-/// type level so a future refactor cannot quietly
-/// re-introduce tool-into-prompt assembly.
 #[test]
 fn prompt_context_has_no_tools_field() {
     let ctx = PromptContext::default();
     let _ = (&ctx.skills, &ctx.agents);
 }
 
-/// Empty manifests drop the corresponding section
-/// entirely — no `(none)` placeholder, no empty `<tag/>`.
-/// The model wastes zero attention on absence signals.
 #[test]
 fn empty_manifests_drop_their_section() {
     let d = descriptor_with_instructions("BASE");
@@ -220,16 +176,6 @@ fn empty_manifests_drop_their_section() {
     assert!(!out.contains("<available_agents>"));
 }
 
-/// A descriptor with an output schema makes the prompt state the
-/// structured-output requirement — the one fact the tool channel cannot
-/// carry.
-///
-/// The schema itself stays out of the prompt (it is the tool's
-/// `parameters()`, delivered natively), so this section is purely the
-/// instruction that prose is not an accepted ending. Without it the
-/// finalize-time `WarningKind::StructuredOutput` would fire on nearly
-/// every schema-declaring run, because the model had never been asked to
-/// submit — noise, not validation.
 #[test]
 fn output_schema_adds_the_structured_output_requirement() {
     let mut descriptor =
@@ -248,8 +194,6 @@ fn output_schema_adds_the_structured_output_requirement() {
     );
 }
 
-/// No schema, no section — the block is about a declared contract, not
-/// about output formatting in general.
 #[test]
 fn without_output_schema_no_structured_output_section() {
     let descriptor =
@@ -261,9 +205,6 @@ fn without_output_schema_no_structured_output_section() {
     );
 }
 
-/// The schema text itself must not be inlined — it rides the provider's
-/// native `tools` channel, and duplicating it would spend prompt tokens
-/// on a copy the model already receives.
 #[test]
 fn output_schema_text_is_not_inlined_in_the_prompt() {
     let mut descriptor =

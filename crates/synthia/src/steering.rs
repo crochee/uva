@@ -2,7 +2,7 @@
 //! nudges, or vetoes a run without the agent loop knowing a policy.
 //!
 //! One container ([`Steering`]) holding five seams: [`Guard`]
-//! (fail-closed veto), [`AgentHook`] (async lifecycle), [`Hint`]
+//! (fail-closed veto), [`HookMap`] (async interception), [`Hint`]
 //! (advisory injection), [`tracker::Tracker`] (sync observation +
 //! concurrency advice), and [`OutputTransformer`] (tool-output
 //! rewrite). [`Steering::noop`] is the empty default;

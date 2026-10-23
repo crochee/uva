@@ -6,7 +6,7 @@
 //!
 //! This crate is the concrete answer to "how do tools that need
 //! the loop itself plug in?": its [`TaskDelegator`] implements
-//! [`synthia_harness::ToolInterceptor`], so installing it on a
+//! [`synthia_harness::SyntheticTool`], so installing it on a
 //! [`synthia_harness::ReActAgent`] gives the model a synthetic
 //! `task(agent, prompt)` tool whose calls run a registered peer
 //! as a child run:
@@ -20,7 +20,9 @@
 //! # async fn wrap(agent: ReActAgent) -> ReActAgent {
 //! let peers = Arc::new(AgentRegistry::new());
 //! // peers.put(AgentEntry::new(/* a child agent */)).await;
-//! agent.with_interceptor(Arc::new(TaskDelegator::new(peers)))
+//! agent
+//!     .with_synthetic_tool(Arc::new(TaskDelegator::new(peers)))
+//!     .expect("no synthetic tool already advertises `task`")
 //! # }
 //! ```
 //!

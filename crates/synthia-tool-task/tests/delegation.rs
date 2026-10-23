@@ -266,18 +266,16 @@ fn text_only(text: &str) -> Vec<StreamChunk> {
 
 async fn echo_child_registry() -> AgentRegistry {
     let registry = AgentRegistry::new();
-    let mut child = ReActAgent::with_prompt_context(
+    let child = ReActAgent::with_descriptor(
         Arc::new(EchoChildProvider {
             calls: Arc::new(AtomicUsize::new(0)),
         }),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "child instructions".to_string(),
+        synthia_harness::default_descriptor("child instructions".to_string()),
         Arc::new(PromptContext::default()),
     );
-    let mut child_desc = child.descriptor().clone();
-    child_desc.name = "child".into();
-    child.descriptor_mut(child_desc);
+    let child = child.with_name("child");
     registry
         .put(AgentEntry::new(Arc::new(child)))
         .await
@@ -297,14 +295,15 @@ async fn task_tool_delegates_to_peer_and_wraps_child_events() {
 
     let child_registry = echo_child_registry().await;
 
-    let parent = ReActAgent::with_prompt_context(
+    let parent = ReActAgent::with_descriptor(
         parent_provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        "parent instructions".to_string(),
+        synthia_harness::default_descriptor("parent instructions".to_string()),
         Arc::new(PromptContext::default()),
     )
-    .with_interceptor(Arc::new(TaskDelegator::new(Arc::new(child_registry))));
+    .with_synthetic_tool(Arc::new(TaskDelegator::new(Arc::new(child_registry))))
+    .expect("one delegator installs cleanly");
 
     let mut events = Vec::new();
     let mut stream = parent
@@ -372,16 +371,17 @@ async fn task_tool_unknown_agent_returns_error_result() {
         text_only("recovered"),
     ]));
 
-    let parent = ReActAgent::with_prompt_context(
+    let parent = ReActAgent::with_descriptor(
         parent_provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        String::new(),
+        synthia_harness::default_descriptor(String::new()),
         Arc::new(PromptContext::default()),
     )
-    .with_interceptor(Arc::new(TaskDelegator::new(Arc::new(
+    .with_synthetic_tool(Arc::new(TaskDelegator::new(Arc::new(
         AgentRegistry::new(),
-    ))));
+    ))))
+    .expect("one delegator installs cleanly");
 
     let mut saw_error_result = false;
     let mut stream = parent
@@ -419,14 +419,15 @@ async fn task_tool_depth_guard_refuses_spawn_at_limit() {
     // depth guard, not an unknown-agent error.
     let child_registry = echo_child_registry().await;
 
-    let parent = ReActAgent::with_prompt_context(
+    let parent = ReActAgent::with_descriptor(
         parent_provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        String::new(),
+        synthia_harness::default_descriptor(String::new()),
         Arc::new(PromptContext::default()),
     )
-    .with_interceptor(Arc::new(TaskDelegator::new(Arc::new(child_registry))));
+    .with_synthetic_tool(Arc::new(TaskDelegator::new(Arc::new(child_registry))))
+    .expect("one delegator installs cleanly");
 
     let mut input = AgentInput::text("hi");
     input.subagent_depth = MAX_SUBAGENT_DEPTH;
@@ -461,11 +462,11 @@ async fn task_tool_absent_without_the_interceptor() {
         text_only("ok"),
     ]));
 
-    let parent = ReActAgent::with_prompt_context(
+    let parent = ReActAgent::with_descriptor(
         parent_provider.clone(),
         Arc::new(ToolRegistry::new()),
         PathBuf::new(),
-        String::new(),
+        synthia_harness::default_descriptor(String::new()),
         Arc::new(PromptContext::default()),
     );
 

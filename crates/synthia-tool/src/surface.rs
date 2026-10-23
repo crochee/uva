@@ -78,8 +78,8 @@
 //!
 //! [`ToolSurfacePolicy`] is the serializable twin of those two
 //! wrappers: a deployment declares groups, an active set, and a cap
-//! once. [`ToolSurfacePolicy::apply`] writes the group verdict onto
-//! the registry's [`ToolExposure`]s, while
+//! once. [`ToolSurfacePolicy::write_to_registry`] writes the group
+//! verdict onto the registry's [`ToolExposure`]s, while
 //! [`ToolSurfacePolicy::visible_tool_names`] is the allow-list half
 //! the projection takes — so a config file reaches the same seam as
 //! the runtime wrappers.
@@ -91,7 +91,7 @@ use thiserror::Error;
 
 use crate::{
     ToolRegistry,
-    registry::{ToolDescriptor, ToolExposure},
+    registry::{ToolDescriptor, ToolExposure, Visibility},
 };
 
 /// The schema advertised for a `Deferred` tool before its first call.
@@ -132,13 +132,16 @@ pub fn project_tool_definitions(
     defs
 }
 
-/// Whether `descriptor` reaches the model at all: not hidden, exposure
-/// not `Hidden`, and (when a filter is given) named by it.
+/// Whether `descriptor` reaches the model at all: visibility not
+/// `Hidden`, and (when a filter is given) named by it. Reads the
+/// descriptor's own [`ToolDescriptor::visibility`] derivation —
+/// the same total rule the contract test in
+/// `crates/synthia-tool/tests/visibility.rs` pins.
 fn is_advertised(
     descriptor: &ToolDescriptor,
     visible: Option<&HashSet<String>>,
 ) -> bool {
-    if descriptor.is_hidden || descriptor.exposure == ToolExposure::Hidden {
+    if descriptor.visibility() == Visibility::Hidden {
         return false;
     }
     visible
@@ -257,14 +260,14 @@ pub enum SurfacePolicyError {
 /// levers — named groups with an active set, and a cap on how many
 /// tools the model is told about — as *runtime* wrappers over a
 /// registry. This type is their serializable twin: a deployment
-/// declares the surface once, [`ToolSurfacePolicy::apply`] writes the
-/// group verdict onto the registry's [`ToolExposure`]s, and
+/// declares the surface once, [`ToolSurfacePolicy::write_to_registry`]
+/// writes the group verdict onto the registry's [`ToolExposure`]s, and
 /// [`ToolSurfacePolicy::visible_tool_names`] produces the allow-list
 /// [`project_tool_definitions`] filters with.
 ///
 /// ## Group rule
 ///
-/// | tool's group | [`apply`](Self::apply) writes | advertised |
+/// | tool's group | [`write_to_registry`](Self::write_to_registry) writes | advertised |
 /// |---|---|---|
 /// | active | [`ToolExposure::Direct`] | yes |
 /// | inactive | [`ToolExposure::Hidden`] | no |
@@ -278,28 +281,29 @@ pub enum SurfacePolicyError {
 /// This rule makes the policy verdict-identical to that wrapper —
 /// same declarations, same active set, same model-facing list.
 ///
-/// [`apply`](Self::apply) writes **only** tools named by a group; a
-/// tool in no group keeps whatever exposure it was registered with.
-/// That keeps the policy composable with registration-time
-/// `with_exposure` and with other writers (e.g. a server's
-/// `deferred`/`hidden` lists).
+/// [`write_to_registry`](Self::write_to_registry) writes **only** tools
+/// named by a group; a tool in no group keeps whatever exposure it
+/// was registered with. That keeps the policy composable with
+/// registration-time `with_exposure` and with other writers (e.g. a
+/// server's `deferred`/`hidden` lists).
 ///
 /// ## The cap is the caller's
 ///
 /// `max_visible` is deliberately *not* applied by
-/// [`apply`](Self::apply): it belongs to one request, not to the
-/// registry — the same catalog may be shown capped to a small model
-/// and uncapped to a large one. [`visible_tool_names`](Self::visible_tool_names)
-/// is the caller-side half: it returns the capped allow-list, and the
-/// caller hands it to [`project_tool_definitions`]. Tools the
-/// registry already hides (`is_hidden`, or [`ToolExposure::Hidden`])
-/// take no cap slot, matching [`AdaptiveRegistry`](crate::AdaptiveRegistry),
-/// which caps after [`ToolRegistry::snapshot`].
+/// [`write_to_registry`](Self::write_to_registry): it belongs to one
+/// request, not to the registry — the same catalog may be shown
+/// capped to a small model and uncapped to a large one.
+/// [`visible_tool_names`](Self::visible_tool_names) is the caller-side
+/// half: it returns the capped allow-list, and the caller hands it to
+/// [`project_tool_definitions`]. Tools the registry already hides
+/// (`is_hidden`, or [`ToolExposure::Hidden`]) take no cap slot,
+/// matching [`AdaptiveRegistry`](crate::AdaptiveRegistry), which caps
+/// after [`ToolRegistry::snapshot`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolSurfacePolicy {
     /// Cap on advertised tools, or `None` for the whole catalog.
     /// Applied by [`ToolSurfacePolicy::visible_tool_names`], not by
-    /// [`ToolSurfacePolicy::apply`].
+    /// [`ToolSurfacePolicy::write_to_registry`].
     pub max_visible: Option<usize>,
     /// Declared groups: group name → member tool names, in
     /// declaration order. A `BTreeMap`, so iteration (and therefore
@@ -326,36 +330,14 @@ impl ToolSurfacePolicy {
     ///
     /// # Errors
     ///
-    /// [`SurfacePolicyError`] naming the offending group and tool.
-    pub fn apply(
-        &self,
-        registry: &ToolRegistry,
-    ) -> Result<(), SurfacePolicyError> {
-        self.validate(registry)?;
-        for (group, tools) in &self.groups {
-            let exposure = if self.is_active(group) {
-                ToolExposure::Direct
-            } else {
-                ToolExposure::Hidden
-            };
-            for tool in tools {
-                // Validated above; `false` here would mean a
-                // concurrent unregister between validation and
-                // write, which leaves the registry consistent.
-                if !registry.set_exposure(tool, exposure) {
-                    tracing::warn!(
-                        group = %group,
-                        tool = %tool,
-                        "tool surface policy: tool vanished during apply"
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Validate the whole policy against `registry` without writing.
-    fn validate(
+    ///
+    /// Public so a deployment can pre-flight a policy before binding
+    /// it to a registry (the server boot path does this via
+    /// [`Self::validate`]; an operator feeding the policy from a UI
+    /// can do the same). The registry mutation is a separate step —
+    /// see [`Self::write_to_registry`].
+    pub fn validate(
         &self,
         registry: &ToolRegistry,
     ) -> Result<(), SurfacePolicyError> {
@@ -400,22 +382,51 @@ impl ToolSurfacePolicy {
         Ok(())
     }
 
-    /// The allow-list [`project_tool_definitions`] should filter with:
+    /// Write each group's verdict onto the registry as a per-tool
+    /// [`ToolExposure`]: active → `Direct`; inactive → `Hidden`;
+    /// groupless → untouched. Single registry-mutating seam for a
+    /// [`ToolSurfacePolicy`].
+    ///
+    /// # Errors
+    ///
+    /// [`SurfacePolicyError`] on validation failure; the registry
+    /// is not mutated.
+    pub fn write_to_registry(
+        &self,
+        registry: &ToolRegistry,
+    ) -> Result<(), SurfacePolicyError> {
+        self.validate(registry)?;
+        for (group, tools) in &self.groups {
+            let exposure = if self.is_active(group) {
+                ToolExposure::Direct
+            } else {
+                ToolExposure::Hidden
+            };
+            for tool in tools {
+                // Validated above; `false` here would mean a
+                // concurrent unregister between validation and
+                // write, which leaves the registry consistent.
+                if !registry.set_exposure(tool, exposure) {
+                    tracing::warn!(
+                        group = %group,
+                        tool = %tool,
+                        "tool surface policy: tool vanished during write_to_registry"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Allow-list [`project_tool_definitions`] should filter with:
     /// every groupless tool, every member of an active group, and —
-    /// when [`Self::max_visible`] is set — only the first N of them in
-    /// `descriptors` order.
+    /// when [`Self::max_visible`] is set — only the first N in
+    /// `descriptors` order. Already-hidden descriptors and MCP
+    /// self-management tools take no cap slot.
     ///
-    /// `descriptors` is [`ToolRegistry::descriptors`]' output, whose
-    /// name-sorted order makes the cap deterministic (a `HashSet` is
-    /// returned, so the caller's list order still comes from
-    /// `descriptors`, not from insertion order here). Already-hidden
-    /// descriptors take no cap slot.
-    ///
-    /// This read side is deliberately lenient — a name that is not in
-    /// `descriptors` simply cannot match, and a duplicate claim is
-    /// resolved as "any active claimant wins" — so an agent loop can
-    /// apply a policy without an error path on the hot path.
-    /// [`ToolSurfacePolicy::apply`] is the strict validator.
+    /// Lenient read side: a name not in `descriptors` cannot match,
+    /// a duplicate claim is "any active claimant wins". The strict
+    /// validator is [`ToolSurfacePolicy::write_to_registry`].
     #[must_use]
     pub fn visible_tool_names(
         &self,
@@ -426,6 +437,7 @@ impl ToolSurfacePolicy {
         for descriptor in descriptors {
             if descriptor.is_hidden
                 || descriptor.exposure == ToolExposure::Hidden
+                || crate::is_mcp_self_tool(&descriptor.name)
                 || !self.admits(&descriptor.name)
             {
                 continue;
@@ -783,12 +795,13 @@ mod tests {
         out
     }
 
-    /// `apply` writes the documented verdict — active group members
-    /// `Direct`, inactive members `Hidden` exposure, groupless tools
-    /// untouched — and the projection then advertises exactly the
-    /// policy's visible set.
+    /// `write_to_registry` writes the documented verdict — active
+    /// group members `Direct`, inactive members `Hidden` exposure,
+    /// groupless tools untouched — and the projection then advertises
+    /// exactly the policy's visible set.
     #[test]
-    fn policy_apply_writes_the_group_verdict_the_projection_reads() {
+    fn policy_write_to_registry_writes_the_group_verdict_the_projection_reads()
+    {
         let registry = registry_with(&["read", "write", "shell", "free"]);
         let policy = policy(
             &[("files", &["read", "write"]), ("ops", &["shell"])],
@@ -796,7 +809,7 @@ mod tests {
             None,
         );
 
-        policy.apply(&registry).expect("valid policy");
+        policy.write_to_registry(&registry).expect("valid policy");
 
         assert_eq!(registry.exposure("read"), Some(ToolExposure::Direct));
         assert_eq!(registry.exposure("write"), Some(ToolExposure::Direct));
@@ -840,7 +853,7 @@ mod tests {
         let unknown =
             policy(&[("files", &["read", "ghost"])], &["files"], None);
         assert_eq!(
-            unknown.apply(&registry),
+            unknown.write_to_registry(&registry),
             Err(SurfacePolicyError::UnknownTool {
                 group: "files".to_string(),
                 tool: "ghost".to_string(),
@@ -850,7 +863,7 @@ mod tests {
         let twice_claimed =
             policy(&[("a", &["read"]), ("b", &["read"])], &[], None);
         assert_eq!(
-            twice_claimed.apply(&registry),
+            twice_claimed.write_to_registry(&registry),
             Err(SurfacePolicyError::AlreadyGrouped {
                 group: "b".to_string(),
                 tool: "read".to_string(),
@@ -861,7 +874,7 @@ mod tests {
 
         let repeated = policy(&[("a", &["read", "read"])], &["a"], None);
         assert_eq!(
-            repeated.apply(&registry),
+            repeated.write_to_registry(&registry),
             Err(SurfacePolicyError::DuplicateTool {
                 group: "a".to_string(),
                 tool: "read".to_string(),
@@ -870,7 +883,7 @@ mod tests {
 
         let unknown_group = policy(&[("a", &["read"])], &["nope"], None);
         assert_eq!(
-            unknown_group.apply(&registry),
+            unknown_group.write_to_registry(&registry),
             Err(SurfacePolicyError::UnknownGroup {
                 name: "nope".to_string(),
             })
@@ -939,7 +952,7 @@ mod tests {
         grouped.declare("core", &["alpha", "beta"]).unwrap();
         grouped.declare("ops", &["gamma"]).unwrap();
         grouped.activate("core");
-        policy.apply(&registry).expect("valid policy");
+        policy.write_to_registry(&registry).expect("valid policy");
 
         let descriptors = registry.descriptors();
         let from_policy: Vec<String> = project_tool_definitions(

@@ -44,13 +44,14 @@ use crate::{
 /// on disk at cleanup time). Cleanup reports branch + path +
 /// `base_sha` when changes are present so the caller can
 /// surface them.
+#[allow(dead_code)]
 pub(crate) async fn run_subagent(
     agent: Arc<dyn Agent>,
     spec: TaskSpec,
     parent_session_id: &str,
     input_depth: usize,
     cancel: Arc<dyn CancelToken>,
-    on_event: &(dyn Fn(AgentEvent) + Send + Sync),
+    on_event: futures::channel::mpsc::UnboundedSender<AgentEvent>,
 ) -> synthia_tool::ToolOutput {
     let runner: Arc<dyn CommandRunner> = Arc::new(StdCommandRunner::new());
     run_subagent_with_runner(
@@ -76,7 +77,7 @@ pub(crate) async fn run_subagent_with_runner(
     parent_session_id: &str,
     input_depth: usize,
     cancel: Arc<dyn CancelToken>,
-    on_event: &(dyn Fn(AgentEvent) + Send + Sync),
+    on_event: futures::channel::mpsc::UnboundedSender<AgentEvent>,
     runner: &Arc<dyn CommandRunner>,
 ) -> synthia_tool::ToolOutput {
     let child_depth = input_depth + 1;
@@ -93,13 +94,28 @@ pub(crate) async fn run_subagent_with_runner(
     let mut input = AgentInput::text(spec.prompt.clone());
     input.subagent_depth = child_depth;
 
-    // The first forwarded event carries the dispatch prompt on
-    // its meta, so a session router can persist the prompt as
-    // the child session's user turn without cloning it onto
-    // every event of the run (see `AgentMeta::prompt`).
-    let mut first_event = true;
-
+    // R-OPT-1 Step 6.2: when the parent populated
+    // `spec.trace_context`, resolve it into an OTel
+    // `Context` here. We deliberately do NOT call
+    // `Context::attach()` over the `agent.run().await`
+    // future — `ContextGuard` is `!Send` and breaks the
+    // `+ Send` bound on the agent future. The wire shim
+    // is therefore available for callers that surface the
+    // parent explicitly (a future iteration can set the
+    // ambient OTel context via `tokio::task::LocalSet`),
+    // and the child starts a root span in the meantime.
+    // This is the documented limitation in the plan
+    // ("sub-agent starts a root span — acceptable
+    // degradation").
+    #[cfg(feature = "otel")]
+    let _parent_cx = spec
+        .trace_context
+        .as_ref()
+        .and_then(parent_context_from_wire);
+    #[cfg(not(feature = "otel"))]
+    let _parent_cx = Option::<()>::None;
     let mut stream = agent.run(input, cancel.clone()).await;
+    let mut first_event = true;
     let mut text = String::new();
     let mut end_reason = SessionEndReason::Completed;
     while let Some(event) = stream.next().await {
@@ -126,7 +142,9 @@ pub(crate) async fn run_subagent_with_runner(
         } else {
             meta.clone()
         };
-        on_event(AgentEvent::Agent(event_meta, Box::new(event)));
+        on_event
+            .unbounded_send(AgentEvent::Agent(event_meta, Box::new(event)))
+            .ok();
     }
 
     let child_text = if matches!(end_reason, SessionEndReason::Completed) {
@@ -265,4 +283,53 @@ pub(crate) async fn run_subagent_with_runner(
 /// pointing at the same id.
 fn session_line(child_session_id: &str) -> String {
     format!("\n\n[subagent session: {child_session_id}]")
+}
+
+/// Reconstruct an [`opentelemetry::Context`] carrying the
+/// parent's remote span from a wire shim. The returned context
+/// is the one to attach as the ambient OTel context for the
+/// child run, so the child opens its first span as a child of
+/// the parent's `traceparent`-encoded span.
+///
+/// `None` when the hex fields are malformed (extra defensive
+/// check; `TaskSpec::from_value` already validated lengths).
+#[cfg(feature = "otel")]
+fn parent_context_from_wire(
+    wire: &crate::task::spec::TaskTraceContext,
+) -> Option<opentelemetry::Context> {
+    use std::str::FromStr;
+
+    use opentelemetry::trace::{
+        SpanContext,
+        SpanId,
+        TraceContextExt,
+        TraceFlags,
+        TraceId,
+        TraceState,
+    };
+
+    let trace_id = TraceId::from_hex(&wire.trace_id_hex).ok()?;
+    let parent_span_id = SpanId::from_hex(&wire.parent_span_id_hex).ok()?;
+    let trace_flags = if wire.trace_flags_byte & 0x01 != 0 {
+        TraceFlags::SAMPLED
+    } else {
+        TraceFlags::default()
+    };
+    let trace_state = if wire.trace_state.is_empty() {
+        TraceState::default()
+    } else {
+        TraceState::from_str(&wire.trace_state)
+            .unwrap_or_else(|_| TraceState::default())
+    };
+    let span_cx = SpanContext::new(
+        trace_id,
+        parent_span_id,
+        trace_flags,
+        true,
+        trace_state,
+    );
+    if !span_cx.is_valid() {
+        return None;
+    }
+    Some(opentelemetry::Context::new().with_remote_span_context(span_cx))
 }

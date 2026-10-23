@@ -29,6 +29,16 @@ pub(super) async fn run_controller_loop(
     // `LifecycleShutdown` event. Each exit path overrides it;
     // the default (Completed) covers the channel-closed path.
     let mut exit_reason = synthia::session::SessionEndReason::Completed;
+    // Cluster ownership keepalive: renew at a third of the TTL so a
+    // single missed tick does not lose the lease. An empty lease (a
+    // controller built outside `AppState`) renews nothing.
+    let lease_ttl = inner.cluster.lease_ttl;
+    let mut renew = tokio::time::interval_at(
+        tokio::time::Instant::now() + lease_ttl / 3,
+        lease_ttl / 3,
+    );
+    renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let lease_held = !inner.lease.is_empty();
 
     loop {
         let idle_deadline =
@@ -51,6 +61,22 @@ pub(super) async fn run_controller_loop(
                 last_activity = tokio::time::Instant::now();
             }
 
+            _ = renew.tick(), if lease_held => {
+                if let Err(e) = inner
+                    .cluster
+                    .bus
+                    .renew(&inner.lease, &inner.cluster.node_id, lease_ttl)
+                    .await
+                {
+                    tracing::warn!(
+                        session_id = %inner.session_id,
+                        error = %e,
+                        "cluster: lost the session lease; stopping the controller"
+                    );
+                    break;
+                }
+            }
+
             _ = wait_idle_timeout(idle_deadline), if idle_deadline.is_some() => {
                 handle_idle_timeout(&inner, &mut run_handle).await;
                 break;
@@ -67,6 +93,15 @@ pub(super) async fn run_controller_loop(
     // log always ends with a `lifecycle_shutdown` marker and the
     // sink is closed exactly once.
     inner.finalise_shutdown(exit_reason).await;
+    if lease_held {
+        // Best effort: an expired/reassigned lease failing to delete
+        // is harmless (the TTL covers it).
+        let _ = inner
+            .cluster
+            .bus
+            .release(&inner.lease, &inner.cluster.node_id)
+            .await;
+    }
     inner.alive.store(false, Ordering::SeqCst);
 }
 
@@ -275,6 +310,13 @@ async fn handle_feedback_op(
         "thumbs_up": thumbs_up,
         "ts": inner.deps.lock().clock.now().to_rfc3339(),
     });
+    // The feedback row is written straight to the sink, bypassing
+    // the run's writer — so it reserves its ordinal from the sink's
+    // counter, the same one the run's writer draws from. A local
+    // counter here would collide with the run's ordinals and make
+    // every compaction checkpoint that cites a later row
+    // unresolvable.
+    inner.session_store.alloc_seq();
     if let Err(e) = inner.session_store.append(&payload).await {
         tracing::warn!(
             target: "synthia.session",

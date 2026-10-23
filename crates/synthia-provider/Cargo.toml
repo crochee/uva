@@ -31,14 +31,21 @@ tokio = { workspace = true, features = ["macros", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 # `ResourceLink::prompt_projection` decodes an inline `text/*` payload
 # into a prompt, which only the two adapters ever do, so `base64` is
-# optional and rides the same features as `reqwest` — a consumer with
+# optional and rides the same features as `reqwest`—a consumer with
 # their own provider compiles no decoder either.
 base64 = { workspace = true, optional = true }
 parking_lot.workspace = true
 tracing.workspace = true
+# R-OPT-1: typed-span helpers (`SpanKind`/`new_typed_span`) are
+# always-on (zero cost) in synthia-telemetry, so a no-default
+# dep is enough to name them from `traits_impl.rs`. The OTLP
+# path is provided by the consumer crate that enables the
+# `otel` feature.
+synthia-telemetry = { workspace = true, default-features = false }
 ulid.workspace = true
 chrono.workspace = true
 regex.workspace = true
+url.workspace = true
 toml.workspace = true
 ahash = "0.8"
 thiserror.workspace = true
@@ -52,12 +59,12 @@ thiserror.workspace = true
 # synthia-provider = { version = "0.1", default-features = false }
 # ```
 #
-# The rest of the crate — the `ModelProvider` trait, the wire types,
+# The rest of the crate—the `ModelProvider` trait, the wire types,
 # the token estimator, the typed `ProviderProfile` data, the retry
-# classifier, `json_repair` — compiles either way.
+# classifier, `json_repair`—compiles either way.
 default = ["anthropic", "openai"]
-# Each adapter turns on `synthia-core/reqwest` — the
-# `From<reqwest::Error> for Error` impl they `?` through — so a build
+# Each adapter turns on `synthia-core/reqwest`—the
+# `From<reqwest::Error> for Error` impl they `?` through—so a build
 # with no adapter has no HTTP error type either.
 anthropic = ["dep:reqwest", "dep:base64", "synthia-core/reqwest"]
 openai = ["dep:reqwest", "dep:base64", "synthia-core/reqwest"]
@@ -65,14 +72,34 @@ openai = ["dep:reqwest", "dep:base64", "synthia-core/reqwest"]
 # When enabled, `AnthropicProvider::complete` / `OpenAICompatibleProvider::complete`
 # (and their `complete_with_stream` variants) emit a `llm.call` tracing span
 # with `gen_ai.*` semantic-convention attributes. No-op when disabled, and
-# irrelevant when both adapters are off.
-otel = []
+# irrelevant when both adapters are off. R-OPT-1: also activates the OTel
+# metrics half of synthia-telemetry so the same call sites can emit
+# `synthia_llm_calls_total` / token histograms.
+otel = ["synthia-telemetry/otlp"]
+# : HTTP connection-pool + warm-up + per-host cap.
+# When disabled (default), the two adapters use
+# `reqwest::Client::new()` unchanged. When enabled, the
+# adapter is constructed through [`crate::pool::PooledHttpClient`]
+# with the configured [`crate::pool::PoolConfig`] (default:
+# max_idle_per_host = 8, idle_timeout = 90 s, warm-up on),
+# and a `PoolStats` snapshot is reachable through the
+# facade-side `hpc_pool` module. No new external dep;
+# `reqwest::Client::builder().pool_max_idle_per_host(...)` is
+# the only knob turned on by the feature.
+hpc-pool = []
 
 [dev-dependencies]
 # Tests spawn tasks and use channels on a real runtime; `macros`/`time`
 # come from the lib's own feature set.
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 wiremock.workspace = true
 futures.workspace = true
 tracing-subscriber.workspace = true
 serial_test = "4.0"
+
+# The pool bench drives 64 concurrent requests on a
+# multi-thread runtime; without `rt-multi-thread` the
+# `#[tokio::main]` macro fails at expansion time.
+[[example]]
+name = "provider_pool_bench"
+required-features = ["hpc-pool"]

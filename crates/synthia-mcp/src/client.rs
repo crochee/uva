@@ -13,7 +13,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use synthia_core::{Error, registry::Registry as _};
+use synthia_core::Error;
 use synthia_provider::types::{
     AudioContent,
     ContentPart,
@@ -376,15 +376,15 @@ pub async fn sync_mcp_tools(
 /// `tools/list_changed` or reconnect: the deployment's policy survived
 /// only until the server blinked.
 ///
-/// The existing entry is read through `Registry::get`, which — unlike
-/// `snapshot` — deliberately sees hidden tools.
+/// The existing entry is read through [`ToolRegistry::get`], which —
+/// unlike `snapshot` — deliberately sees hidden tools.
 async fn carried_visibility(
     registry: &ToolRegistry,
     previous: &McpToolGeneration,
 ) -> HashMap<String, (bool, ToolExposure)> {
     let mut carried = HashMap::new();
     for (name, _) in &previous.entries {
-        if let Ok(Some(entry)) = registry.get(name).await {
+        if let Some(entry) = registry.get(name) {
             carried.insert(name.clone(), (entry.is_hidden(), entry.exposure()));
         }
     }

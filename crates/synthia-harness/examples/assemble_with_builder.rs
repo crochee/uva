@@ -4,10 +4,10 @@
 //! wires the bricks by hand (each `with_*` call held by the
 //! caller). `ReActAgent::new(provider, registry)` collapses that
 //! into one chained expression (R12's `AgentBuilder` folded into
-//! the agent itself in R110); R13's `output_schema` and
-//! `compaction_settings` setters ride the same chain. This file
-//! is the "best-assembly paradigm" the project goal names: a
-//! complete, production-shaped agent in one readable block.
+//! the agent itself in R110); R13's `output_schema` setter rides
+//! the same chain. This file is the "best-assembly paradigm" the
+//! project goal names: a complete, production-shaped agent in one
+//! readable block.
 //!
 //! Demonstrated bricks:
 //!
@@ -16,7 +16,7 @@
 //! | `ReActAgent` (the builder is the harness) | R12 / R110 | `ReActAgent::new(provider, registry)` chain |
 //! | Tier-aware steering | R10 | `synthia_steering::tier::auto` |
 //! | Structured output | R12+R13 | `.with_output_schema(schema)` → auto tool |
-//! | LLM compaction | R13 | `.with_compaction_settings(..)` → summarising manager |
+//! | LLM compaction | R13 | `synthia-server::agent_run_config::context_manager_for_compaction_with_emitters` |
 //! | Typed event sink | R6 | `.with_typed_event_sink(sink)` |
 //! | @agent router bridge | R10+R11 | `LeaderRouter` + `mentions_to_task_specs` |
 //!
@@ -28,7 +28,6 @@
 
 use std::sync::Arc;
 
-use synthia_context::CompactionSettings;
 use synthia_harness::{ReActAgent, agent::Agent as _};
 use synthia_provider::traits::ModelProvider;
 use synthia_session::TypedEventSink;
@@ -80,8 +79,10 @@ async fn main() {
     // 4-6. THE BUILD: one chained expression consumes the bricks.
     //    - `.output_schema(..)` (R13) auto-registers the
     //      `structured_output` tool AND stamps the descriptor.
-    //    - `.compaction_settings(..)` (R13) upgrades the context
-    //      manager to the LLM-backed summariser (same provider).
+    //    - LLM compaction is wired by the server-side factory
+    //      `synthia_server::agent_run_config::context_manager_for_compaction_with_emitters`
+    //      (R126 moved it out of the harness); the harness only
+    //      owns the contextual wires it composes here.
     //    - `.steering(..)` / `.typed_event_sink(..)` / `.name()`
     //      complete the wiring.
     let agent = ReActAgent::new(provider, plugin_tool_registry())
@@ -97,7 +98,6 @@ async fn main() {
             },
             "required": ["answer"]
         }))
-        .with_compaction_settings(CompactionSettings::default())
         .with_typed_event_sink(typed_sink);
 
     println!(
@@ -112,7 +112,9 @@ async fn main() {
     println!(
         "[5/6] structured out: tool auto-injected (output_schema declared)"
     );
-    println!("[6/6] compaction    : LLM summariser armed (default settings)");
+    println!(
+        "[6/6] compaction    : server factory owns the LLM summariser wiring"
+    );
 
     // Bonus brick: the @agent router bridge (R10+R11). Text
     // mentions become `TaskSpec`s for the delegation seam.

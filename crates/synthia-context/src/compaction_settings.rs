@@ -192,6 +192,29 @@ pub struct CompactionDetails {
     pub modified_files: Vec<PathBuf>,
 }
 
+/// One tool call's file activity as `(read, write)`; either side may be `None`.
+pub type TouchedPair = (Option<PathBuf>, Option<PathBuf>);
+
+/// Project one tool call onto the `(read_path, write_path)` pair
+/// [`CompactionDetails`] tracks. Only `read` / `write` participate:
+/// inferring the files a `sh -c` touched is a guess, and a wrong claim in
+/// the summariser prompt is worse than none.
+#[must_use]
+pub fn touched_target(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Option<TouchedPair> {
+    let path = input
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from);
+    match tool_name {
+        "read" => Some((path, None)),
+        "write" => Some((None, path)),
+        _ => None,
+    }
+}
+
 /// Predicate: should the agent loop trigger compaction now?
 ///
 /// Returns `true` iff:
@@ -253,7 +276,27 @@ impl std::error::Error for ValidationError {}
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
+
+    #[test]
+    fn touched_target_ignores_shell() {
+        assert!(
+            touched_target("shell", &json!({ "cmd": "rm a.rs" })).is_none()
+        );
+        assert!(touched_target("web_fetch", &json!({ "url": "x" })).is_none());
+        assert_eq!(
+            touched_target("read", &json!({ "path": "a.rs" })),
+            Some((Some(PathBuf::from("a.rs")), None))
+        );
+        assert_eq!(
+            touched_target("write", &json!({ "path": "b.rs" })),
+            Some((None, Some(PathBuf::from("b.rs"))))
+        );
+        // No `path` argument → no claim.
+        assert_eq!(touched_target("read", &json!({})), Some((None, None)));
+    }
 
     #[test]
     fn defaults_match_pi() {

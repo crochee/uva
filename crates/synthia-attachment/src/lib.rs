@@ -75,8 +75,15 @@ pub struct ImageAttachmentRef {
     /// without re-reading the storage backend).
     pub byte_len: usize,
     /// Wall-clock timestamp the attachment was saved.
-    #[serde(default = "Utc::now")]
+    #[serde(default = "saved_at_default")]
     pub saved_at: DateTime<Utc>,
+}
+
+/// Deserialization default for records that predate `saved_at`
+/// (AGENTS.md §3.8: wall-clock reads go through
+/// [`synthia_core::Clock`], never `chrono::Utc::now`).
+fn saved_at_default() -> DateTime<Utc> {
+    synthia_core::SharedClock::system().now()
 }
 
 impl ImageAttachmentRef {

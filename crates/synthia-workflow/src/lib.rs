@@ -84,6 +84,7 @@ pub mod result;
 pub mod runtime;
 pub mod scorer;
 pub mod spec;
+pub mod store;
 pub use crate::{
     concurrency::default_max_concurrency,
     control::WorkflowControl,
@@ -134,4 +135,5 @@ pub use crate::{
         Step,
         WorkflowSpec,
     },
+    store::WorkflowStore,
 };

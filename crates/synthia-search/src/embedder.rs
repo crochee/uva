@@ -1,4 +1,4 @@
-//! [`Embedder`] — pluggable text → dense-vector.
+//! [`Embedder`]—pluggable text → dense-vector.
 //!
 //! [`HashingEmbedder`] is the default. It is fully deterministic
 //! (FNV-1a 64-bit hash of each token, sign bit for ±1), zero
@@ -13,6 +13,26 @@ use crate::Tokenizer;
 pub trait Embedder: Send + Sync + 'static {
     fn dim(&self) -> usize;
     fn embed(&self, text: &str) -> Vec<f32>;
+
+    /// Embed a batch in one inner trip. The default
+    /// implementation serialises through [`Embedder::embed`];
+    /// embedders whose underlying engine already accepts a
+    /// batch (e.g. `ModelProviderEmbedder` over a real API)
+    /// override it so the batch driver only pays one wire
+    /// trip per chunk. Returned `Vec<Vec<f32>>` MUST keep
+    /// the input order and length.
+    ///
+    /// : added as a default-implemented
+    /// method so the trait extension is non-breaking—every
+    /// existing embedder that only implemented `embed` keeps
+    /// compiling.
+    fn embed_batch(&self, texts: Vec<String>) -> Vec<Vec<f32>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.embed(&t));
+        }
+        out
+    }
 }
 
 pub struct HashingEmbedder {
@@ -41,6 +61,18 @@ impl Embedder for HashingEmbedder {
         }
         l2_normalize(&mut v);
         v
+    }
+
+    fn embed_batch(&self, texts: Vec<String>) -> Vec<Vec<f32>> {
+        // HashingEmbedder is CPU-only—the batch path
+        // does not open a wire trip, but exposing the
+        // method explicitly keeps `BatchEmbedder`'s
+        // driver uniform across providers.
+        let mut out = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.embed(&t));
+        }
+        out
     }
 }
 

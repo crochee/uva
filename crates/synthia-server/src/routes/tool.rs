@@ -92,12 +92,12 @@ async fn collect_tool_defs(
     // Self-management MCP tools (`mcp__self__*`) are server-facing
     // (operators reach them via MCP), not model-facing. The HTTP
     // `/api/tools` catalog follows the same contract as the agent
-    // loop's `projected_tool_definitions`: hide them so an operator
+    // loop's tool projection: hide them so an operator
     // browsing the tool surface is not presented with nine
     // server-management entries that the LLM cannot call.
     let operator_facing: Vec<synthia::tool::ToolDescriptor> = descriptors
         .into_iter()
-        .filter(|d| !d.name.starts_with("mcp__self__"))
+        .filter(|d| !synthia::tool::is_mcp_self_tool(&d.name))
         .collect();
     let defs: Vec<synthia::provider::ToolDefinition> =
         synthia::tool::project_tool_definitions(
@@ -156,24 +156,38 @@ pub async fn register_tool(
     let tool = synthia::tool::ToolEntry::dynamic(
         req.name.clone(),
         desc.clone(),
-        params,
+        params.clone(),
     );
 
-    let reg = state.tool_registry.write().await;
-    let existed = reg
-        .list(None)
-        .await
-        .map(|entries| entries.iter().any(|e| e.name() == req.name))
-        .unwrap_or(false);
-    if existed {
-        return Err(AppError::from(Error::already_exists(format!(
-            "tool '{}'",
-            req.name
-        ))));
+    {
+        let reg = state.tool_registry.write().await;
+        let existed = reg
+            .list(None)
+            .await
+            .map(|entries| entries.iter().any(|e| e.name() == req.name))
+            .unwrap_or(false);
+        if existed {
+            return Err(AppError::from(Error::already_exists(format!(
+                "tool '{}'",
+                req.name
+            ))));
+        }
+        reg.put(tool).await.map_err(|e| {
+            Error::internal(format!("failed to register tool: {e}"))
+        })?;
     }
-    reg.put(tool).await.map_err(|e| {
-        Error::internal(format!("failed to register tool: {e}"))
-    })?;
+    // Tell the other nodes; a local bus publishes into the process
+    // (the dispatcher skips our own origin, the local apply already
+    // happened).
+    publish_tool_mutation(
+        &state,
+        crate::cluster::ToolMutation::RegisterDynamic {
+            name: req.name.clone(),
+            description: desc.clone(),
+            parameters: params.clone(),
+        },
+    )
+    .await;
 
     Ok(Json(ToolInfo {
         name: req.name,
@@ -204,11 +218,7 @@ pub async fn get_tool(
     // just to find the one named entry. The previous path wasted
     // work on every detail-page render and the front-end's per-
     // detail-page prefetch.
-    let entry = tool_reg
-        .get(&name)
-        .await
-        .map_err(|e| Error::internal(e.to_string()))?;
-    let entry = entry.ok_or_else(|| {
+    let entry = tool_reg.get(&name).ok_or_else(|| {
         AppError::from(Error::not_found(format!("tool '{name}'")))
     })?;
     // Provenance isn't on `ToolEntry`; the registry exposes it via
@@ -247,20 +257,40 @@ pub async fn unregister_tool(
     AppPath(name): AppPath<String>,
 ) -> Result<Json<ToolInfo>, AppError> {
     validate_resource_name(&name)?;
-    let reg = state.tool_registry.write().await;
-    let entries = reg.list(None).await.unwrap_or_default();
-    let target =
-        entries
-            .into_iter()
-            .find(|e| e.name() == name)
-            .ok_or_else(|| {
-                AppError::from(Error::not_found(format!("tool '{name}'")))
-            })?;
-    let description = target.description().to_string();
-    reg.delete(&name).await.map_err(|e| {
-        Error::internal(format!("failed to unregister tool: {e}"))
-    })?;
-    Ok(Json(ToolInfo { name, description }))
+    {
+        let reg = state.tool_registry.write().await;
+        let entries = reg.list(None).await.unwrap_or_default();
+        let target =
+            entries.into_iter().find(|e| e.name() == name).ok_or_else(
+                || AppError::from(Error::not_found(format!("tool '{name}'"))),
+            )?;
+        let description = target.description().to_string();
+        reg.delete(&name).await.map_err(|e| {
+            Error::internal(format!("failed to unregister tool: {e}"))
+        })?;
+        publish_tool_mutation(
+            &state,
+            crate::cluster::ToolMutation::Remove { name: name.clone() },
+        )
+        .await;
+        Ok(Json(ToolInfo { name, description }))
+    }
+}
+
+/// Publish one tool-registry mutation for peer nodes. Best effort:
+/// a publish failure leaves peers with a stale view until their next
+/// mutation or restart, which the bus contract accepts.
+async fn publish_tool_mutation(
+    state: &AppState,
+    mutation: crate::cluster::ToolMutation,
+) {
+    let frame = crate::cluster::ControlFrame::InvalidateTools {
+        origin: state.cluster.node_id.clone(),
+        mutation,
+    };
+    if let Err(e) = state.cluster.bus.publish_control(frame).await {
+        tracing::warn!(error = %e, "cluster: tool mutation publish failed");
+    }
 }
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use synthia::{core::registry::Registry, session::manager::SessionRegistry};
+use synthia::session::manager::SessionRegistry;
 
 use crate::state::{AppState, app_state::self_mcp};
 
@@ -36,7 +36,7 @@ async fn boot_registers_self_management_tools() {
     let self_tools: Vec<String> = registry
         .descriptors()
         .iter()
-        .filter(|d| d.name.starts_with("mcp__self__"))
+        .filter(|d| synthia::tool::is_mcp_self_tool(&d.name))
         .map(|d| d.name.clone())
         .collect();
     for domain in [
@@ -50,7 +50,7 @@ async fn boot_registers_self_management_tools() {
         "models",
         "attachments",
     ] {
-        let name = format!("mcp__self__{domain}");
+        let name = format!("{}{domain}", synthia::tool::MCP_SELF_TOOL_PREFIX);
         assert!(
             self_tools.contains(&name),
             "missing {name}; registered: {self_tools:?}"
@@ -59,7 +59,7 @@ async fn boot_registers_self_management_tools() {
     let deferred = registry
         .descriptors()
         .iter()
-        .filter(|d| d.name.starts_with("mcp__self__"))
+        .filter(|d| synthia::tool::is_mcp_self_tool(&d.name))
         .all(|d| d.exposure == synthia::tool::ToolExposure::Deferred);
     assert!(
         deferred,
@@ -71,8 +71,6 @@ async fn boot_registers_self_management_tools() {
     // `AppState`. `models` is the cheapest read that proves it.
     let entry = registry
         .get("mcp__self__models")
-        .await
-        .expect("lookup")
         .expect("models tool must be registered");
     let tool = entry.tool_instance();
     drop(registry);

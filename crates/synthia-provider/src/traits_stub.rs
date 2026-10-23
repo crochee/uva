@@ -44,6 +44,52 @@ impl Default for ModelProviderStub {
     }
 }
 
+/// Blanket impl: `Arc<T>` derefs to `T`, so an `Arc<dyn ModelProvider>`
+/// field can hold any concrete provider, including one whose
+/// `Sync` / `Send` bounds the harness requires.
+#[async_trait]
+impl<T: ModelProvider + ?Sized> ModelProvider for Arc<T> {
+    async fn initialize(
+        &mut self,
+        config: ProviderConfig,
+    ) -> Result<(), Error> {
+        Arc::get_mut(self)
+            .ok_or_else(|| {
+                Error::validation(
+                    "ModelProvider::initialize called on a shared Arc",
+                )
+            })?
+            .initialize(config)
+            .await
+    }
+
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        (**self).model_config()
+    }
+
+    async fn complete(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<CompletionResponse, Error> {
+        (**self).complete(request).await
+    }
+
+    async fn complete_with_stream(
+        &self,
+        request: CompletionRequest,
+        cancel_token: Option<Arc<dyn CancelToken>>,
+        on_delta: Box<dyn FnMut(StreamChunk) + Send>,
+    ) -> Result<CompletionResponse, Error> {
+        (**self)
+            .complete_with_stream(request, cancel_token, on_delta)
+            .await
+    }
+}
+
 #[async_trait]
 impl ModelProvider for ModelProviderStub {
     async fn initialize(

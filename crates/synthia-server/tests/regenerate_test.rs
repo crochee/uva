@@ -64,6 +64,7 @@ async fn append_rows(fix: &Fixture, session_id: &str, rows: &[Value]) {
         .session_manager
         .sink(SERVER_DEFAULT_USER_ID, session_id);
     for row in rows {
+        sink.alloc_seq();
         sink.append(row).await.unwrap();
     }
 }

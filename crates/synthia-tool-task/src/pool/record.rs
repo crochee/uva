@@ -39,6 +39,11 @@ impl InvocationStatus {
             SessionEndReason::Cancelled => Self::Cancelled,
             SessionEndReason::Error(_) => Self::Failed,
             SessionEndReason::MaxIterations => Self::MaxIterations,
+            // R-OPT-HPC: a child that was refused by the safety seam
+            // did not produce a usable output; the parent sees the
+            // same surface as a `Failed` so existing retry /
+            // escalation logic continues to work unchanged.
+            SessionEndReason::Refused { .. } => Self::Failed,
         }
     }
 

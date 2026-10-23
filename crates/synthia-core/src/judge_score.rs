@@ -2,7 +2,7 @@
 //!
 //! Canonical location for the LLM-as-judge reply parser. Both
 //! [`synthia_eval::LlmJudgeMetric`](https://docs.rs/synthia_eval)
-//! and [`synthia_harness::LlmJudgeScorer`](https://docs.rs/synthia_harness)
+//! and [`synthia_strategy_best_of_n::LlmJudgeScorer`](https://docs.rs/synthia_strategy_best_of_n)
 //! read judge replies through this function, so a change to the
 //! shape of a score line (`Score: 0.85`, case-insensitive, with
 //! or without a space after the colon, clamped to the unit

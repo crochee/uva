@@ -1,21 +1,17 @@
-//! Compaction wiring: which context manager a run actually uses.
-//!
-//! The compaction setters and [`ReActAgent::with_context_manager`]
-//! describe one decision — an enabled + valid policy replaces the
-//! caller's manager, anything else keeps it — and these tests pin that
-//! the decision is made per run, so the order the setters are called in
-//! cannot change the outcome. Before the resolution moved out of the
-//! setters, `.with_context_manager(..).with_compaction_settings(..)`
-//! silently discarded the caller's manager.
+//! Manual compaction wiring: build a
+//! `SummarizingContextManager` directly and pin it through
+//! `with_context_manager`. The harness-side `with_compaction_settings`
+//! setter moved out to the server-side factory
+//! (`synthia_server::agent_run_config::context_manager_for_compaction_with_emitters`),
+//! so this file is the regression test for the canonical caller
+//! path: a hand-built `SummarizingContextManager` installed through
+//! `with_context_manager` is what the loop uses for the run.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use synthia_context::{AgentState, CompactionSettings, ContextManager};
+use synthia_context::{AgentState, ContextManager, SummarizingContextManager};
 use synthia_provider::{
     ContentPart,
     SamplingResult,
@@ -28,7 +24,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{support::*, *};
 
-/// Counts how many times the loop asked it to fit the context window.
 struct SpyManager {
     prepares: Arc<AtomicUsize>,
 }
@@ -40,11 +35,11 @@ impl ContextManager for SpyManager {
         _messages: &mut Vec<Message>,
         _state: &mut AgentState,
     ) {
-        self.prepares.fetch_add(1, Ordering::SeqCst);
+        self.prepares
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
-/// Script a one-iteration run that answers and stops.
 fn answer_script() -> ScriptedStreamProvider {
     ScriptedStreamProvider::new(vec![vec![
         StreamChunk::Content(ContentPart::Text(TextContent {
@@ -74,126 +69,46 @@ async fn run_to_completion(agent: &ReActAgent) -> Vec<SessionEndReason> {
     reasons
 }
 
-/// A disabled policy leaves the caller's manager in place whichever
-/// setter ran first.
 #[tokio::test]
-async fn disabled_policy_keeps_the_caller_manager_in_either_order() {
-    let disabled = CompactionSettings {
-        enabled: false,
-        ..CompactionSettings::default()
-    };
+async fn caller_supplied_manager_runs_when_set_via_with_context_manager() {
+    let prepares = Arc::new(AtomicUsize::new(0));
+    let spy: Arc<dyn ContextManager> = Arc::new(SpyManager {
+        prepares: Arc::clone(&prepares),
+    });
+    let provider: Arc<dyn ModelProvider> = Arc::new(answer_script());
 
-    for settings_first in [true, false] {
-        let prepares = Arc::new(AtomicUsize::new(0));
-        let spy: Arc<dyn ContextManager> = Arc::new(SpyManager {
-            prepares: Arc::clone(&prepares),
-        });
-        let provider: Arc<dyn ModelProvider> = Arc::new(answer_script());
+    let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
+        .with_context_manager(spy);
 
-        let base = ReActAgent::new(provider, Arc::new(ToolRegistry::new()));
-        let agent = if settings_first {
-            base.with_compaction_settings(disabled)
-                .with_context_manager(spy)
-        } else {
-            base.with_context_manager(spy)
-                .with_compaction_settings(disabled)
-        };
-
-        let reasons = run_to_completion(&agent).await;
-        assert_eq!(
-            reasons,
-            vec![SessionEndReason::Completed],
-            "settings_first={settings_first}: the run must complete"
-        );
-        assert_eq!(
-            prepares.load(Ordering::SeqCst),
-            1,
-            "settings_first={settings_first}: a disabled policy must not \
-             discard the caller's own context manager"
-        );
-    }
+    let reasons = run_to_completion(&agent).await;
+    assert_eq!(
+        reasons,
+        vec![SessionEndReason::Completed],
+        "the run must complete"
+    );
+    assert_eq!(
+        prepares.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the caller-supplied manager must be the one used by the loop"
+    );
 }
 
-/// An enabled + valid policy replaces the caller's manager whichever
-/// setter ran first.
 #[tokio::test]
-async fn enabled_policy_replaces_the_caller_manager_in_either_order() {
-    // The scripted provider's window is wide enough that no compaction
-    // triggers, so the summariser never calls the provider.
-    let enabled = CompactionSettings::default();
+async fn caller_supplied_summarising_manager_runs_when_set_via_with_context_manager()
+ {
+    let summarise: synthia_context::SummariseFn =
+        Arc::new(|_batch| Box::pin(async { None }));
+    let summarising: Arc<dyn ContextManager> =
+        Arc::new(SummarizingContextManager::new(summarise));
+    let provider: Arc<dyn ModelProvider> = Arc::new(answer_script());
 
-    for settings_first in [true, false] {
-        let prepares = Arc::new(AtomicUsize::new(0));
-        let spy: Arc<dyn ContextManager> = Arc::new(SpyManager {
-            prepares: Arc::clone(&prepares),
-        });
-        let provider: Arc<dyn ModelProvider> = Arc::new(answer_script());
+    let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
+        .with_context_manager(summarising);
 
-        let base = ReActAgent::new(provider, Arc::new(ToolRegistry::new()));
-        let agent = if settings_first {
-            base.with_compaction_settings(enabled)
-                .with_context_manager(spy)
-        } else {
-            base.with_context_manager(spy)
-                .with_compaction_settings(enabled)
-        };
-
-        let reasons = run_to_completion(&agent).await;
-        assert_eq!(
-            reasons,
-            vec![SessionEndReason::Completed],
-            "settings_first={settings_first}: the run must complete"
-        );
-        assert_eq!(
-            prepares.load(Ordering::SeqCst),
-            0,
-            "settings_first={settings_first}: an enabled policy replaces \
-             the caller's context manager"
-        );
-    }
-}
-
-/// An externally-owned checkpoint supplies the durable emitters, so a
-/// policy + checkpoint pair still replaces the caller's manager — in
-/// either setter order.
-#[tokio::test]
-async fn external_checkpoint_still_replaces_the_caller_manager() {
-    let enabled = CompactionSettings::default();
-
-    for settings_first in [true, false] {
-        let prepares = Arc::new(AtomicUsize::new(0));
-        let spy: Arc<dyn ContextManager> = Arc::new(SpyManager {
-            prepares: Arc::clone(&prepares),
-        });
-        let (sink, _rx) = synthia_session::TypedEventSink::channel(16);
-        let checkpoint = synthia_session::CompactionCheckpoint::new(
-            sink,
-            Arc::new(synthia_session::SurfaceLedger::new()),
-        );
-        let provider: Arc<dyn ModelProvider> = Arc::new(answer_script());
-
-        let base = ReActAgent::new(provider, Arc::new(ToolRegistry::new()));
-        let agent = if settings_first {
-            base.with_compaction_settings(enabled)
-                .with_compaction_checkpoint(checkpoint)
-                .with_context_manager(spy)
-        } else {
-            base.with_context_manager(spy)
-                .with_compaction_checkpoint(checkpoint)
-                .with_compaction_settings(enabled)
-        };
-
-        let reasons = run_to_completion(&agent).await;
-        assert_eq!(
-            reasons,
-            vec![SessionEndReason::Completed],
-            "settings_first={settings_first}: the run must complete"
-        );
-        assert_eq!(
-            prepares.load(Ordering::SeqCst),
-            0,
-            "settings_first={settings_first}: an enabled policy replaces \
-             the caller's context manager even with an external checkpoint"
-        );
-    }
+    let reasons = run_to_completion(&agent).await;
+    assert_eq!(
+        reasons,
+        vec![SessionEndReason::Completed],
+        "the run must complete with a hand-built summarising manager"
+    );
 }

@@ -173,7 +173,7 @@ fn main() {
         calls: Arc::clone(&model_calls),
     });
 
-    let registry = ToolRegistry::new().with_spawner(Arc::clone(&spawner));
+    let registry = ToolRegistry::new();
     registry.register_entry(ToolEntry::new(Arc::new(EchoTool {
         calls: Arc::clone(&tool_calls),
     })));

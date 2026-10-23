@@ -36,26 +36,18 @@ schemars = { workspace = true, features = ["preserve_order"] }
 # feature name.
 schemars_derive.workspace = true
 tracing.workspace = true
-# `rt` (spawn for dispatch + spawn_blocking), `sync` (semaphore,
-# channels), `time` (cleanup interval, spill expiry), `fs` (the
-# full-output stash), `io-util` (the spill writer), `macros`
-# (`select!` / `join!` / `tokio::test`). `process` left with the
-# `shell` tool, which now lives in `synthia-tool-shell`.
-tokio = { workspace = true, features = [
-  "rt",
-  "sync",
-  "time",
-  "fs",
-  "io-util",
-  "macros",
-] }
-tokio-stream.workspace = true
 parking_lot.workspace = true
 futures.workspace = true
 [dev-dependencies]
-# The examples and multi-threaded tests use `#[tokio::main]`, which
-# defaults to the multi-thread flavor.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `macros` + `rt-multi-thread` drive the `#[tokio::test]` /
+# `#[tokio::main]` tests and examples. The production library is
+# runtime-free (dispatch runs on the caller's poll; the spill
+# writer blocks).
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+] }
+tokio-stream.workspace = true
 tempfile.workspace = true
 synthia-test-support.workspace = true
 tracing-subscriber.workspace = true

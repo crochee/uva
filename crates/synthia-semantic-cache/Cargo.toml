@@ -1,0 +1,38 @@
+[package]
+name = "synthia-semantic-cache"
+description = "Embedding-similarity LLM response cache: provider wrapper that short-circuits duplicate completions via cosine similarity over a pluggable embedder + store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+synthia-core.workspace = true
+synthia-provider = { workspace = true, default-features = false }
+# `Embedder` / `HashingEmbedder` / `CjkTokenizer` live here; this
+# crate depends on `synthia-search` directly (not via the facade)
+# because the facade has a re-export but the embedder trait is
+# already part of the `synthia-search` crate's curated public
+# surface. `synthia-search` default features are intentionally
+# empty, so no `reqwest` / `provider` adapter is pulled in.
+synthia-search.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+hex.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+synthia-test-support.workspace = true
+tempfile.workspace = true

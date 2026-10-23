@@ -11,11 +11,11 @@
 //! | [`assemble`]       | The public `assemble` contract — order, purity, byte-stability, no-runtime-facts |
 //! | [`identity`]       | The `<identity>` renderer: display_name fallback, empty fields |
 //! | [`skills_agents`]  | The `<available_skills>` / `<available_agents>` renderers and their absence rules |
-//! | [`runtime_context`]| The `RuntimeContext` snapshot seam: supersession frame, git status, clock injection |
+//! | [`snapshot`]       | The `RuntimeContext` snapshot seam: supersession frame, git status, clock injection |
 //! | [`support`]        | Shared fixtures (`descriptor_with_instructions`, `peer_descriptor`, `fixed_runtime_context`) |
 
 mod assemble;
 mod identity;
-mod runtime_context;
 mod skills_agents;
+mod snapshot;
 mod support;

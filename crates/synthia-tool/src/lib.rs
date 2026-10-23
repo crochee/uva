@@ -102,17 +102,15 @@
 //!   policy, and a tool that mutates files declares
 //!   [`ExecutionMode::Sequential`] so the loop never races it with a
 //!   sibling call.
-//! - `spawn` — the [`synthia_core::spawn::Spawner`] seam dispatch
-//!   detaches onto.
 //!
 //! ## What is deliberately *not* here
 //!
-//! - **No runtime choice.** Dispatch detaches through
-//!   [`synthia_core::spawn::Spawner`]; the plugin tool crates
+//! - **No runtime choice.** Dispatch runs on the caller's poll —
+//!   no detached task, no spawner, no channel — so `run_stream`
+//!   works on any executor. The plugin tool crates
 //!   (`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-web`
 //!   / `-task`) use `tokio::fs` / `tokio::process`, and a consumer
 //!   on another runtime registers their own tools.
-//!   [`synthia_core::spawn`] documents the boundary.
 //!
 //! - **No retries.** A tool failure is a result the model reads
 //!   ([`ToolOutput`]), not a transport error to retry.
@@ -123,11 +121,11 @@
 pub mod adaptive;
 pub mod full_output;
 pub mod grouped;
+pub mod mcp_self;
 pub mod output;
 pub mod registry;
 pub mod restriction;
 pub mod schema_builder;
-mod spawn;
 pub mod structured_output;
 pub mod surface;
 pub mod traits;
@@ -147,8 +145,11 @@ pub use full_output::{
     full_output_tool,
 };
 pub use grouped::{GroupError, GroupedRegistry};
+pub use mcp_self::{MCP_SELF_TOOL_PREFIX, is_mcp_self_tool};
 pub use output::{RenderKind, ToolOutputDefinition};
 pub use registry::{
+    DispatchPlan,
+    DispatchRefusal,
     RegistrationScope,
     RegistrationToken,
     ToolAnnotations,
@@ -159,6 +160,7 @@ pub use registry::{
     ToolMetadataSnapshot,
     ToolProvenance,
     ToolRegistry,
+    Visibility,
 };
 pub use restriction::{RestrictedRegistry, ToolRestriction};
 pub use schema_builder::{ToolFeatures, ToolSchemaBuilder};
@@ -174,12 +176,10 @@ pub use surface::{
 };
 pub use traits::{ExecutionMode, StreamOutput, Tool};
 pub use truncate::{
-    CleanupTask,
     OutputBound,
     OverflowStrategy,
     SanitizationPolicy,
     bound_output,
-    start_cleanup_task,
 };
 // `signal_of` reads `ExitStatus::signal()`, a POSIX-only std
 // extension. Both the source (`types::signal_of`) and the

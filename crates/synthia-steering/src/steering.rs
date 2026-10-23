@@ -19,7 +19,8 @@ use crate::{
         WorkspaceBoundaryGuard,
     },
     hint::{ContextBudgetHint, Hint, IterationReminderHint, TruncationHint},
-    hook::{AgentHook, LoggingHook},
+    hook::LoggingHook,
+    hook_map::HookMap,
     output_transformer::{NoopOutputTransformer, OutputTransformer},
     tracker::{AdaptiveTracker, NoopTracker, Tracker},
 };
@@ -29,8 +30,8 @@ use crate::{
 pub struct Steering {
     /// Pre-execution policy pipeline (sync, fail-closed).
     pub guards: Vec<Arc<dyn Guard>>,
-    /// Async lifecycle observers (in registration order).
-    pub hooks: Vec<Arc<dyn AgentHook>>,
+    /// Interception handlers, keyed by event name (see [`HookMap`]).
+    pub hooks: HookMap,
     /// Advisory context injections consulted before each LLM
     /// call.
     pub hints: Vec<Arc<dyn Hint>>,
@@ -47,7 +48,7 @@ impl Steering {
     pub fn noop() -> Self {
         Self {
             guards: Vec::new(),
-            hooks: Vec::new(),
+            hooks: HookMap::new(),
             hints: Vec::new(),
             tracker: Arc::new(NoopTracker),
             output_transformer: Arc::new(NoopOutputTransformer),
@@ -74,7 +75,7 @@ impl Steering {
                 Arc::new(WorkspaceBoundaryGuard::new(workspace_root)),
                 Arc::new(PromptInjectionGuard::new()),
             ],
-            hooks: vec![Arc::new(LoggingHook)],
+            hooks: LoggingHook::hook_map(),
             hints: vec![
                 Arc::new(ContextBudgetHint::new(0.85)),
                 Arc::new(IterationReminderHint::new(10)),
@@ -91,9 +92,9 @@ impl Steering {
         self
     }
 
-    /// Add a hook.
-    pub fn add_hook(mut self, hook: Arc<dyn AgentHook>) -> Self {
-        self.hooks.push(hook);
+    /// Merge `hooks` into the bundle's map.
+    pub fn add_hooks(mut self, hooks: HookMap) -> Self {
+        self.hooks = hooks;
         self
     }
 
@@ -151,7 +152,7 @@ mod tests {
         assert!(!s.is_inert());
         assert_eq!(s.guards.len(), 5);
         assert_eq!(s.hints.len(), 3);
-        assert_eq!(s.hooks.len(), 1);
+        assert!(!s.hooks.is_empty());
         let guard_names: Vec<&str> =
             s.guards.iter().map(|g| g.name()).collect();
         assert_eq!(

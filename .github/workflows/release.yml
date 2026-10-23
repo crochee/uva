@@ -337,8 +337,15 @@ jobs:
             echo "${image} → labels OK (revision=${SHA:0:7}, version=${VERSION})"
           }
 
+          failed=0
           for image in \
               "docker.io/crochee/synthia-server:${TAG}" \
               "docker.io/crochee/synthia-web:${TAG}"; do
-            verify_image "${image}"
+            if ! verify_image "${image}"; then
+              failed=1
+            fi
           done
+          if [ "${failed}" -ne 0 ]; then
+            echo "::error::one or more image labels failed verification"
+            exit 1
+          fi

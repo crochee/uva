@@ -14,6 +14,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use parking_lot::RwLock;
 
+use crate::{
+    traits::{ExecutionMode, Tool},
+    types::ToolOutput,
+};
+
 mod catalog;
 mod dispatch;
 mod entry;
@@ -29,6 +34,7 @@ pub use catalog::{
     ToolMetadataSnapshot,
     ToolProvenance,
     ToolProvenanceRecord,
+    Visibility,
 };
 pub use entry::ToolEntry;
 use entry::{ProviderEntry, entry_from_provider};
@@ -37,10 +43,8 @@ pub use scope::{RegistrationScope, RegistrationToken};
 /// Unified tool registry.
 pub struct ToolRegistry {
     pub(crate) inner: RwLock<ToolRegistryInner>,
-    /// Max parallel tool invocations per dispatch call.
-    ///
-    /// The dispatch path lives in section 6; this field is the
-    /// per-call semaphore-bounded executor's knob.
+    /// Max parallel tool invocations per dispatch call: the bound
+    /// `run_stream`'s merged stream keeps on in-flight tool drains.
     pub(crate) max_concurrent: usize,
     /// Monotonically increasing version counter, bumped on
     /// every register/unregister. Lets callers cheaply key a
@@ -49,11 +53,6 @@ pub struct ToolRegistry {
     /// current version without holding the registry lock or
     /// diffing the full tool list.
     pub(crate) version: std::sync::atomic::AtomicU64,
-    /// Where `run_stream`'s per-tool tasks go. Default =
-    /// `crate::spawn::TokioSpawner`; replaceable via
-    /// [`ToolRegistry::with_spawner`] so dispatch does not decide the
-    /// consumer's runtime.
-    pub(crate) spawner: Arc<dyn synthia_core::spawn::Spawner>,
     /// Version-keyed memo of [`ToolRegistry::descriptors`]: the
     /// projection inputs the agent loop rebuilds every iteration. Holds
     /// `(registry version, descriptors)`; a version mismatch recomputes.
@@ -69,7 +68,7 @@ pub struct ToolRegistry {
         parking_lot::Mutex<Option<(u64, Arc<Vec<ToolMetadataSnapshot>>)>>,
     /// When `true`, `run_stream` validates every tool call's `input`
     /// against the resolved tool's `parameters()` (a JSON Schema)
-    /// before spawning a task. Mismatches synthesize a
+    /// before the tool runs. Mismatches synthesize a
     /// `ToolOutput::error` listing the dotted-path violations, so the
     /// model can self-correct in the same turn. Default `false` —
     /// validation is opt-in so the hot dispatch path is unchanged
@@ -86,6 +85,98 @@ pub(crate) struct ToolRegistryInner {
     pub(crate) next_registration: u64,
 }
 
+/// The single dispatch decision for one model-issued tool call:
+/// either the tool to execute with its (validated) input, or the
+/// refusal the dispatcher reports instead.
+///
+/// Produced by [`ToolRegistry::resolve_dispatch`] — the one source
+/// of the hidden-refusal + argument-validation decision that
+/// `run_stream`, `dispatch_one`, and the harness loop all dispatch
+/// on.
+pub enum DispatchPlan {
+    /// Resolve succeeded: run this tool with this input.
+    Execute(Arc<dyn Tool>, serde_json::Value),
+    /// The call is refused before any tool runs.
+    Refused {
+        /// Name exactly as it appeared in the call.
+        tool_name: String,
+        /// Why the call was refused.
+        reason: DispatchRefusal,
+    },
+}
+
+impl std::fmt::Debug for DispatchPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `Arc<dyn Tool>` has no Debug; the tool's name is the
+        // useful rendering.
+        match self {
+            DispatchPlan::Execute(tool, input) => f
+                .debug_tuple("Execute")
+                .field(&tool.name())
+                .field(input)
+                .finish(),
+            DispatchPlan::Refused { tool_name, reason } => f
+                .debug_struct("Refused")
+                .field("tool_name", tool_name)
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+/// Why a [`DispatchPlan::Refused`] refused a call.
+#[derive(Debug)]
+pub enum DispatchRefusal {
+    /// No dispatchable tool by that name. Also the answer for a
+    /// hidden tool: the two are indistinguishable by contract
+    /// (pinned by
+    /// `dispatch_one_refuses_hidden_tool_with_not_found_shape`).
+    Unknown,
+    /// The call's `input` failed JSON-Schema validation against the
+    /// tool's `parameters()`; the violations are listed so the
+    /// model can self-correct in the same turn.
+    InvalidArguments {
+        violations: Vec<synthia_core::SchemaViolation>,
+    },
+}
+
+impl DispatchRefusal {
+    /// The error `ToolOutput` a dispatcher synthesises for this
+    /// refusal — the single rendering both the registry's
+    /// dispatchers and the harness loop report. Formats kept
+    /// byte-identical to the pre-`resolve_dispatch` dispatcher
+    /// (pinned by the argument-validation tests and example).
+    #[must_use]
+    pub fn tool_output(&self, tool_name: &str) -> ToolOutput {
+        match self {
+            DispatchRefusal::Unknown => {
+                ToolOutput::error(format!("tool not found: {tool_name}"))
+            }
+            DispatchRefusal::InvalidArguments { violations } => {
+                // Format the violations as a numbered list so the
+                // model gets every field it needs to fix in one
+                // read. An empty `violations` is unreachable in
+                // practice (`validate_against_schema` returns
+                // `Err(vec)` only on failure), but we handle it
+                // defensively to keep the error path total.
+                if violations.is_empty() {
+                    return ToolOutput::error(format!(
+                        "invalid arguments for tool `{tool_name}`"
+                    ));
+                }
+                let lines: Vec<String> =
+                    violations.iter().map(|v| format!("- {v}")).collect();
+                ToolOutput::error(format!(
+                    "invalid arguments for tool `{tool_name}` ({} violation{}):\n{}",
+                    violations.len(),
+                    if violations.len() == 1 { "" } else { "s" },
+                    lines.join("\n"),
+                ))
+            }
+        }
+    }
+}
+
 impl ToolRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
@@ -96,27 +187,10 @@ impl ToolRegistry {
             }),
             max_concurrent: 5,
             version: std::sync::atomic::AtomicU64::new(0),
-            spawner: Arc::new(crate::spawn::TokioSpawner),
             descriptor_cache: parking_lot::Mutex::new(None),
             snapshot_cache: parking_lot::Mutex::new(None),
             validate_arguments: false,
         }
-    }
-
-    /// Run dispatch tasks on `spawner` instead of tokio.
-    ///
-    /// [`ToolRegistry::run_stream`] hands one detached task per tool
-    /// call to this spawner. The default is tokio (the crate's own
-    /// runtime); a consumer building the registry for another executor
-    /// installs their implementation here. Builder-style, because
-    /// `new()` is the only constructor.
-    #[must_use]
-    pub fn with_spawner(
-        mut self,
-        spawner: Arc<dyn synthia_core::spawn::Spawner>,
-    ) -> Self {
-        self.spawner = spawner;
-        self
     }
 
     /// Enable JSON-Schema validation of every tool call's arguments
@@ -136,10 +210,10 @@ impl ToolRegistry {
     ///
     /// Validation is paid once per `run_stream` call, in the same
     /// read-lock span as the tool lookup, so a misbehaving call
-    /// costs a synthesized error Result instead of a spawned task
-    /// that runs a tool it shouldn't. Empty / non-object schemas
-    /// pass through (matches `synthia_core::validate_against_schema`
-    /// — unknown keywords are annotations, not assertions).
+    /// costs a synthesized error Result instead of running a tool
+    /// it shouldn't. Empty / non-object schemas pass through
+    /// (matches `synthia_core::validate_against_schema` — unknown
+    /// keywords are annotations, not assertions).
     #[must_use]
     pub fn with_argument_validation(mut self, on: bool) -> Self {
         self.validate_arguments = on;
@@ -151,6 +225,61 @@ impl ToolRegistry {
     #[must_use]
     pub fn argument_validation_enabled(&self) -> bool {
         self.validate_arguments
+    }
+
+    /// Resolve one tool call to a [`DispatchPlan`]: the single
+    /// source of the hidden-refusal + argument-validation decision
+    /// behind `run_stream`, `dispatch_one`, and the harness loop's
+    /// tool routing. Takes the read lock; a batch that wants one
+    /// lock span resolves its calls from `run_stream` instead.
+    #[must_use]
+    pub fn resolve_dispatch(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+    ) -> DispatchPlan {
+        let inner = self.inner.read();
+        self.resolve_plan_locked(&inner, name, input)
+    }
+
+    /// [`ToolRegistry::resolve_dispatch`] under a read lock the
+    /// caller already holds, so a whole batch resolves in one lock
+    /// span before any await point.
+    fn resolve_plan_locked(
+        &self,
+        inner: &ToolRegistryInner,
+        name: &str,
+        input: serde_json::Value,
+    ) -> DispatchPlan {
+        // `is_hidden` is the registry's privacy flag: a hidden tool
+        // is never advertised and is refused here, with the same
+        // not-found shape as an unknown name. `ToolExposure::Hidden`
+        // is the softer, advertisement-only level and stays
+        // dispatchable.
+        let Some(entry) = inner.tools.get(name).and_then(|e| e.last()) else {
+            return DispatchPlan::Refused {
+                tool_name: name.to_string(),
+                reason: DispatchRefusal::Unknown,
+            };
+        };
+        if entry.is_hidden {
+            return DispatchPlan::Refused {
+                tool_name: name.to_string(),
+                reason: DispatchRefusal::Unknown,
+            };
+        }
+        if self.validate_arguments
+            && let Err(violations) = synthia_core::validate_against_schema(
+                &entry.tool.parameters(),
+                &input,
+            )
+        {
+            return DispatchPlan::Refused {
+                tool_name: name.to_string(),
+                reason: DispatchRefusal::InvalidArguments { violations },
+            };
+        }
+        DispatchPlan::Execute(Arc::clone(&entry.tool), input)
     }
 
     /// Register a `ToolEntry` directly — wraps the inner `Arc<dyn Tool>`
@@ -266,6 +395,41 @@ impl ToolRegistry {
             .map(|entry| entry.exposure)
     }
 
+    /// The scheduling [`ExecutionMode`] of the tool `name`
+    /// resolves to, read under the same lock
+    /// [`ToolRegistry::exposure`] uses — without materializing a
+    /// `ToolEntry`. Missing tools resolve to
+    /// [`ExecutionMode::Sequential`], the conservative default:
+    /// an unknown call fails in the bucket that cannot fan out.
+    #[must_use]
+    pub fn execution_mode(&self, name: &str) -> ExecutionMode {
+        self.inner
+            .read()
+            .tools
+            .get(name)
+            .and_then(|entries| entries.last())
+            .map(|entry| entry.tool.mode())
+            .unwrap_or(ExecutionMode::Sequential)
+    }
+
+    /// The entry `name` currently resolves to: the last-registered
+    /// provider wins (the same LIFO top every read path —
+    /// [`ToolRegistry::exposure`], [`ToolRegistry::descriptors`],
+    /// `run_stream` — resolves), cloned out under one read lock.
+    /// Unlike [`ToolRegistry::snapshot`] this deliberately sees
+    /// hidden tools: dispatch and wiring questions need the real
+    /// binding. The `synthia_core::registry::Registry` impl delegates
+    /// here, so the HTTP surface and this method cannot drift.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<ToolEntry> {
+        let inner = self.inner.read();
+        inner
+            .tools
+            .get(name)
+            .and_then(|entries| entries.last())
+            .map(entry_from_provider)
+    }
+
     /// Apply `mutate` to the entry `name` resolves to. Returns
     /// whether the tool existed; bumps the version only when `mutate`
     /// reports a real change. One write-lock acquisition, no awaits,
@@ -331,7 +495,6 @@ impl Clone for ToolRegistry {
             version: std::sync::atomic::AtomicU64::new(
                 self.version.load(std::sync::atomic::Ordering::Relaxed),
             ),
-            spawner: Arc::clone(&self.spawner),
             // The memo is a pure function of (registrations, version);
             // both travel with the clone, so the cached list stays
             // valid.

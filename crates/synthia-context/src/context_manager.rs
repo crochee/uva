@@ -262,6 +262,33 @@ impl AgentState {
 /// `prepare` default impl falls back to the legacy surface via
 /// `Arc::get_mut` so callers that *only* override `prepare` still
 /// get correct semantics — they just lose the cache shortcut.
+/// Blanket impl: `Arc<T>` derefs to `T`, so an
+/// `Arc<dyn ContextManager>` field can hold any concrete manager
+/// (including a `TruncatingContextManager`, an `InlineSpawner`,
+/// or a test counter).
+#[async_trait]
+impl<T: ContextManager + ?Sized> ContextManager for Arc<T> {
+    async fn prepare(
+        &self,
+        messages: &mut Vec<Message>,
+        state: &mut AgentState,
+    ) {
+        (**self).prepare(messages, state).await
+    }
+
+    async fn prepare_arc(
+        &self,
+        messages: Arc<Vec<Message>>,
+        state: &mut AgentState,
+    ) -> Arc<Vec<Message>> {
+        (**self).prepare_arc(messages, state).await
+    }
+
+    fn estimate_tokens(&self, messages: &[Message]) -> usize {
+        (**self).estimate_tokens(messages)
+    }
+}
+
 #[async_trait]
 pub trait ContextManager: Send + Sync {
     /// Mutate `messages` in place until it fits within
@@ -333,6 +360,38 @@ pub trait ContextManager: Send + Sync {
         _details: crate::compaction_settings::CompactionDetails,
     ) {
     }
+
+    /// R-OPT-HPC Step 5 (default-stale): return the
+    /// slice of `messages` whose segments are **frozen**
+    /// (assembled, sent upstream, never re-edited). The
+    /// pipeline feature runs an out-of-band prefetch
+    /// compaction against exactly this slice so the next
+    /// LLM request can pull a pre-compacted history
+    /// without waiting on the manager.
+    ///
+    /// Default: empty slice. The crate's [`Noop`] /
+    /// [`Truncating`] / [`Summarizing`] / [`Dag`]
+    /// strategies all keep the default; this method is
+    /// a seam for an in-tree optimization tier that
+    /// knows which segments are immutable.
+    ///
+    /// [`Noop`]: crate::NoopContextManager
+    /// [`Truncating`]: crate::TruncatingContextManager
+    /// [`Summarizing`]: crate::SummarizingContextManager
+    /// [`Dag`]: crate::DagContextManager
+    fn frozen_segments<'a>(&self, _messages: &'a [Message]) -> &'a [Message] {
+        &[]
+    }
+
+    /// R-OPT-HPC Step 5 (default-noop): run a prefetch
+    /// compaction over the frozen slice; ignore the
+    /// result for now. Default: empty no-op. A prefetch
+    /// driver writes its output into a place the next
+    /// `prepare` call can read (a thread-local store,
+    /// a future-aware field, …); a manager that does
+    /// not implement the seam simply returns without
+    /// touching the slice.
+    async fn prefetch_compaction(&self, _frozen: &[Message]) {}
 }
 
 /// Boxed, type-erased handle. Most call sites hold this rather than

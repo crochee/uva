@@ -52,6 +52,7 @@
 //! [`synthia_provider`]: ../synthia_provider/index.html
 
 pub mod agent;
+pub mod breaker;
 pub mod cancel;
 pub mod clock;
 pub mod cursor;
@@ -64,6 +65,7 @@ pub mod registry;
 pub mod schema;
 pub mod sensitive;
 pub mod spawn;
+pub mod sync;
 pub mod text;
 pub mod token;
 
@@ -71,6 +73,13 @@ pub mod token;
 /// type [`Error`]. Callers returning a different error type can
 /// still override the parameter (`synthia_core::Result<T, E>`),
 pub use agent::{AgentDescriptor, AgentFilter};
+pub use breaker::{
+    BreakerConfig,
+    BreakerObservation,
+    BreakerPhase,
+    BreakerState,
+    Outcome,
+};
 pub use cancel::{AtomicCancelToken, CancelToken};
 pub use clock::{Clock, FixedClock, SharedClock, SystemClock};
 pub use idgen::{IdGen, SequenceGenerator, SharedIdGen, UlidGenerator};
@@ -80,6 +89,7 @@ pub use judge_score::parse_judge_score;
 pub use panic::panic_message;
 pub use registry::{
     MAX_LIMIT,
+    NameTable,
     Registry,
     RegistryItem,
     RegistryList,

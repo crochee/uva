@@ -19,8 +19,8 @@
 //!   with a session was **policy** and lived outside this crate
 //!   (typically in `synthia-server`).
 //! - All on-disk persistence, state machines, approval flows, and
-//!   token-budget tracking had been either deleted or moved into
-//!   the `synthia-server::session` orchestration layer.
+//!   token-budget tracking had been either deleted or moved into the
+//!   `synthia-server::session` orchestration layer.
 //!
 //! The trait gained two **default-implemented** methods in a
 //! later round so the same primitive could carry three orthogonal
@@ -28,9 +28,9 @@
 //! need them:
 //!
 //! - [`SessionSink::append_with_key`] — idempotent append:
-//!   `Some(key)` callers that re-submit the same key observe the
-//!   original `seq` (no double-write); `None` callers see the
-//!   legacy non-idempotent behaviour.
+//!   `Some(key)` callers that re-submit the same key write nothing
+//!   (no double-write); `None` callers see the legacy
+//!   non-idempotent behaviour.
 //! - [`SessionSink::append_many`] — batch append with one
 //!   durable barrier (`fsync`) at the tail, instead of N. The
 //!   default implementation loops over `append` so backends that
@@ -43,6 +43,17 @@
 //! Both are default-implemented: a backend that does not care
 //! about idempotency or batch durability stays at the original
 //! 5-method surface.
+//!
+//! ## Who numbers a row
+//!
+//! The sink owns the ordinal counter, but it does not *assign* it:
+//! [`SessionSink::alloc_seq`] hands the next ordinal out, and the
+//! caller stamps the row with it before
+//! [`append`](SessionSink::append) writes it. The producer therefore
+//! knows a row's ordinal before the row is durable — which is what
+//! lets a compaction row cite the rows it shadows — while every
+//! appender still draws from one counter, so two writers on the
+//! same session cannot collide.
 //!
 //! ## Event shape
 //!
@@ -102,21 +113,35 @@ pub trait SessionSink: Send + Sync {
     /// emit.
     fn id(&self) -> &str;
 
+    /// Reserve the next ordinal for a row.
+    ///
+    /// The ordinal is the row's 1-indexed position in the log — the
+    /// same numbering [`read`](Self::read) order and
+    /// [`snapshot`](Self::snapshot)'s `last_event_seq` use. The
+    /// counter lives here so that every appender on this session
+    /// draws from one sequence: a writer that counts rows itself
+    /// drifts as soon as anything else appends concurrently, and a
+    /// drifted ordinal makes a compaction's provenance unresolvable.
+    ///
+    /// The caller stamps the reserved ordinal into the row before
+    /// [`append`](Self::append) writes it. Reserving an ordinal and
+    /// then not writing the row burns that ordinal — the log then
+    /// has a hole, which the fold tolerates but no compaction may
+    /// cite across.
+    fn alloc_seq(&self) -> u64;
+
     /// Append one event durably. **Write-through** — when the
     /// future resolves with `Ok`, the bytes are durable (or the
     /// caller has explicit transactional guarantees).
     ///
-    /// Returns the implicit 1-indexed sequence the sink assigned to
-    /// the row — the same ordinal [`read`](Self::read) order and
-    /// [`snapshot`](Self::snapshot)'s `last_event_seq` use. The sink
-    /// is the only thing that can report it: it assigns the ordinal
-    /// under its own lock, so a caller that counts rows itself drifts
-    /// as soon as anything else appends concurrently.
+    /// The row's ordinal was reserved with
+    /// [`alloc_seq`](Self::alloc_seq) before the call; the sink
+    /// does not assign one.
     ///
     /// Failure is fatal at the call site: the agent loop MUST
     /// surface the error to its caller rather than silently
     /// dropping the event.
-    async fn append(&self, event: &Value) -> Result<u64, SessionError>;
+    async fn append(&self, event: &Value) -> Result<(), SessionError>;
 
     /// Reconstruct the chronological event stream. Returns events
     /// in the order they were `append`-ed. Used by callers that
@@ -195,8 +220,7 @@ pub trait SessionSink: Send + Sync {
     /// `agent.session.turn.id` a downstream client minted). The
     /// sink remembers every key it has seen for this session
     /// within a bounded LRU window. A re-submission of the same
-    /// key is a **no-op**: the sink returns the `seq` originally
-    /// assigned to that key, and the bytes are not written twice.
+    /// key is a **no-op**: the bytes are not written twice.
     ///
     /// This is the dedup seam that closes the
     /// "client retried / SSE reconnected mid-flush" hole —
@@ -219,13 +243,12 @@ pub trait SessionSink: Send + Sync {
     /// # Errors
     ///
     /// Returns [`SessionError::Closed`] when the session is
-    /// already closed. Idempotent re-submission is NOT an error
-    /// — it returns the same `seq` as the original append.
+    /// already closed. Idempotent re-submission is NOT an error.
     async fn append_with_key(
         &self,
         key: Option<&str>,
         event: &Value,
-    ) -> Result<u64, SessionError> {
+    ) -> Result<(), SessionError> {
         let _ = key;
         self.append(event).await
     }
@@ -242,11 +265,9 @@ pub trait SessionSink: Send + Sync {
     /// batch.
     ///
     /// Atomicity contract: either every event in `events` is
-    /// durable after `Ok`, or none of them are. A partial
-    /// failure rolls back the `seq` counter so subsequent
-    /// `read` / `snapshot` calls do not observe a half-written
-    /// batch. Callers SHOULD treat the same `Err` as a fatal
-    /// append failure (the agent loop's fail-fast rule).
+    /// durable after `Ok`, or none of them are. Callers SHOULD
+    /// treat the same `Err` as a fatal append failure (the agent
+    /// loop's fail-fast rule).
     ///
     /// Idempotency: this method does not dedup — call
     /// [`append_with_key`](Self::append_with_key) per row if
@@ -256,25 +277,18 @@ pub trait SessionSink: Send + Sync {
     /// memory, and submits a fresh batch to the child — no
     /// dedup needed.
     ///
+    /// The rows carry the ordinals their writer reserved with
+    /// [`alloc_seq`](Self::alloc_seq); the batch does not reserve
+    /// any of its own.
+    ///
     /// # Errors
     ///
-    /// Returns [`SessionError::AppendFailed`] on any IO
-    /// failure; `seq` is rolled back atomically so a retry
-    /// that re-sends the same batch does not double-write.
-    ///
-    /// The return value is the `seq` of the batch's **last**
-    /// event, or the current tail when `events` is empty — so a
-    /// caller can read it as "where the log stands now" without a
-    /// separate `snapshot` call.
-    async fn append_many(&self, events: &[Value]) -> Result<u64, SessionError> {
-        if events.is_empty() {
-            return Ok(self.snapshot().await?.last_event_seq);
-        }
-        let mut last_seq = 0;
+    /// Returns [`SessionError::AppendFailed`] on any IO failure.
+    async fn append_many(&self, events: &[Value]) -> Result<(), SessionError> {
         for event in events {
-            last_seq = self.append(event).await?;
+            self.append(event).await?;
         }
-        Ok(last_seq)
+        Ok(())
     }
 }
 

@@ -62,6 +62,8 @@
 pub mod export;
 pub mod metrics;
 pub mod runner;
+pub mod store;
+pub mod transcript;
 
 use std::collections::BTreeMap;
 
@@ -74,7 +76,18 @@ pub use metrics::{
 };
 pub use runner::{AsyncMetric, EvalAgent, EvalRunner, SyncMetricAdapter};
 use serde::{Deserialize, Serialize};
+pub use store::EvalStore;
 use thiserror::Error;
+pub use transcript::{
+    SpanRecord,
+    ToolCallRecord,
+    Transcript,
+    TranscriptMessage,
+    TranscriptOutcome,
+    TranscriptSink,
+    Usage,
+    jsonl::JsonlTranscriptSink,
+};
 
 /// Errors produced by the evaluation framework.
 #[derive(Debug, Error)]
@@ -208,10 +221,106 @@ pub struct EvalReport {
     pub passed: usize,
     /// Total number of cases.
     pub total: usize,
+    /// R-OPT-HPC: number of trials per case (set by
+    /// `EvalRunner::run_trials(n)`; `1` for `EvalRunner::run`).
+    /// Used by `pass_at(k)` / `pass_pow(k)` / `per_case_pass_rate`.
+    #[serde(default = "default_trials")]
+    pub trials: usize,
+    /// R-OPT-HPC: per-case pass counts (filled by `run_trials`;
+    /// empty for `run`). Together with `trials` it gives
+    /// `per_case_pass_rate`.
+    ///
+    /// Layout: `case_id -> count_of_passes_across_trials`.
+    /// `tests` are excluded from the counts (transcript carries
+    /// the `Error` verdict for them; `pass_at` only counts
+    /// `Pass { score }`).
+    #[serde(default)]
+    pub per_case_passes: BTreeMap<String, usize>,
+    /// R-OPT-HPC: total trials attempted per case. Together
+    /// with `per_case_passes` it gives `per_case_pass_rate`.
+    /// Counts `Pass` + `Fail` + `Cancelled`; excludes
+    /// `Error` (a backend fault, not a real trial outcome).
+    #[serde(default)]
+    pub per_case_attempts: BTreeMap<String, usize>,
 }
 
 impl EvalReport {
+    /// Per-case pass rate (0.0–1.0): `passes / attempts`. Cases
+    /// that errored out (no recorded attempt) are reported as
+    /// `0.0`.
+    #[must_use]
+    pub fn per_case_pass_rate(&self) -> BTreeMap<String, f64> {
+        self.per_case_passes
+            .iter()
+            .map(|(k, passes)| {
+                let attempts =
+                    self.per_case_attempts.get(k).copied().unwrap_or(0);
+                let rate = if attempts == 0 {
+                    0.0
+                } else {
+                    *passes as f64 / attempts as f64
+                };
+                (k.clone(), rate)
+            })
+            .collect()
+    }
+
+    /// `pass_at(k)` — probability that **at least one** of the
+    /// `k` sampled trials passed, computed from the per-case
+    /// pass rate `c/n`.
+    ///
+    /// The standard estimator is `1 − (1 − c/n)^k`. When `k = 0`
+    /// the result is `0.0`; when `c = 0` the result is `0.0`; when
+    /// `c = n` the result is `1.0`. Reads what `run_trials`
+    /// recorded in `per_case_passes` / `per_case_attempts`.
+    ///
+    /// `k` is clamped to `[1, total_trials]` so a caller asking
+    /// for `pass_at(0)` is still well-defined (returns `0.0`).
+    #[must_use]
+    pub fn pass_at(&self, k: u32) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for (case_id, attempts) in &self.per_case_attempts {
+            let c = self.per_case_passes.get(case_id).copied().unwrap_or(0);
+            let n = *attempts;
+            if n == 0 || k == 0 {
+                out.insert(case_id.clone(), 0.0);
+                continue;
+            }
+            let k_clamped = k.min(n as u32);
+            let p = c as f64 / n as f64;
+            let prob = 1.0 - (1.0 - p).powi(k_clamped as i32);
+            out.insert(case_id.clone(), prob);
+        }
+        out
+    }
+
+    /// `pass_pow(k)` — probability that **all** `k` sampled
+    /// trials passed. `(c/n)^k`, clamped to `0.0` when `c = 0`,
+    /// `1.0` when `c = n`.
+    #[must_use]
+    pub fn pass_pow(&self, k: u32) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for (case_id, attempts) in &self.per_case_attempts {
+            let c = self.per_case_passes.get(case_id).copied().unwrap_or(0);
+            let n = *attempts;
+            if n == 0 || k == 0 {
+                out.insert(case_id.clone(), 0.0);
+                continue;
+            }
+            let k_clamped = k.min(n as u32);
+            let p = c as f64 / n as f64;
+            out.insert(case_id.clone(), p.powi(k_clamped as i32));
+        }
+        out
+    }
+
     /// Human-readable summary: pass-rate and average score.
+    ///
+    /// `pass-rate` here is `passed / total` where `total` is the
+    /// `tests` field (1 per case × number of trials when
+    /// populated by `run_trials`). This makes a one-trial report
+    /// and a ten-trial report read identically for a 100% pass
+    /// case.
     #[must_use]
     pub fn summary(&self) -> String {
         let rate = if self.total > 0 {
@@ -224,6 +333,26 @@ impl EvalReport {
             self.suite_name, self.passed, self.total, rate, self.average_score,
         )
     }
+}
+
+impl Default for EvalReport {
+    fn default() -> Self {
+        Self {
+            suite_name: String::new(),
+            generated_at: DateTime::UNIX_EPOCH,
+            results: Vec::new(),
+            average_score: 0.0,
+            passed: 0,
+            total: 0,
+            trials: default_trials(),
+            per_case_passes: BTreeMap::new(),
+            per_case_attempts: BTreeMap::new(),
+        }
+    }
+}
+
+fn default_trials() -> usize {
+    1
 }
 
 /// Trait for synchronous evaluation metrics.
@@ -347,6 +476,9 @@ mod tests {
             average_score: 0.75,
             passed: 3,
             total: 4,
+            trials: 1,
+            per_case_passes: BTreeMap::new(),
+            per_case_attempts: BTreeMap::new(),
         };
         let s = report.summary();
         assert!(s.contains("3/4"), "summary: {s}");
@@ -366,6 +498,9 @@ mod tests {
             average_score: 0.0,
             passed: 0,
             total: 0,
+            trials: 1,
+            per_case_passes: BTreeMap::new(),
+            per_case_attempts: BTreeMap::new(),
         };
         assert!(report.summary().contains("0/0 (0.0%)"));
     }

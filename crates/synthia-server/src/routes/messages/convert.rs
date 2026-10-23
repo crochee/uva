@@ -22,7 +22,7 @@
 //! 2. **The client's `system` stays separate.** It cannot become a
 //!    `Role::System` message: the harness assembles the agent's own
 //!    system prompt ahead of `input.history`
-//!    (`synthia::harness::agent::re_act::loop_::steps::prepare`) and the
+//!    (`synthia::harness` loop `prepare` step) and the
 //!    Anthropic adapter promotes only the *first* `Role::System`
 //!    message to the request's top-level `system` field while
 //!    filtering the rest out

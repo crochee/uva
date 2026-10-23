@@ -48,8 +48,10 @@ pub mod summarizing;
 pub use compaction_settings::{
     CompactionDetails,
     CompactionSettings,
+    TouchedPair,
     ValidationError,
     should_compact,
+    touched_target,
 };
 pub use context_manager::{
     AgentState,

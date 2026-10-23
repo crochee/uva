@@ -172,9 +172,16 @@ impl SubagentRouter {
                 depth,
                 agent_name,
             ))?;
+            // Every row the router writes to the child's sink
+            // reserves its ordinal from that sink's counter — the
+            // child session's log is written by the router and by
+            // the child's own run, and one counter keeps the two
+            // from colliding.
+            sink.alloc_seq();
             sink.append(&self.stamp_ts(header.clone())).await?;
             if let Some(prompt) = meta.prompt.as_ref().filter(|p| !p.is_empty())
             {
+                sink.alloc_seq();
                 sink.append(&serde_json::json!({
                     "type": "UserInput",
                     "data": { "text": prompt },
@@ -191,6 +198,7 @@ impl SubagentRouter {
                 // the grandchild's own session.
                 if event.is_durable() {
                     let value = serde_json::to_value(event)?;
+                    sink.alloc_seq();
                     sink.append(&self.stamp_ts(value)).await?;
                 }
                 self.route_level(
@@ -205,6 +213,7 @@ impl SubagentRouter {
             inner => {
                 if inner.is_durable() {
                     let value = serde_json::to_value(inner)?;
+                    sink.alloc_seq();
                     sink.append(&self.stamp_ts(value)).await?;
                 }
                 if let AgentEvent::System(SystemEvent::SessionEnded {
@@ -216,6 +225,7 @@ impl SubagentRouter {
                         depth,
                         reason.as_str(),
                     ))?;
+                    sink.alloc_seq();
                     sink.append(&self.stamp_ts(footer.clone())).await?;
                     self.append_to_parent(&mut parent, footer).await?;
                 }
@@ -333,7 +343,6 @@ mod tests {
         let mut log = RunLog::new(
             Arc::clone(&parent_sink),
             Arc::new(SurfaceLedger::new()),
-            0,
             SharedClock::system(),
         );
 
@@ -406,7 +415,6 @@ mod tests {
         let mut log = RunLog::new(
             Arc::clone(&parent_sink),
             Arc::new(SurfaceLedger::new()),
-            0,
             SharedClock::system(),
         );
 

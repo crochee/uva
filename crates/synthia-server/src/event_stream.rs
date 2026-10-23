@@ -97,7 +97,7 @@ impl EventBroadcaster {
         // a serialized copy for the disk write, and a second
         // serialize just for a log line is wasted work on every
         // streaming chunk.
-        let byte_size = event.serialized_size();
+        let byte_size = event.size_hint();
         let outer_kind = event.kind();
         let inner_kind = match &event {
             AgentEvent::System(sys) => Some(sys.kind()),
