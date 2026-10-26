@@ -153,6 +153,17 @@ mod tests {
                 run_idx: 0,
                 reason: "completed".into(),
             },
+            HookEvent::BeforeStep {
+                agent_name: "a".into(),
+                run_idx: 0,
+                iteration: 0,
+            },
+            HookEvent::BeforeRequest {
+                provider: "p".into(),
+                params: crate::RequestParams::from_request(
+                    &synthia_provider::CompletionRequest::default(),
+                ),
+            },
             HookEvent::BeforeTool {
                 tool_name: "echo".into(),
                 call_id: "c1".into(),

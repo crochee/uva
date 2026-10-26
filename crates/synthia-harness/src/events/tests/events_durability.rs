@@ -1,5 +1,6 @@
-//! `AgentEvent::is_durable` matrix. Durable events are replayed
-//! to reconstruct session state; ephemeral ones are skipped.
+//! `AgentEvent::is_durable` matrix. The model family is never
+//! durable: the harness writes those facts to the log itself, so
+//! the host persists nothing from the event stream.
 
 use super::{
     super::{AgentEvent, SystemEvent, WarningKind},
@@ -17,10 +18,10 @@ use super::{
 
 #[test]
 fn is_durable_matrix() {
-    assert!(AgentEvent::Model(make_text("hello")).is_durable());
-    assert!(AgentEvent::Model(make_tool_use()).is_durable());
-    assert!(AgentEvent::Model(make_tool_result()).is_durable());
-    assert!(AgentEvent::Model(make_resource()).is_durable());
+    assert!(!AgentEvent::Model(make_text("hello")).is_durable());
+    assert!(!AgentEvent::Model(make_tool_use()).is_durable());
+    assert!(!AgentEvent::Model(make_tool_result()).is_durable());
+    assert!(!AgentEvent::Model(make_resource()).is_durable());
 
     assert!(!AgentEvent::Model(make_reasoning("x")).is_durable());
     assert!(!AgentEvent::Model(make_image()).is_durable());
@@ -48,9 +49,10 @@ fn is_durable_matrix() {
         .is_durable()
     );
 
-    // Recursive wrapper delegates to the inner event.
+    // Recursive wrapper delegates to the inner event — which is
+    // never durable any more.
     assert!(
-        AgentEvent::Agent(make_meta(), Box::new(AgentEvent::text_delta("hi")))
+        !AgentEvent::Agent(make_meta(), Box::new(AgentEvent::text_delta("hi")))
             .is_durable()
     );
     assert!(

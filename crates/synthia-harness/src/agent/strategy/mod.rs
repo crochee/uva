@@ -86,7 +86,8 @@ pub async fn prepare_messages_for_shot(
 ) -> Arc<Vec<synthia_provider::Message>> {
     use synthia_context::AgentState;
 
-    let base = crate::prompt::resolve_prompt_context(input, caps)
+    let base = caps
+        .run_prompt_context(input.prompt_context.as_ref())
         .assemble(&caps.model.descriptor);
     let system = match instruction {
         Some(instruction) => format!("{base}\n\n{instruction}"),
@@ -99,7 +100,7 @@ pub async fn prepare_messages_for_shot(
     let messages = crate::prompt::base_transcript(
         &system,
         &input.history,
-        input.to_message(),
+        Some(input.to_message()),
     );
 
     let config = caps.model.provider.model_config();

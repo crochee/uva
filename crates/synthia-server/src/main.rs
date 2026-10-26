@@ -2,13 +2,13 @@
 //!
 //! Server starts with empty/default config. APIs populate config at runtime.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::Parser;
+use synthia::core::{AtomicCancelToken, CancelToken};
 use synthia_server::build_info;
 use tokio::signal;
-use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[derive(Parser, Debug)]
@@ -72,8 +72,8 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Create cancellation token for graceful shutdown
-    let cancel_token = CancellationToken::new();
-    let cancel_token_for_shutdown = cancel_token.clone();
+    let cancel_token = Arc::new(AtomicCancelToken::new());
+    let cancel_token_for_shutdown = Arc::clone(&cancel_token);
 
     // Spawn task to handle shutdown signals
     tokio::spawn(async move {

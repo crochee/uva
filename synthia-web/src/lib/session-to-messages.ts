@@ -16,6 +16,14 @@
  * synthetic `kind` discriminator — we detect the segment kind
  * from the keys present in each `Part::data` payload.
  *
+ * The durable log also carries the newer typed rows, and this
+ * projection reads them too: an `assistant_message` row holds one
+ * whole assistant turn (the provider `Message` — its text and its
+ * tool calls together), and a `tool_result` row holds one tool's
+ * outcome. Both project onto the same segments the legacy
+ * `Model` rows produced, so a log written by either writer reads
+ * the same way in the chat UI.
+ *
  * Source priority:
  *   1. `session.history` — primary source of truth. Each
  *      transcript entry maps to one chat message (or a
@@ -36,7 +44,7 @@
  */
 import { contentText, extractImages, filesFromPersistedAttachments } from '../api/chat-message';
 import { stripAttachmentSegments } from './strip-attachment-segments';
-import type { ChatFile, ChatImage } from '../api/chat-message';
+import type { ChatFile, ChatImage, CompactionInfo } from '../api/chat-message';
 import type { SessionArtifact, SessionDetail, SessionTurn } from '../api/types';
 
 export interface ChatMessageLike {
@@ -56,8 +64,19 @@ export interface ChatMessageLike {
 // (knip flagged as unused export).
 interface ChatSegmentLike {
   id: string;
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'tool_block' | 'progress' | 'notice';
+  type:
+    | 'text'
+    | 'thinking'
+    | 'tool_call'
+    | 'tool_result'
+    | 'tool_block'
+    | 'progress'
+    | 'notice'
+    | 'compaction';
   content: string;
+  /** When type === 'compaction': the summary and the span it
+   *  shadowed, rendered by `CompactionMarker`. */
+  compaction?: CompactionInfo;
   toolName?: string;
   callContent?: string;
   resultContent?: string;
@@ -94,6 +113,14 @@ interface ChatSegmentLike {
  *  `chat-stream` module still owns. */
 const EVENT_USER_INPUT = 'UserInput';
 const EVENT_MODEL = 'Model';
+/** Durable row for one assistant turn: `data` is a whole provider
+ *  `Message` — the turn's text and its tool calls together — so the
+ *  row projects onto ONE assistant message. */
+const EVENT_ASSISTANT_MESSAGE = 'assistant_message';
+/** Durable row for one tool outcome: `data` is the tool message the
+ *  run committed — the tool's output plus the id of the call it
+ *  answers. */
+const EVENT_TOOL_RESULT = 'tool_result';
 /** Recursive sub-agent trace envelope: `data` is
  *  `[AgentMeta, inner AgentEvent]`. Durable inner content is
  *  persisted verbatim, so history replay reconstructs
@@ -106,10 +133,18 @@ const EVENT_AGENT = 'Agent';
  *  keeps the link, not the trace. */
 const EVENT_SUBAGENT_ENTER = 'subagent_enter';
 const EVENT_SUBAGENT_EXIT = 'subagent_exit';
+/** A committed compaction: `data.summary` is the replacement text and
+ *  `surface_op` names the span it shadowed. It produces a timeline
+ *  marker, not a replace: the reader can still see what was compacted
+ *  away and why older turns stopped being sent. */
+const EVENT_COMPACTION = 'compaction';
 
 /** Discriminators on the inner `ContentPart` carried by
  *  `Model` events. */
 const PART_TEXT = 'text';
+/** Model reasoning. Durable rows carry it, so a rebuilt transcript can
+ *  show the same scratchpad the live projection streamed. */
+const PART_REASONING = 'reasoning';
 const PART_TOOL_USE = 'tool_use';
 const PART_TOOL_RESULT = 'tool_result';
 
@@ -249,11 +284,11 @@ export function isToolEchoText(text: string): boolean {
   return false;
 }
 
-/** Find the trailing assistant message a no-target parent segment
- *  should attach to. Sub-agent bubbles interleave after the
- *  assistant turn, so "trailing message" is ambiguous once
- *  delegation exists — parent content must always land on the
- *  assistant turn, never inside a child bubble.
+/** Find the assistant message a no-target parent segment should attach
+ *  to, returning a copy this fold may mutate. Sub-agent bubbles
+ *  interleave after the assistant turn, so "trailing message" is
+ *  ambiguous once delegation exists — parent content must always land
+ *  on the assistant turn, never inside a child bubble.
  *
  *  The scan stops at a user message: an assistant turn owns only the
  *  content that follows it, so text arriving after a new user prompt
@@ -262,17 +297,57 @@ export function isToolEchoText(text: string): boolean {
  *  that produced the second half. A log with a rerun (user, answer,
  *  user, answer) is the everyday case: it must fold to four messages,
  *  not three with the answers concatenated. */
-function findAssistantTarget(
+function mutableAssistantTarget(
   messages: ChatMessageLike[],
   target?: ChatMessageLike,
 ): ChatMessageLike | undefined {
+  // A `target` is a bubble this fold created for the row it is
+  // applying (the sub-agent path); nothing else holds it, so it can
+  // be written in place.
   if (target) return target;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i];
-    if (m.role === 'assistant') return m;
-    if (m.role === 'user') return undefined;
+    const message = messages[i];
+    if (message.role === 'user') return undefined;
+    if (message.role !== 'assistant') continue;
+    // A compaction marker is an assistant-shaped divider, not an
+    // answer. Appending into it would fold the next steps into the
+    // marker (and make their text look like the turn's whole durable
+    // prefix), so content after a marker starts a new bubble.
+    if (!carriesModelContent(message)) return undefined;
+    // The caller's projection is React state, and StrictMode
+    // double-invokes reducers in development to surface impure
+    // ones. Appending to the stored message object would therefore
+    // apply the row twice — the UI showed a streamed step's text
+    // and reasoning duplicated inside one assistant block until a
+    // reload rebuilt the window from the log. Copy the message and
+    // its segment list so the fold never touches the old state.
+    const copy: ChatMessageLike = { ...message, segments: message.segments.slice() };
+    messages[i] = copy;
+    return copy;
   }
   return undefined;
+}
+
+/**
+ * True when an assistant message renders model-visible content — text,
+ * reasoning, a tool call or a tool result.
+ *
+ * `role: 'assistant'` alone is not enough: a compaction marker is
+ * assistant-shaped but only carries a `compaction` segment, and
+ * sub-agent bubbles carry child content rather than the parent turn's.
+ * Both can sit between the parent assistant messages of one run, so the
+ * live-prefix scan and the fold's append target must look through them
+ * instead of treating them as the turn's durable answer.
+ */
+export function carriesModelContent(message: ChatMessageLike): boolean {
+  if (message.role !== 'assistant') return false;
+  return message.segments.some(
+    (segment) =>
+      segment.type === 'text' ||
+      segment.type === 'thinking' ||
+      segment.type === 'tool_block' ||
+      segment.type === 'tool_result',
+  );
 }
 
 /**
@@ -282,18 +357,19 @@ function findAssistantTarget(
  * chat stream so the reconstructed transcript renders the same
  * way.
  */
-function appendAgentText(
+function appendAgentSegment(
   messages: ChatMessageLike[],
   text: string,
+  kind: 'text' | 'thinking',
   sessionId: string,
   target?: ChatMessageLike,
 ): void {
   if (!text) return;
-  const owner = findAssistantTarget(messages, target);
+  const owner = mutableAssistantTarget(messages, target);
   if (owner) {
     const segments = owner.segments;
     const tail = segments[segments.length - 1];
-    if (tail && tail.type === 'text') {
+    if (tail && tail.type === kind) {
       segments[segments.length - 1] = {
         ...tail,
         content: tail.content + text,
@@ -302,7 +378,7 @@ function appendAgentText(
     }
     segments.push({
       id: crypto.randomUUID(),
-      type: 'text',
+      type: kind,
       content: text,
     });
     return;
@@ -311,7 +387,7 @@ function appendAgentText(
   messages.push({
     id: crypto.randomUUID(),
     role: 'assistant',
-    segments: [{ id: crypto.randomUUID(), type: 'text', content: text }],
+    segments: [{ id: crypto.randomUUID(), type: kind, content: text }],
     sessionId,
     status: 'completed',
   });
@@ -360,7 +436,7 @@ function appendToolCall(
     toolPending: true,
     toolUseId,
   };
-  const owner = findAssistantTarget(messages, target);
+  const owner = mutableAssistantTarget(messages, target);
   if (owner) {
     owner.segments.push(segment);
     return;
@@ -406,7 +482,7 @@ function appendToolResult(
   const isError = payload.is_error === true;
   const toolUseId = typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined;
 
-  const owner = findAssistantTarget(messages, target);
+  const owner = mutableAssistantTarget(messages, target);
   if (owner) {
     const segments = owner.segments;
     let matchIdx = -1;
@@ -467,6 +543,37 @@ function appendToolResult(
 }
 
 /**
+ * The `content` parts of a provider `Message` payload.
+ *
+ * The wire form is the serde shape of `synthia_provider::Content`:
+ * an externally tagged enum, so one part arrives as
+ * `{"Single": <part>}` and several as `{"Multi": [<part>, …]}`.
+ * The loose spelling — `{"role": …, "content": [<part>, …]}` — is
+ * read too, so a row written by hand and a row written by the
+ * backend project the same way. Those are the two shapes the
+ * server's own fold accepts, so this reader and that fold agree on
+ * what a valid row is.
+ *
+ * Exported so the session detail page counts the parts of a row
+ * with the same reader this projection uses.
+ */
+export function messageParts(payload: unknown): Record<string, unknown>[] {
+  const message = toRecord(payload);
+  if (!message) return [];
+  const content = message.content;
+  if (Array.isArray(content)) {
+    return content.map(toRecord).filter((part): part is Record<string, unknown> => part !== null);
+  }
+  const obj = toRecord(content);
+  if (!obj) return [];
+  if (Array.isArray(obj.Multi)) {
+    return obj.Multi.map(toRecord).filter((part): part is Record<string, unknown> => part !== null);
+  }
+  const single = toRecord(obj.Single);
+  return single ? [single] : [];
+}
+
+/**
  * Dispatch one `Model`-envelope payload (`data` = a single
  * `ContentPart`) onto the message list. When `target` is
  * provided the segment lands in that message (used for
@@ -498,8 +605,82 @@ function applyContentPart(
     // assistant's text segment, creating the appearance
     // of a duplicate tool turn.
     if (isToolEchoText(text)) return;
-    appendAgentText(out, text, sessionId, target);
+    appendAgentSegment(out, text, 'text', sessionId, target);
+    return;
   }
+  if (kind === PART_REASONING) {
+    const text = typeof data.text === 'string' ? data.text : '';
+    appendAgentSegment(out, text, 'thinking', sessionId, target);
+  }
+}
+
+/**
+ * Project one `tool_result` row onto the message list.
+ *
+ * Two rows carry this type. The run's own row holds the tool
+ * message the loop committed: the provider `Message` with
+ * `role: "tool"`, the tool's output as its `content`, and the id of
+ * the call it answers in `tool_call_id`. The crash-repair closer
+ * holds a marker instead — `call_id`, the tool's name, an `error`
+ * code and `interrupted: true` — because the call never finished.
+ * Both name the call, and that id is the pairing key the assistant
+ * turn's `tool_use` part carried, so the result lands on that
+ * call's block — the same pairing the live stream does.
+ *
+ * A row whose content is a `tool_result` part already carries the
+ * whole payload (the body, the error flag). The harness's own row
+ * carries the tool's output as plain parts instead, so the payload
+ * is rebuilt from the message.
+ */
+function applyToolResultMessage(
+  entry: SessionTurn,
+  sessionId: string,
+  out: ChatMessageLike[],
+): void {
+  const data = toRecord(entry.data);
+  if (!data) return;
+  const parts = messageParts(data);
+  const resultPart = parts.find((part) => part.type === PART_TOOL_RESULT);
+  if (resultPart) {
+    // The part carries its own failure flag; the row's flag says the
+    // same thing from the row's side, so either may set it.
+    const payload = entry.is_error === true ? { ...resultPart, is_error: true } : resultPart;
+    appendToolResult(out, payload, sessionId);
+    return;
+  }
+  const toolUseId =
+    typeof data.tool_call_id === 'string'
+      ? data.tool_call_id
+      : typeof data.call_id === 'string'
+        ? data.call_id
+        : '';
+  if (!toolUseId) return;
+  // A failed tool says so three ways: the row's own flag (the run's
+  // row), the repair closer's error code, and the closer's
+  // `interrupted` marker. A call that never finished must not read
+  // as one that returned.
+  const errorCode = typeof data.error === 'string' ? data.error : '';
+  const isError = entry.is_error === true || errorCode !== '' || data.interrupted === true;
+  const toolName =
+    typeof data.tool_name === 'string'
+      ? data.tool_name
+      : typeof data.name === 'string'
+        ? data.name
+        : undefined;
+  appendToolResult(
+    out,
+    {
+      type: PART_TOOL_RESULT,
+      tool_use_id: toolUseId,
+      // The repair closer carries no output — its error code is the
+      // only thing it knows about the call — so the code is what
+      // the block shows.
+      content: parts.length > 0 ? parts : errorCode ? [{ type: PART_TEXT, text: errorCode }] : [],
+      tool_name: toolName,
+      is_error: isError,
+    },
+    sessionId,
+  );
 }
 
 /**
@@ -513,6 +694,12 @@ function applyContentPart(
  * Each `Model` envelope carries exactly one `ContentPart` on the
  * wire (the controller writes one event per agent frame), so a
  * single dispatch is enough — no inner part loop is needed.
+ *
+ * The typed rows carry whole messages instead: an
+ * `assistant_message` envelope is one assistant turn (its text and
+ * its tool calls together), and a `tool_result` envelope is one
+ * tool's outcome. Both land on the same segments the `Model`
+ * envelopes produced.
  *
  * `Agent` envelopes (`data` = `[AgentMeta, inner AgentEvent]`)
  * reconstruct the delegated child's durable content into its own
@@ -554,6 +741,43 @@ function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessa
           files: files.length > 0 ? files : undefined,
         },
       ],
+    });
+    return;
+  }
+
+  if (envelope === EVENT_COMPACTION) {
+    const obj = toRecord(data);
+    const summary = obj && typeof obj.summary === 'string' ? obj.summary : '';
+    const shadowedTokens =
+      obj && typeof obj.shadowed_token_count === 'number' ? obj.shadowed_token_count : undefined;
+    const op = entry.surface_op;
+    out.push({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      segments: [
+        {
+          id: crypto.randomUUID(),
+          type: 'compaction',
+          content: summary,
+          compaction: {
+            summary,
+            ...(op?.start !== undefined ? { start: op.start } : {}),
+            ...(op?.end !== undefined ? { end: op.end } : {}),
+            ...(op?.start !== undefined && op?.end !== undefined
+              ? { shadowedMessages: op.end - op.start }
+              : {}),
+            ...(shadowedTokens !== undefined ? { shadowedTokens } : {}),
+            ...(op?.source_event_seqs && op.source_event_seqs.length > 0
+              ? {
+                  firstSeq: Math.min(...op.source_event_seqs),
+                  lastSeq: Math.max(...op.source_event_seqs),
+                }
+              : {}),
+          },
+        },
+      ],
+      sessionId,
+      status: 'completed',
     });
     return;
   }
@@ -647,9 +871,28 @@ function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessa
     // re-introduce `ensureSubagentTarget` and dispatch
     // `applyContentPart(part, sessionId, out, target)` again — it
     // is not a one-line revert because the target plumbing runs
-    // through `appendAgentText` / `appendToolCall` /
+    // through `appendAgentSegment` / `appendToolCall` /
     // `appendToolResult`.
     void childKey;
+    return;
+  }
+
+  if (envelope === EVENT_ASSISTANT_MESSAGE) {
+    // One assistant turn is one durable row: `data` is the whole
+    // provider `Message`, so its parts expand into the turn's
+    // segments — text into the text segment, `tool_use` into a
+    // tool block. The parts go through the same dispatch the
+    // legacy `Model` rows use, so the tool pairing rules live in
+    // one place and the turn renders the way the live stream
+    // rendered it.
+    for (const part of messageParts(data)) {
+      applyContentPart(part, sessionId, out);
+    }
+    return;
+  }
+
+  if (envelope === EVENT_TOOL_RESULT) {
+    applyToolResultMessage(entry, sessionId, out);
     return;
   }
 
@@ -667,46 +910,56 @@ function toRecord(data: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Build the chat messages that best represent a session's
- * `history` array. Each transcript entry becomes either a
- * standalone chat message (user / tool events) or a segment
- * appended to the trailing assistant turn (text deltas
- * coalesce; tool_call opens a `tool_block`; tool_result fills
- * the most recent open block or falls back to a free-standing
- * segment).
+ * A fold of durable rows into the chat timeline, plus the log ordinal
+ * each message came from.
+ *
+ * `sources[i]` is the durable ordinal of the row that created
+ * `messages[i]`; a replace op locates what it shadows by that ordinal,
+ * never by a UI index.
+ */
+export interface RowProjection {
+  sessionId: string;
+  messages: ChatMessageLike[];
+  sources: number[];
+}
+
+/** An empty projection for one session's window. */
+export function newRowProjection(sessionId: string): RowProjection {
+  return { sessionId, messages: [], sources: [] };
+}
+
+/**
+ * Fold durable rows onto a projection.
+ *
+ * Incremental by design: the chat page applies each `follow` row batch
+ * to the projection it already holds, so a step boundary does not
+ * re-allocate the ids of every earlier message (which would remount the
+ * list and lose the reader's scroll position). A fresh window starts
+ * from `newRowProjection(sessionId)` and passes the whole baseline.
  *
  * The output preserves the on-wire ordering of events, with one
- * exception: a `UserInput` row carrying a `surface_op` replace
- * (the row a regenerate persists) first drops the messages its
- * cited seqs shadow, so a rerun shows the replacement story —
- * one prompt bubble, the new answer — exactly like the server's
- * `fold_log_surface` projections. Compaction rows also carry
- * replace ops but produce no message here; they stay
- * display-invisible as before.
- *
- * The chat UI renders the resulting `segments[]` verbatim.
+ * exception: a `UserInput` row carrying a `surface_op` replace (the row
+ * a regenerate persists) first drops the messages its cited seqs
+ * shadow, so a rerun shows the replacement story — one prompt bubble,
+ * the new answer. A `compaction` row produces a marker instead of a
+ * replace, so the reader can still see the span that was compacted.
  */
-function historyToChatMessages(
-  history: ReadonlyArray<SessionTurn>,
-  sessionId: string,
-): ChatMessageLike[] {
-  const out: ChatMessageLike[] = [];
-  // `sources[i]` = 1-based log ordinal of the history row that
-  // created `out[i]`; kept in step with `out` so a replace op
-  // can locate what it shadows by log ordinal, never by a UI
-  // index.
-  const sources: number[] = [];
-  history.forEach((entry, index) => {
+export function projectRows(state: RowProjection, rows: ReadonlyArray<SessionTurn>): RowProjection {
+  const messages = state.messages.slice();
+  const sources = state.sources.slice();
+  for (const entry of rows) {
     if (entry.type === EVENT_USER_INPUT) {
-      dropReplacedTurn(entry, out, sources);
+      dropReplacedTurn(entry, messages, sources);
     }
-    const before = out.length;
-    applyHistoryEntry(entry, sessionId, out);
-    for (let i = before; i < out.length; i += 1) {
-      sources[i] = index + 1;
+    const before = messages.length;
+    applyHistoryEntry(entry, state.sessionId, messages);
+    const ordinal =
+      typeof entry.seq === 'number' ? entry.seq : (sources[sources.length - 1] ?? 0) + 1;
+    for (let i = before; i < messages.length; i += 1) {
+      sources[i] = ordinal;
     }
-  });
-  return out;
+  }
+  return { sessionId: state.sessionId, messages, sources };
 }
 
 /**
@@ -827,14 +1080,11 @@ function extractArtifactText(art: SessionArtifact): string {
  * history (legacy sessions).
  */
 export function reconstructMessagesFromSession(session: SessionDetail): ChatMessageLike[] {
-  const out: ChatMessageLike[] = [];
   if (session.history && session.history.length > 0) {
-    out.push(...historyToChatMessages(session.history, session.id));
-    return out;
+    return projectRows(newRowProjection(session.id), session.history).messages;
   }
   const assistant = artifactsToAssistantMessage(session.artifacts, session.id);
-  if (assistant) out.push(assistant);
-  return out;
+  return assistant ? [assistant] : [];
 }
 
 /**

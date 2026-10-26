@@ -18,7 +18,7 @@
 //! |---|---|---|
 //! | Provider (stub, no network) | `synthia-provider` | `ModelProviderStub::text_only` |
 //! | Tier-aware steering | `synthia-steering` | `tier::auto(provider.tier(), ws)` |
-//! | Typed event sink | `synthia-session` | `TypedEventSink::channel(32)` |
+//! | Session log writer | `synthia-session` | `LogWriter::new(sink, clock)` |
 //! | Agent assembly | `synthia-harness` | `ReActAgent::new(..)` chain → the agent is its own builder |
 //! | Structured output | `synthia-harness`/`synthia-tool` | `.with_output_schema(json!{..})` |
 //! | LLM compaction | `synthia-context` | `SummarizingContextManager::new(..).with_settings(..)` via `.with_context_manager(..)` |
@@ -36,7 +36,11 @@ use synthia_harness::agent::Agent as _;
 use synthia_harness::{AgentEvent, AgentInput, ReActAgent};
 use synthia_context::CompactionSettings;
 use synthia_provider::traits::ModelProvider;
-use synthia_session::TypedEventSink;
+use synthia_session::{
+    LogWriter,
+    SessionSink,
+    in_memory::InMemorySessionSink,
+};
 use synthia_steering::tier::auto as tier_steering;
 use synthia_tool::{ToolEntry, ToolRegistry};
 use synthia_tool_read::ReadTool;
@@ -69,8 +73,12 @@ async fn main() {
     // Piece 2 — steering from the provider's tier.
     let steering = Arc::new(tier_steering(provider.tier(), &workspace));
 
-    // Piece 3 — typed event sink (futures mpsc, runtime-neutral).
-    let (sink, mut rx) = TypedEventSink::channel(32);
+    // Piece 3 — the session's one writer (runtime-neutral).
+    let sink = Arc::new(InMemorySessionSink::new("consumer-proof"));
+    let writer = Arc::new(LogWriter::new(
+        sink.clone(),
+        Arc::new(synthia_core::SystemClock),
+    ));
 
     // Pieces 4..n — one-expression assembly.
     let agent = ReActAgent::new(provider, Arc::new(plugin_tool_registry()))
@@ -88,7 +96,7 @@ async fn main() {
             ))
             .with_settings(CompactionSettings::default()),
         ))
-        .with_typed_event_sink(sink);
+        .with_log_writer(writer);
 
     println!(
         "descriptor: {} (schema: {})",
@@ -137,12 +145,9 @@ async fn main() {
     }
     println!("run: {events} events, text = {text:?}");
 
-    // Drain typed structural events.
-    let mut typed = 0;
-    while typed < 3 && matches!(rx.try_recv(), Ok(Some(_))) {
-        typed += 1;
-    }
-    println!("typed events: {typed}");
+    // Read the structural rows back from the log.
+    let rows = sink.read().await.expect("read");
+    println!("structural rows: {}", rows.len());
 
     // Skill registry (the lego for procedural knowledge).
     let reg = synthia_skill::SkillRegistry::new();

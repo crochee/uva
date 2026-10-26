@@ -41,6 +41,7 @@ let memo = MemoizedTool::new(
         .ttl(Duration::from_secs(5 * 60))
         .scope(MemoScope::Process),
     Arc::new(InMemoryMemoStore::default()),
+    Arc::new(synthia_core::SystemClock),
 );
 let registry = ToolRegistry::new();
 registry.register_entry(ToolEntry::new(memo));
@@ -61,9 +62,11 @@ Expected tail: `OK: 1 invocation, 4 cache-hits`.
   suite pins this. A real `shell` tool, for instance, returns false
   when argv contains pipes / subshells; `web_fetch` returns false
   unless the caller passes `cacheable: true`.
-- Single-flight via `tokio::sync::OnceCell` collapsed through
-  `Arc<Mutex<HashMap<Key, OnceCell<ToolOutput>>>>` — concurrent calls
-  for the same key await the first caller's future.
+- Single-flight via a shared future per key
+  (`futures::FutureExt::shared()` under
+  `Arc<Mutex<HashMap<Key, Shared<ToolOutput>>>>`) — concurrent calls
+  for the same key await the first caller's future. The crate names
+  no runtime: `tokio` appears only in `[dev-dependencies]`.
 - `MemoScope::Workspace(path)` adds the canonicalised path to the
   key, so two workspaces do not share cache.
 - No edits to `synthia-tool` — composition only.

@@ -11,7 +11,12 @@ use synthia_harness::{
     WarningKind,
     agent::strategy::{AgentRuntime, single_shot_request},
 };
-use synthia_provider::{CompletionRequest, StreamChunk};
+use synthia_provider::{
+    CompletionRequest,
+    ContentPart,
+    StreamChunk,
+    TextContent,
+};
 use synthia_session::{step_end, step_start};
 
 /// How many reasoning steps the instruction asks for, when the caller
@@ -68,10 +73,25 @@ impl ChainOfThoughtStrategy {
         runtime: &AgentRuntime,
         request: CompletionRequest,
         sink: &EventSink,
-    ) -> (Option<String>, Result<(), String>) {
+    ) -> (Option<String>, Vec<ContentPart>, Result<(), String>) {
         let attempt = Arc::new(parking_lot::Mutex::new(None));
         let slot = Arc::clone(&attempt);
+        // The turn's parts, kept for the durable row: the deltas
+        // live on the event stream, and the row the run leaves behind
+        // is the same turn.
+        let parts =
+            Arc::new(parking_lot::Mutex::new(Vec::<ContentPart>::new()));
+        let parts_slot = Arc::clone(&parts);
+        // A provider that answers in one batch streams no text chunk:
+        // the answer is the terminal result's own text.
+        let answer = Arc::new(parking_lot::Mutex::new(String::new()));
+        let answer_slot = Arc::clone(&answer);
         let stream_sink = sink.clone();
+        // The prompt (and everything queued before it) lands before
+        // the model sees it.
+        if let Err(error) = sink.flush_log().await {
+            return (None, Vec::new(), Err(error.to_string()));
+        }
         let outcome = runtime
             .caps
             .model
@@ -82,6 +102,13 @@ impl ChainOfThoughtStrategy {
                 Some(runtime.cancel.clone()),
                 Box::new(move |chunk| match chunk {
                     StreamChunk::Content(part) => {
+                        // The cot offers no tools: a tool call in
+                        // the answer is ignored (and warned about),
+                        // and it must not reach the log, where it
+                        // would be an unanswered call.
+                        if !matches!(part, ContentPart::ToolUse(_)) {
+                            parts_slot.lock().push(part.clone());
+                        }
                         stream_sink.emit(AgentEvent::Model(part));
                     }
                     StreamChunk::Usage(usage) => {
@@ -96,6 +123,7 @@ impl ChainOfThoughtStrategy {
                         if let Some(first) = result.tool_calls.first() {
                             *slot.lock() = Some(first.name.clone());
                         }
+                        *answer_slot.lock() = result.text.clone();
                         stream_sink.emit(AgentEvent::ModelDone(*result));
                     }
                     StreamChunk::Stop(_)
@@ -106,8 +134,21 @@ impl ChainOfThoughtStrategy {
             )
             .await;
         let attempted = attempt.lock().clone();
+        let mut parts = std::mem::take(&mut *parts.lock());
+        if !parts.iter().any(|part| {
+            matches!(part, ContentPart::Text(text) if !text.text.is_empty())
+        }) {
+            let text = answer.lock().clone();
+            if !text.is_empty() {
+                parts.push(ContentPart::Text(TextContent {
+                    text,
+                    cache_control: None,
+                }));
+            }
+        }
         (
             attempted,
+            parts,
             outcome.map(|_| ()).map_err(|err| err.to_string()),
         )
     }
@@ -129,15 +170,25 @@ impl ReasoningStrategy for ChainOfThoughtStrategy {
         if !sink.begin(&begin_token) {
             return;
         }
+        // The run's epoch marker: one header naming the request
+        // envelope this run's facts are produced under.
+        sink.stamp_request_header(&runtime.caps, &[]);
 
         let instruction = self.instruction();
+        // The prompt is on disk before the context manager's
+        // summariser — a provider call — not only before the sample.
+        if let Err(error) = sink.flush_log().await {
+            sink.fail(format!("log flush failed: {error}"));
+            return;
+        }
         let request =
             single_shot_request(&runtime.caps, &input, Some(&instruction))
                 .await;
 
         sink.emit_typed(step_start(0, 1));
-        let (attempted, outcome) =
+        let (attempted, parts, outcome) =
             self.stream_once(&runtime, request, sink).await;
+
         sink.emit_typed(step_end(0, 1, "final_answer"));
 
         if let Some(name) = attempted {
@@ -154,7 +205,16 @@ impl ReasoningStrategy for ChainOfThoughtStrategy {
 
         let finish_token = runtime.cancel.clone();
         match outcome {
-            Ok(()) => sink.finish(&finish_token),
+            Ok(()) => {
+                // The model's answer is the run's durable fact: one
+                // `assistant_message` row through the session's
+                // writer. Only a turn that *completed* is a fact — a
+                // stream that failed mid-answer leaves its deltas on
+                // the wire, because a truncated row would read back
+                // as a finished assistant turn.
+                sink.write_assistant_turn(&parts);
+                sink.finish(&finish_token);
+            }
             Err(message) => sink.fail(message),
         }
     }

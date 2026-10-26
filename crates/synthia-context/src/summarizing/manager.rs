@@ -7,13 +7,22 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use synthia_provider::{Message, Role};
-use synthia_session::{CompactionOutcome, SurfaceToken};
+use synthia_session::{
+    CompactionLifecycleOutcome,
+    SurfaceToken,
+    ledger_key::key_of,
+    tool_pairing::{balanced_message_cut, balanced_prefix},
+};
 
 use super::{
     SummariseFn,
     archive::{ToolCallArchive, archive_record_for},
     lifecycle::{CompactionLifecycle, CompactionRecord},
-    prompt::{extract_tool_result_text, serialise_batch_for_summariser},
+    prompt::{
+        extract_assistant_text,
+        extract_tool_result_text,
+        serialise_batch_for_summariser,
+    },
     refs::{allocate_short_refs, build_summary_message},
 };
 use crate::{
@@ -82,25 +91,6 @@ impl SummarizingContextManager {
         Self {
             summarise,
             archive: Arc::new(ToolCallArchive::new()),
-            compaction_emitter: None,
-            compaction_lifecycle: None,
-            settings: None,
-            compaction_details: None,
-            messages_since_compaction: std::sync::atomic::AtomicU32::new(0),
-            runtime_details: Mutex::new(None),
-        }
-    }
-
-    /// Construct with a caller-provided archive (e.g. a
-    /// pre-populated index from session resume). The default
-    /// archive is empty.
-    pub fn with_archive(
-        summarise: SummariseFn,
-        archive: Arc<ToolCallArchive>,
-    ) -> Self {
-        Self {
-            summarise,
-            archive,
             compaction_emitter: None,
             compaction_lifecycle: None,
             settings: None,
@@ -186,6 +176,104 @@ impl SummarizingContextManager {
     }
 }
 
+/// One compactable unit: a run of tool results plus the assistant
+/// turn(s) that issued their calls, widened until both ends sit on a
+/// balanced tool-pairing boundary.
+#[derive(Debug)]
+struct CompactionGroup {
+    /// Inclusive start of the pre-splice range this group replaces.
+    start: usize,
+    /// Exclusive end of that range.
+    end: usize,
+    /// Indices of the tool-result messages inside `start..end`.
+    results: Vec<usize>,
+}
+
+/// Widen each seed run of tool results into the tool-call group it
+/// belongs to (R1).
+///
+/// The pairing rule is the one the manual/harness path already uses:
+/// [`balanced_prefix`] and [`balanced_message_cut`] from
+/// `synthia_session::tool_pairing`. The start moves back to the
+/// nearest index whose prefix holds no unanswered `tool_use` — for a
+/// valid history that is the assistant turn that issued the run —
+/// and the end moves forward until the range answers every call it
+/// contains. Using the session's predicate rather than a second
+/// pairing check is what keeps the automatic path from disagreeing
+/// with the manual one again (R4).
+///
+/// Overlapping groups (one assistant issuing several result runs the
+/// history kept apart) merge, so no message is summarised twice.
+fn compaction_groups(
+    messages: &[Message],
+    batches: Vec<Vec<usize>>,
+) -> Vec<CompactionGroup> {
+    let mut groups: Vec<CompactionGroup> = batches
+        .into_iter()
+        .map(|batch| {
+            let seed = batch.first().copied().unwrap_or(0);
+            // The nearest prefix-balanced cut at or before the seed
+            // is the start of the tool-call group. `balanced_prefix`
+            // rather than `balanced_message_cut`: the message at
+            // `start` is removed, so it may be a tool result whose
+            // issuing call this range also removes.
+            let start = (0..=seed)
+                .rev()
+                .find(|&cut| balanced_prefix(messages, cut))
+                .unwrap_or(0);
+            let mut end = batch.last().map(|i| i + 1).unwrap_or(seed + 1);
+            while end < messages.len() && !balanced_message_cut(messages, end) {
+                end += 1;
+            }
+            let results = (start..end)
+                .filter(|&i| {
+                    messages.get(i).is_some_and(|m| m.role == Role::Tool)
+                })
+                .collect();
+            CompactionGroup {
+                start,
+                end,
+                results,
+            }
+        })
+        .collect();
+
+    groups.sort_by_key(|group| group.start);
+    let mut merged: Vec<CompactionGroup> = Vec::with_capacity(groups.len());
+    for group in groups {
+        match merged.last_mut() {
+            Some(previous) if group.start < previous.end => {
+                if group.end > previous.end {
+                    previous.end = group.end;
+                    previous.results = (previous.start..previous.end)
+                        .filter(|&i| {
+                            messages
+                                .get(i)
+                                .is_some_and(|m| m.role == Role::Tool)
+                        })
+                        .collect();
+                }
+            }
+            _ => merged.push(group),
+        }
+    }
+    merged
+}
+
+/// Text a compaction would remove from one message, for the
+/// "summary must be smaller" guard (R5).
+fn replaced_text_len(msg: &Message) -> usize {
+    match msg.role {
+        Role::Tool => {
+            extract_tool_result_text(msg).map(|t| t.len()).unwrap_or(0)
+        }
+        Role::Assistant => {
+            extract_assistant_text(msg).map(|t| t.len()).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
 #[async_trait]
 impl ContextManager for SummarizingContextManager {
     async fn prepare(
@@ -227,11 +315,14 @@ impl ContextManager for SummarizingContextManager {
             }
         }
 
-        // Walk once: collect every tool-result message and the
-        // assistant turn that *contains* the corresponding tool
-        // calls. We only prune the tool-result messages; the
-        // assistant turn stays verbatim so the conversation
-        // surface still shows "model asked → tool answered".
+        // Walk once: collect every run of tool-result messages. A
+        // run is only a *seed* — the unit of compaction is the
+        // tool-call group it belongs to (R1), so each seed is
+        // widened backward over the assistant turn that issued the
+        // results and forward until every call inside the range has
+        // its result inside it too. Replacing a seed as-is would
+        // shadow the results and leave the `tool_use` blocks behind,
+        // which the provider rejects as a protocol violation.
         let mut batches: Vec<Vec<usize>> = Vec::new();
         let mut current: Vec<usize> = Vec::new();
 
@@ -250,10 +341,14 @@ impl ContextManager for SummarizingContextManager {
             return;
         }
 
-        // Walk each batch back-to-front. Reverse order keeps
-        // earlier indices stable as we splice.
+        let groups = compaction_groups(messages, batches);
+
+        // Walk each group back-to-front. Reverse order keeps
+        // earlier indices stable as we splice: a group always
+        // starts after every earlier group's end.
         let mut did_prune = false;
-        for batch in batches.into_iter().rev() {
+        for group in groups.into_iter().rev() {
+            let batch = &group.results;
             // Serialise the batch as a user-message for the
             // summariser LLM. Tool-name + result-text per call,
             // wrapped in XML fences so a malicious / hijacked tool
@@ -270,16 +365,18 @@ impl ContextManager for SummarizingContextManager {
                 .clone()
                 .or_else(|| self.compaction_details.clone());
             let serialised = serialise_batch_for_summariser(
-                &batch,
+                batch,
                 messages,
                 effective_details.as_ref(),
             );
 
-            let raw_size: usize = batch
-                .iter()
-                .filter_map(|&i| messages.get(i))
-                .filter_map(extract_tool_result_text)
-                .map(|t| t.len())
+            // R5: compare the summary against everything the
+            // extended range removes — the results *and* the
+            // assistant text/thinking the widening swallows —
+            // otherwise the guard silently changes meaning.
+            let raw_size: usize = (group.start..group.end)
+                .filter_map(|i| messages.get(i))
+                .map(replaced_text_len)
                 .sum();
 
             // R29-Phase-J: open the lifecycle before the LLM
@@ -301,7 +398,7 @@ impl ContextManager for SummarizingContextManager {
                     // recovery path itself is broken.
                     self.emit_lifecycle(CompactionLifecycle::End {
                         token,
-                        outcome: CompactionOutcome::Failed,
+                        outcome: CompactionLifecycleOutcome::Failed,
                     });
                     continue;
                 }
@@ -313,7 +410,7 @@ impl ContextManager for SummarizingContextManager {
             if summary_text.len() > raw_size {
                 self.emit_lifecycle(CompactionLifecycle::End {
                     token,
-                    outcome: CompactionOutcome::Failed,
+                    outcome: CompactionLifecycleOutcome::Failed,
                 });
                 continue;
             }
@@ -321,56 +418,62 @@ impl ContextManager for SummarizingContextManager {
             self.emit_lifecycle(CompactionLifecycle::Summary {
                 token: token.clone(),
                 summary: summary_text.clone(),
-                shadowed_positions: batch.iter().map(|i| *i as u64).collect(),
+                shadowed_positions: (group.start..group.end)
+                    .map(|i| i as u64)
+                    .collect(),
             });
 
             // Build the replacement summary message as an
             // assistant turn carrying the short-ref footer so
             // `context_tree_query` can resolve the aliases.
-            let short_refs = allocate_short_refs(&batch);
+            let short_refs = allocate_short_refs(batch);
             let summary_msg = build_summary_message(&short_refs, &summary_text);
 
-            // Archive each tool call so `context_tree_query` can
-            // recover the original output.
-            for &i in &batch {
+            // Archive every replaced message so
+            // `context_tree_query` can recover the original
+            // output. That includes the assistant turn(s) the
+            // widening had to swallow: their text/thinking would
+            // otherwise be lost without a trace (R2).
+            for i in group.start..group.end {
                 if let Some(msg) = messages.get(i)
-                    && let Some(record) = archive_record_for(msg)
+                    && let Some(record) = archive_record_for(i, msg)
                 {
                     self.archive.insert(record);
                 }
             }
 
-            // Splice: replace the contiguous run of tool-result
-            // messages with the single summary message. The
-            // assistant turn that contained the original
-            // tool_use blocks stays untouched.
-            let first = batch[0];
-            let last = *batch.last().expect("batch is non-empty");
+            // Splice: replace the whole tool-call group — the
+            // assistant turn(s) that issued the calls, the
+            // tool-result messages, and anything the widening
+            // swallowed between them — with the single summary
+            // message. The group is balanced at both ends (see
+            // `compaction_groups`), so no `tool_use` is left
+            // without its result and no result without its call.
+            let first = group.start;
+            let end = group.end;
             // R5-8: emit a `CompactionRecord` describing the splice
             // to the registered emitter (wired by the agent loop
             // to a typed `SessionEvent::Compaction`). Pre-splice
             // indices so the durable event references the
-            // historical messages that were replaced.
+            // historical messages that were replaced; the span and
+            // the indices cover the *extended* range (R3).
             if let Some(emitter) = self.compaction_emitter.as_ref() {
+                let source_indices: Vec<usize> = (first..end).collect();
                 emitter(CompactionRecord {
                     start: first,
-                    end: last + 1,
-                    source_indices: batch.clone(),
-                    source_keys: batch
+                    end,
+                    source_keys: source_indices
                         .iter()
-                        .map(|&i| {
-                            messages
-                                .get(i)
-                                .and_then(|msg| msg.tool_call_id.clone())
-                        })
+                        .map(|&i| messages.get(i).and_then(key_of))
                         .collect(),
+                    source_indices,
                     summary_text: summary_text.clone(),
                 });
             }
             // Drop indices in reverse so each removal does not
             // shift the ones still to drop.
-            for &i in batch.iter().skip(1).collect::<Vec<_>>().iter().rev() {
-                messages.remove(*i);
+            for i in (first + 1..end).rev() {
+                messages.remove(i);
             }
             messages[first] = summary_msg;
             did_prune = true;
@@ -380,7 +483,7 @@ impl ContextManager for SummarizingContextManager {
             // from a crashed one.
             self.emit_lifecycle(CompactionLifecycle::End {
                 token,
-                outcome: CompactionOutcome::Committed,
+                outcome: CompactionLifecycleOutcome::Committed,
             });
         }
 

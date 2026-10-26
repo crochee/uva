@@ -146,12 +146,81 @@ async fn three_step_plan_executes_in_order() {
     ]);
     let runtime = minimal_runtime(provider);
     let (tx, _rx) = futures::channel::mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(tx), None, None);
+    let sink = EventSink::new(Arc::new(tx), None);
     let strategy = PlanExecuteStrategy::new(
         crate::strategy::PlanExecuteConfig::default().max_steps(20),
     );
     strategy.run(runtime, text_input(), &sink).await;
     assert_eq!(scripted_arc.pos(), 6);
+}
+
+/// The model's output is the run's durable fact: one
+/// `assistant_message` row per model call — the plan, then each
+/// step's answer.
+#[tokio::test]
+async fn the_models_output_is_one_row_per_call() {
+    use synthia_session::{
+        LogWriter,
+        SessionEvent,
+        SessionSink,
+        in_memory::InMemorySessionSink,
+    };
+
+    let (provider, _scripted_arc) = scripted(vec![
+        "1. step one\n2. step two",
+        "result of step one",
+        "continue",
+        "result of step two",
+        "finalize",
+    ]);
+    let runtime = minimal_runtime(provider);
+    let log = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(
+        log.clone(),
+        Arc::new(synthia_core::SystemClock),
+    ));
+    let (tx, _rx) = futures::channel::mpsc::unbounded();
+    let sink = EventSink::new(Arc::new(tx), Some(Arc::clone(&writer)));
+    let strategy = PlanExecuteStrategy::new(
+        crate::strategy::PlanExecuteConfig::default().max_steps(20),
+    );
+    strategy.run(runtime, text_input(), &sink).await;
+    writer.flush().await.expect("flush");
+
+    let rows = log.read().await.expect("read");
+    let assistant: Vec<SessionEvent> = rows
+        .iter()
+        .filter_map(SessionEvent::from_value)
+        .filter(|event| event.type_tag() == "assistant_message")
+        .collect();
+    assert_eq!(
+        assistant.len(),
+        3,
+        "the plan and the two step answers are three rows; got {}",
+        rows.len()
+    );
+    let texts: Vec<String> = assistant
+        .iter()
+        .map(|event| match event {
+            SessionEvent::AssistantMessage { data, .. } => data.to_string(),
+            other => other.type_tag().to_string(),
+        })
+        .collect();
+    assert!(
+        texts[0].contains("step one"),
+        "the plan is the first row; got {}",
+        texts[0]
+    );
+    assert!(
+        texts[1].contains("result of step one"),
+        "the first answer is the second row; got {}",
+        texts[1]
+    );
+    assert!(
+        texts[2].contains("result of step two"),
+        "the second answer is the third row; got {}",
+        texts[2]
+    );
 }
 
 #[tokio::test]
@@ -197,7 +266,7 @@ async fn replanner_abort_stops_subsequent_steps() {
     let (provider, _scripted_arc) = scripted(vec!["1. only step"]);
     let runtime = minimal_runtime(provider);
     let (_tx, _rx) = futures::channel::mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(_tx.clone()), None, None);
+    let sink = EventSink::new(Arc::new(_tx.clone()), None);
     let strategy = PlanExecuteStrategy::new(
         crate::strategy::PlanExecuteConfig::default()
             .max_steps(20)
@@ -213,7 +282,7 @@ async fn max_steps_truncates() {
         scripted(vec!["1. a\n2. b\n3. c\n4. d\n5. e", "r1", "r2", "r3"]);
     let runtime = minimal_runtime(provider);
     let (_tx, _rx) = futures::channel::mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(_tx.clone()), None, None);
+    let sink = EventSink::new(Arc::new(_tx.clone()), None);
     let strategy = PlanExecuteStrategy::new(
         crate::strategy::PlanExecuteConfig::default().max_steps(2),
     );
@@ -235,7 +304,7 @@ async fn cancel_halts_between_steps() {
     runtime.cancel =
         Arc::clone(&concrete) as Arc<dyn synthia_core::CancelToken>;
     let (_tx, _rx) = futures::channel::mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(_tx.clone()), None, None);
+    let sink = EventSink::new(Arc::new(_tx.clone()), None);
     let strategy =
         PlanExecuteStrategy::new(crate::strategy::PlanExecuteConfig::default());
     strategy.run(runtime, text_input(), &sink).await;

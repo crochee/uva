@@ -17,7 +17,7 @@
 //! | Tier-aware steering | R10 | `synthia_steering::tier::auto` |
 //! | Structured output | R12+R13 | `.with_output_schema(schema)` → auto tool |
 //! | LLM compaction | R13 | `synthia-server::agent_run_config::context_manager_for_compaction_with_emitters` |
-//! | Typed event sink | R6 | `.with_typed_event_sink(sink)` |
+//! | Session log writer | R6 | `.with_log_writer(writer)` |
 //! | @agent router bridge | R10+R11 | `LeaderRouter` + `mentions_to_task_specs` |
 //!
 //! Run (no network, no API key):
@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use synthia_harness::{ReActAgent, agent::Agent as _};
 use synthia_provider::traits::ModelProvider;
-use synthia_session::TypedEventSink;
+use synthia_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use synthia_steering::tier::auto as tier_steering;
 use synthia_tool::{ToolEntry, ToolRegistry};
 use synthia_tool_read::ReadTool;
@@ -71,10 +71,15 @@ async fn main() {
         steering.hints.len()
     );
 
-    // 3. Typed event sink (R6): structural events stream to a
-    //    futures-mpsc channel (runtime-neutral).
-    let (typed_sink, mut typed_rx) = TypedEventSink::channel(64);
-    println!("[3/6] typed sink    : channel open");
+    // 3. The session's one writer (R6): the structural rows the loop
+    //    produces go straight into it, and it stamps each row's
+    //    ordinal.
+    let sink = Arc::new(InMemorySessionSink::new("assemble-with-builder"));
+    let writer = Arc::new(LogWriter::new(
+        sink.clone(),
+        Arc::new(synthia_core::SystemClock),
+    ));
+    println!("[3/6] log writer   : session writer installed");
 
     // 4-6. THE BUILD: one chained expression consumes the bricks.
     //    - `.output_schema(..)` (R13) auto-registers the
@@ -83,7 +88,7 @@ async fn main() {
     //      `synthia_server::agent_run_config::context_manager_for_compaction_with_emitters`
     //      (R126 moved it out of the harness); the harness only
     //      owns the contextual wires it composes here.
-    //    - `.steering(..)` / `.typed_event_sink(..)` / `.name()`
+    //    - `.steering(..)` / `.log_writer(..)` / `.name()`
     //      complete the wiring.
     let agent = ReActAgent::new(provider, plugin_tool_registry())
         .with_name("tutorial-agent")
@@ -98,7 +103,7 @@ async fn main() {
             },
             "required": ["answer"]
         }))
-        .with_typed_event_sink(typed_sink);
+        .with_log_writer(writer);
 
     println!(
         "[4/6] descriptor    : name={} (schema {})",
@@ -150,14 +155,9 @@ async fn main() {
     }
     println!("\nrun              : {events} events, final: {answer}");
 
-    // Drain a couple of typed events to prove the sink wired.
-    let mut typed = 0usize;
-    while typed < 3
-        && let Ok(Some(_)) = typed_rx.try_recv()
-    {
-        typed += 1;
-    }
-    println!("typed events     : >= {typed} structural events observed");
+    // Read the structural rows back to prove the writer was wired.
+    let rows = sink.read().await.expect("read");
+    println!("structural rows  : {} written to the log", rows.len());
 
     println!("\n== done ==");
 }

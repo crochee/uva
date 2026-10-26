@@ -85,7 +85,7 @@ fn deny_restriction_yields_every_tool_not_in_the_set() {
 }
 
 #[test]
-fn empty_synthetic_list_returns_registry_only_definitions() {
+fn empty_delegator_list_returns_registry_only_definitions() {
     let registry = build_registry(3);
     let defs: Vec<ToolDefinition> =
         crate::agent::re_act::projection::compose_tool_definitions(

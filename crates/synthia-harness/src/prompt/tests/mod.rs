@@ -11,11 +11,13 @@
 //! | [`assemble`]       | The public `assemble` contract — order, purity, byte-stability, no-runtime-facts |
 //! | [`identity`]       | The `<identity>` renderer: display_name fallback, empty fields |
 //! | [`skills_agents`]  | The `<available_skills>` / `<available_agents>` renderers and their absence rules |
+//! | [`sections`]       | Plugin prompt sections: host registrations, registration order, placement, empty title |
 //! | [`snapshot`]       | The `RuntimeContext` snapshot seam: supersession frame, git status, clock injection |
 //! | [`support`]        | Shared fixtures (`descriptor_with_instructions`, `peer_descriptor`, `fixed_runtime_context`) |
 
 mod assemble;
 mod identity;
+mod sections;
 mod skills_agents;
 mod snapshot;
 mod support;

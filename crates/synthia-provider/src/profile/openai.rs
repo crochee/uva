@@ -65,21 +65,6 @@ impl OpenAIProfile {
         }
     }
 
-    /// OpenRouter-flavoured profile: any base URL, any model id.
-    pub fn openai_compat(
-        name: impl Into<String>,
-        base_url: impl Into<String>,
-        default_model: impl Into<String>,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            base_url: base_url.into(),
-            api_key_env: default_openai_key_env(),
-            default_model: default_model.into(),
-            capabilities: None,
-        }
-    }
-
     /// Override the resolved capability set (e.g. for a
     /// reasoning-disabled local model).
     pub fn with_capabilities(

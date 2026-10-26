@@ -1,9 +1,9 @@
 //! The `task` tool as a harness plugin.
 //!
 //! Wraps an [`AgentRegistry`] of peer agents and implements
-//! [`SyntheticTool`]: installed on a
+//! [`DelegatingTool`]: installed on a
 //! [`ReActAgent`](synthia_harness::ReActAgent) via
-//! `with_synthetic_tool`, the model sees a `task(agent, prompt)`
+//! `with_delegator`, the model sees a `task(agent, prompt)`
 //! tool; calls resolve the named peer, run it as a
 //! depth-capped child, forward its events, and commit its
 //! final text as the tool result. Not installed, the agent
@@ -15,16 +15,16 @@ use synthia_core::CancelToken;
 use synthia_harness::{
     AgentEvent,
     AgentRegistry,
-    SyntheticCall,
-    SyntheticTool,
+    DelegatingTool,
+    DelegationCall,
 };
 use synthia_provider::{ToolDefinition, ToolUse};
 use tracing::{info, warn};
 
 use super::{
-    runner::run_subagent_with_runner,
+    runner::{HostContext, run_subagent_with_runner},
     schema::task_tool_definition,
-    spec::{MAX_SUBAGENT_DEPTH, TASK_TOOL_NAME, TaskSpec},
+    spec::{MAX_SUBAGENT_DEPTH, TaskSpec},
 };
 use crate::gate::{CommandRunner, StdCommandRunner};
 
@@ -160,7 +160,10 @@ impl TaskDelegator {
         let outcome = run_subagent_with_runner(
             peer,
             spec,
-            &parent_session_id,
+            HostContext {
+                parent_session_id: &parent_session_id,
+                writers: None,
+            },
             depth,
             cancel,
             emit,
@@ -201,28 +204,30 @@ fn current_trace_context_wire() -> Option<crate::task::spec::TaskTraceContext> {
     })
 }
 
-impl SyntheticTool for TaskDelegator {
+impl DelegatingTool for TaskDelegator {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![task_tool_definition()]
     }
 
-    fn claims(&self, name: &str) -> bool {
-        name == TASK_TOOL_NAME
-    }
-
     fn execute(
         &self,
-        call: SyntheticCall<'_>,
+        call: DelegationCall<'_>,
     ) -> futures::future::BoxFuture<'static, synthia_tool::ToolOutput> {
         let cancel = Arc::clone(&call.cancel);
         let depth = call.depth;
         let emit = call.emit.clone();
+        let writers = call.subagent_writers.clone();
         let call_data = call.call.clone();
+        // The child runs from its own agent's workspace root, not the
+        // parent's tool context: the peer carries its own env plane.
+        let _ = call.context;
         let peers = Arc::clone(&self.peers);
         let runner: Arc<dyn CommandRunner> = Arc::new(StdCommandRunner::new());
         Box::pin(async move {
-            execute_with_runner(peers, runner, &call_data, cancel, depth, emit)
-                .await
+            execute_with_runner(
+                peers, runner, &call_data, cancel, depth, emit, writers,
+            )
+            .await
         })
     }
 }
@@ -234,6 +239,7 @@ async fn execute_with_runner(
     cancel: Arc<dyn CancelToken>,
     depth: usize,
     emit: futures::channel::mpsc::UnboundedSender<AgentEvent>,
+    writers: Option<Arc<dyn synthia_harness::SubagentWriters>>,
 ) -> synthia_tool::ToolOutput {
     let spec = match TaskSpec::from_value(&call.input) {
         Ok(spec) => spec,
@@ -266,6 +272,17 @@ async fn execute_with_runner(
             ));
         }
     };
-    run_subagent_with_runner(peer, spec, &call.id, depth, cancel, emit, &runner)
-        .await
+    run_subagent_with_runner(
+        peer,
+        spec,
+        HostContext {
+            parent_session_id: &call.id,
+            writers,
+        },
+        depth,
+        cancel,
+        emit,
+        &runner,
+    )
+    .await
 }

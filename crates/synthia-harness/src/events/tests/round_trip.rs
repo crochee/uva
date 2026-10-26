@@ -56,7 +56,7 @@ fn round_trips_through_json() {
         assert_eq!(json, json2, "round-trip failed for {ev:?}");
     }
 
-    // WarningKind (all 7).
+    // WarningKind (all 8).
     for kind in [
         WarningKind::Loop,
         WarningKind::TokenBudget,
@@ -65,6 +65,7 @@ fn round_trips_through_json() {
         WarningKind::EditConflict,
         WarningKind::Guard,
         WarningKind::StructuredOutput,
+        WarningKind::Attachments,
     ] {
         let json = serde_json::to_string(&kind).unwrap();
         let parsed: WarningKind = serde_json::from_str(&json).unwrap();

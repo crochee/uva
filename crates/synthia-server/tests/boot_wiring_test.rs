@@ -247,7 +247,7 @@ async fn boot_wiring_applies_the_tools_section() {
     assert_eq!(state.tool_surface.max_visible, Some(3));
 
     {
-        let registry = state.tool_registry.read().await;
+        let registry = state.tool_registry.as_ref();
         assert_eq!(
             registry.exposure("read"),
             Some(synthia::tool::ToolExposure::Direct)
@@ -293,7 +293,7 @@ async fn boot_wiring_applies_the_tools_section() {
 
     // The agent-side projection honours groups + the cap, so a run
     // sees a strictly narrower list than the catalog.
-    let registry = Arc::new(state.tool_registry.read().await.clone());
+    let registry = Arc::clone(&state.tool_registry);
     let policy = state
         .tool_surface
         .policy()
@@ -305,7 +305,7 @@ async fn boot_wiring_applies_the_tools_section() {
     )
     .with_tool_surface(policy);
     let cancel: Arc<dyn synthia::core::CancelToken> =
-        Arc::new(tokio_util::sync::CancellationToken::new());
+        Arc::new(synthia::core::AtomicCancelToken::new());
     let mut stream = agent
         .run(synthia::harness::AgentInput::text("go"), cancel)
         .await;

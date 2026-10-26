@@ -9,6 +9,12 @@
 //! [`synthia_core::breaker`] so this crate
 //! is runtime-neutral.
 //!
+//! The retry backoff waits through
+//! [`synthia_core::sleeper::Sleeper`], so the crate names no
+//! runtime either: the default waits on a std thread, and a host on
+//! a real runtime installs that runtime's sleeper
+//! ([`ResilientProvider::with_sleeper`]).
+//!
 //! ```
 //! use std::sync::Arc;
 //!
@@ -24,7 +30,10 @@
 //!     provider,
 //!     ResiliencePolicy::default()
 //!         .max_attempts(5)
-//!         .breaker(BreakerConfig::default().failure_threshold(5)),
+//!         .breaker(BreakerConfig {
+//!             failure_threshold: 5,
+//!             ..Default::default()
+//!         }),
 //!     Arc::new(synthia_core::SystemClock),
 //! );
 //! ```

@@ -6,10 +6,10 @@ use std::{pin::Pin, sync::Arc};
 
 use futures::{Stream, StreamExt};
 use synthia::{
+    core::AtomicCancelToken,
     harness::{Agent, AgentEvent, AgentInput},
     tool_task::TaskDelegator,
 };
-use tokio_util::sync::CancellationToken;
 
 use crate::agent_run_config::{AgentRunConfig, RunOverrides};
 
@@ -21,7 +21,7 @@ pub trait RunStreamFactory: Send + Sync + 'static {
         config: AgentRunConfig,
         overrides: RunOverrides,
         input: AgentInput,
-        cancel: Arc<CancellationToken>,
+        cancel: Arc<AtomicCancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>>;
 }
 
@@ -36,7 +36,7 @@ impl RunStreamFactory for AgentRunStreamFactory {
         config: AgentRunConfig,
         overrides: RunOverrides,
         input: AgentInput,
-        cancel: Arc<CancellationToken>,
+        cancel: Arc<AtomicCancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
         let provider = Arc::clone(&config.provider);
         let tool_registry = Arc::clone(&config.tool_registry);
@@ -76,17 +76,24 @@ impl RunStreamFactory for AgentRunStreamFactory {
                 .max_iterations
                 .unwrap_or(synthia::harness::DEFAULT_MAX_ITERATIONS),
             // Sub-agent delegation via the `task` plugin.
-            synthetic: registry
+            delegators: registry
                 .map(|r| {
                     vec![Arc::new(TaskDelegator::new(Arc::clone(&r)))
-                        as Arc<dyn synthia::harness::SyntheticTool>]
+                        as Arc<dyn synthia::harness::DelegatingTool>]
                 })
                 .unwrap_or_default(),
             tool_surface: overrides.tool_surface,
             strategy: overrides.strategy,
             tool_restriction: overrides.tool_restriction,
-            typed_event_sink: config.typed_event_sink,
+            log_writer: config.log_writer,
+            subagent_writers: config.subagent_writers.clone(),
             context_manager: overrides.context_manager,
+            // The deployment's plugin host: a clone shares the
+            // registrations, so a plugin installed at boot is
+            // callable from this run. Its `with_host` binds the
+            // node's one registry, which is already the host's
+            // binding — a no-op.
+            host: config.host,
         }
         .build();
         let agent = Arc::new(agent) as Arc<dyn Agent>;

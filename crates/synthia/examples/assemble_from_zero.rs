@@ -22,7 +22,7 @@
 //! | 2 | the tools | [`ToolRegistry`] + plugin bricks + one hand-written [`Tool`] |
 //! | 3 | the steering | [`Steering`] |
 //! | 4 | the context manager | [`ContextManager`] |
-//! | 5 | the session sink | [`TypedEventSink`] |
+//! | 5 | the session sink | [`synthia::session::LogWriter`] |
 //! | 6 | the cancel token | [`CancelToken`] |
 //! | 7 | the agent | [`ReActAgent`] |
 //!
@@ -32,7 +32,10 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use synthia::prelude::*;
+use synthia::{
+    prelude::*,
+    session::{LogWriter, SessionSink, in_memory::InMemorySessionSink},
+};
 
 // ---------------------------------------------------------------------
 // 1. The provider: the one piece the framework cannot supply.
@@ -188,15 +191,18 @@ async fn main() {
     println!("[4/7] context mgr    : TruncatingContextManager");
 
     // --- 5. session sink --------------------------------------------
-    let (typed_sink, mut typed_rx) = TypedEventSink::channel(64);
-    println!("[5/7] typed channel  : capacity 64 (futures mpsc)");
+    // The session's one writer: the structural rows the loop produces
+    // go straight into it, and it stamps each row's ordinal.
+    let sink = Arc::new(InMemorySessionSink::new("assemble-from-zero"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    println!("[5/7] session sink  : in-memory log + the session's writer");
 
     // --- 7. the agent ------------------------------------------------
     let agent = ReActAgent::new(provider, Arc::new(registry))
         .with_workspace(".")
         .with_steering(steering)
         .with_context_manager(context_manager)
-        .with_typed_event_sink(typed_sink)
+        .with_log_writer(writer)
         .with_max_iterations(4)
         .with_name("assemble-from-zero")
         .with_instructions("Answer in one short sentence.");
@@ -240,15 +246,13 @@ async fn main() {
     }
     println!("      lifecycle    : {lifecycle:?}");
 
-    // The structural events the loop published to the typed sink —
-    // drained synchronously, because every record is buffered before
-    // the run's event stream ends.
-    let mut structural = 0usize;
-    while let Ok(Some(record)) = typed_rx.try_recv() {
-        println!("      typed event  : {}", record.as_value());
-        structural += 1;
+    // The structural rows the loop wrote — read back from the log the
+    // writer flushed at the step boundary.
+    let rows = sink.read().await.expect("read");
+    for row in &rows {
+        println!("      structural row: {row}");
     }
-    println!("      typed events : {structural}");
+    println!("      structural rows: {}", rows.len());
 
     assert!(
         answer.contains("assembled from seven pieces"),

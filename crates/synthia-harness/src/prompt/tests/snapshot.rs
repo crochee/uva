@@ -23,7 +23,7 @@ const NOW: chrono::DateTime<chrono::Utc> =
     chrono::DateTime::from_timestamp(1_767_225_600, 0)
         .expect("2026-01-01T00:00:00Z is a valid unix second");
 
-/// Frame wording is part of the prompt-cache contract, not free prose.
+// Frame wording is part of the prompt-cache contract, not free prose.
 #[test]
 fn runtime_context_renders_snapshot_with_supersession_frame() {
     let ctx = fixed_runtime_context();

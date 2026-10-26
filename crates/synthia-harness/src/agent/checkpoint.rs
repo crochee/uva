@@ -76,16 +76,6 @@ pub struct InMemoryCheckpointer {
     inner: Arc<RwLock<HashMap<String, CheckpointSnapshot>>>,
 }
 
-impl InMemoryCheckpointer {
-    /// Keys of every stored snapshot, sorted.
-    #[must_use]
-    pub fn list_keys(&self) -> Vec<String> {
-        let mut keys = self.inner.read().keys().cloned().collect::<Vec<_>>();
-        keys.sort();
-        keys
-    }
-}
-
 impl Clone for InMemoryCheckpointer {
     fn clone(&self) -> Self {
         Self {
@@ -151,17 +141,14 @@ mod tests {
     }
 
     #[test]
-    fn delete_removes_key_and_list_keys_drops_it() {
+    fn delete_removes_key_and_leaves_siblings() {
         let cp = InMemoryCheckpointer::default();
         cp.save("k1", &snap("t", vec![])).unwrap();
         cp.save("k2", &snap("t", vec![])).unwrap();
-        assert_eq!(cp.list_keys().len(), 2);
         cp.delete("k1").unwrap();
         assert!(cp.load("k1").unwrap().is_none());
         cp.delete("never-existed").unwrap();
-        let keys = cp.list_keys();
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0], "k2");
+        assert!(cp.load("k2").unwrap().is_some());
     }
 
     #[test]
@@ -169,12 +156,6 @@ mod tests {
         let cp = InMemoryCheckpointer::default();
         let loaded = cp.load("nope").unwrap();
         assert!(loaded.is_none());
-    }
-
-    #[test]
-    fn empty_list_keys_on_fresh_checkpointer() {
-        let cp = InMemoryCheckpointer::default();
-        assert!(cp.list_keys().is_empty());
     }
 
     #[test]

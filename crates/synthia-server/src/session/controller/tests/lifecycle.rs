@@ -3,9 +3,11 @@
 //! `OperationSnapshot` bus, idempotent `close()`.
 
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{Arc, atomic::AtomicUsize},
     time::Duration,
 };
+
+use parking_lot::Mutex;
 
 use super::{
     super::{SessionOp, SessionState},
@@ -62,7 +64,7 @@ async fn test_two_concurrent_prompts_spawn_one_run() {
     .await
     .expect("second prompt was not queued in time");
 
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(calls.lock().len(), 1);
 
     controller.cancel().await.unwrap();
     tokio::time::timeout(Duration::from_millis(500), async {
@@ -153,7 +155,7 @@ async fn test_submit_after_shutdown_returns_error() {
     );
     // No factory calls were made — the post-shutdown
     // op never reached the run loop.
-    assert_eq!(calls.lock().unwrap().len(), 0);
+    assert_eq!(calls.lock().len(), 0);
 }
 
 /// R29-Phase-I: `close()` stops the loop, emits the terminal
@@ -282,4 +284,300 @@ async fn snapshot_bus_publishes_running_then_completing() {
     assert_eq!(second.state, synthia::session::OperationState::Completing);
     assert_eq!(first.session_id, "s1");
     assert_eq!(second.session_id, "s1");
+}
+
+/// A resume resubmitted after the log applied it is a no-op.
+///
+/// The token is derived from the log — the last durable seq plus the
+/// call ids still undecided — so a second submission of the same token
+/// cannot match the log once the decisions are rows. That is what makes
+/// the client's retry safe after a takeover, where the server
+/// deliberately remembers no decision (§5.11): the retry must not run
+/// the turn a second time.
+#[tokio::test]
+async fn a_resubmitted_resume_is_a_no_op() {
+    use synthia::harness::{ResumeDecision, ResumeStatus, ResumeToken};
+
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
+    let factory: Arc<dyn super::super::RunStreamFactory> =
+        Arc::new(VecFactory::new(
+            vec![super::super::AgentEvent::System(
+                synthia::harness::SystemEvent::SessionEnded {
+                    reason: synthia::harness::SessionEndReason::Completed,
+                },
+            )],
+            Arc::clone(&calls),
+            None,
+        ));
+    let (controller, manager, _temp) =
+        make_manager_and_controller(Duration::from_secs(60), factory).await;
+
+    // The log a suspension leaves: one high-risk call asked, the turn
+    // closed as suspended.
+    let writer = manager.writer("alice", "s1");
+    writer
+        .append_event(&synthia::session::turn_start(0))
+        .await
+        .unwrap();
+    writer
+        .append_event(&synthia::session::approval_asked(
+            "a1",
+            "c1",
+            "shell",
+            "sha256:args",
+            "high",
+            "default",
+        ))
+        .await
+        .unwrap();
+    writer
+        .append_event(&synthia::session::turn_end_suspended())
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    let token = ResumeToken::new(3, vec!["c1".to_string()], "sha256:env");
+    let decisions = vec![ResumeDecision {
+        id: "a1".to_string(),
+        status: ResumeStatus::Resolved,
+        payload: None,
+    }];
+
+    controller
+        .submit(SessionOp::Resume {
+            token: token.clone(),
+            decisions: decisions.clone(),
+            allow_drift: true,
+        })
+        .await
+        .unwrap();
+    wait_for_runs(&calls, 1).await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while controller.state() == SessionState::Running {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the resumed run settles");
+
+    // The decisions the resumed run writes — what makes the token spent.
+    writer
+        .append_event(&synthia::session::approval_decided(
+            "a1", "c1", "resolved", "resume", None,
+        ))
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+    let rows = manager.sink("alice", "s1").read().await.unwrap();
+    assert!(
+        synthia::harness::open_requests(&rows).is_empty(),
+        "the log's open set is empty again"
+    );
+
+    // The client re-sends; nothing may run again.
+    controller
+        .submit(SessionOp::Resume {
+            token,
+            decisions,
+            allow_drift: true,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        calls.lock().len(),
+        1,
+        "a resubmitted resume must not run the turn a second time"
+    );
+    assert_ne!(
+        controller.state(),
+        SessionState::Running,
+        "and must not park a resume that starts a later run"
+    );
+}
+
+/// A sink whose log cannot be read: appends land in memory, reads fail.
+struct UnreadableSink {
+    inner: synthia::session::in_memory::InMemorySessionSink,
+}
+
+#[async_trait::async_trait]
+impl synthia::session::SessionSink for UnreadableSink {
+    fn id(&self) -> &str {
+        synthia::session::SessionSink::id(&self.inner)
+    }
+
+    fn alloc_seq(&self) -> u64 {
+        synthia::session::SessionSink::alloc_seq(&self.inner)
+    }
+
+    async fn append(
+        &self,
+        event: &serde_json::Value,
+    ) -> Result<(), synthia::session::SessionError> {
+        self.inner.append(event).await
+    }
+
+    async fn read(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, synthia::session::SessionError> {
+        Err(synthia::session::SessionError::ReadFailed(
+            "the log is unreadable".to_string(),
+        ))
+    }
+
+    async fn read_from(
+        &self,
+        _from: u64,
+    ) -> Result<Vec<serde_json::Value>, synthia::session::SessionError> {
+        Err(synthia::session::SessionError::ReadFailed(
+            "the log is unreadable".to_string(),
+        ))
+    }
+
+    async fn snapshot(
+        &self,
+    ) -> Result<synthia::session::SessionSnapshot, synthia::session::SessionError>
+    {
+        self.inner.snapshot().await
+    }
+
+    async fn close(
+        &self,
+        reason: synthia::session::SessionEndReason,
+    ) -> Result<(), synthia::session::SessionError> {
+        self.inner.close(reason).await
+    }
+}
+
+/// An unreadable log is not an *unpaused* one either.
+///
+/// `maybe_start_run` refuses a fresh run while the log holds an open
+/// interrupt. A failed read used to look like "nothing is open", so a
+/// prompt arriving after a crash could start a run straight over a turn
+/// that was waiting for approval — the same swallow as the resume path,
+/// one caller over. The run is refused and the prompt stays queued.
+#[tokio::test]
+async fn an_unreadable_log_refuses_a_fresh_run() {
+    use std::sync::Arc;
+
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
+    let factory: Arc<dyn super::super::RunStreamFactory> =
+        Arc::new(VecFactory::new(
+            vec![super::super::AgentEvent::System(
+                synthia::harness::SystemEvent::SessionEnded {
+                    reason: synthia::harness::SessionEndReason::Completed,
+                },
+            )],
+            Arc::clone(&calls),
+            None,
+        ));
+    let sink: Arc<dyn synthia::session::SessionSink> =
+        Arc::new(UnreadableSink {
+            inner: synthia::session::in_memory::InMemorySessionSink::new("s1"),
+        });
+    let writer = Arc::new(synthia::session::LogWriter::new(
+        Arc::clone(&sink),
+        Arc::new(synthia::core::SystemClock),
+    ));
+    let manager = super::support::FixtureRegistry::new(
+        tempfile::TempDir::new().expect("a temp dir").keep(),
+    );
+    let controller = super::super::SessionController::spawn(
+        "alice",
+        "s1",
+        manager.input_queue(),
+        sink,
+        writer,
+        super::support::test_deps(),
+        Duration::from_secs(60),
+        factory,
+    );
+
+    controller
+        .submit(SessionOp::Prompt {
+            content: "run over the pause".to_string(),
+            priority: 0,
+        })
+        .await
+        .expect("the prompt is delivered");
+    // The op loop is asynchronous: give the start decision time to make
+    // its own call.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        calls.lock().len(),
+        0,
+        "the run must not start on an approval state it could not read"
+    );
+    assert_eq!(
+        controller.state(),
+        SessionState::Idle,
+        "and the controller does not record a pause it cannot prove"
+    );
+}
+
+/// An unreadable log is not a decided one.
+///
+/// `is_spent_resume` reads "no open interrupt names the token's calls"
+/// as *already answered*. If a read failure produced the same empty set,
+/// a legitimate resume would be dropped after the route had already
+/// answered `202` — the client waits for a run that never starts.
+#[tokio::test]
+async fn an_unreadable_log_is_not_a_spent_resume() {
+    use std::sync::Arc;
+
+    use synthia::harness::{ResumeDecision, ResumeStatus, ResumeToken};
+
+    let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
+    let factory: Arc<dyn super::super::RunStreamFactory> =
+        Arc::new(VecFactory::new(
+            vec![super::super::AgentEvent::System(
+                synthia::harness::SystemEvent::SessionEnded {
+                    reason: synthia::harness::SessionEndReason::Completed,
+                },
+            )],
+            Arc::clone(&calls),
+            None,
+        ));
+    let sink: Arc<dyn synthia::session::SessionSink> =
+        Arc::new(UnreadableSink {
+            inner: synthia::session::in_memory::InMemorySessionSink::new("s1"),
+        });
+    let writer = Arc::new(synthia::session::LogWriter::new(
+        Arc::clone(&sink),
+        Arc::new(synthia::core::SystemClock),
+    ));
+    let manager = super::support::FixtureRegistry::new(
+        tempfile::TempDir::new().expect("a temp dir").keep(),
+    );
+    let controller = super::super::SessionController::spawn(
+        "alice",
+        "s1",
+        manager.input_queue(),
+        sink,
+        writer,
+        super::support::test_deps(),
+        Duration::from_secs(60),
+        factory,
+    );
+
+    controller
+        .submit(SessionOp::Resume {
+            token: ResumeToken::new(3, vec!["c1".to_string()], "sha256:env"),
+            decisions: vec![ResumeDecision {
+                id: "a1".to_string(),
+                status: ResumeStatus::Resolved,
+                payload: None,
+            }],
+            allow_drift: true,
+        })
+        .await
+        .expect("the resume is delivered");
+
+    wait_for_runs(&calls, 1).await;
+    assert_eq!(
+        calls.lock().len(),
+        1,
+        "the resume must run rather than be mistaken for a spent token"
+    );
 }

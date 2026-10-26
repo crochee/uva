@@ -175,6 +175,43 @@ pub trait SessionSink: Send + Sync {
     /// error).
     async fn read_from(&self, from: u64) -> Result<Vec<Value>, SessionError>;
 
+    /// The **last** `window` events, newest at the end.
+    ///
+    /// [`read`](Self::read) parses the whole log; a subscriber that
+    /// only wants the tail (the `follow` baseline) should not pay for
+    /// the session's whole history on every subscribe. An
+    /// implementation with a cheaper tail path overrides this.
+    ///
+    /// The default reads the log and slices it, so every backend is
+    /// correct without the optimisation — `JsonlSessionSink` overrides
+    /// it with a bounded read from the end of the file.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`read`](Self::read) returns.
+    async fn read_tail(
+        &self,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
+        let rows = self.read().await?;
+        let start = rows.len().saturating_sub(window);
+        Ok(rows[start..].to_vec())
+    }
+
+    /// The **first** event, if the log holds one.
+    ///
+    /// The few facts that are whole-log rather than tail-shaped (a
+    /// session's creation time, the agent a delegated session runs as)
+    /// need the head; a tail read cannot answer them. The default
+    /// reads the log and takes its first row.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`read`](Self::read) returns.
+    async fn read_head(&self) -> Result<Option<Value>, SessionError> {
+        Ok(self.read().await?.into_iter().next())
+    }
+
     /// Reconstruct the chronological event stream starting **after**
     /// the event whose `stream_index` is `idx`.
     ///
@@ -269,12 +306,15 @@ pub trait SessionSink: Send + Sync {
     /// treat the same `Err` as a fatal append failure (the agent
     /// loop's fail-fast rule).
     ///
-    /// Idempotency: this method does not dedup — call
-    /// [`append_with_key`](Self::append_with_key) per row if
+    /// Idempotency: the default implementation does not dedup —
+    /// call [`append_with_key`](Self::append_with_key) per row if
     /// the batch may have been partially applied on a prior
-    /// attempt. `fork_session` is the motivating caller: it
-    /// reads the parent transcript once, holds the rows in
-    /// memory, and submits a fresh batch to the child — no
+    /// attempt. The production `JsonlSessionSink` overrides this
+    /// as well: it skips the rows its log already holds, so the
+    /// retry of a refused batch does not write a row twice.
+    /// `fork_session` is the motivating caller of the plain
+    /// batch: it reads the parent transcript once, holds the rows
+    /// in memory, and submits a fresh batch to the child — no
     /// dedup needed.
     ///
     /// The rows carry the ordinals their writer reserved with

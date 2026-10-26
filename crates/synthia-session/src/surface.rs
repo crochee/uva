@@ -295,6 +295,7 @@ mod tests {
                 seq,
                 ts: "2026-09-10T00:00:00Z".into(),
                 data,
+                source: None,
                 surface_op: op,
             },
             "assistant_message" => SessionEvent::AssistantMessage {
@@ -307,6 +308,7 @@ mod tests {
                 seq,
                 ts: "2026-09-10T00:00:00Z".into(),
                 data,
+                is_error: false,
                 surface_op: op,
             },
             "compaction" => SessionEvent::Compaction {

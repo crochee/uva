@@ -1,7 +1,10 @@
 # Harness V2 — 日志即真源，插件即一等公民
 
 日期：2026-10-23
-状态：待批准
+状态：已落地（第一段）——「日志即真源」的第一段由
+[`2026-10-25-writer-unification-plan.md`](2026-10-25-writer-unification-plan.md)
+实施：写者唯一化、序号以行里的 `seq` 为准、一轮一行。插件与循环从 fold 推导的那几段
+尚未开始。
 取代：无（这是 `synthia-harness` 的下一次形态，不是补丁）
 
 ---
@@ -240,10 +243,16 @@ provenance 立即失效。切换顺序为：先加 `LogWriter` 与新 sink 实�
 
 ### 4.5 模块划分
 
+> **已被 [`2026-10-24-writer-unification-design.md`](2026-10-24-writer-unification-design.md) §5.1 推翻。**
+> 写者（`LogWriter`）下沉到 `synthia-session`：折叠器本来就在那里，而 provenance 要求写者取的号与
+> 折叠器算的号是同一个数；写者留在 harness 会让 `synthia-session` 里的 `CompactionCheckpoint`
+> 够不着它，只能另开一条会丢行的通道。下文的 `log/` 只保留「durable / ephemeral 分类」的职责，
+> 写者本身归 session crate。
+
 ```text
 crates/synthia-harness/src/
 ├── log/                    # 循环的日志视图（harness 私有，不是新 crate）
-│   ├── mod.rs              # LogWriter：stamp / append / flush / repair
+│   ├── mod.rs              # ~~LogWriter：stamp / append / flush / repair~~ → 下沉到 session
 │   ├── surface.rs          # fold 出来的只读模型视图
 │   └── events.rs           # durable / ephemeral 分类
 ├── agent/
@@ -515,7 +524,7 @@ Rust 侧的等价物是 `libloading` 加载 `.so`，代价是：ABI 不稳定（
 | 决定 | 理由 |
 |---|---|
 | `Durability` 枚举四档，默认 `StepBoundary` | 语义沿用 LangGraph `durability` / PG `synchronous_commit` / Redis `appendfsync`，但默认档选在最省的位置 |
-| `log/` 是 harness 私有模块而非新 crate | 「什么行是 durable」须与循环实现同 crate，否则重蹈 server 兜底的覆辙 |
+| ~~`log/` 是 harness 私有模块而非新 crate~~ **（2026-10-24 推翻）** | 原理由：「什么行是 durable」须与循环实现同 crate，否则重蹈 server 兜底的覆辙。推翻后：写者下沉到 `synthia-session`（折叠器在那里，两端必须同 crate 才能保证 provenance 的号一致）——见 [`2026-10-24-writer-unification-design.md`](2026-10-24-writer-unification-design.md) §5.1 |
 | 设计文档放 `docs/design/` 而非 `docs/superpowers/specs/` | 后者在本仓库 `.gitignore:42`，AGENTS.md 明定为 agent 草稿区 |
 | `SyntheticTool` **改造**为 `DelegatingTool` 而非删除 | 实现者审查发现：把执行能力塞进 T2「改写」档是错的。本能题成「执行循环内子 agent」的插件无处落地。改造保留其 `emit`/`cancel`/`depth`，补齐 `context`/`mode()`/`annotations()` |
 | T2 拿只读 `RequestParams` 视图而非 `CompletionRequest` | 后者的 `messages[0]` 就是 system prompt，交给插件等于绕过 T3/T4 |

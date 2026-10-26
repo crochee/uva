@@ -85,7 +85,7 @@ pub(super) async fn with_max_iterations_overrides_default() {
     let _ = tool_use;
 }
 
-/// The clamps are the contract: `0` floors to `1`, overflow ceilings to `4096`.
+// The clamps are the contract: `0` floors to `1`, overflow ceilings to `4096`.
 #[test]
 fn max_iterations_clamps_inputs() {
     assert_eq!(

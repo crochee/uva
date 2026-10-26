@@ -302,7 +302,7 @@ async fn task_tool_delegates_to_peer_and_wraps_child_events() {
         synthia_harness::default_descriptor("parent instructions".to_string()),
         Arc::new(PromptContext::default()),
     )
-    .with_synthetic_tool(Arc::new(TaskDelegator::new(Arc::new(child_registry))))
+    .with_delegator(Arc::new(TaskDelegator::new(Arc::new(child_registry))))
     .expect("one delegator installs cleanly");
 
     let mut events = Vec::new();
@@ -378,9 +378,9 @@ async fn task_tool_unknown_agent_returns_error_result() {
         synthia_harness::default_descriptor(String::new()),
         Arc::new(PromptContext::default()),
     )
-    .with_synthetic_tool(Arc::new(TaskDelegator::new(Arc::new(
-        AgentRegistry::new(),
-    ))))
+    .with_delegator(Arc::new(TaskDelegator::new(
+        Arc::new(AgentRegistry::new()),
+    )))
     .expect("one delegator installs cleanly");
 
     let mut saw_error_result = false;
@@ -426,7 +426,7 @@ async fn task_tool_depth_guard_refuses_spawn_at_limit() {
         synthia_harness::default_descriptor(String::new()),
         Arc::new(PromptContext::default()),
     )
-    .with_synthetic_tool(Arc::new(TaskDelegator::new(Arc::new(child_registry))))
+    .with_delegator(Arc::new(TaskDelegator::new(Arc::new(child_registry))))
     .expect("one delegator installs cleanly");
 
     let mut input = AgentInput::text("hi");

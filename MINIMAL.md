@@ -195,15 +195,14 @@ re-enters that feature set.
 | The offline file and process tools | add `tool-read` / `tool-write` / `tool-shell` / `tool-todo` and register the bricks you want: `registry.register_entry(ToolEntry::new(Arc::new(ReadTool::new())))` |
 | `web_fetch` | add the `tool-web` feature |
 | Your own executor | `.with_spawner(Arc::new(MySpawner))` — the loop's per-run detach goes wherever you say (`cargo run --example runtime_agnostic -p synthia-harness`) |
-| Typed event sink | `.with_typed_event_sink(TypedEventSink::channel(64).0)` |
+| Durable run log | `synthia::session::LogWriter::new(sink, clock)` + `.with_log_writer(writer)` — the session's one writer stamps each row's ordinal, buffers it, and flushes at the step boundary |
 | Structured output schema | `.with_output_schema(json!({...}))` |
 | LLM-driven compaction | server-side factory `synthia_server::agent_run_config::context_manager_for_compaction_with_emitters`; the harness accepts the resolved manager directly through `.with_context_manager(...)` |
 | Tier-aware steering | `tier::auto(provider.tier(), ".")` instead of `Steering::noop()` |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
-| Multi-agent delegation | `synthia-tool-task`: `agent.with_synthetic_tool(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
+| Multi-agent delegation | `synthia-tool-task`: `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
 | Remote MCP tools the host discovered | `synthia-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
 | Scheduling, model-side | add `tool-scheduler` and share one store: `let store = Arc::new(ScheduleStore::new(dir)); register_scheduler_tool(&registry, SchedulerTool::new(Arc::clone(&store)));` — the host still owns delivery (`Scheduler::new(store).tick(now)`), and a tool-side write (or a `ScheduleStore::load` that ingests another process's rows) reaches the next `tick` / `next_deadline` on its own: the pass sees the store's revision move and rebuilds its wheel. `Scheduler::resync(now)` stays available as the explicit rebuild, for a host that needs the wheel correct between passes |
-| Durable run log | `LogWriter::new(sink, Durability::StepBoundary)` + `.with_log_writer(writer)` — the loop stamps each row's ordinal, buffers it, and flushes at the step boundary |
 
 Each one is **opt-in**: if you do not add the feature or call the
 `with_*` setter, that code is not compiled into your binary.
@@ -221,9 +220,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 use synthia::core::spawn::{BoxFuture, Spawner};
-use synthia::harness::{Durability, LogWriter, ReActAgent};
+use synthia::harness::ReActAgent;
 use synthia::prelude::*;
-use synthia::session::in_memory::InMemorySessionSink;
+use synthia::session::{LogWriter, in_memory::InMemorySessionSink};
 use synthia::tool::ToolRestriction;
 
 // Everything the Step-3 table names, in one chain. Each call is the
@@ -243,15 +242,15 @@ fn every_opt_in(
         fn spawn_blocking(&self, _f: Box<dyn FnOnce() + Send + 'static>) {}
     }
 
-    let (typed_sink, _rx) = TypedEventSink::channel(64);
+    // The session's one writer: it stamps each row's ordinal, buffers
+    // it, and flushes at the step boundary.
     let log_writer = Arc::new(LogWriter::new(
         Arc::new(InMemorySessionSink::new("guide")),
-        Durability::StepBoundary,
+        Arc::new(SystemClock),
     ));
 
     ReActAgent::new(provider, registry)
         .with_spawner(Arc::new(MySpawner))
-        .with_typed_event_sink(typed_sink)
         .with_output_schema(json!({"type": "object"}))
         .with_log_writer(log_writer)
         .with_tool_restriction(ToolRestriction::deny(["shell"]))

@@ -26,33 +26,49 @@ and stays that way under the `make check-mvp-deps` gate.
 
 ```rust
 use std::sync::Arc;
-
-use synthia_provider::AnthropicProvider;
-use synthia_search::{CjkTokenizer, Embedder, HashingEmbedder};
-use synthia_semantic_cache::{
-    InMemorySemanticCache, SemanticCacheConfig, SemanticCacheProvider,
-};
 use std::time::Duration;
 
-let provider = Arc::new(AnthropicProvider::from_env()?);
-let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::new(
-    64,
-    Arc::new(CjkTokenizer),
-));
-let store = Arc::new(InMemorySemanticCache::default());
-let cached = SemanticCacheProvider::new(
-    provider,
-    store,
-    embedder,
-    SemanticCacheConfig::default()
-        .threshold(0.92)
-        .ttl(Duration::from_secs(60 * 60)),
-);
+use synthia_provider::ModelProvider;
+use synthia_search::{CjkTokenizer, Embedder, HashingEmbedder};
+use synthia_semantic_cache::{
+    InMemorySemanticCache,
+    SemanticCacheConfig,
+    SemanticCacheProvider,
+    SharedClock,
+};
+
+/// Wrap the provider you already talk to. The cache short-circuits
+/// near-duplicate prompts and forwards everything else to
+/// `inner_provider` unchanged.
+fn with_cache(
+    inner_provider: Arc<dyn ModelProvider>,
+) -> SemanticCacheProvider {
+    let embedder: Arc<dyn Embedder> = Arc::new(HashingEmbedder::new(
+        64,
+        Arc::new(CjkTokenizer),
+    ));
+    let store = Arc::new(InMemorySemanticCache::default());
+    SemanticCacheProvider::new(
+        inner_provider,
+        store,
+        embedder,
+        SemanticCacheConfig::default()
+            .threshold(0.92)
+            .ttl(Duration::from_secs(60 * 60)),
+        Arc::new(SharedClock::system()),
+    )
+}
 ```
+
+`inner_provider` is the provider you already hold — anything that
+implements `ModelProvider`. `ModelProviderStub` (in
+`synthia_provider::traits_stub`), used in this crate's own
+doctest, is a test double that returns a canned answer — not
+production wiring.
 
 ## Demo
 
-```
+```console
 cargo run --example semantic_cache_demo -p synthia-semantic-cache
 ```
 

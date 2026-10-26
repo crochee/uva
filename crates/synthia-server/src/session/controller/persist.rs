@@ -5,10 +5,7 @@
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context as _, Result};
-use synthia::{
-    harness::{AgentEvent, SystemEvent},
-    session::SessionError,
-};
+use synthia::harness::{AgentEvent, SystemEvent};
 
 use super::{inner::ControllerInner, run_log::RunLog};
 use crate::state::UsageMetrics;
@@ -46,30 +43,38 @@ impl ControllerInner {
             subscribers = self.broadcaster.subscriber_count(),
             "persist_and_broadcast: entering"
         );
-
         Self::record_usage(&self.usage, event);
-        // The sink's append returns the per-row stream_index
-        // — used by `routes/chat.rs::resume_stream_to_sse` for
-        // the cursor / snapshot frames. `EventBroadcaster`
-        // continues to carry the bare `AgentEvent`; live tail
-        // frames do not embed the stream_index, the wire
-        // cursor + `GET /api/v1/sessions/{id}` are the source
-        // of truth for resume. See
-        // `2026-09-24-stream-index.md` §4.3 / §10.
-        let stream_index =
-            Self::append_if_durable(event, &event_value, log).await?;
+        // The log is the authority for the paused state (`session_state`
+        // derives it); this flag only spares the list view a second read
+        // of a log it already holds. It is cleared when the next run
+        // starts.
+        if matches!(event, AgentEvent::System(SystemEvent::Suspended(_))) {
+            self.suspended.store(true, Ordering::SeqCst);
+        }
+        // The live projection is what a `follow` client renders until
+        // the durable row for this turn lands. It is fed from the same
+        // funnel as the broadcast, so the two cannot disagree.
+        self.tap_live(event);
+        // The event stream is live-only: no `AgentEvent` is
+        // durable any more, so there is no event-shaped row to
+        // append here. The log's rows come from the writers —
+        // the run's own (its structural rows and the harness's
+        // model facts, flushed before the corresponding event is
+        // emitted) and the op loop's out-of-band rows. This path
+        // only broadcasts what already happened durably.
         self.broadcast_event(event, outer_kind, system_kind);
-        self.publish_session_frame(stream_index, &event_value).await;
+        self.publish_session_frame(None, &event_value).await;
         Ok(())
     }
 
     /// Fan one run event out on the cluster bus (best-effort).
     ///
-    /// The durable append already happened; a publish failure only
-    /// costs a remote subscriber a live frame, and its `from` cursor
-    /// re-reads the row from disk. `cursor` is the durable row's
-    /// `stream_index` (`None` for ephemeral events, which must never
-    /// be filtered against a resume cursor).
+    /// A publish failure only costs a remote subscriber a live
+    /// frame; its `from` cursor re-reads the row from disk. The
+    /// event stream carries no durable rows any more — the log's
+    /// rows are written by the writers, not this tap — so the
+    /// frame's cursor is always `None` and is never filtered
+    /// against a resume cursor.
     async fn publish_session_frame(
         &self,
         cursor: Option<u64>,
@@ -169,35 +174,11 @@ impl ControllerInner {
         }
     }
 
-    /// Append `event_value` to the run log when (and only
-    /// when) the event is durable. Ephemeral events (token
-    /// deltas, warnings, reasoning chunks) are streamed live
-    /// but not persisted.
-    ///
-    /// Returns the sink's `stream_index` for the appended row
-    /// — the per-session resume cursor the wire exposes in
-    /// `cursor` and `snapshot` frames. `None` for non-durable
-    /// events (no row was written).
-    pub(super) async fn append_if_durable(
-        event: &AgentEvent,
-        event_value: &serde_json::Value,
-        log: &mut RunLog,
-    ) -> Result<Option<u64>> {
-        if event.is_durable() {
-            let idx =
-                log.append(event_value).await.map_err(|e: SessionError| {
-                    anyhow::anyhow!("failed to append event to sink: {e}")
-                })?;
-            Ok(Some(idx))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// Fan the event out to the live SSE/WebSocket
     /// subscribers. A send with no subscribers is a debug
-    /// log, not an error — the durable append already
-    /// happened.
+    /// log, not an error — the durable rows a subscriber may
+    /// resume from are the writers', flushed before the
+    /// corresponding event reaches this fan-out.
     pub(super) fn broadcast_event(
         &self,
         event: &AgentEvent,

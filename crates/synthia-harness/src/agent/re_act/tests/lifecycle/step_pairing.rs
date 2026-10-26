@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
+use synthia_core::SystemClock;
 use synthia_provider::{
     ContentPart,
     SamplingResult,
@@ -10,6 +11,7 @@ use synthia_provider::{
     TokenUsage,
     ToolUse,
 };
+use synthia_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use synthia_tool::ToolRegistry;
 use tokio_util::sync::CancellationToken;
 
@@ -18,7 +20,17 @@ use super::super::{support::*, *};
 pub(super) async fn every_step_start_has_a_matching_end() {
     use synthia_core::CancelToken;
     use synthia_provider::traits::ModelProvider;
-    use synthia_session::{SessionEvent, TypedEventSink};
+    use synthia_session::SessionEvent;
+
+    // The typed rows the run wrote, read back from the log.
+    async fn typed_rows(sink: &InMemorySessionSink) -> Vec<SessionEvent> {
+        let rows = sink.read().await.expect("read");
+        rows.iter()
+            .filter_map(|row| {
+                serde_json::from_value::<SessionEvent>(row.clone()).ok()
+            })
+            .collect()
+    }
 
     fn step_pairs(events: &[SessionEvent]) -> Vec<(u64, &'static str)> {
         events
@@ -73,17 +85,16 @@ pub(super) async fn every_step_start_has_a_matching_end() {
     {
         let provider: Arc<dyn ModelProvider> =
             Arc::new(ScriptedStreamProvider::new(vec![empty_response()]));
-        let (sink, mut rx) = TypedEventSink::channel(64);
+        let sink = Arc::new(InMemorySessionSink::new("s"));
+        let writer =
+            Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
         let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
-            .with_typed_event_sink(sink);
+            .with_log_writer(writer);
         let mut stream = agent
             .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
             .await;
         while stream.next().await.is_some() {}
-        let mut events = Vec::new();
-        while let Ok(Some(record)) = rx.try_recv() {
-            events.push(record.event);
-        }
+        let events = typed_rows(&sink).await;
         assert_paired("normal completion", &events, true);
     }
 
@@ -94,18 +105,17 @@ pub(super) async fn every_step_start_has_a_matching_end() {
     {
         let provider: Arc<dyn ModelProvider> =
             Arc::new(ScriptedStreamProvider::new(Vec::new()));
-        let (sink, mut rx) = TypedEventSink::channel(64);
+        let sink = Arc::new(InMemorySessionSink::new("s"));
+        let writer =
+            Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
         let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
-            .with_typed_event_sink(sink);
+            .with_log_writer(writer);
         let cancel = CancellationToken::new();
         cancel.cancel();
         let mut stream =
             agent.run(AgentInput::text("go"), Arc::new(cancel)).await;
         while stream.next().await.is_some() {}
-        let mut events = Vec::new();
-        while let Ok(Some(record)) = rx.try_recv() {
-            events.push(record.event);
-        }
+        let events = typed_rows(&sink).await;
         assert_paired("cancelled before LLM", &events, false);
     }
 
@@ -156,20 +166,19 @@ pub(super) async fn every_step_start_has_a_matching_end() {
             }
         }
 
-        let (sink, mut rx) = TypedEventSink::channel(64);
+        let sink = Arc::new(InMemorySessionSink::new("s"));
+        let writer =
+            Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
         let agent = ReActAgent::new(
             Arc::new(FailingProvider),
             Arc::new(ToolRegistry::new()),
         )
-        .with_typed_event_sink(sink);
+        .with_log_writer(writer);
         let mut stream = agent
             .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
             .await;
         while stream.next().await.is_some() {}
-        let mut events = Vec::new();
-        while let Ok(Some(record)) = rx.try_recv() {
-            events.push(record.event);
-        }
+        let events = typed_rows(&sink).await;
         assert_paired("sample failed", &events, true);
     }
 
@@ -177,7 +186,7 @@ pub(super) async fn every_step_start_has_a_matching_end() {
     {
         use synthia_steering::HookEvent;
 
-        /// Cancels mid-stream so the tool batch never runs.
+        // Cancels mid-stream so the tool batch never runs.
         fn cancel_after_provider(
             cancel: CancellationToken,
         ) -> synthia_steering::HookMap {
@@ -207,18 +216,17 @@ pub(super) async fn every_step_start_has_a_matching_end() {
             hooks: cancel_after_provider(cancel.clone()),
             ..synthia_steering::Steering::noop()
         });
-        let (sink, mut rx) = TypedEventSink::channel(64);
+        let sink = Arc::new(InMemorySessionSink::new("s"));
+        let writer =
+            Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
         let agent = ReActAgent::new(provider, registry)
             .with_steering(steering)
-            .with_typed_event_sink(sink);
+            .with_log_writer(writer);
 
         let mut stream =
             agent.run(AgentInput::text("go"), Arc::new(cancel)).await;
         while stream.next().await.is_some() {}
-        let mut events = Vec::new();
-        while let Ok(Some(record)) = rx.try_recv() {
-            events.push(record.event);
-        }
+        let events = typed_rows(&sink).await;
         assert_paired("cancelled before tool", &events, true);
     }
 }

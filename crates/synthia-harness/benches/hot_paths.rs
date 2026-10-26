@@ -466,7 +466,7 @@ fn main() {
     });
 
     Bench {
-        label: "estimate_messages_token_count (100 msgs)",
+        label: "estimate_messages_token_count (401 msgs)",
         iters: 20_000,
     }
     .run("compaction gate", || {
@@ -493,7 +493,7 @@ fn main() {
 
     // ---- wire repair ------------------------------------------------
     Bench {
-        label: "parse_tool_input (4 KB strict)",
+        label: "parse_tool_input (7.5 KB strict)",
         iters: 50_000,
     }
     .run("happy path", || {
@@ -501,7 +501,7 @@ fn main() {
     });
 
     Bench {
-        label: "repair_json (4 KB defective)",
+        label: "repair_json (7.5 KB defective)",
         iters: 20_000,
     }
     .run("salvage path", || {
@@ -536,7 +536,7 @@ fn main() {
 
     // ---- the per-iteration prep the loop does before caching -------
     Bench {
-        label: "called_tool_names (200-message transcript)",
+        label: "called_tool_names (401-message transcript)",
         iters: 20_000,
     }
     .run("deferred promotion", || {
@@ -649,27 +649,50 @@ fn main() {
     });
 
     // ---- context window ---------------------------------------------
+    // What the old `Arc::new(messages.clone())` inside the timed closures
+    // was charging to the manager: one deep copy of the 401-message
+    // fixture. Priced here so the report can say how much of the old
+    // numbers was the fixture rather than the manager.
     Bench {
-        label: "TruncatingContextManager (200 msgs, over window)",
+        label: "Vec<Message> clone (401 msgs)",
+        iters: 5_000,
+    }
+    .run("the copy the old rows timed", || {
+        black_box(black_box(&messages).clone());
+    });
+
+    // The history is `tool_heavy_history(100)` = **401** messages: one
+    // system message plus four per pair, not the 200 these rows used
+    // to claim. One copy is built here, outside the timed closures, so
+    // the number is the manager's own work instead of "the manager plus
+    // a full deep copy per iteration".
+    //
+    // Sharing it is also the production shape: the loop keeps the
+    // history alive, so the manager's `Arc::try_unwrap` fails and it
+    // materialises a fresh list when truncation fires. That copy *is*
+    // the manager's cost, priced in the row above.
+    let history = Arc::new(messages.clone());
+    Bench {
+        label: "TruncatingContextManager (401 msgs, over window)",
         iters: 2_000,
     }
     .run("fits check + evict", || {
         let mut state = AgentState::with_window(2_000);
-        let input = Arc::new(messages.clone());
         black_box(futures::executor::block_on(
-            TruncatingContextManager.prepare_arc(input, &mut state),
+            TruncatingContextManager
+                .prepare_arc(Arc::clone(&history), &mut state),
         ));
     });
 
     Bench {
-        label: "TruncatingContextManager (200 msgs, no eviction)",
+        label: "TruncatingContextManager (401 msgs, no eviction)",
         iters: 20_000,
     }
     .run("fast path", || {
         let mut state = AgentState::with_window(usize::MAX / 2);
-        let input = Arc::new(messages.clone());
         black_box(futures::executor::block_on(
-            TruncatingContextManager.prepare_arc(input, &mut state),
+            TruncatingContextManager
+                .prepare_arc(Arc::clone(&history), &mut state),
         ));
     });
 
@@ -685,6 +708,47 @@ fn main() {
     }
     .run("end to end", || {
         black_box(run_one_turn(&turn_agent));
+    });
+
+    // ---- the one clone the dispatch path still pays -----------------
+    // `route.rs` hands the registry a `serde_json::Value` by value, so
+    // the call's input is copied once per tool call. `guard.rs` copies
+    // again only when a hook or gate is registered (its event is built
+    // lazily). Switching `ToolUse.input` to `Arc<Value>` would remove
+    // the remaining copy at the price of a workspace-wide refactor
+    // (≈250 `ToolUse {` construction sites and ≈200 `.input` reads,
+    // grep over `crates/`, tests included), so measure first: these
+    // two rows are what the deferral costs against the turn above.
+    //
+    // The rows time `serde_json::Value::clone`—the exact call
+    // `route.rs:39` makes—not a whole `ToolUse` (its `id` / `name`
+    // `String`s are not part of it). The small fixture mirrors the
+    // `read` call hard-coded in `tool_heavy_history`; the scripted
+    // turn above actually sends `{"text": "bench"}`, which is
+    // smaller, so the small number is an upper bound for that turn.
+    let small_input = serde_json::json!({
+        "path": "/workspace/file_0.rs",
+        "offset": 0,
+        "limit": 200,
+    });
+    Bench {
+        label: "Value::clone (tool input, path + 2 ints)",
+        iters: 2_000_000,
+    }
+    .run("per tool call", || {
+        black_box(black_box(&small_input).clone());
+    });
+
+    // The same copy on a call carrying a large argument payload—the
+    // shape where an `Arc` would actually earn its ripple.
+    let nested_input: serde_json::Value =
+        serde_json::from_str(&strict_json).expect("nested fixture");
+    Bench {
+        label: "Value::clone (tool input, 7.5 KB nested)",
+        iters: 20_000,
+    }
+    .run("per tool call", || {
+        black_box(black_box(&nested_input).clone());
     });
 
     // ---- text truncation --------------------------------------------
@@ -834,7 +898,9 @@ fn tool_descriptors(count: usize) -> Vec<ToolDescriptor> {
         .collect()
 }
 
-/// A nested tool-argument payload of roughly 4 KB.
+/// A nested tool-argument payload: about 64 bytes per entry, so the
+/// bench's `nested_tool_args(120)` is ≈7.5 KB (7,701 bytes), not the
+/// "4 KB" the first version of this fixture was labelled with.
 fn nested_tool_args(depth: usize) -> String {
     let mut out = String::from("{");
     for i in 0..depth {

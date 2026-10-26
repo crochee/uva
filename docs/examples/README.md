@@ -26,8 +26,8 @@ Two things are worth knowing before reading the code:
 
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
-| `assemble_from_scratch` | `synthia-harness` | The seven lego pieces wired by hand (provider stub, default tool registry, `Steering`, truncating context manager, typed sink, std-only cancel token, `ReActAgent`) | the live event stream, then the typed structural events |
-| `assemble_with_builder` | `synthia-harness` | The same agent in one `ReActAgent` chain: tier steering, `.with_output_schema` auto-tool, LLM compaction, typed sink, `@agent` router | how small the happy path is |
+| `assemble_from_scratch` | `synthia-harness` | The seven lego pieces wired by hand (provider stub, default tool registry, `Steering`, truncating context manager, the session's log writer, std-only cancel token, `ReActAgent`) | the live event stream, then the structural rows |
+| `assemble_with_builder` | `synthia-harness` | The same agent in one `ReActAgent` chain: tier steering, `.with_output_schema` auto-tool, LLM compaction, the session's log writer, `@agent` router | how small the happy path is |
 | `assemble_with_provider_profile` | `synthia-harness` | `ProviderProfile` as typed configuration instead of loose setters | the profile → provider translation |
 | `assemble_with_skills` | `synthia-harness` | `SkillRegistry`: procedural skills bound to tools | skill lookup during assembly |
 | `assemble_with_tier_steering` | `synthia-harness` | `ModelTier` → `Steering::for_tier` + `AdaptiveRegistry` tool cap | the visible tool list shrinking on `Small` |
@@ -36,6 +36,7 @@ Two things are worth knowing before reading the code:
 | `argument_validation` | `synthia-tool` | The R74 opt-in: same `EchoTool`, two runs (off / on), the off path counts 2 tool bodies (default unchanged-by-R74 contract), the on path counts 1 (the malformed call is rejected at the registry with `is_error: true` and the dotted-path violation in the body) | `ARGUMENT-VALIDATION: OK`, and the tool's call counter (2 vs 1) |
 | `external-consumer` | `docs/examples/` | A **standalone crate** (not a workspace member) depending on synthia by relative path — the real "use it as a library" test | `CONSUMER-PROOF: OK` |
 | `minimal-consumer` | `docs/examples/` | The **smallest** complete agent: one dependency (`synthia`, `default-features = false`) and the seven-feature MVP subset from [`MINIMAL.md`](../../MINIMAL.md) — a scripted provider that asks for a tool, one hand-written `Tool`, and assertions that it really ran. Its tree carries no HTTP client at all | `MVP-OK`, and `make check-mvp-deps` for the dependency promise |
+| `harness-only-consumer` | `docs/examples/` | A **standalone crate** whose `cargo tree` contains **zero** `tokio`: one turn on `futures::executor::block_on` with a `std::thread` spawner, so the harness closure is runtime-*free* rather than merely runtime-tolerant | `HARNESS-ONLY: OK`, and the `tokio in tree: 0` line `make examples` asserts before running it |
 | `assemble_from_zero` | `synthia` (facade) | The same assembly through **one dependency**: `use synthia::prelude::*` and nothing else | how few names a consumer actually needs; the crate docs are the longer version |
 
 ## 2. Tools and the wire

@@ -5,12 +5,12 @@ peers as sub-agents (gates, worktree isolation, `@agent:` routing,
 subagent admission, batched completion notification).
 
 It is the first consumer of the
-[`SyntheticTool`](../../SEAMS.md) seam — i.e. it needs the loop's
+[`DelegatingTool`](../../SEAMS.md) seam — i.e. it needs the loop's
 internal capability (event forwarding, cancellation, depth), so it
 depends on `synthia-harness` rather than just `synthia-tool`.
 
 > Plugin crate for `synthia-tool`. See [`SEAMS.md`](../../SEAMS.md) for
-> the synthetic-tool seam.
+> the delegation seam.
 
 ## CI 契约
 

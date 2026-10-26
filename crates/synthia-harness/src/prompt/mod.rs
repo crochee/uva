@@ -1,38 +1,32 @@
-//! System-prompt assembly: [`PromptContext::assemble`] builds the deterministic prompt (skills + peer agents + identity in XML-delimited order), while the volatile runtime facts ride the snapshot message instead so the provider cache stays hot.
+//! System-prompt assembly: [`PromptContext::assemble`] builds the deterministic prompt (base instructions + identity, then plugin sections as Markdown headings, then the XML-delimited skills / peer-agent catalogues), while the volatile runtime facts ride the snapshot message instead so the provider cache stays hot.
 mod snapshot;
 
 pub(crate) use snapshot::RuntimeContext;
 use synthia_provider::Message;
 
-use crate::{AgentCaps, agent::AgentDescriptor, input::AgentInput};
+use crate::agent::{AgentDescriptor, host::PromptSection};
 
 /// The conversation every sampling path starts from: the assembled
 /// system prompt (skipped when empty — a placeholder system message
 /// would evict the provider's prefix cache for no content), the
-/// caller's history, and the turn's user message.
+/// caller's history, and the turn's user message when the caller
+/// owns one.
+///
+/// A writer-backed run passes `None`: the host already logged this
+/// turn's user message, so it arrives inside `history` (as the fold's
+/// tail) and appending `input.content` would duplicate it.
 pub(crate) fn base_transcript(
     assembled_system: &str,
     history: &[Message],
-    user: Message,
+    user: Option<Message>,
 ) -> Vec<Message> {
     let mut messages = Vec::with_capacity(history.len() + 2);
     if !assembled_system.is_empty() {
         messages.push(Message::system(assembled_system));
     }
     messages.extend(history.iter().cloned());
-    messages.push(user);
+    messages.extend(user);
     messages
-}
-
-/// Per-dispatch manifest wins; the agent's default is the fallback.
-pub(crate) fn resolve_prompt_context<'a>(
-    input: &'a AgentInput,
-    caps: &'a AgentCaps,
-) -> &'a PromptContext {
-    input
-        .prompt_context
-        .as_deref()
-        .unwrap_or(&caps.model.prompt_context)
 }
 
 fn wrap(tag: &str, body: &str) -> String {
@@ -56,6 +50,41 @@ fn push_block(out: &mut String, first: &mut bool, block: &str) {
 // so the assembler never writes an empty `<tag/>`. All renderers are
 // pure and take the descriptor per call, so one `PromptContext` can
 // render for several agents.
+
+// Plugin-contributed sections are prose, not a catalogue: each keeps its
+// own `## title` heading, and the whole group is one block, so the blank
+// line to its neighbours comes from `push_block` like every other
+// section's separation.
+fn render_sections(scope: &PromptContext) -> Option<String> {
+    if !scope.has_renderable_sections() {
+        return None;
+    }
+    let mut out = String::new();
+    for section in &scope.sections {
+        let title = section.title.trim();
+        let body = section.body.trim();
+        if title.is_empty() && body.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        match (title.is_empty(), body.is_empty()) {
+            (true, _) => out.push_str(body),
+            (false, true) => {
+                out.push_str("## ");
+                out.push_str(title);
+            }
+            (false, false) => {
+                out.push_str("## ");
+                out.push_str(title);
+                out.push_str("\n\n");
+                out.push_str(body);
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
 
 pub const DEFAULT_SYSTEM_PROMPT: &str = "\
 You are Synthia, an AI coding assistant. Your main goal is to complete \
@@ -252,10 +281,18 @@ fn render_agents(scope: &PromptContext) -> Option<String> {
 /// [`AgentDescriptor`] only `name`, `description`, and `handoff_hint` are read.
 /// Tool schemas never appear here — they travel on the completion request's
 /// `tools` field.
+///
+/// [`PromptContext::with_sections`] carries the plugin-contributed blocks a
+/// [`Host`](crate::agent::host::Host) registered. They are copied in once per
+/// run — the run's manifest is snapshotted at run start — so a section
+/// registered *during* a run appears on the next run, not the current one: the
+/// system prompt stays byte-stable within a run, which is what the provider's
+/// prefix cache needs.
 #[derive(Clone, Debug, Default)]
 pub struct PromptContext {
     pub(crate) skills: Vec<(String, String)>,
     pub(crate) agents: Vec<AgentDescriptor>,
+    pub(crate) sections: Vec<PromptSection>,
 }
 
 impl PromptContext {
@@ -275,7 +312,48 @@ impl PromptContext {
         self
     }
 
-    /// Render the final system prompt: base instructions plus the XML-delimited sections, joined with `\n\n`.
+    /// Append plugin-contributed sections, rendered in the order given.
+    ///
+    /// Each section renders as `## {title}` followed by its body,
+    /// separated from its neighbours by a blank line; a section with an
+    /// empty title renders its body alone, and one that is blank in both
+    /// title and body renders nothing at all. Titles and bodies are
+    /// trimmed, so a body that opens with indentation loses it — write a
+    /// code fence's payload unindented. The sections land after the
+    /// identity block and before every catalogue (structured-output
+    /// mandate, skills, peer agents).
+    ///
+    /// The blocks are prose, not markup the assembler owns: a body is
+    /// copied verbatim, so a plugin that writes a section boundary into
+    /// its text forges one.
+    pub fn with_sections(mut self, sections: Vec<PromptSection>) -> Self {
+        self.sections.extend(sections);
+        self
+    }
+
+    /// The plugin-contributed sections this manifest carries, in
+    /// registration order.
+    #[must_use]
+    pub fn sections(&self) -> &[PromptSection] {
+        &self.sections
+    }
+
+    /// Whether [`PromptContext::assemble`] renders anything from
+    /// [`PromptContext::sections`]: a section that is blank in both title and
+    /// body is dropped, so a manifest can hold registrations that contribute
+    /// no prompt bytes.
+    ///
+    /// The request-envelope fingerprint consults this rather than "are there
+    /// registrations", so an empty block cannot make a resume look like drift
+    /// for a prompt that never changed. Both sides read it here so they cannot
+    /// drift apart from each other.
+    pub(crate) fn has_renderable_sections(&self) -> bool {
+        self.sections.iter().any(|section| {
+            !section.title.trim().is_empty() || !section.body.trim().is_empty()
+        })
+    }
+
+    /// Render the final system prompt: base instructions, the identity block, the plugin sections' Markdown headings, then the XML-delimited catalogues, all joined with `\n\n`.
     pub fn assemble(&self, descriptor: &AgentDescriptor) -> String {
         let mut out = String::new();
         let mut first = true;
@@ -283,8 +361,13 @@ impl PromptContext {
         if let Some(base) = trimmed_non_empty(&descriptor.instructions) {
             push_block(&mut out, &mut first, base);
         }
+        // Plugin sections sit with the identity block — both are
+        // instruction, not catalogue — and ahead of the structured-output
+        // mandate and the skills / agents menus, whose established order
+        // behind it this does not disturb.
         for section in [
             render_identity(descriptor),
+            render_sections(self),
             render_structured_output(descriptor),
             render_skills(self),
             render_agents(self),

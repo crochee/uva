@@ -57,13 +57,26 @@ pub(crate) async fn run_subagent(
     run_subagent_with_runner(
         agent,
         spec,
-        parent_session_id,
+        HostContext {
+            parent_session_id,
+            writers: None,
+        },
         input_depth,
         cancel,
         on_event,
         &runner,
     )
     .await
+}
+
+/// What the delegator knows about the host context a child runs
+/// in: the parent session id (empty at this layer — the server
+/// assigns session ids) and the writer source that opens the
+/// child's own session. `writers: None` runs the child with no
+/// log of its own.
+pub(crate) struct HostContext<'a> {
+    pub(crate) parent_session_id: &'a str,
+    pub(crate) writers: Option<Arc<dyn synthia_harness::SubagentWriters>>,
 }
 
 /// Like [`run_subagent`] but with an injectable
@@ -74,25 +87,42 @@ pub(crate) async fn run_subagent(
 pub(crate) async fn run_subagent_with_runner(
     agent: Arc<dyn Agent>,
     spec: TaskSpec,
-    parent_session_id: &str,
+    host: HostContext<'_>,
     input_depth: usize,
     cancel: Arc<dyn CancelToken>,
     on_event: futures::channel::mpsc::UnboundedSender<AgentEvent>,
     runner: &Arc<dyn CommandRunner>,
 ) -> synthia_tool::ToolOutput {
+    let parent_session_id = host.parent_session_id;
+    let writers = host.writers;
     let child_depth = input_depth + 1;
     // A stable per-child trace id so downstream consumers (the
     // web frontend, session replay) can group a child's events
     // into one sub-agent bubble even when the parent delegated
     // to several peers in parallel. The agent runtime has no
     // session registry of its own (the server assigns session
-    // ids), so we mint an opaque ULID here.
+    // ids), so we mint an opaque ULID here. The same id names
+    // the child's own session log when a writer source is
+    // wired.
     let child_trace_id = ulid::Ulid::generate().to_string();
     let meta =
         AgentMeta::new(parent_session_id, child_trace_id.clone(), child_depth)
             .with_agent_name(Some(spec.agent.clone()));
+    // The first forwarded event carries the dispatch prompt; the
+    // session opener wants it up front so the child's log opens
+    // with the prompt before the child's first row.
+    let first_meta = meta.clone().with_prompt(Some(spec.prompt.clone()));
     let mut input = AgentInput::text(spec.prompt.clone());
     input.subagent_depth = child_depth;
+    // The child's harness writes the child's model facts into
+    // the child's own session: open that session (its header and
+    // prompt land ahead of the child's first row) and hand the
+    // run the writer, plus the source for any grandchild this
+    // child delegates to.
+    if let Some(source) = &writers {
+        input.log_writer = Some(source.open_child(&first_meta));
+        input.subagent_writers = Some(Arc::clone(source));
+    }
 
     // R-OPT-1 Step 6.2: when the parent populated
     // `spec.trace_context`, resolve it into an OTel
@@ -138,7 +168,7 @@ pub(crate) async fn run_subagent_with_runner(
         }
         let event_meta = if first_event {
             first_event = false;
-            meta.clone().with_prompt(Some(spec.prompt.clone()))
+            first_meta.clone()
         } else {
             meta.clone()
         };

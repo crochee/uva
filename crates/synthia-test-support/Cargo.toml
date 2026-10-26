@@ -19,9 +19,12 @@ async-trait.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# `sync` = the fake provider's channel/mutex; the fakes never spawn and
-# never touch the filesystem.
-tokio = { workspace = true, features = ["sync"] }
+# `sync` = the fake provider's channel/mutex; the fakes never spawn
+# and never touch the filesystem. `time` = `ReplayProvider`'s optional
+# `pace`, which sleeps between replayed chunks — the lib compiles
+# without a caller supplying a timer, so the feature must be declared
+# here rather than left to whichever consumer enables it.
+tokio = { workspace = true, features = ["sync", "time"] }
 futures.workspace = true
 
 [dev-dependencies]

@@ -7,10 +7,11 @@
 //! harness internals.
 
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{Arc, atomic::AtomicUsize},
     time::Duration,
 };
 
+use parking_lot::Mutex;
 use synthia::harness::{SessionEndReason, SystemEvent};
 
 use super::{

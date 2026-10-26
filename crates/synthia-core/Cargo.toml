@@ -25,7 +25,11 @@ ulid.workspace = true
 # `futures::executor::block_on` is the runtime-neutral inline
 # executor for `spawn::InlineSpawner` — the runtime-free fallback
 # the harness installs as its default when the consumer does not
-# provide one. `futures` is a primitives library, not a runtime:
+# provide one. `futures::channel::oneshot` carries the wakeup back
+# from `sleeper::ThreadSleeper`'s waiting thread and the completion
+# back from `blocking::ThreadBlocking`'s working thread, and
+# `futures::future::BoxFuture` is the `Sleeper` / `Blocking` traits'
+# return type. `futures` is a primitives library, not a runtime:
 # it has no reactor, no worker pool, and no I/O integration;
 # the only "executor" surface it ships is the `block_on` we use
 # here, which polls a future on the calling thread.

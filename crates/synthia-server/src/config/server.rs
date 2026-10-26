@@ -129,6 +129,12 @@ pub struct ServerConfig {
     /// [`ToolsConfig`].
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Task 15: the deployment's plugin composition. Plugins are
+    /// optional capability: an entry that fails to install is
+    /// reported and skipped, never a boot failure. See
+    /// [`PluginsConfig`].
+    #[serde(default)]
+    pub plugins: PluginsConfig,
     /// : optional semantic-cache wrap on the default
     /// provider. See [`SemanticCacheConfig`].
     #[serde(default)]
@@ -357,6 +363,185 @@ pub struct ToolsConfig {
     pub max_visible: Option<usize>,
 }
 
+/// The deployment's plugins (Task 15).
+///
+/// This is the runtime half of "dependencies are compile-time,
+/// composition is runtime": which plugins a deployment runs is read
+/// from this section, not selected by a cargo feature.
+///
+/// The section **is** the list — `plugins:` holds the entries
+/// directly, matching what `DEPLOYMENT.md` shows:
+///
+/// ```yaml
+/// plugins:
+///   - name: redactor
+///     kind: remote
+///     command: ["/usr/local/bin/redactor"]
+/// ```
+///
+/// (`#[serde(transparent)]`: the struct exists so the section has a
+/// named home, not to add a nesting level. The doubled
+/// `plugins: { plugins: [...] }` shape is not accepted.)
+///
+/// Plugins are optional capability. An entry that cannot be
+/// installed — a process that will not start, a handshake that
+/// fails, a promotion the plugin cannot serve, a static name the
+/// binary does not link — is reported and skipped; it never fails
+/// the boot. The resolved and skipped sets are exposed through
+/// [`crate::composition::Composition`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct PluginsConfig {
+    pub plugins: Vec<PluginEntry>,
+}
+
+/// One plugin entry.
+///
+/// `kind` selects the channel: `static` names a factory compiled
+/// into this binary, `remote` describes a process the host spawns
+/// and speaks the plugin protocol to.
+///
+/// The free-form string fields are validated while parsing, so an
+/// operator typo is a clear error naming the field and the accepted
+/// values instead of a silent fallback to the default.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PluginEntry {
+    /// A plugin compiled into this binary. The name is looked up in
+    /// the server's [`StaticPlugins`](crate::composition::StaticPlugins)
+    /// table.
+    Static {
+        /// The factory name in the binary's static plugin table.
+        name: String,
+    },
+    /// A plugin process reached over the plugin protocol.
+    Remote {
+        /// The plugin's name: the prefix of its diagnostics and the
+        /// owner of the tool names it claims.
+        name: String,
+        /// The argv the host spawns. An argv vector, not a shell
+        /// string.
+        command: Vec<String>,
+        /// `"stdio"` (default) or `"http"`.
+        #[serde(
+            default = "default_plugin_transport",
+            deserialize_with = "deserialize_plugin_transport"
+        )]
+        transport: String,
+        /// The roles this deployment enables: `tools`, `observe`,
+        /// `transform`, `gate`.
+        #[serde(default, deserialize_with = "deserialize_plugin_capabilities")]
+        capabilities: Vec<String>,
+        /// `"reduced"` (default) or `"full"`.
+        #[serde(
+            default = "default_plugin_authority",
+            deserialize_with = "deserialize_plugin_authority"
+        )]
+        authority: String,
+        /// `"low"`, `"high"` or `"unknown"` (default).
+        #[serde(
+            default = "default_plugin_risk",
+            deserialize_with = "deserialize_plugin_risk"
+        )]
+        risk: String,
+    },
+}
+
+const PLUGIN_TRANSPORTS: &[&str] = &["stdio", "http"];
+const PLUGIN_CAPABILITIES: &[&str] = &["tools", "observe", "transform", "gate"];
+const PLUGIN_AUTHORITIES: &[&str] = &["reduced", "full"];
+const PLUGIN_RISKS: &[&str] = &["low", "high", "unknown"];
+
+fn default_plugin_transport() -> String {
+    "stdio".to_string()
+}
+
+fn default_plugin_authority() -> String {
+    "reduced".to_string()
+}
+
+fn default_plugin_risk() -> String {
+    "unknown".to_string()
+}
+
+/// The parse error for a value outside a field's accepted set. It
+/// names the field and every value it accepts, so an operator can
+/// fix the file without reading the code.
+fn rejected_plugin_value(
+    field: &str,
+    value: &str,
+    accepted: &[&str],
+) -> String {
+    let accepted: Vec<String> = accepted
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect();
+    format!(
+        "invalid value `{value}` for field `{field}`: accepted values are {}",
+        accepted.join(", ")
+    )
+}
+
+fn check_plugin_value(
+    field: &str,
+    value: &str,
+    accepted: &[&str],
+) -> Result<(), String> {
+    if accepted.contains(&value) {
+        Ok(())
+    } else {
+        Err(rejected_plugin_value(field, value, accepted))
+    }
+}
+
+fn deserialize_plugin_transport<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    check_plugin_value("transport", &value, PLUGIN_TRANSPORTS)
+        .map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn deserialize_plugin_authority<'de, D>(
+    deserializer: D,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    check_plugin_value("authority", &value, PLUGIN_AUTHORITIES)
+        .map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn deserialize_plugin_risk<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    check_plugin_value("risk", &value, PLUGIN_RISKS)
+        .map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn deserialize_plugin_capabilities<'de, D>(
+    deserializer: D,
+) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    for value in &values {
+        check_plugin_value("capabilities", value, PLUGIN_CAPABILITIES)
+            .map_err(serde::de::Error::custom)?;
+    }
+    Ok(values)
+}
+
 /// The `POST.../operation` endpoint gate (R29).
 ///
 /// One flag, one endpoint. Kept as a struct (rather than a bare
@@ -495,6 +680,7 @@ impl Default for ServerConfig {
             mcp_servers: Vec::new(),
             operations: OperationEndpointConfig::default(),
             tools: ToolsConfig::default(),
+            plugins: PluginsConfig::default(),
             cache: SemanticCacheConfig::default(),
             resilience: ResilienceConfig::default(),
             budget: BudgetConfig::default(),

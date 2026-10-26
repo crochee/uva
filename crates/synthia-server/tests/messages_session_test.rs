@@ -627,6 +627,100 @@ async fn tool_fixture() -> Fixture {
     fix
 }
 
+// ---------------------------------------------------------------------------
+// Approvals: a suspension is a protocol error, never a completed turn
+// ---------------------------------------------------------------------------
+
+/// A run that asks for approval: the model calls `shell` with a
+/// destructive command, which the default policy holds before it
+/// executes. The suspended run is this endpoint's terminal state.
+fn suspension_provider() -> Arc<dyn ModelProvider> {
+    let call = CompletionResponse {
+        content: Content::Single(ContentPart::ToolUse(ToolUse {
+            id: "toolu_rm_1".to_string(),
+            name: "shell".to_string(),
+            input: json!({ "command": "rm -r target" }),
+        })),
+        ..CompletionResponse::default()
+    };
+    Arc::new(FakeProvider::new(vec![call]))
+}
+
+/// A non-streaming request whose run suspends answers a `409` with the
+/// protocol's error envelope. It must not answer `200` with a message
+/// that never finished.
+#[tokio::test]
+async fn a_suspension_is_an_error_response_not_a_completed_message() {
+    let fix = make_fixture(suspension_provider()).await;
+    let (status, body) =
+        post(&fix, &turn_body(Some("chat-approval"), "delete it")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a suspended run is not a completed message: {body}"
+    );
+    assert_eq!(body["type"], "error", "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("approval"),
+        "the failure must name the missing approval: {message}"
+    );
+}
+
+/// The streaming shape: the run's terminal event is the protocol's
+/// `error` frame, and the stream never pretends the message completed.
+#[tokio::test]
+async fn a_suspension_ends_the_stream_with_an_error_frame() {
+    let fix = make_fixture(suspension_provider()).await;
+    let (status, bytes) =
+        post_bytes(&fix, &stream_body(Some("chat-approval-stream"), "delete"))
+            .await;
+    assert_eq!(status, StatusCode::OK, "the SSE status is still 200");
+    let frames = parse_sse(&bytes);
+    let error = frames
+        .iter()
+        .find(|frame| frame.event == "error")
+        .unwrap_or_else(|| {
+            panic!("a suspended stream must carry an error frame: {frames:#?}")
+        });
+    assert_eq!(error.data["type"], "error", "{error:?}");
+    assert_eq!(error.data["error"]["type"], "invalid_request_error");
+    assert!(
+        !frames.iter().any(|frame| frame.event == "message_stop"),
+        "a suspended run must not emit a successful stop: {frames:#?}"
+    );
+}
+
+/// A later request against a paused session is refused up front. If it
+/// were queued the controller would never start it, and the response
+/// would wait on a terminal that cannot come.
+#[tokio::test]
+async fn a_request_to_a_paused_session_is_refused_before_queueing() {
+    let fix = make_fixture(suspension_provider()).await;
+    let (status, body) =
+        post(&fix, &turn_body(Some("chat-paused"), "delete it")).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    let started = std::time::Instant::now();
+    let (status, body) =
+        post(&fix, &turn_body(Some("chat-paused"), "again")).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a paused session must answer, not hang: {body}"
+    );
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("approval"),
+        "the refusal must name the approval: {message}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the refusal must not wait for a run that cannot start"
+    );
+}
+
 /// An opted-in request sees the call and its result as separate blocks
 /// paired by the call id — the two halves the web UI renders.
 #[tokio::test]

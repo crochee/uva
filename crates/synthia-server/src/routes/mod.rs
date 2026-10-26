@@ -2,9 +2,11 @@ pub mod agents;
 pub mod attachment;
 pub mod chat;
 pub mod evals;
+pub mod follow;
 pub mod health;
 pub mod helpers;
 pub(crate) mod messages;
+pub mod plugins;
 pub mod schedules;
 pub mod search;
 pub mod session_search;
@@ -13,6 +15,9 @@ pub mod skills;
 pub mod tasks;
 pub mod tool;
 pub mod workflows;
+
+#[cfg(test)]
+mod tests;
 
 use std::sync::Arc;
 
@@ -40,7 +45,6 @@ pub fn chat_router() -> Router<Arc<AppState>> {
         .route("/usage", get(chat::usage))
         .route("/sessions", post(chat::create_session))
         .route("/sessions/{id}/messages", post(chat::send_message))
-        .route("/sessions/{id}/messages/stream", get(chat::stream_messages))
         .route("/sessions/{id}/cancel", post(chat::cancel_session))
         .route("/sessions/{id}/regenerate", post(chat::regenerate))
         .route("/messages/{message_id}/feedback", post(chat::feedback))

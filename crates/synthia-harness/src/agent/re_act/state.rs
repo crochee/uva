@@ -6,7 +6,10 @@ use synthia_core::CancelToken;
 use synthia_provider::Message;
 
 use super::projection::ToolProjectionCache;
-use crate::events::SessionEndReason;
+use crate::{
+    agent::{approval::ApprovalPolicy, history::HistoryProjection},
+    events::SessionEndReason,
+};
 
 /// The live LLM transcript: shared behind an `Arc` so the loop, snapshots and the durable log observe one history without copying it.
 pub(crate) type Transcript = Arc<Vec<Message>>;
@@ -28,6 +31,9 @@ pub(crate) struct SampleOutcome {
 pub(crate) enum Step {
     Continue(&'static str),
     Completed,
+    // The batch held high-risk calls; the run ends here and a
+    // resume continues it.
+    Suspended,
     Failed(SessionEndReason),
 }
 
@@ -36,6 +42,7 @@ impl Step {
         match self {
             Self::Continue(label) => label,
             Self::Completed => "completed",
+            Self::Suspended => "suspended",
             Self::Failed(SessionEndReason::Cancelled) => "cancelled",
             Self::Failed(_) => "failed",
         }
@@ -63,11 +70,46 @@ pub(crate) struct RunState {
     /// re-reading the shared descriptor each iteration.
     pub model_hint: Option<String>,
     pub runtime_snapshot: Option<RuntimeSnapshotCache>,
+    /// The log-derived transcript, present only when a writer owns
+    /// this run's log. `messages` is the projection plus the
+    /// request-local seams; the step boundary re-derives the
+    /// projection and rebuilds `messages` from it when the log's tail
+    /// produced a different transcript.
+    pub history: Option<HistoryProjection>,
+    /// The current turn's non-text parts. The log persists a turn's
+    /// text but never its bytes, so a writer-backed run carries them
+    /// in the request and re-appends them after every rebuild. Empty
+    /// for a run that owns its transcript in `messages`.
+    pub attachments: Vec<synthia_provider::ContentPart>,
     pub projection: ToolProjectionCache,
     pub touched: synthia_context::CompactionDetails,
+    /// Whether this run already reported a context-manager prune.
+    /// A writer-backed run re-derives and re-prunes at every step, but
+    /// the prune is request-local and the log still holds the full
+    /// transcript, so one warning per run describes the whole run.
+    pub context_pruned: bool,
     /// Whether a schema-valid `structured_output` submission was
     /// committed (violations land as error results, not here).
     pub structured_output: bool,
+    /// The reason a policy ended the run after a tool returned. The
+    /// run stops at the step boundary — the tool's own result is
+    /// committed first, so the transcript stays whole.
+    pub terminate: Option<String>,
+    /// The calls a gate held for an approval. The suspension that
+    /// asks for them arrives with the approval policy.
+    pub pending_approvals: Vec<crate::agent::approval::ApprovalRequest>,
+    /// The approval policy this run actually uses: the agent's
+    /// configured policy plus the session-scope grants folded from
+    /// the log. Held per run so a grant written by a resume is
+    /// visible to the calls that follow it.
+    pub approval: ApprovalPolicy,
+    /// The request-envelope fingerprint this run was built under;
+    /// a suspension's resume token carries it.
+    pub request_snapshot_hash: Option<String>,
+    /// The seq of the last `Compaction` row this run wrote. A second
+    /// pass that could only shadow that row would rewrite the summary
+    /// without shadowing anything new.
+    pub(crate) last_compaction: Option<u64>,
 }
 
 impl RunState {
@@ -105,9 +147,17 @@ impl RunState {
             last_snapshot: None,
             model_hint: None,
             runtime_snapshot: None,
+            history: None,
+            attachments: Vec::new(),
             projection: ToolProjectionCache::new(),
             touched: synthia_context::CompactionDetails::default(),
+            context_pruned: false,
             structured_output: false,
+            terminate: None,
+            pending_approvals: Vec::new(),
+            approval: ApprovalPolicy::default(),
+            request_snapshot_hash: None,
+            last_compaction: None,
         }
     }
 
@@ -126,6 +176,26 @@ impl RunState {
     #[must_use]
     pub(super) fn with_resume_key(mut self, key: Option<String>) -> Self {
         self.resume_key = key;
+        self
+    }
+
+    /// Attach the current turn's non-text parts.
+    #[must_use]
+    pub(super) fn with_attachments(
+        mut self,
+        attachments: Vec<synthia_provider::ContentPart>,
+    ) -> Self {
+        self.attachments = attachments;
+        self
+    }
+
+    /// Attach the log-derived projection a writer-backed run reads.
+    #[must_use]
+    pub(super) fn with_history(
+        mut self,
+        history: Option<HistoryProjection>,
+    ) -> Self {
+        self.history = history;
         self
     }
 

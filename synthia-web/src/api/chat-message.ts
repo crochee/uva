@@ -9,7 +9,7 @@
  * un-importable from unit tests.
  */
 
-import type { AttachmentPart, SegmentType } from './chat-stream';
+import type { SegmentType } from './chat-stream';
 import type { SessionPart } from './types';
 
 /**
@@ -75,38 +75,6 @@ export function extractImages(raw: unknown): ChatImage[] {
   return out;
 }
 
-/** Convert the composer's pending attachments into renderable images.
- *
- *  The user's own picture is the other half of the multimodal
- *  surface: it reaches the model through `POST /messages`
- *  (`build_parts` in `synthia-server/src/routes/chat.rs`), but the
- *  chat view only ever rendered `segments` — the message's
- *  `attachments` field was dropped at the `ChatMessageViewItem`
- *  boundary, so an image-only send produced an empty `> USER`
- *  bubble. Normalising here lets the user's turn show what they
- *  sent.
- *
- *  Only `image` attachments contribute; a file part is rendered by
- *  `filesFromAttachments` instead.
- *
- *  `AttachmentPart.dataUrl` carries the base64 payload and `url`
- *  the remote one, so `dataUrl` wins when both are present.
- */
-export function imagesFromAttachments(attachments: ReadonlyArray<AttachmentPart>): ChatImage[] {
-  const out: ChatImage[] = [];
-  for (const a of attachments) {
-    if (a.kind !== 'image') continue;
-    const src = a.dataUrl ?? a.url;
-    if (!src) continue;
-    out.push({
-      id: crypto.randomUUID(),
-      dataUrl: isRenderableUrl(src) ? src : `data:${a.mimeType};base64,${src}`,
-      mimeType: a.mimeType,
-    });
-  }
-  return out;
-}
-
 /**
  * One file the user attached to a turn: everything the bubble needs to
  * show that the turn carried it. The bytes deliberately stay behind —
@@ -114,12 +82,11 @@ export function imagesFromAttachments(attachments: ReadonlyArray<AttachmentPart>
  * would only cost the localStorage quota that
  * `stripAttachmentSegments` exists to protect.
  *
- * Two sources fill this: the composer's own `AttachmentPart` (the send
- * path, via `filesFromAttachments`) and the attachment references a
- * persisted `UserInput` row carries (the rebuild path, via
- * `filesFromPersistedAttachments`). The second has no bytes and no
- * blob URL, so `uri` and `byteLen` are optional and the chip degrades
- * to name plus MIME type.
+ * The composer's attachments stay on the send path; the transcript is
+ * built from the attachment references a persisted `UserInput` row
+ * carries (`filesFromPersistedAttachments`). Those have no bytes and no
+ * blob URL, so `uri` and `byteLen` are optional and the chip degrades to
+ * name plus MIME type.
  */
 export interface ChatFile {
   /** Stable key for React's list rendering. */
@@ -134,30 +101,6 @@ export interface ChatFile {
   /** Size the persisted row reported, in bytes. Rendered as a hint in the
    *  tooltip when present; the composer path has no size to report. */
   byteLen?: number;
-}
-
-/**
- * Convert the composer's pending attachments into renderable
- * files. The counterpart of `imagesFromAttachments` for the
- * protocol's `document` block: without it a file-only send
- * produced an empty `> USER` bubble, the same defect the image
- * path was fixed for.
- *
- * This is the *send* side — it reads the composer's
- * `AttachmentPart`s. A rebuilt transcript has no `AttachmentPart`s,
- * so `filesFromPersistedAttachments` serves the persisted side.
- */
-export function filesFromAttachments(attachments: ReadonlyArray<AttachmentPart>): ChatFile[] {
-  const out: ChatFile[] = [];
-  for (const a of attachments) {
-    if (a.kind !== 'file') continue;
-    out.push({
-      id: crypto.randomUUID(),
-      filename: a.filename ?? 'attachment',
-      mimeType: a.mimeType,
-    });
-  }
-  return out;
 }
 
 /** First non-empty string value among `keys`, or `''`. */
@@ -298,6 +241,31 @@ export function contentText(raw: unknown): string {
 }
 
 /**
+ * What a compaction pass replaced, rendered as a timeline marker.
+ *
+ * Comes from the durable `compaction` row: its `data.summary` is the
+ * replacement text, `data.shadowed_token_count` the pre-prune price,
+ * and `surface_op` the span (fold positions) plus the shadowed durable
+ * ordinals. A row without a `surface_op` (an older log) still shows
+ * its summary, just without a range.
+ */
+export interface CompactionInfo {
+  summary: string;
+  /** First shadowed surface position (fold index). */
+  start?: number;
+  /** One past the last shadowed surface position. */
+  end?: number;
+  /** Messages the replace shadowed. */
+  shadowedMessages?: number;
+  /** Pre-prune token price of the shadowed span. */
+  shadowedTokens?: number;
+  /** First shadowed durable ordinal. */
+  firstSeq?: number;
+  /** Last shadowed durable ordinal. */
+  lastSeq?: number;
+}
+
+/**
  * A single typed unit inside a chat `Message`. The chat UI
  * renders one row per segment.
  */
@@ -305,6 +273,10 @@ export interface MessageSegment {
   id: string;
   type: SegmentType;
   content: string;
+  /** When type === 'compaction': the summary and the span it
+   *  shadowed. Rendered by `CompactionMarker` in place, in the
+   *  timeline position the compaction row occupies. */
+  compaction?: CompactionInfo;
   toolName?: string;
   /** When type === 'tool_block': the request body of the call
    *  (rendered as a yellow sub-block). */

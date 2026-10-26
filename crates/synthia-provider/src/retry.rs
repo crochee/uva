@@ -94,107 +94,6 @@ pub fn parse_retry_after_at(
     None
 }
 
-pub async fn retry_with_backoff<F, Fut, T>(
-    config: RetryConfig,
-    mut operation: F,
-) -> Result<T, Error>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, Error>>,
-{
-    let mut attempts = 0u32;
-    let mut delay_ms = config.initial_interval_ms;
-    let start = std::time::Instant::now();
-
-    loop {
-        attempts += 1;
-
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                if !e.is_retryable() || attempts >= config.max_attempts {
-                    return Err(e);
-                }
-
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                if elapsed_ms >= config.max_elapsed_ms {
-                    return Err(Error::retry_exhausted(attempts, e));
-                }
-
-                if e.is_rate_limited()
-                    && let Error::RateLimited {
-                        retry_after: Some(retry_after),
-                        ..
-                    } = &e
-                {
-                    tokio::time::sleep(*retry_after).await;
-                    continue;
-                }
-
-                let actual_delay = delay_ms.min(config.max_interval_ms);
-                delay_ms = (delay_ms * 2).min(config.max_interval_ms);
-                tokio::time::sleep(Duration::from_millis(actual_delay)).await;
-            }
-        }
-    }
-}
-
-/// Retry wrapper that respects Retry-After header for rate limits.
-/// If a RateLimited error with a Retry-After duration is encountered,
-/// wait for that duration instead of exponential backoff.
-pub async fn retry_with_retry_after<F, Fut, T>(
-    config: RetryConfig,
-    retry_after_header: Option<String>,
-    mut operation: F,
-) -> Result<T, Error>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, Error>>,
-{
-    let mut attempts = 0u32;
-    let mut delay_ms = config.initial_interval_ms;
-    let start = std::time::Instant::now();
-
-    loop {
-        attempts += 1;
-
-        match operation().await {
-            Ok(result) => return Ok(result),
-            Err(e) => {
-                if !e.is_retryable() || attempts >= config.max_attempts {
-                    return Err(e);
-                }
-
-                let elapsed_ms = start.elapsed().as_millis() as u64;
-                if elapsed_ms >= config.max_elapsed_ms {
-                    return Err(Error::retry_exhausted(attempts, e));
-                }
-
-                if e.is_rate_limited() {
-                    if let Error::RateLimited {
-                        retry_after: Some(duration),
-                        ..
-                    } = &e
-                    {
-                        tokio::time::sleep(*duration).await;
-                        continue;
-                    }
-                    if let Some(ref header) = retry_after_header
-                        && let Some(duration) = parse_retry_after(header)
-                    {
-                        tokio::time::sleep(duration).await;
-                        continue;
-                    }
-                }
-
-                let actual_delay = delay_ms.min(config.max_interval_ms);
-                delay_ms = (delay_ms * 2).min(config.max_interval_ms);
-                tokio::time::sleep(Duration::from_millis(actual_delay)).await;
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Typed retry classification (R4 Phase C.1 — dsh llm-retry semantics)
 // ---------------------------------------------------------------------------
@@ -488,14 +387,18 @@ pub fn retry_config_for(class: RetryClass) -> RetryConfig {
 /// Retry with per-class backoff: each failure is classified and
 /// the class's budget governs the next sleep.
 ///
-/// Unlike [`retry_with_backoff`] (one fixed config for every
-/// failure), the budget adapts: a 429 keeps retrying longer than
+/// The budget adapts per class: a 429 keeps retrying longer than
 /// a timeout, an empty completion gets one cheap re-ask, and the
 /// terminal classes (`Quota`, `ContextOverflow`, `Auth`,
 /// `Permanent`) return after the first attempt without sleeping.
-/// The elapsed-time budget resets per
-/// class — a run that starts `Transient` and later trips a rate
-/// limit gets the full `RateLimit` budget.
+/// The elapsed-time budget resets per class — a run that starts
+/// `Transient` and later trips a rate limit gets the full
+/// `RateLimit` budget.
+///
+/// Adapter-only: the sleep is `tokio::time::sleep`, and the two
+/// adapter features are the only code that calls this and are the
+/// only configuration where tokio is a dependency.
+#[cfg(any(feature = "anthropic", feature = "openai"))]
 pub async fn retry_with_classification<F, Fut, T>(
     mut operation: F,
 ) -> Result<T, Error>
@@ -869,6 +772,7 @@ mod tests {
         assert_eq!(quota.max_attempts, 1, "quota is not retryable");
     }
 
+    #[cfg(any(feature = "anthropic", feature = "openai"))]
     #[tokio::test]
     async fn retry_with_classification_gives_up_on_quota() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -894,6 +798,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(any(feature = "anthropic", feature = "openai"))]
     #[tokio::test]
     async fn retry_with_classification_reasks_empty_completion() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -917,6 +822,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
+    #[cfg(any(feature = "anthropic", feature = "openai"))]
     #[tokio::test]
     async fn retry_with_classification_exhausts_empty_budget() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -955,6 +861,7 @@ mod tests {
         assert_eq!(retry_config_for(RetryClass::Auth).max_attempts, 1);
     }
 
+    #[cfg(any(feature = "anthropic", feature = "openai"))]
     #[tokio::test]
     async fn retry_with_classification_gives_up_on_permanent() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -975,6 +882,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(any(feature = "anthropic", feature = "openai"))]
     #[tokio::test]
     async fn retry_with_classification_succeeds_after_transient() {
         use std::sync::atomic::{AtomicUsize, Ordering};

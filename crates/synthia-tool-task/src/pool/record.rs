@@ -44,6 +44,12 @@ impl InvocationStatus {
             // same surface as a `Failed` so existing retry /
             // escalation logic continues to work unchanged.
             SessionEndReason::Refused { .. } => Self::Failed,
+            // A child that suspends has no approval route back to its
+            // parent yet (Task 9), so the parent sees a failed child
+            // rather than a silent allow. Drift is likewise a failure.
+            SessionEndReason::Suspended | SessionEndReason::ConfigDrift => {
+                Self::Failed
+            }
         }
     }
 

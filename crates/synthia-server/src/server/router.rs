@@ -132,6 +132,13 @@ pub async fn create_router(state: Arc<AppState>) -> Router {
     let api_routes = Router::new()
         // Models listing
          .route("/models", get(routes::health::list_models))
+        // Deployment plugin composition (Task 17). The reader for the
+        // resolved/skipped record boot has always produced: which
+        // plugins this deployment actually runs, through which
+        // channel, at what authority and risk, and which configured
+        // entries were skipped with the reason.
+        // GET    /plugins           → list_plugins
+        .route("/plugins", get(routes::plugins::list_plugins))
         // Session list (management view backed by the shared session store)
         .route("/sessions", get(routes::sessions::list_sessions))
         .route(
@@ -155,10 +162,25 @@ pub async fn create_router(state: Arc<AppState>) -> Router {
             "/sessions/{id}/status",
             axum::routing::get(routes::sessions::session_status),
         )
+        .route(
+            "/sessions/{id}/follow",
+            get(routes::follow::follow),
+        )
+        .route(
+            "/sessions/{id}/resume",
+            axum::routing::post(routes::follow::resume),
+        )
+        .route(
+            "/sessions/{id}/compact",
+            axum::routing::post(routes::follow::compact),
+        )
+        .route(
+            "/sessions/{id}/usage",
+            get(routes::follow::usage),
+        )
         // --- Chat (REST + SSE) interface ---
         // POST   /chat/sessions                        → create_session
         // POST   /chat/sessions/{id}/messages          → send_message
-        // GET    /chat/sessions/{id}/messages/stream   → stream_messages (SSE)
         // POST   /chat/sessions/{id}/cancel            → cancel_session
         // POST   /chat/sessions/{id}/regenerate        → regenerate
         // POST   /chat/messages/{mid}/feedback         → feedback
@@ -176,10 +198,6 @@ pub async fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/chat/sessions/{id}/messages",
             axum::routing::post(routes::chat::send_message),
-        )
-        .route(
-            "/chat/sessions/{id}/messages/stream",
-            get(routes::chat::stream_messages),
         )
         .route(
             "/chat/sessions/{id}/cancel",

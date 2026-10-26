@@ -240,12 +240,34 @@ export interface SessionDetail {
  *   `parent_session_id` / `child_session_id` (a per-run trace
  *   id) / `parent_depth`; `data` may nest further `Agent`
  *   envelopes for grandchildren.
+ * - `{ "type": "assistant_message", "data": Message }` — one
+ *   assistant turn: the provider `Message` with the turn's text
+ *   and its tool calls together.
+ * - `{ "type": "tool_result", "data": Message }` — one tool
+ *   outcome: the tool's output plus the id of the call it
+ *   answers.
  */
 export interface SessionTurn {
   type?: string;
   data?: Record<string, unknown> | unknown[];
   /** RFC 3339 timestamp of the persisted event, when present. */
   ts?: string;
+  /** The durable ordinal the sink stamped on the row. `follow`
+   *  `row` frames and the baseline's window carry it; the
+   *  session-detail projection may omit it. It is the client's
+   *  only cursor, and the number a resume token's `last_seq`
+   *  points at. */
+  seq?: number;
+  /** Provenance the writer recorded beside the row, when it is
+   *  not an ordinary turn boundary. Today only `"steer"` — a
+   *  message the user injected into an already-live run. */
+  source?: string;
+  /** True when a `tool_result` row records a failed tool. The
+   *  row's `data` is the tool *message* — the tool's output and
+   *  the call's id — and the message carries no failure flag of
+   *  its own, so the flag rides beside it. A row without it is a
+   *  tool that returned. */
+  is_error?: boolean;
   /** Surface op the server's fold applies to this row, when the
    *  row replaces a span of earlier rows instead of appending.
    *  A rerun's prompt row (regenerate) carries this so every
@@ -301,6 +323,142 @@ export interface SessionPart {
   url?: string;
   filename?: string;
   mediaType?: string;
+}
+
+/* ----------------------------------------------------------------
+ * Session follow / approval / compaction (`routes/follow.rs`)
+ * ----------------------------------------------------------------
+ *
+ * `GET /api/v1/sessions/{id}/follow` replaces the old
+ * `/messages/stream` replay: its first frame is a complete baseline
+ * (`FollowSnapshot`) that the client swaps its whole window for, and
+ * later frames are increments — durable (`row`), transient (`live`)
+ * or the open-interrupt set (`interrupts`). A reconnect therefore
+ * never splices a local cache onto a server stream; it just replaces.
+ */
+
+/** What the session is doing, as `follow` reports it. */
+export type SessionRuntimeState = 'idle' | 'running' | 'awaiting_approval' | 'cancelled';
+
+/** Session-level facts carried by the `follow` baseline. */
+export interface FollowHeader {
+  session_id: string;
+  user_id: string;
+  agent_name?: string;
+  state: SessionRuntimeState;
+  created_at?: string;
+  updated_at?: string;
+}
+
+/** How much of the model's window the next request would occupy. */
+export interface SessionContextMeter {
+  used: number;
+  window?: number;
+}
+
+/** One tool call the in-progress turn proposed. */
+export interface LiveToolCall {
+  call_id: string;
+  name: string;
+  arguments: unknown;
+  status: 'running' | 'completed' | 'failed';
+  output?: string;
+}
+
+/** The transient projection of the turn that is live right now. */
+export interface LiveTurn {
+  turn_id: string;
+  live_seq: number;
+  running: boolean;
+  text: string;
+  reasoning: string;
+  tool_calls: LiveToolCall[];
+}
+
+/** A high-risk call a suspended run is waiting on. */
+export interface ApprovalRequest {
+  id: string;
+  call_id: string;
+  tool: string;
+  arguments_hash: string;
+  risk: 'low' | 'high' | 'unknown';
+  agent: string;
+}
+
+/** The complete first frame of a `follow` stream. */
+export interface FollowSnapshot {
+  header: FollowHeader;
+  /** The last durable rows (a fixed window; `?from=` never widens it). */
+  rows: SessionTurn[];
+  /** Ordinal of the last durable row (`0` for an empty log). */
+  cursor: number;
+  live: LiveTurn;
+  context: SessionContextMeter;
+  pending_interrupts: ApprovalRequest[];
+  /** Fingerprint of the log's newest request envelope (`''` when none). */
+  request_snapshot_hash: string;
+}
+
+/**
+ * The token a suspension issued, rebuilt from the baseline: the
+ * log tail it ended at, the calls still waiting, and the request
+ * envelope it was suspended under.
+ */
+export interface ResumeToken {
+  last_seq: number;
+  pending: string[];
+  request_snapshot_hash: string;
+}
+
+/** What an operator decided about one held call. */
+export type ResumeStatus = 'resolved' | 'cancelled' | 'rejected';
+
+/** One decision in a resume request. */
+export interface ResumeDecision {
+  /** The interrupt (`ApprovalRequest.id`). */
+  id: string;
+  status: ResumeStatus;
+  /** Denial reason, grant scope, … */
+  payload?: unknown;
+}
+
+/** Session-scoped token usage and context occupancy. */
+export interface SessionUsage {
+  session_id: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  turns: number;
+  context_used: number;
+  context_window?: number;
+}
+
+/** How a submitted message reached its run. */
+export type SteerDelivery = 'queue' | 'steer';
+
+/** Response of `POST /api/v1/chat/sessions/{id}/messages`. */
+export interface SendChatMessageResponse {
+  message_id: string;
+  queued: boolean;
+  /** The delivery that actually happened — `queue` when no run was
+   *  live to steer. */
+  delivery: SteerDelivery;
+}
+
+/** What a manual compaction pass did. */
+export interface CompactResult {
+  committed: boolean;
+  /** First and one-past-last shadowed surface positions. */
+  start?: number;
+  end?: number;
+  shadowed_messages: number;
+  shadowed_tokens: number;
+  summary?: string;
+  first_seq?: number;
+  last_seq?: number;
+  /** Why nothing was committed (`under_budget`, `empty_span`). */
+  reason?: string;
 }
 
 /* ----------------------------------------------------------------

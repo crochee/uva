@@ -1,93 +1,86 @@
-//! One run's writer over the session sink, plus the helpers that
-//! shape prompt text for persistence.
+//! One run's handle on the session's writer, plus the helpers
+//! that shape prompt text for persistence.
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::Value;
 use synthia::{
-    core::Clock,
+    attachment::AttachmentStore,
     provider::{ContentPart, Role},
-    session::{SessionError, SessionSink, SurfaceLedger},
+    session::{AttachmentRefRow, LogWriter, SessionError},
 };
 
-/// One run's writer over the session sink.
+/// One run's handle on the session's one writer.
 ///
-/// Every row the run persists goes through here so the run's
-/// [`SurfaceLedger`] sees the exact bytes, in order, with the 1-based
-/// log ordinal the reader will reproduce — the source of truth a
-/// durable compaction checkpoint resolves its provenance against.
-/// Every ordinal this writer records is the one the **sink** handed
-/// out, never a locally counted value — see `append` for why a local
-/// counter drifts.
+/// Every row the run persists goes through here — the writer is
+/// the session's, so the run's rows, the op loop's out-of-band
+/// rows and a checkpoint's own rows all draw from one ordinal
+/// sequence and every row is stamped with the ordinal it will be
+/// read back under. The append methods only enqueue: the flush
+/// cadence is the caller's — the harness flushes at the step
+/// boundary before each provider call and once more after a tool
+/// result's row (before that result's event goes out), and the run
+/// task flushes before it resolves the checkpoint and again before
+/// it ends.
 pub(crate) struct RunLog {
-    pub(super) store: Arc<dyn SessionSink>,
-    pub(super) ledger: Arc<SurfaceLedger>,
-    /// Stamps each row's `ts`; the deployment's clock, not a fresh
-    /// wall-clock read per append.
-    pub(super) clock: synthia::core::SharedClock,
+    writer: Arc<LogWriter>,
 }
 
 impl RunLog {
-    /// Wrap the run's sink and its ledger.
-    pub(crate) fn new(
-        store: Arc<dyn SessionSink>,
-        ledger: Arc<SurfaceLedger>,
-        clock: synthia::core::SharedClock,
-    ) -> Self {
-        Self {
-            store,
-            ledger,
-            clock,
-        }
+    /// Wrap the session's writer.
+    pub(crate) fn new(writer: Arc<LogWriter>) -> Self {
+        Self { writer }
     }
 
-    /// Append one row and record it in the ledger under the ordinal
-    /// the **sink** reserved.
+    /// Reserve an ordinal for one row, stamp it, and enqueue it.
     ///
-    /// The sink owns the counter: it hands the next ordinal to
-    /// whoever asks, so the controller's op loop (which writes
-    /// `Feedback` rows and the shutdown marker straight to the sink)
-    /// and this run's writer draw from one sequence. A counter kept
-    /// here would drift the moment anything else appends, and the
-    /// ledger's ordinals are exactly what a compaction checkpoint's
-    /// `source_event_seqs` are validated against — a drifted one
-    /// makes a good splice look unresolvable: `try_fold_log_surface`
-    /// errors and the lenient fold silently replays the span the
-    /// checkpoint had replaced.
+    /// The row is on disk only after a [`Self::flush`]; the
+    /// ordinal it was given is the one the reader will reproduce
+    /// from its `seq` field, and the ledger the writer feeds
+    /// records it under the same number — the source of truth a
+    /// durable compaction checkpoint resolves its provenance
+    /// against. The row is taken by value: the writer stamps it
+    /// in place, so a caller that still needs it clones it
+    /// itself.
     pub(crate) async fn append(
         &mut self,
-        value: &Value,
+        value: Value,
     ) -> Result<u64, SessionError> {
-        let seq = self.store.alloc_seq();
-        self.store.append(value).await?;
-        self.ledger.record(seq, value);
-        Ok(seq)
+        self.writer.append(value).await
     }
 
-    /// Append a typed record, stamping the wall clock and the
-    /// ordinal the sink reserved for it.
+    /// Reserve an ordinal for one typed row, stamp it, and
+    /// enqueue it.
     ///
-    /// The stamp is what a typed reader reproduces: the row's own
-    /// `seq` field is the ordinal the log holds it under. The fold
-    /// that reads these rows assigns ordinals positionally
-    /// (`fold_lenient` uses the row index), so the two agree as long
-    /// as the rows are written in the order they were reserved.
+    /// The writer replaces the row's `seq` and `ts`: the ordinal
+    /// is the writer's to hand out, and a typed event's builder
+    /// leaves `seq: 0` behind. The stamp is what a typed reader
+    /// reproduces — the row's own `seq` field is the ordinal the
+    /// log holds it under, which is also how the fold numbers a
+    /// fully stamped log.
     pub(crate) async fn append_typed(
         &mut self,
-        mut value: Value,
+        value: Value,
     ) -> Result<(), SessionError> {
-        let seq = self.store.alloc_seq();
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "ts".to_string(),
-                Value::String(self.clock.now().to_rfc3339()),
-            );
-            obj.insert("seq".to_string(), Value::from(seq));
-        }
-        self.store.append(&value).await?;
-        self.ledger.record(seq, &value);
-        Ok(())
+        self.writer.append(value).await.map(|_| ())
+    }
+
+    /// Serialise one typed event and append it as a row.
+    ///
+    /// For the variants that hold their payload in fields rather than
+    /// an opaque `data` `Value` (`park_consumed` is one): they have no
+    /// builder, and the controller should not hand-roll their wire
+    /// shape at the call site. `seq: 0` / `ts: ""` in, the writer's
+    /// stamp out — same as [`Self::append_typed`].
+    pub(crate) async fn append_event(
+        &mut self,
+        event: &synthia::session::SessionEvent,
+    ) -> Result<(), SessionError> {
+        let row = serde_json::to_value(event).map_err(|e| {
+            SessionError::AppendFailed(format!("serialise the row: {e}"))
+        })?;
+        self.append_typed(row).await
     }
 }
 
@@ -108,95 +101,111 @@ pub(super) fn prompt_text_of_parts(parts: &[ContentPart]) -> String {
     out
 }
 
-/// Small, byte-free references to a multimodal prompt's attachments,
-/// for the durable `UserInput` row.
+/// Store a multimodal prompt's payloads and describe them as
+/// re-readable references.
 ///
-/// The bytes themselves are deliberately never persisted (see the
-/// persistence block in the run task): base64 images would bloat the
-/// per-session log and nothing reads them back as bytes. But a reloaded
-/// transcript still has to be able to show that the turn carried
-/// something — otherwise a file or image turn renders as an empty
-/// bubble on the session-detail page while the live chat showed a chip
-/// for the very same turn.
+/// The bytes themselves are deliberately never written into the log:
+/// base64 images would bloat the per-session file and nothing reads
+/// them back as text. They go into the deployment's
+/// [`AttachmentStore`] instead — content-addressed by their SHA-256,
+/// deduped, and readable by hash — and the returned rows carry that
+/// hash. That hash is what makes the row a **reference**: the metadata
+/// this function used to emit (kind / name / mime / byte length) let a
+/// reloaded transcript show that a turn carried something but gave it
+/// no way to fetch it, so a parked prompt, or a regenerated turn, could
+/// not put the attachment back.
 ///
-/// `kind` mirrors the composer's own vocabulary (`"image"` / `"file"`),
-/// so a client renders the same chip either way. `name` is omitted when
-/// the part carries none rather than being invented here — the renderer
-/// owns the fallback label, because only it knows what reads well.
-pub(super) fn attachment_refs_of_parts(parts: &[ContentPart]) -> Vec<Value> {
+/// A part whose payload the store will not take (an unsupported MIME
+/// the image path enforces, a payload over the size cap, a remote URL
+/// with no local bytes) degrades to a metadata-only row rather than
+/// failing: losing a reference is bad, losing the prompt is worse.
+///
+/// `kind` mirrors the composer's own vocabulary (`"image"` / `"audio"`
+/// / `"file"`), so a client renders the same chip either way. `name` is
+/// omitted when the part carries none rather than being invented here —
+/// the renderer owns the fallback label, because only it knows what
+/// reads well.
+pub(super) fn attachment_refs_of_parts(
+    parts: &[ContentPart],
+    store: &AttachmentStore,
+) -> Vec<AttachmentRefRow> {
     let mut refs = Vec::new();
     for part in parts {
-        let (kind, name, mime_type, byte_len) = match part {
-            ContentPart::Image(image) => (
-                "image",
-                None,
-                Some(image.mime_type.clone()),
-                // `data` holds either inline base64 or a remote URL (the
-                // image counterpart of the resource arm below), so the
-                // size is only knowable for the inline form. Deriving one
-                // from a URL's length would print a real-looking byte
-                // count that is simply wrong.
-                remote_url_byte_len(&image.data),
-            ),
+        let (kind, name, mime_type, raw) = match part {
+            // `data` holds either inline base64 or a remote URL, so a
+            // URL part has no local bytes to store — it is a reference
+            // to something this deployment does not own.
+            ContentPart::Image(image) => {
+                ("image", None, Some(image.mime_type.clone()), &image.data)
+            }
+            ContentPart::Audio(audio) => {
+                ("audio", None, Some(audio.mime_type.clone()), &audio.data)
+            }
+            // A resource's payload is a `data:` URI (inline bytes) or a
+            // URL; only the former is storable.
             ContentPart::Resource(link) => (
                 "file",
                 Some(link.name.clone()),
                 link.mime_type.clone(),
-                remote_url_byte_len(&link.uri),
+                &link.uri,
             ),
-            // Audio and everything else has no composer-side kind; a
-            // text part is the prompt itself, already in `text`.
+            // A text part is the prompt itself, already in `text`.
             _ => continue,
         };
-        let mut entry = serde_json::Map::new();
-        entry.insert("kind".to_string(), Value::from(kind));
-        if let Some(name) = name.filter(|n| !n.is_empty()) {
-            entry.insert("name".to_string(), Value::from(name));
-        }
-        if let Some(mime_type) = mime_type.filter(|m| !m.is_empty()) {
-            entry.insert("mime_type".to_string(), Value::from(mime_type));
-        }
-        if let Some(byte_len) = byte_len {
-            entry.insert("byte_len".to_string(), Value::from(byte_len));
-        }
-        refs.push(Value::Object(entry));
+        let (saved, unstored) = match inline_bytes(raw) {
+            Ok(bytes) => {
+                let mime = mime_type.as_deref().unwrap_or_default();
+                // An image keeps the store's image allow-list: it is the
+                // gate an uploaded image goes through, and a doctored
+                // MIME must not turn it into a blob. Everything else a
+                // multimodal prompt carries (audio, a binary file) is
+                // content-addressed without a MIME gate.
+                let result = if kind == "image" {
+                    store.save_image(&bytes, mime)
+                } else {
+                    store.save_blob(&bytes, mime)
+                };
+                match result {
+                    Ok(saved) => (Some(saved), None),
+                    Err(error) => (None, Some(error.to_string())),
+                }
+            }
+            Err(reason) => (None, Some(reason.to_string())),
+        };
+        refs.push(AttachmentRefRow {
+            kind: kind.to_string(),
+            hash: saved.as_ref().map(|saved| saved.hash.clone()),
+            name: name.filter(|name| !name.is_empty()),
+            mime_type: mime_type
+                .or_else(|| saved.as_ref().map(|s| s.mime_type.clone()))
+                .filter(|mime| !mime.is_empty()),
+            byte_len: saved.as_ref().map(|saved| saved.byte_len as u64),
+            unstored,
+        });
     }
     refs
 }
 
-/// The decoded byte length of a media part's `data` field, or `None` when
-/// it is not inline bytes.
+/// The decoded bytes of a media part's payload, or the reason it has no
+/// local bytes.
 ///
-/// Both media arms of [`attachment_refs_of_parts`] accept either an
-/// inline payload (bare base64 or a `data:` URI) or a remote URL, so the
-/// decision lives here once: a URL has no decodable size, and reporting
-/// `len / 4 * 3` of the URL text would render a confident, wrong byte
-/// count in the UI.
-fn remote_url_byte_len(data: &str) -> Option<u64> {
-    let inline = if data.starts_with("data:") {
-        true
-    } else {
-        // A scheme means a reference; anything else is the bare base64
-        // the provider parts carry.
-        !(data.starts_with("http://") || data.starts_with("https://"))
-    };
-    inline.then(|| decoded_len_of_base64(data))
-}
-
-/// Decoded byte length of a base64 string, without decoding it.
-///
-/// Tolerates (and skips) any `data:` envelope, so it accepts either the
-/// bare payload a provider part carries or the URI form a resource does.
-/// Every 4 base64 characters encode 3 bytes, less one byte per `=`
-/// padding character, so this is exact for well-formed input.
-fn decoded_len_of_base64(data: &str) -> u64 {
+/// Both media arms accept either an inline payload (bare base64 or a
+/// `data:` URI) or a remote URL, so the decision lives here once: a URL
+/// has no local bytes to store, and pretending its text were the
+/// payload would put a URL where the model expects an image. The reason
+/// is what the ref row records, so a reader can tell "never local" from
+/// "the store refused it".
+fn inline_bytes(data: &str) -> Result<Vec<u8>, &'static str> {
+    if data.starts_with("http://") || data.starts_with("https://") {
+        return Err("the payload is a remote URL");
+    }
     let payload = data
         .strip_prefix("data:")
-        .and_then(|rest| rest.split_once(',').map(|(_, p)| p))
+        .and_then(|rest| rest.split_once(',').map(|(_, payload)| payload))
         .unwrap_or(data);
-    let padding = payload.len() - payload.trim_end_matches('=').len();
-    let full_groups = (payload.len() / 4) as u64;
-    full_groups.saturating_mul(3).saturating_sub(padding as u64)
+    BASE64
+        .decode(payload)
+        .map_err(|_| "the payload is not inline base64")
 }
 
 /// The `SurfaceOp::Replace` a rerun's prompt row carries.
@@ -272,12 +281,11 @@ mod tests {
         })
     }
 
-    /// The prompt's own text is not an attachment, and audio has no
-    /// composer-side kind to render — only image/resource parts produce a
-    /// reference, so a text or audio part cannot invent a chip for a turn
-    /// that showed none.
+    /// A text part is the prompt itself, so it produces no chip; every
+    /// media part — image, audio, file — produces a re-readable ref.
     #[test]
-    fn only_image_and_resource_parts_become_attachment_refs() {
+    fn text_is_not_an_attachment_and_every_media_part_is() {
+        let store = AttachmentStore::default();
         let parts = vec![
             text("look at this"),
             ContentPart::Audio(AudioContent {
@@ -286,35 +294,55 @@ mod tests {
                 format: Some(AudioFormat::Wav),
             }),
         ];
-        assert!(attachment_refs_of_parts(&parts).is_empty());
+        let refs = attachment_refs_of_parts(&parts, &store);
+        assert_eq!(refs.len(), 1, "the text part is not an attachment");
+        assert_eq!(refs[0].kind, "audio");
+        assert!(
+            refs[0].hash.is_some(),
+            "an audio payload is stored, so the ref resolves"
+        );
+        assert_eq!(
+            store
+                .read_base64_raw(refs[0].hash.as_deref().expect("hash"))
+                .expect("readable"),
+            b"ABC",
+            "the stored bytes are the decoded payload"
+        );
     }
 
-    /// An image reference carries the composer's `image` kind and the mime
-    /// type, and reports the DECODED size rather than the base64 length —
-    /// a chip that claims 100 bytes for a 75-byte image would be a lie.
+    /// An image reference carries the composer's `image` kind, the mime
+    /// type, the DECODED size — and the hash that makes it re-readable.
     #[test]
-    fn image_ref_reports_the_decoded_byte_length() {
-        // "AAAA" is 3 bytes; with "==" padding it decodes to 1.
+    fn image_ref_reports_the_decoded_byte_length_and_its_hash() {
+        let store = AttachmentStore::default();
+        // "AAAAAA==" decodes to 4 bytes.
         let parts = vec![ContentPart::Image(ImageContent {
             data: "AAAAAA==".to_string(),
             mime_type: "image/png".to_string(),
             detail: None,
         })];
-        let refs = attachment_refs_of_parts(&parts);
+        let refs = attachment_refs_of_parts(&parts, &store);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0]["kind"], "image");
-        assert_eq!(refs[0]["mime_type"], "image/png");
-        assert_eq!(refs[0]["byte_len"], 4, "6 chars = 4 bytes after padding");
+        assert_eq!(refs[0].kind, "image");
+        assert_eq!(refs[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(refs[0].byte_len, Some(4), "6 chars = 4 bytes");
         assert!(
-            refs[0].get("name").is_none(),
+            refs[0].name.is_none(),
             "an image part carries no filename; the renderer owns the label"
+        );
+        let hash = refs[0].hash.as_deref().expect("the ref carries a hash");
+        assert_eq!(
+            store.read_base64_raw(hash).expect("readable").len(),
+            4,
+            "the bytes are in the store, not in the row"
         );
     }
 
-    /// A resource reference keeps the filename the wire gave it, and a
-    /// `data:` URI still reports its decoded payload size.
+    /// A resource reference keeps the filename the wire gave it, decodes
+    /// a `data:` URI, and stores those bytes.
     #[test]
     fn resource_ref_keeps_the_name_and_decodes_a_data_uri() {
+        let store = AttachmentStore::default();
         let parts = vec![ContentPart::Resource(ResourceLink {
             uri: "data:application/pdf;base64,QUJD".to_string(),
             name: "probe.pdf".to_string(),
@@ -322,19 +350,24 @@ mod tests {
             description: None,
             mime_type: Some("application/pdf".to_string()),
         })];
-        let refs = attachment_refs_of_parts(&parts);
+        let refs = attachment_refs_of_parts(&parts, &store);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0]["kind"], "file");
-        assert_eq!(refs[0]["name"], "probe.pdf");
-        assert_eq!(refs[0]["mime_type"], "application/pdf");
-        assert_eq!(refs[0]["byte_len"], 3);
+        assert_eq!(refs[0].kind, "file");
+        assert_eq!(refs[0].name.as_deref(), Some("probe.pdf"));
+        assert_eq!(refs[0].mime_type.as_deref(), Some("application/pdf"));
+        assert_eq!(refs[0].byte_len, Some(3));
+        assert!(
+            refs[0].hash.is_some(),
+            "an inline payload is storable, so it is stored"
+        );
     }
 
-    /// A remote-URL resource has no decoded size to report, so the field
-    /// is omitted rather than guessed — and an empty name is dropped
-    /// rather than persisted as `""` for every renderer to special-case.
+    /// A remote URL has no local bytes: no size to report, no hash to
+    /// resolve, and an empty name is dropped rather than persisted as
+    /// `""` for every renderer to special-case.
     #[test]
-    fn a_url_resource_omits_the_size_and_an_empty_name() {
+    fn a_url_resource_omits_the_size_the_hash_and_an_empty_name() {
+        let store = AttachmentStore::default();
         let parts = vec![ContentPart::Resource(ResourceLink {
             uri: "https://example.com/a.pdf".to_string(),
             name: String::new(),
@@ -342,46 +375,76 @@ mod tests {
             description: None,
             mime_type: None,
         })];
-        let refs = attachment_refs_of_parts(&parts);
+        let refs = attachment_refs_of_parts(&parts, &store);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0]["kind"], "file");
-        assert!(refs[0].get("byte_len").is_none());
-        assert!(refs[0].get("name").is_none());
-        assert!(refs[0].get("mime_type").is_none());
+        assert_eq!(refs[0].kind, "file");
+        assert!(refs[0].byte_len.is_none());
+        assert!(
+            refs[0].hash.is_none(),
+            "a URL is not bytes this deployment stores"
+        );
+        assert!(refs[0].name.is_none());
+        assert!(refs[0].mime_type.is_none());
     }
+
     /// An image part's `data` is inline base64 OR a remote URL — the same
-    /// dual shape the resource arm has. A URL has no decodable size, so
-    /// the ref must omit `byte_len` rather than report `len / 4 * 3` of
-    /// the URL text, which the chip would render as a confident, wrong
-    /// size ("18 B" for a 25-char URL).
+    /// dual shape the resource arm has. A URL has no decodable size and
+    /// nothing to store, so the ref reports neither.
     #[test]
-    fn a_remote_image_url_reports_no_byte_length() {
+    fn a_remote_image_url_reports_no_byte_length_and_no_hash() {
+        let store = AttachmentStore::default();
         let parts = vec![ContentPart::Image(ImageContent {
             data: "https://example.com/a.png".to_string(),
             mime_type: "image/png".to_string(),
             detail: None,
         })];
-        let refs = attachment_refs_of_parts(&parts);
+        let refs = attachment_refs_of_parts(&parts, &store);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0]["kind"], "image");
-        assert_eq!(refs[0]["mime_type"], "image/png");
+        assert_eq!(refs[0].kind, "image");
+        assert_eq!(refs[0].mime_type.as_deref(), Some("image/png"));
         assert!(
-            refs[0].get("byte_len").is_none(),
-            "a URL is not base64 and has no decoded size: {}",
-            refs[0]
+            refs[0].byte_len.is_none(),
+            "a URL is not base64 and has no decoded size"
         );
+        assert!(refs[0].hash.is_none());
     }
 
     /// A `data:`-wrapped payload still reports its decoded size, so the
     /// URL guard above does not swallow the inline case.
     #[test]
     fn a_data_uri_image_still_reports_its_size() {
+        let store = AttachmentStore::default();
         let parts = vec![ContentPart::Image(ImageContent {
             data: "data:image/png;base64,QUJD".to_string(),
             mime_type: "image/png".to_string(),
             detail: None,
         })];
-        let refs = attachment_refs_of_parts(&parts);
-        assert_eq!(refs[0]["byte_len"], 3);
+        let refs = attachment_refs_of_parts(&parts, &store);
+        assert_eq!(refs[0].byte_len, Some(3));
+        assert!(refs[0].hash.is_some());
+    }
+
+    /// A payload the store refuses (over the size cap) degrades to a
+    /// metadata-only ref: losing the reference is bad, losing the prompt
+    /// is worse.
+    #[test]
+    fn an_unstorable_payload_keeps_a_metadata_only_ref() {
+        let store = AttachmentStore::default();
+        let oversize =
+            BASE64
+                .encode(vec![0u8; synthia::attachment::DEFAULT_MAX_BYTES + 1]);
+        let parts = vec![ContentPart::Image(ImageContent {
+            data: oversize,
+            mime_type: "image/png".to_string(),
+            detail: None,
+        })];
+        let refs = attachment_refs_of_parts(&parts, &store);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "image");
+        assert!(
+            refs[0].hash.is_none(),
+            "nothing was stored, so there is no hash to claim"
+        );
+        assert!(refs[0].byte_len.is_none());
     }
 }

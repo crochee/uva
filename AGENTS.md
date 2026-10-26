@@ -261,12 +261,13 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   工具共用的，因此不放任何单工具的策略字段（放了就等于让一个工具的设置
   悄悄改变另一个工具的行为）。
 - **harness 与插件分离**：`synthia-harness` 只保留核心循环 + registry
-  组装 + 类型定义；需要循环内部能力（事件转发、取消、深度）的合成工具
-  走 [`synthia_harness::SyntheticTool`](crates/synthia-harness/src/agent/re_act/synthetic.rs)
-  seam（`with_synthetic_tool` / `ReActAgent::with_synthetic_tool`）。多智能体委派
-  是这条 seam 的第一个实现，整体位于 `synthia-tool-task`（`task` 工具、
-  gate、worktree 隔离、`@agent:` router、subagent 池）。新增同类合成工具
-  一律新建 plugin crate 实现该 trait，**不得**回填进 `synthia-harness`。
+  组装 + 类型定义；需要循环内部能力（事件转发、取消、深度、工具上下文）的
+  委派工具走 [`synthia_harness::DelegatingTool`](crates/synthia-harness/src/agent/re_act/delegation.rs)
+  seam（`with_delegator` / `ReActAgent::with_delegator`，或可撤销的
+  `Host::delegator`）。多智能体委派是这条 seam 的第一个实现，整体位于
+  `synthia-tool-task`（`task` 工具、gate、worktree 隔离、`@agent:` router、
+  subagent 池）。新增同类委派工具一律新建 plugin crate 实现该 trait，**不得**
+  回填进 `synthia-harness`。
 - **依赖方向单向**：`synthia` → `synthia-*` → `synthia-core`，
   永远不回指；用 `cargo tree -p synthia-core` 验证无环。
 - **Registry seam 收口在 `synthia-core`**：所有"具名目录 + cursor 分页"

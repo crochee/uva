@@ -140,7 +140,6 @@ mod tests {
     use std::{path::PathBuf, time::Duration};
 
     use synthia::{test_support::FakeProvider, tool::registry::ToolRegistry};
-    use tokio::sync::RwLock;
 
     use super::*;
     use crate::session::controller::{AgentRunStreamFactory, RunDependencies};
@@ -156,15 +155,16 @@ mod tests {
             .unwrap();
         let deps = RunDependencies::new(
             Arc::new(FakeProvider::new(vec![])),
-            Arc::new(RwLock::new(ToolRegistry::new())),
+            Arc::new(ToolRegistry::new()),
             PathBuf::from("/tmp"),
             synthia::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
         );
         let controller = SessionController::spawn(
             "alice",
             "lane-1",
-            manager.input_queue(),
+            crate::session::input_queue::InputQueue::default(),
             manager.sink("alice", "lane-1"),
+            manager.writer("alice", "lane-1"),
             deps,
             idle,
             Arc::new(AgentRunStreamFactory),

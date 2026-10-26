@@ -22,9 +22,11 @@ use synthia::{
     session::{SharedSessionSearch, manager::SessionRegistry},
     tool::ToolRegistry,
 };
-use tokio::sync::RwLock;
 
-use crate::config::{AuthConfig, CorsConfig};
+use crate::{
+    config::{AuthConfig, CorsConfig},
+    session::input_queue::InputQueue,
+};
 
 mod boot;
 pub(crate) mod cluster_ops;
@@ -50,6 +52,8 @@ pub use eval_agent::HarnessEvalAgent;
 pub use evals::EvalsState;
 pub use providers::{ModelSelectionError, ProviderCatalogue};
 pub use schedules::SchedulesState;
+#[cfg(test)]
+pub(crate) use sessions::PARKED_PROMPT_WINDOW;
 pub use tools::AppliedToolSurface;
 #[cfg(test)]
 pub(crate) use tools::plugin_tool_registry;
@@ -57,7 +61,17 @@ pub use usage::{UsageMetrics, UsageSnapshot};
 pub use workflows::WorkflowsState;
 
 pub struct AppState {
-    pub tool_registry: Arc<RwLock<ToolRegistry>>,
+    /// The node's one tool registry.
+    ///
+    /// Every agent this process builds shares this handle — the boot
+    /// agent, each per-run session agent, eval agents, dynamically
+    /// registered agents — so a tool registered at any point (a
+    /// plugin at boot, an MCP server, a management route) is visible
+    /// to every later run. `ToolRegistry` already carries its own
+    /// interior `parking_lot::RwLock`, so this is the only lock: an
+    /// outer one would force agents to clone a snapshot instead of
+    /// sharing the live surface.
+    pub tool_registry: Arc<ToolRegistry>,
     /// Multi-agent registry. Populated at startup with the
     /// canonical [`ReActAgent`](synthia::harness::ReActAgent) descriptor so any panel/judge
     /// agents registered later surface in the system prompt as
@@ -65,6 +79,17 @@ pub struct AppState {
     pub agent_registry: Arc<AgentRegistry>,
     pub session_search: SharedSessionSearch,
     pub session_manager: Arc<SessionRegistry>,
+    /// The shared per-session input queue: the channel a
+    /// `submit(Prompt | Steer)` lands on before the controller's run
+    /// loop drains it.
+    ///
+    /// Process-wide, like [`Self::session_manager`]: every controller
+    /// is handed a clone, so a route that drains a session's pending
+    /// input observes exactly the controller's queue. It lives here
+    /// rather than on the registry because it is this application's
+    /// bridge between HTTP submissions and its run loop — not a
+    /// property of a durable session log.
+    pub input_queue: InputQueue,
     pub workspace_root: PathBuf,
     pub default_model: String,
     pub workspace_config: WorkspaceConfig,
@@ -99,6 +124,28 @@ pub struct AppState {
     /// `tokio::sync::broadcast::Receiver` via
     /// [`SessionController::subscribe`](crate::session::controller::SessionController::subscribe).
     pub active_sessions: Arc<crate::state::ActiveSessions>,
+    /// One gate per `(user_id, session_id)` for the cold-open path.
+    ///
+    /// Opening a session for the first time is a read-modify-write of
+    /// [`Self::active_sessions`] that also rebuilds the controller from
+    /// the log and re-queues a parked prompt — work that must happen
+    /// once, not once per concurrent request. Every open for the
+    /// session queues on the gate, warm ones included: a request that
+    /// arrives while a cold open is in flight waits for it, bounded by
+    /// the timeout below. Private: it is a spawn detail, not server
+    /// state a route may inspect.
+    ///
+    /// The map holds a **weak** reference to each gate: the session's
+    /// controller owns the lock, so an entry lives exactly as long as
+    /// its controller and the map cannot grow with the number of
+    /// sessions the process has ever opened.
+    spawn_gates: Arc<crate::state::SessionSpawnGates>,
+    /// How long a cold open waits for that gate before failing.
+    ///
+    /// The production value is `COLD_OPEN_GATE_TIMEOUT` in
+    /// `sessions.rs`; a test shortens it to prove the bound without
+    /// waiting half a minute.
+    pub(crate) spawn_gate_timeout: std::time::Duration,
     /// Sub-agent session router: gives every delegated child a
     /// first-class session of its own (see
     /// `crate::session::subagent_router`). Installed once at boot
@@ -178,6 +225,26 @@ pub struct AppState {
     /// consumer (readiness probe, operator endpoint) see which
     /// integrations are live without re-reading the config.
     pub mcp_health: Vec<synthia::mcp::ServerHealth>,
+    /// The deployment's plugin host, built once at boot.
+    ///
+    /// [`Self::plugins`] installed every configured plugin into it;
+    /// the host owns the registrations (observers, gates,
+    /// transformers, prompt sections, tools) those installs made.
+    /// Every agent construction hands this clone to
+    /// `ReActAgent::with_host`, so the plugin's tools are callable
+    /// from the boot agent and from the per-run agents that serve
+    /// chat alike. A clone shares the registrations, so there is one
+    /// policy, not one per agent.
+    pub plugin_host: synthia::harness::Host,
+    /// Task 15: the deployment's plugin composition, installed into
+    /// [`Self::plugin_host`] at boot.
+    ///
+    /// It owns every installed plugin's `PluginHandle`, and a
+    /// handle's drop withdraws its registrations — so this field
+    /// must live as long as the host. The resolved and skipped
+    /// sets are the operator-facing record ("this deployment runs
+    /// these plugins; these entries were skipped, and why").
+    pub plugins: crate::composition::Composition,
     /// R34: the effective tool surface after the `[tools]` config
     /// section was applied to the registry at boot. Unknown config
     /// names were dropped with a warning (see

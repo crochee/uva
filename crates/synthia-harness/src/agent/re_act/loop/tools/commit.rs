@@ -15,7 +15,7 @@ use synthia_provider::{
 use synthia_tool::ToolOutput;
 use tracing::info;
 
-use super::{super::ReActLoop, did_not_run, text_parts};
+use super::{super::ReActLoop, text_parts};
 use crate::{
     agent::re_act::{r#loop::hooks, state::RunState},
     events::AgentEvent,
@@ -38,15 +38,18 @@ pub(crate) async fn commit_all_results(
             }
         }
     }
-    // Last resort: every loop-exit path above fills its
-    // unanswered slots with a cause-tagged error, so a slot
-    // reaching here unfilled means no dispatch path claimed it.
-    let unclaimed = outputs.iter().filter(|slot| slot.is_none()).count();
+    // A held call has no result to commit: its slot stays `None`
+    // until a resume approves it. Every other loop-exit path fills
+    // its unanswered slots with a cause-tagged error, so a `None`
+    // here is a held call (an unfilled ordinary call would be a bug,
+    // but inventing an error row for it would make repair believe
+    // the call was answered).
+    let held = outputs.iter().filter(|slot| slot.is_none()).count();
     let mut error_count = 0usize;
     for (idx, call) in calls.iter().enumerate() {
-        let mut output = outputs[idx].take().unwrap_or_else(|| {
-            did_not_run(call, "no dispatch path claimed it")
-        });
+        let Some(mut output) = outputs[idx].take() else {
+            continue;
+        };
         let is_error = output.is_error.unwrap_or(false);
         if is_error {
             error_count += 1;
@@ -74,12 +77,12 @@ pub(crate) async fn commit_all_results(
                 replace_text_parts(&mut output.content, text);
             }
         }
-        commit_tool_result(this, session, call, output);
+        commit_tool_result(this, session, call, output).await;
     }
     info!(
         tool_call_count = calls.len(),
         error_count,
-        unclaimed,
+        held,
         history_len = session.messages.len(),
         "step 4 execute_tools: all ToolResults committed to history"
     );
@@ -100,7 +103,7 @@ fn replace_text_parts(content: &mut Vec<ContentPart>, text: String) {
     );
 }
 
-pub(crate) fn commit_tool_result(
+pub(crate) async fn commit_tool_result(
     this: &ReActLoop,
     session: &mut RunState,
     call: &ToolUse,
@@ -121,15 +124,44 @@ pub(crate) fn commit_tool_result(
     }
     // `output` is owned here; move its `content` / `metadata` out
     // and clone `content` once for the message — the event takes
-    // the original, saving one full `Vec<ContentPart>` copy per
-    // committed tool result.
+    // the original. The row serializes from a borrow of the
+    // message before it moves into history, so the commit costs
+    // exactly one `Vec<ContentPart>` copy.
     let synthia_tool::ToolOutput {
         content, metadata, ..
     } = output;
-    Arc::make_mut(&mut session.messages).push(Message::tool(
-        Content::parts(content.clone()),
-        call.id.clone(),
-    ));
+    let message =
+        Message::tool(Content::parts(content.clone()), call.id.clone());
+    let row = this.sink.has_writer().then(|| {
+        serde_json::to_value(&message).expect("tool result serializes")
+    });
+    Arc::make_mut(&mut session.messages).push(message);
+    // The tool result is a harness-owned log fact: write it here,
+    // on the loop's own task, and land it BEFORE the event goes
+    // out — a subscriber that sees the tool result reads a log
+    // that already holds its row. A failed flush does not drop
+    // the row (it waits in the writer's spill); the run's
+    // fail-fast rule then surfaces the failure at the next step
+    // boundary.
+    if let Some(data) = row {
+        this.sink
+            .emit_typed(synthia_session::SessionEvent::ToolResult {
+                seq: 0,
+                ts: String::new(),
+                data,
+                // The message payload carries the tool's output, not
+                // the failure; the flag rides beside it so the row
+                // says what the live event below says.
+                is_error,
+                surface_op: None,
+            });
+        if let Err(reason) = this.flush_log().await {
+            tracing::warn!(
+                end_reason = ?reason,
+                "tool-result flush failed; the row waits in the spill"
+            );
+        }
+    }
     this.sink
         .emit(AgentEvent::Model(ContentPart::ToolResult(ToolResult {
             tool_use_id: call.id.clone(),

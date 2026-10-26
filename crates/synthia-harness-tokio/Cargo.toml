@@ -17,18 +17,22 @@ categories.workspace = true
 # harness itself. The harness types appear only in docs, examples,
 # and rustdoc prose — all dev-side.
 synthia-core = { workspace = true }
-# `rt` is the only feature needed: `tokio::spawn` requires a runtime
-# handle which `rt` provides. The crate avoids `full` so a build of
-# this crate never pulls `tokio::process` / `tokio::fs` / `tokio::net`.
-tokio = { workspace = true, features = ["rt"] }
+# `rt` provides the runtime handle behind `tokio::spawn` and the
+# blocking pool behind `tokio::task::spawn_blocking`; `time` provides
+# `tokio::time::sleep` for `TokioSleeper`. The crate avoids `full` so
+# a build of this crate never pulls `tokio::process` / `tokio::fs` /
+# `tokio::net`.
+tokio = { workspace = true, features = ["rt", "time"] }
 
 [dev-dependencies]
 # The example composes a real `ReActAgent` with this spawner; the
 # lib itself never imports the harness.
 synthia-harness = { workspace = true }
 # The example uses `#[tokio::main]` to spin a runtime the spawner
-# can attach to.
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# can attach to; the seam tests use `#[tokio::test]`,
+# `tokio::sync::oneshot`, and `tokio::time::sleep` to hold a future
+# unpolled.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 # `Stream::next` over the agent event stream.
 futures.workspace = true
 # `#[async_trait]` for the scripted provider.

@@ -40,6 +40,7 @@ pub mod hint;
 pub mod hook;
 pub mod hook_map;
 pub mod output_transformer;
+pub mod request_params;
 pub mod steering;
 pub mod tier;
 pub mod tracker;
@@ -82,6 +83,7 @@ pub use hook_map::{
     event_name,
 };
 pub use output_transformer::{NoopOutputTransformer, OutputTransformer};
+pub use request_params::RequestParams;
 pub use steering::Steering;
 pub use tier::{auto, for_tier};
 pub use transformer::{BudgetAwareTruncator, JsonExtractor, TransformerChain};

@@ -15,7 +15,7 @@ use synthia_provider::{
     ToolChoice,
     ToolUse,
 };
-use synthia_steering::HookEvent;
+use synthia_steering::{HookDecision, HookEvent, RequestParams};
 use synthia_tool::ToolOutput;
 use tracing::{debug, info};
 
@@ -32,6 +32,9 @@ use super::{
 use crate::events::{SessionEndReason, WarningKind};
 
 /// Returns an `Arc` so the hot path clones the refcount, never the messages.
+///
+/// The caller-provided transcript: a host without a log writer hands
+/// the loop the history and this turn's content.
 pub(super) fn prepare(
     this: &ReActLoop,
     input: &crate::input::AgentInput,
@@ -42,35 +45,76 @@ pub(super) fn prepare(
         has_per_dispatch_ctx = input.prompt_context.is_some(),
         "step 1 prepare: assembling system prompt + history"
     );
-    // The system prompt is byte-stable: volatile runtime facts live
-    // in the RuntimeContext snapshot seam (see
-    // `snapshot_runtime_context`), never in the system prompt—
-    // that's the prompt-cache-stability contract.
-    let assembled = assemble_system_prompt(this, input);
-    let messages = crate::prompt::base_transcript(
-        &assembled,
+    Arc::new(crate::prompt::base_transcript(
+        &assemble_system_prompt(this),
         &input.history,
-        input.to_message(),
-    );
+        Some(input.to_message()),
+    ))
+}
+
+/// The writer-backed transcript: the system prompt, the history the
+/// session log derives, and this turn's attachment parts.
+///
+/// The host logs this turn's user message before starting the run, so
+/// its text is already in `history`; `input.content` and
+/// `input.history` are not appended. The log cannot hold the turn's
+/// bytes, so the non-text parts ride a user message of their own after
+/// the derived history.
+pub(super) fn prepare_from_log(
+    this: &ReActLoop,
+    input: &crate::input::AgentInput,
+    history: &[Message],
+    attachments: &[ContentPart],
+) -> Transcript {
     debug!(
         agent = %this.caps.model.descriptor.name,
-        final_messages_len = messages.len(),
-        "step 1 prepare: messages vector ready for LLM"
+        history_len = history.len(),
+        attachment_parts = attachments.len(),
+        has_per_dispatch_ctx = input.prompt_context.is_some(),
+        "step 1 prepare: assembling system prompt + log-derived history"
     );
+    let mut messages = crate::prompt::base_transcript(
+        &assemble_system_prompt(this),
+        history,
+        None,
+    );
+    if !attachments.is_empty() {
+        messages.push(Message::new(
+            Role::User,
+            Content::Multi(attachments.to_vec()),
+        ));
+    }
     Arc::new(messages)
 }
 
-fn assemble_system_prompt(
-    this: &ReActLoop,
+/// The parts of this turn the session log cannot reproduce: everything
+/// that is not text. The host's log row carries the text, so only the
+/// bytes need a home in the request.
+pub(super) fn attachment_parts(
     input: &crate::input::AgentInput,
-) -> String {
-    let ctx = crate::prompt::resolve_prompt_context(input, this.caps.as_ref());
+) -> Vec<ContentPart> {
+    input
+        .content
+        .iter()
+        .filter(|part| !matches!(part, ContentPart::Text(_)))
+        .cloned()
+        .collect()
+}
+
+// The system prompt is byte-stable: volatile runtime facts live in
+// the `RuntimeContext` snapshot seam (see
+// `snapshot_runtime_context`), never in the system prompt — that's
+// the prompt-cache-stability contract. The manifest was snapshotted
+// once at run start (`ReActLoop::from_caps`), so this only renders.
+fn assemble_system_prompt(this: &ReActLoop) -> String {
+    let ctx = &this.prompt_context;
     let assembled = ctx.assemble(&this.caps.model.descriptor);
     debug!(
         agent = %this.caps.model.descriptor.name,
         assembled_len = assembled.len(),
         skills = ctx.skills.len(),
         peer_agents = ctx.agents.len(),
+        plugin_sections = ctx.sections().len(),
         "step 1 prepare: system prompt assembled"
     );
     assembled
@@ -88,8 +132,8 @@ pub(super) fn completion_request(
         Arc::clone(messages),
         tool_definitions(
             this.caps.as_ref(),
-            &this.synthetic_defs,
-            this.synthetic_fingerprint,
+            &this.delegator_defs,
+            this.delegator_fingerprint,
             projection,
         ),
         ToolChoice::Auto,
@@ -136,7 +180,7 @@ fn merge_adjacent(prev: &mut ContentPart, next: &ContentPart) -> bool {
     }
 }
 
-pub(super) fn fail_truncated_tool_batch(
+pub(super) async fn fail_truncated_tool_batch(
     this: &ReActLoop,
     session: &mut RunState,
     calls: &[ToolUse],
@@ -153,7 +197,8 @@ pub(super) fn fail_truncated_tool_batch(
             session,
             call,
             ToolOutput::error(error_text),
-        );
+        )
+        .await;
     }
 }
 
@@ -168,6 +213,19 @@ pub(crate) async fn sample_once(
     model_hint: Option<&String>,
     iteration: usize,
 ) -> Result<SampleOutcome, SessionEndReason> {
+    // The step boundary: a policy can end the run before the model
+    // is asked anything.
+    let arbitration = super::hooks::dispatch_hook(&this.caps.control, || {
+        HookEvent::BeforeStep {
+            agent_name: this.caps.model.descriptor.name.clone(),
+            run_idx: 0,
+            iteration: iteration as u32,
+        }
+    })
+    .await;
+    if let HookDecision::Terminate { reason } = arbitration.decision {
+        return Err(SessionEndReason::Error(reason));
+    }
     let req =
         Arc::new(completion_request(this, model_hint, projection, messages));
     info!(
@@ -182,15 +240,55 @@ pub(crate) async fn sample_once(
     // Arc is back to refcount 1 here and the unwrap succeeds
     // without copying; the fallback keeps the (pathological)
     // shared case correct.
-    let req = Arc::try_unwrap(req).unwrap_or_else(|shared| (*shared).clone());
+    let mut request =
+        Arc::try_unwrap(req).unwrap_or_else(|shared| (*shared).clone());
+    rewrite_request(this, &mut request).await;
 
-    let (resp, outcome) = match stream_completion(this, req, iteration).await {
-        Ok(pair) => pair,
-        Err(reason) => return Err(reason),
-    };
+    let (resp, outcome) =
+        match stream_completion(this, request, iteration).await {
+            Ok(pair) => pair,
+            Err(reason) => return Err(reason),
+        };
     observe_provider_success(this, &resp, agent_state).await;
     log_sample_result(iteration, &resp, &outcome);
     Ok(outcome)
+}
+
+// The `before_request` point: the parameters the request goes out
+// with. The host's transformers chain over them, and a handler that
+// answered `ReplaceParams` replaces them.
+//
+// The message list is not part of the rewrite surface: the params
+// carry it read-only, so a rewrite can change the model, the
+// temperature, the budget, the tool choice or the tool schemas — and
+// nothing else.
+async fn rewrite_request(this: &ReActLoop, request: &mut CompletionRequest) {
+    // Nothing can rewrite the request: skip the whole pass — the
+    // params snapshot, the dispatch and the write-back — rather than
+    // paying for it on every step.
+    if this.caps.control.steering.hooks.is_empty()
+        && !this.caps.control.host.has_request_rewriters()
+    {
+        return;
+    }
+    let mut params = RequestParams::from_request(request);
+    let provider = this.cfg.provider.clone();
+    let arbitration = super::hooks::dispatch_hook(&this.caps.control, || {
+        HookEvent::BeforeRequest {
+            provider: provider.clone(),
+            params: params.clone(),
+        }
+    })
+    .await;
+    if let HookDecision::ReplaceParams(replacement) = arbitration.decision {
+        params = replacement;
+    }
+    this.caps
+        .control
+        .host
+        .apply_request_transformers(&mut params)
+        .await;
+    params.apply_to(request);
 }
 
 fn log_sample_result(
@@ -213,8 +311,10 @@ fn log_sample_result(
 }
 
 async fn notify_provider_start_hooks(this: &ReActLoop) {
-    // Decision ignored: `BeforeProviderCall` is observational.
-    let _ = super::hooks::dispatch_hook(&this.caps.control.steering, || {
+    // `BeforeProviderCall` is observational: the point accepts no
+    // decision, so a handler that returns one is recorded as a
+    // diagnostic and the run continues.
+    super::hooks::dispatch_hook(&this.caps.control, || {
         HookEvent::BeforeProviderCall {
             provider: this.cfg.provider.clone(),
             model: this.cfg.name.clone(),
@@ -281,6 +381,13 @@ async fn stream_completion(
             // already published.
             Arc::make_mut(&mut outcome.result).stop_reason =
                 resp.stop_reason.clone();
+            // The turn's row is one `assistant_message`, written
+            // by the finalize above. Land it now: by the time the
+            // loop moves past this model call, the call's fact is
+            // durable — a crash one instruction later still
+            // leaves the transcript whole. A failed flush is
+            // fatal per the run's fail-fast rule.
+            this.flush_log().await?;
             Ok((resp, outcome))
         }
         Err(e) => Err(provider_failed(
@@ -300,12 +407,11 @@ async fn provider_failed(
     detail: &str,
 ) -> SessionEndReason {
     let reason = format!("{context}: {detail}");
-    // Decision ignored: `OnError` is observational.
-    let _ = super::hooks::dispatch_hook(&this.caps.control.steering, || {
-        HookEvent::OnError {
-            agent_name: this.caps.model.descriptor.name.clone(),
-            reason: reason.clone(),
-        }
+    // `OnError` is observational: the point accepts no decision, so
+    // a handler that returns one is recorded as a diagnostic.
+    super::hooks::dispatch_hook(&this.caps.control, || HookEvent::OnError {
+        agent_name: this.caps.model.descriptor.name.clone(),
+        reason: reason.clone(),
     })
     .await;
     this.sink
@@ -342,8 +448,10 @@ async fn observe_provider_success(
                 .on_llm_response(&resp.usage, agent_state);
         },
     );
-    // Decision ignored: `AfterProviderCall` is observational.
-    let _ = super::hooks::dispatch_hook(&this.caps.control.steering, || {
+    // `AfterProviderCall` is observational: the point accepts no
+    // decision, so a handler that returns one is recorded as a
+    // diagnostic.
+    super::hooks::dispatch_hook(&this.caps.control, || {
         HookEvent::AfterProviderCall {
             provider: this.cfg.provider.clone(),
             model: this.cfg.name.clone(),
@@ -416,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_count_changes_invalidate_the_fingerprint() {
+    fn delegator_count_changes_invalidate_the_fingerprint() {
         let a = compute_fingerprint(7, 0, 11, 3);
         let b = compute_fingerprint(7, 0, 11, 4);
         assert_ne!(a, b);

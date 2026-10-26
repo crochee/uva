@@ -13,8 +13,8 @@ use super::{
     support::{descriptor_with_instructions, peer_descriptor},
 };
 
-/// Section order below is a prompt-cache wire contract: a reorder invalidates
-/// every cached prefix, and this is the only test pinning *place*, not presence.
+// Section order below is a prompt-cache wire contract: a reorder invalidates
+// every cached prefix, and this is the only test pinning *place*, not presence.
 #[test]
 fn default_pack_renders_canonical_xml_order() {
     let mut d = descriptor_with_instructions("BASE");

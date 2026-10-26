@@ -1,6 +1,6 @@
 [package]
 name = "synthia-harness"
-description = "ReAct loop and reasoning strategies for synthia: ReActAgent, ReAct / chain-of-thought / best-of-N strategies, SyntheticTool seam, event sinks"
+description = "ReAct loop and reasoning strategies for synthia: ReActAgent, ReAct / chain-of-thought / best-of-N strategies, DelegatingTool seam, event sinks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -30,6 +30,10 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# The approval request carries a digest of the call's arguments, so a
+# decision can be checked against the call it was made for.
+sha2.workspace = true
+hex.workspace = true
 # The harness is runtime-neutral: its `[dependencies]` carries zero
 # tokio. A consumer on a tokio runtime depends on the sibling
 # `synthia-harness-tokio` crate, which provides `TokioSpawner` —

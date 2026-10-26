@@ -44,6 +44,15 @@ pub type ActiveSessions = dashmap::DashMap<
     (String, String),
     std::sync::Arc<crate::session::controller::SessionController>,
 >;
+
+/// One cold-open gate per `(user_id, session_id)`.
+///
+/// The map holds a **weak** reference to each gate: the session's
+/// controller owns the lock (and with it the only strong reference),
+/// so an entry cannot outlive its controller and the map cannot grow
+/// with the number of sessions the process has ever opened.
+pub type SessionSpawnGates =
+    dashmap::DashMap<(String, String), std::sync::Weak<tokio::sync::Mutex<()>>>;
 #[cfg(test)]
 pub(crate) use boot::{
     apply_tools_config,

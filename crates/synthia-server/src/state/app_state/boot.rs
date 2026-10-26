@@ -4,16 +4,20 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use dashmap::DashMap;
 use synthia::{
     core::{Clock, registry::Registry},
     harness::{AgentEntry, AgentRegistry},
     provider::{config::WorkspaceConfig, traits::ModelProvider},
-    session::{jsonl_session_search, manager::SessionRegistry},
+    session::{
+        JsonlSessionSearch,
+        SharedSessionSearch,
+        manager::SessionRegistry,
+    },
     skill::{register_skill_tool, seed_default_skills},
     tool::ToolRegistry,
     tool_task::TaskDelegator,
 };
-use tokio::sync::RwLock;
 
 use super::{
     AppState,
@@ -175,18 +179,24 @@ impl AppState {
             clock.clone(),
         );
 
-        let session_search =
-            jsonl_session_search(workspace_root.join("sessions"));
-        let session_manager =
-            Arc::new(SessionRegistry::new(workspace_root.join("sessions")));
+        // The store walk and every session's fs writes run on the
+        // tokio blocking pool (the seams' defaults are runtime-free
+        // but pay one OS thread per call).
+        let session_search: SharedSessionSearch = Arc::new(
+            JsonlSessionSearch::new(workspace_root.join("sessions"))
+                .with_blocking(crate::spawner::server_blocking()),
+        );
+        let session_manager = Arc::new(
+            SessionRegistry::new(workspace_root.join("sessions"))
+                .with_blocking(crate::spawner::server_blocking()),
+        );
         // The default tool surface, composed from the plugin
-        // crates, then the agent-facing `skill` tool on top. The
-        // skill implementation lives in `synthia-skill` so the HTTP
-        // list route and the LLM-facing tool share one home;
-        // registering before wrapping in `RwLock` lets the
-        // synchronous `register_skill_tool(&registry)` call take
-        // `&ToolRegistry` directly without going through an async
-        // lock guard.
+        // crates, then the agent-facing `skill` tool on top.
+        // The skill implementation lives in `synthia-skill` so the
+        // HTTP list route and the LLM-facing tool share one home;
+        // registering before wrapping in `Arc` lets the synchronous
+        // `register_skill_tool(&registry)` call take `&ToolRegistry`
+        // directly.
         let tool_registry_built = plugin_tool_registry();
         register_skill_tool(&tool_registry_built);
         // R21/R30: connect the configured MCP servers through the
@@ -204,18 +214,6 @@ impl AppState {
             }
             None => (Vec::new(), Vec::new()),
         };
-        // R34: apply the deployment's `[tools]` surface after every
-        // registration source (builtins, skill tool, MCP tools) has had
-        // its say, so the config can name remote tools too. Unknown
-        // names are warnings, never boot failures—see
-        // `apply_tools_config`.
-        let tool_surface = apply_tools_config(
-            &tool_registry_built,
-            &server_config
-                .as_ref()
-                .map(|c| c.tools.clone())
-                .unwrap_or_default(),
-        );
         // Smaller per-request load: with cross-domain search wired
         // below, MCP tools stop carrying their full JSON schemas on
         // every completion request—they advertise name +
@@ -229,8 +227,7 @@ impl AppState {
             tool_registry_built
                 .set_exposure(&d.name, synthia::tool::ToolExposure::Deferred);
         }
-        let tool_surface_policy = tool_surface.policy();
-        let tool_registry = Arc::new(RwLock::new(tool_registry_built));
+        let tool_registry = Arc::new(tool_registry_built);
         // Per-section config: auth, CORS, operations, default
         // agent name, max iterations, compaction, restriction,
         // strategy. The eight fields group by what the boot does
@@ -279,6 +276,47 @@ impl AppState {
         let steering = Arc::new(synthia::steering::Steering::default_policy(
             workspace_root.clone(),
         ));
+        // Task 15: the deployment's plugins come from this config
+        // section, not from cargo features. The static table starts
+        // empty — no in-tree crate implements
+        // `synthia_harness::Plugin` today — so a fork that links a
+        // plugin crate registers its factory here, one line per
+        // plugin. The composition is installed into the deployment's
+        // one host; both the host and the composition's handles live
+        // on `AppState` below, for the process lifetime. Every agent
+        // this server builds — including each per-run session agent —
+        // gets a clone of that host and binds the shared registry, so
+        // a plugin installed here is visible to chat, not only to the
+        // boot agent.
+        let plugins_config = server_config
+            .as_ref()
+            .map(|config| config.plugins.clone())
+            .unwrap_or_default();
+        let static_plugins = crate::composition::StaticPlugins::new();
+        let mut plugin_host = synthia::harness::Host::new();
+        let plugins = crate::composition::Composition::build(
+            &plugins_config,
+            &static_plugins,
+            &tool_registry,
+            &mut plugin_host,
+        )
+        .await;
+        // R34 (Task 16): apply the deployment's `[tools]` surface after
+        // the plugin bind, not before it. The bind is what puts a
+        // plugin's tools in the registry, so a `[tools]` entry naming
+        // one was silently skipped when this ran first — the config was
+        // read against a registry that did not have the tool yet.
+        // Every registration source has now had its say: builtins, the
+        // skill tool, MCP servers, the plugins. Unknown names are
+        // warnings, never boot failures — see `apply_tools_config`.
+        let tool_surface = apply_tools_config(
+            tool_registry.as_ref(),
+            &server_config
+                .as_ref()
+                .map(|c| c.tools.clone())
+                .unwrap_or_default(),
+        );
+        let tool_surface_policy = tool_surface.policy();
         let agent_registry = Self::build_default_agent(
             &default_provider,
             &tool_registry,
@@ -287,6 +325,7 @@ impl AppState {
             default_strategy.clone(),
             default_tool_restriction.clone(),
             steering.clone(),
+            plugin_host.clone(),
         )
         .await;
 
@@ -365,16 +404,11 @@ impl AppState {
         // exposure—the cold-start tool list carries name +
         // description, and the real schema promotes on the first
         // call.
-        {
-            let g = tool_registry.read().await;
-            if !synthia::tool_search::register_search_tool(
-                &g,
-                search.registry(),
-            ) {
-                tracing::warn!(
-                    "failed to register the search tool: name shadowed"
-                );
-            }
+        if !synthia::tool_search::register_search_tool(
+            &tool_registry,
+            search.registry(),
+        ) {
+            tracing::warn!("failed to register the search tool: name shadowed");
         }
 
         // The four HTTP-backed management subsystems. Schedules,
@@ -393,7 +427,6 @@ impl AppState {
             Arc::new(crate::session::subagent_router::SubagentRouter::new(
                 Arc::clone(&session_manager),
                 Arc::clone(&active_sessions),
-                clock.clone(),
             ));
         // Workflow-runtime bridge over the same agent registry the
         // interactive routes resolve through—cloned here because
@@ -425,6 +458,7 @@ impl AppState {
             agent_registry,
             session_search,
             session_manager,
+            input_queue: crate::session::input_queue::InputQueue::default(),
             workspace_root,
             default_model,
             workspace_config,
@@ -445,7 +479,11 @@ impl AppState {
             tool_defs_cache: parking_lot::RwLock::new(None),
             mcp_clients,
             mcp_health,
+            plugin_host,
+            plugins,
             active_sessions,
+            spawn_gates: Arc::new(DashMap::new()),
+            spawn_gate_timeout: super::sessions::COLD_OPEN_GATE_TIMEOUT,
             subagent_router,
             default_agent_name: parking_lot::RwLock::new(
                 default_agent_name_value,
@@ -579,16 +617,20 @@ impl AppState {
     /// the original was the largest single block in the boot—
     /// ~50 lines threading tool registry / provider / policy /
     /// restriction / strategy through the `ReActAgent::with_*`
-    /// builder chain, plus a `try_read()` snapshot and four
-    /// `if let Some` chains. In its own private fn the
-    /// orchestrator stays at "wire → assemble".
+    /// builder chain and four `if let Some` chains. In its own
+    /// private fn the orchestrator stays at "wire → assemble".
     ///
     /// The steering bundle is passed in (the orchestrator
     /// builds it once; the `AppState` field and the default
     /// agent share the same `Arc`).
+    ///
+    /// The deployment's plugin host is passed in too: the boot
+    /// composed the plugins into it, `AppState` keeps it, and this
+    /// agent gets a clone — the same handle every run will get.
+    #[allow(clippy::too_many_arguments)]
     async fn build_default_agent(
         default_provider: &Arc<dyn ModelProvider>,
-        tool_registry: &Arc<RwLock<ToolRegistry>>,
+        tool_registry: &Arc<ToolRegistry>,
         tool_surface_policy: Option<synthia::tool::ToolSurfacePolicy>,
         default_max_iterations: usize,
         default_strategy: Option<
@@ -596,23 +638,17 @@ impl AppState {
         >,
         default_tool_restriction: Option<Arc<synthia::tool::ToolRestriction>>,
         steering: Arc<synthia::steering::Steering>,
+        plugin_host: synthia::harness::Host,
     ) -> Arc<AgentRegistry> {
         let agent_registry = Arc::new(AgentRegistry::new());
-        // Snapshot the tool registry for `ReActAgent::new`. The
-        // agent captures the registry it was built with; the
-        // per-policy installers below carry the configured
-        // surface / strategy / restriction.
-        let tool_registry_snapshot = {
-            let g = tool_registry.try_read();
-            match g {
-                Ok(g) => Arc::new(g.clone()),
-                Err(_) => Arc::new(ToolRegistry::new()),
-            }
-        };
         let default_agent =
             crate::agent_assembly::AgentAssembly {
                 provider: Arc::clone(default_provider),
-                tool_registry: tool_registry_snapshot,
+                // The node's one registry — not a snapshot. A
+                // plugin's tools are registered here at bind time,
+                // and every per-run agent sees them because it binds
+                // the same handle.
+                tool_registry: Arc::clone(tool_registry),
                 workspace_root: std::path::PathBuf::new(),
                 descriptor: synthia::harness::default_descriptor(
                     synthia::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
@@ -626,14 +662,16 @@ impl AppState {
                 // `task` calls resolve the same catalog the session
                 // factory builds. (Its prompt manifest is assembled
                 // once `prompt_context` exists, after this call.)
-                synthetic: vec![Arc::new(TaskDelegator::new(Arc::clone(
+                delegators: vec![Arc::new(TaskDelegator::new(Arc::clone(
                     &agent_registry,
                 )))],
                 tool_surface: tool_surface_policy,
                 strategy: default_strategy,
                 tool_restriction: default_tool_restriction,
-                typed_event_sink: None,
+                log_writer: None,
+                subagent_writers: None,
                 context_manager: None,
+                host: Some(plugin_host),
             }
             .build();
         if let Err(e) = agent_registry

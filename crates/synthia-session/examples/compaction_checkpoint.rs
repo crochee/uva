@@ -5,11 +5,10 @@
 //! the call ids of the shadowed tool results — to a durable
 //! `SessionEvent::Compaction` row, but **only** when the run's
 //! `SurfaceLedger` can prove where those rows sit in the log and
-//! which seqs identify them. The writer feeds that ledger every row
-//! it appends, with the row's 1-based log ordinal (`RunLog::append`
-//! in `synthia-server`, which is private); this example mirrors it
-//! over the crate's own `InMemorySessionSink`, with no agent, no
-//! provider call and no network.
+//! which seqs identify them. The session's `LogWriter` feeds that
+//! ledger every row it appends, with the row's own ordinal; this
+//! example runs it over the crate's own `InMemorySessionSink`, with
+//! no agent, no provider call and no network.
 //!
 //! Run:
 //!
@@ -32,77 +31,22 @@
 use std::sync::Arc;
 
 use serde_json::Value;
+use synthia_core::SystemClock;
 use synthia_provider::{Content, Message};
 use synthia_session::{
     CompactionCheckpoint,
+    CompactionLifecycleOutcome,
     CompactionLifecycleView,
-    CompactionOutcome,
     CompactionRecordView,
     FoldedSurface,
+    LogWriter,
     SessionEvent,
     SessionSink,
     SurfaceLedger,
-    TypedEventReceiver,
-    TypedEventSink,
     fold_log_surface,
     in_memory::InMemorySessionSink,
     try_fold_log_surface,
 };
-
-/// One run's writer over the session sink.
-///
-/// Mirrors `RunLog` in `synthia-server/src/session/controller.rs`:
-/// append the row to the sink, then feed the run's ledger with the
-/// 1-based ordinal the reader will reproduce — the source of truth a
-/// checkpoint resolves its provenance against.
-struct RunWriter {
-    sink: InMemorySessionSink,
-    ledger: Arc<SurfaceLedger>,
-    next_seq: u64,
-}
-
-impl RunWriter {
-    /// Wrap the sink, seeded with the ordinal of the last row it
-    /// already holds.
-    async fn new(
-        sink: InMemorySessionSink,
-        ledger: Arc<SurfaceLedger>,
-    ) -> Self {
-        let next_seq = sink
-            .snapshot()
-            .await
-            .map(|snapshot| snapshot.last_event_seq)
-            .unwrap_or(0);
-        Self {
-            sink,
-            ledger,
-            next_seq,
-        }
-    }
-
-    /// Append one row, then index it.
-    async fn append(&mut self, mut row: Value) {
-        if let Some(object) = row.as_object_mut() {
-            // The server also stamps a wall-clock `ts`; only the
-            // ordinal takes part in provenance.
-            object.insert("seq".to_string(), Value::from(self.next_seq + 1));
-        }
-        self.sink
-            .append(&row)
-            .await
-            .expect("the in-memory sink accepts appends while open");
-        self.next_seq += 1;
-        self.ledger.record(self.next_seq, &row);
-    }
-
-    /// The rows as the resume path reads them.
-    async fn rows(&self) -> Vec<Value> {
-        self.sink
-            .read()
-            .await
-            .expect("the in-memory sink reads while open")
-    }
-}
 
 /// The run's rows: a prompt, one assistant line, and the tool result
 /// the compaction will shadow.
@@ -116,6 +60,7 @@ fn run_rows() -> Vec<Value> {
         ts: String::new(),
         data: serde_json::to_value(Message::user("read the config file"))
             .expect("a user message serialises"),
+        source: None,
         surface_op: None,
     };
     let assistant = SessionEvent::AssistantMessage {
@@ -133,6 +78,7 @@ fn run_rows() -> Vec<Value> {
             "call-1",
         ))
         .expect("a tool result serialises"),
+        is_error: false,
         surface_op: None,
     };
     [user, assistant, tool_result]
@@ -166,30 +112,35 @@ fn attempt(
     checkpoint.record_callback()(record);
     lifecycle(CompactionLifecycleView::End {
         token: token.to_string(),
-        outcome: CompactionOutcome::Committed,
+        outcome: CompactionLifecycleOutcome::Committed,
     });
 }
 
-/// The run-end flush, in the server's order: drain the typed channel
-/// into the log, then retry the records that parked and append what
-/// resolved. Returns `(parked, resolved-and-written)`.
+/// The run-end flush, in the server's order: the writer's queued
+/// rows reach the log, then the records that parked are retried and
+/// what resolved is written through the same writer. Returns
+/// `(parked, resolved-and-written)`.
 async fn flush(
     checkpoint: &Arc<CompactionCheckpoint>,
-    receiver: &mut TypedEventReceiver,
-    log: &mut RunWriter,
+    writer: &Arc<LogWriter>,
 ) -> (usize, usize) {
-    while let Ok(Some(record)) = receiver.try_recv() {
-        log.append(record.as_value()).await;
-    }
+    writer
+        .flush()
+        .await
+        .expect("the writer's rows reach the log");
     let parked = checkpoint.pending_len();
     let resolved = checkpoint.resolve_pending();
     let written = resolved.len();
     for event in resolved {
-        log.append(
-            serde_json::to_value(&event).expect("an event row serialises"),
-        )
-        .await;
+        writer
+            .append_event(&event)
+            .await
+            .expect("the resolved record is queued");
     }
+    writer
+        .flush()
+        .await
+        .expect("the resolved record reaches the log");
     (parked, written)
 }
 
@@ -267,12 +218,19 @@ fn mentions(folded: &FoldedSurface, needle: &str) -> bool {
 async fn main() {
     println!("== run 1: a record the ledger can prove ==");
     let ledger = Arc::new(SurfaceLedger::new());
-    let sink = InMemorySessionSink::new("checkpoint-proven");
-    let mut log = RunWriter::new(sink, Arc::clone(&ledger)).await;
+    let sink = Arc::new(InMemorySessionSink::new("checkpoint-proven"));
+    let writer = Arc::new(
+        LogWriter::new(sink.clone(), Arc::new(SystemClock))
+            .with_ledger(Arc::clone(&ledger)),
+    );
     for row in run_rows() {
-        log.append(row).await;
+        writer
+            .append(row)
+            .await
+            .expect("the writer queues the rows");
     }
-    let rows_before = log.rows().await;
+    writer.flush().await.expect("the run's rows reach the log");
+    let rows_before = sink.read().await.expect("the log reads");
     println!(
         "run rows: {} (tool result `call-1` at seq 3)",
         rows_before.len()
@@ -280,8 +238,8 @@ async fn main() {
     let before = fold_log_surface(&rows_before);
     print_surface("surface before the checkpoint", &before);
 
-    let (sink, mut receiver) = TypedEventSink::channel(16);
-    let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+    let checkpoint =
+        CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
 
     // What the manager reports: it counts the system prompt the
     // loop prepends but never logs, so the tool result is its index
@@ -294,7 +252,7 @@ async fn main() {
             start: 3,
             end: 4,
             source_indices: vec![3],
-            source_keys: vec![Some("call-1".to_string())],
+            source_keys: vec![Some("tool:call-1".to_string())],
             summary_text: "summary: read the config file -> ok".to_string(),
         },
     );
@@ -303,10 +261,10 @@ async fn main() {
         checkpoint.pending_len()
     );
 
-    let (parked, written) = flush(&checkpoint, &mut receiver, &mut log).await;
+    let (parked, written) = flush(&checkpoint, &writer).await;
     println!("flush: parked={parked} resolved-and-written={written}");
 
-    let rows_after = log.rows().await;
+    let rows_after = sink.read().await.expect("the log reads");
     let compaction = find_row(&rows_after, "compaction")
         .expect("the checkpoint wrote a compaction row");
     let tag = compaction
@@ -366,24 +324,34 @@ async fn main() {
     println!();
     println!("== run 2: a record the ledger cannot prove ==");
     let ghost_ledger = Arc::new(SurfaceLedger::new());
-    let ghost_sink = InMemorySessionSink::new("checkpoint-unproven");
-    let mut ghost_log =
-        RunWriter::new(ghost_sink, Arc::clone(&ghost_ledger)).await;
+    let ghost_sink = Arc::new(InMemorySessionSink::new("checkpoint-unproven"));
+    let ghost_writer = Arc::new(
+        LogWriter::new(ghost_sink.clone(), Arc::new(SystemClock))
+            .with_ledger(Arc::clone(&ghost_ledger)),
+    );
     for row in run_rows() {
-        ghost_log.append(row).await;
+        ghost_writer
+            .append(row)
+            .await
+            .expect("the writer queues the rows");
     }
-    let ghost_keys = vec![Some("call-ghost".to_string())];
+    ghost_writer
+        .flush()
+        .await
+        .expect("the run's rows reach the log");
+    let ghost_keys = vec![Some("tool:call-ghost".to_string())];
     println!(
-        "ledger lookup for `call-ghost`: {}",
+        "ledger lookup for `tool:call-ghost`: {}",
         match ghost_ledger.resolve(&ghost_keys) {
             Ok(_) => "resolved".to_string(),
             Err(gap) => gap.to_string(),
         }
     );
 
-    let (ghost_sink, mut ghost_receiver) = TypedEventSink::channel(16);
-    let ghost_checkpoint =
-        CompactionCheckpoint::new(ghost_sink, Arc::clone(&ghost_ledger));
+    let ghost_checkpoint = CompactionCheckpoint::new(
+        Arc::clone(&ghost_writer),
+        Arc::clone(&ghost_ledger),
+    );
     // A call id no row carries: citing it would invent provenance,
     // so the record is parked instead of written.
     attempt(
@@ -401,13 +369,12 @@ async fn main() {
         "records parked after the callback: {}",
         ghost_checkpoint.pending_len()
     );
-    let (parked, written) =
-        flush(&ghost_checkpoint, &mut ghost_receiver, &mut ghost_log).await;
+    let (parked, written) = flush(&ghost_checkpoint, &ghost_writer).await;
     println!(
         "flush: parked={parked} resolved-and-written={written} \
          (an unprovable record is dropped)"
     );
-    let ghost_rows = ghost_log.rows().await;
+    let ghost_rows = ghost_sink.read().await.expect("the log reads");
     println!(
         "compaction rows in the log: {}",
         count_rows(&ghost_rows, "compaction")

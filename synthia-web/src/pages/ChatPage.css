@@ -595,7 +595,7 @@
 
 /* Files the user attached to a turn — the `document` blocks the
    send path emitted. Only the name and type are kept (see
-   `filesFromAttachments`), so each renders as a chip next to the
+   persisted attachment reference), so each renders as a chip next to the
    text rather than as a preview. */
 .nt-chat__segment-files {
   display: flex;
@@ -1587,4 +1587,250 @@
 
 .nt-chat__file-chip-state {
   color: var(--text-secondary);
+}
+
+/* -----------------------------------------------------------------
+ * Follow-driven surfaces: steer chips, queue, approval card,
+ * compaction marker, context meter
+ * ----------------------------------------------------------------- */
+
+/* Queued turns and steers sit above the composer, between the
+ * transcript and the input, so a message the user sent is visible
+ * even before the log has a row for it. */
+.nt-chat__queued,
+.nt-chat__steers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nt-chat__queued-item,
+.nt-chat__steer {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  max-width: 100%;
+  padding: 2px var(--spacing-sm);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+}
+
+.nt-chat__steer {
+  border-style: solid;
+  border-color: var(--border-primary);
+  background: var(--accent-primary-subtle);
+  color: var(--text-primary);
+}
+
+.nt-chat__steer--consumed,
+.nt-chat__steer--next_turn {
+  border-color: var(--border-subtle);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.nt-chat__queued-text,
+.nt-chat__steer-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 32ch;
+}
+
+.nt-chat__queued-state,
+.nt-chat__steer-state {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+/* Approval card — bounded to the held call's tool block (or the
+ * fallback slot when that block is outside the baseline window). */
+.nt-chat__approval {
+  margin: var(--spacing-xs) 0 var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--accent-yellow);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+}
+
+.nt-chat__approval-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.nt-chat__approval-count {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: var(--fs-xs);
+}
+
+.nt-chat__approval-list {
+  margin: var(--spacing-sm) 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.nt-chat__approval-item {
+  padding: var(--spacing-sm);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+}
+
+.nt-chat__approval-item-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+}
+
+.nt-chat__approval-tool {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.nt-chat__approval-risk {
+  padding: 0 var(--spacing-xs);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--color-tool-block-error-bg);
+  color: var(--color-tool-block-error-fg);
+}
+
+.nt-chat__approval-risk--low {
+  background: var(--accent-primary-subtle);
+  color: var(--accent-primary);
+}
+
+.nt-chat__approval-agent,
+.nt-chat__approval-hash {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.nt-chat__approval-actions,
+.nt-chat__approval-decided {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-sm);
+}
+
+.nt-chat__approval-decision {
+  font-weight: 600;
+}
+
+.nt-chat__approval-decision--resolved {
+  color: var(--accent-success);
+}
+
+.nt-chat__approval-decision--rejected,
+.nt-chat__approval-decision--cancelled {
+  color: var(--accent-red);
+}
+
+.nt-chat__approval-note {
+  margin: var(--spacing-xs) 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.nt-chat__approval-error {
+  margin-bottom: var(--spacing-xs);
+  color: var(--accent-red);
+  font-size: var(--fs-sm);
+}
+
+.nt-chat__approval-footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.nt-chat__approval-fallback {
+  margin: var(--spacing-sm) 0;
+}
+
+/* Compaction marker in the timeline. */
+.nt-chat__compaction {
+  margin: var(--spacing-sm) 0;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+}
+
+.nt-chat__compaction-head {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  flex-wrap: wrap;
+  color: var(--text-secondary);
+  font-size: var(--fs-xs);
+}
+
+.nt-chat__compaction-title {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.nt-chat__compaction-seq {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.nt-chat__compaction-summary {
+  margin: var(--spacing-sm) 0 0;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Footer meter: session-scoped context + tokens, and the manual
+ * compaction action. */
+.nt-chat__context-meter {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+}
+
+.nt-chat__context-meter .rt-Button {
+  margin-left: auto;
+}
+
+/* "Load earlier history" — the follow baseline carries a fixed
+ * window; the session transcript is the sanctioned way further back. */
+.nt-chat__load-history {
+  display: flex;
+  justify-content: center;
+  padding: var(--spacing-xs) 0;
 }

@@ -8,7 +8,6 @@ use synthia::{
     provider::traits::ModelProvider,
     tool::registry::ToolRegistry,
 };
-use tokio::sync::RwLock;
 
 use crate::{agent_run_config::CompactionEmitters, state::UsageMetrics};
 
@@ -18,7 +17,12 @@ use crate::{agent_run_config::CompactionEmitters, state::UsageMetrics};
 #[derive(Clone)]
 pub struct RunDependencies {
     pub provider: Arc<dyn ModelProvider>,
-    pub tool_registry: Arc<RwLock<ToolRegistry>>,
+    /// The node's one tool registry, shared by every agent.
+    ///
+    /// Not a snapshot: a plugin's tools, an MCP server's tools and a
+    /// management-route registration all land here, and every run
+    /// built from these dependencies advertises the live surface.
+    pub tool_registry: Arc<ToolRegistry>,
     /// Working directory handed to built-in tools via
     /// [`AgentRunConfig::workspace_root`](crate::agent_run_config::AgentRunConfig::workspace_root). Replaces the
     /// previous hard-coded `/tmp` so `read_file` / `shell`
@@ -110,6 +114,26 @@ pub struct RunDependencies {
     ///
     /// [`LocalBus`]: crate::cluster::LocalBus
     pub cluster: Arc<crate::cluster::ClusterRuntime>,
+    /// The deployment's attachment store (`AppState::attachment_store`).
+    ///
+    /// The one place multimodal payload bytes are kept: a parked prompt
+    /// stores them here (content-addressed) and its log row carries the
+    /// hash, so the row never holds the bytes and a restarted node can
+    /// fetch them back. The default is an in-memory store, which keeps
+    /// a controller built without an `AppState` (tests, embedders)
+    /// working — its refs resolve for the life of the process and no
+    /// further.
+    pub attachment_store: Arc<synthia::attachment::AttachmentStore>,
+    /// The deployment's plugin host (`AppState::plugin_host`), when
+    /// this controller was spawned by the server.
+    ///
+    /// Every run agent gets a clone and hands it to
+    /// `ReActAgent::with_host`, so the plugin tools installed at
+    /// boot are callable from chat. A host clone shares the
+    /// registrations (and the harness makes binding the already-bound
+    /// registry a no-op), so per-run agents add no plugin process.
+    /// Tests and embedders leave this `None`.
+    pub plugin_host: Option<synthia::harness::Host>,
 }
 
 impl RunDependencies {
@@ -136,7 +160,7 @@ impl RunDependencies {
 
     pub fn new(
         provider: Arc<dyn ModelProvider>,
-        tool_registry: Arc<RwLock<ToolRegistry>>,
+        tool_registry: Arc<ToolRegistry>,
         workspace_root: PathBuf,
         system_prompt: String,
     ) -> Self {
@@ -158,7 +182,34 @@ impl RunDependencies {
             usage_metrics: Arc::new(UsageMetrics::default()),
             subagent_router: None,
             cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
+            attachment_store: Arc::new(
+                synthia::attachment::AttachmentStore::default(),
+            ),
+            plugin_host: None,
         }
+    }
+
+    /// Install the deployment's attachment store — where a parked
+    /// prompt's payload bytes live, keyed by the hash its log row
+    /// carries.
+    #[must_use]
+    pub fn with_attachment_store(
+        mut self,
+        store: Arc<synthia::attachment::AttachmentStore>,
+    ) -> Self {
+        self.attachment_store = store;
+        self
+    }
+
+    /// Install the deployment's plugin host, whose clone every run
+    /// agent this controller builds receives.
+    #[must_use]
+    pub fn with_plugin_host(
+        mut self,
+        host: Option<synthia::harness::Host>,
+    ) -> Self {
+        self.plugin_host = host;
+        self
     }
 
     /// Install the wall-clock source this session's log rows are

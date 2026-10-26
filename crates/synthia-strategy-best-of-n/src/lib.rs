@@ -159,6 +159,11 @@ impl BestOfNStrategy {
         request: &CompletionRequest,
         sink: &EventSink,
     ) -> (Vec<Scored>, Vec<String>) {
+        // The prompt (and everything queued before it) lands before
+        // any candidate samples.
+        if let Err(error) = sink.flush_log().await {
+            return (Vec::new(), vec![format!("log flush failed: {error}")]);
+        }
         let mut answers = self.fan_out(runtime, request);
         let mut arrivals: Vec<(usize, String)> = Vec::new();
         let mut failures: Vec<String> = Vec::new();
@@ -252,6 +257,13 @@ impl BestOfNStrategy {
             text: text.clone(),
             cache_control: None,
         })));
+        // The winner is the run's durable fact: one
+        // `assistant_message` row through the session's writer. The
+        // alternatives were never published, so they leave no row.
+        sink.write_assistant_turn(&[ContentPart::Text(TextContent {
+            text: text.clone(),
+            cache_control: None,
+        })]);
         sink.emit(AgentEvent::ModelDone(SamplingResult {
             text,
             usage: Default::default(),
@@ -279,7 +291,16 @@ impl ReasoningStrategy for BestOfNStrategy {
         if !sink.begin(&begin_token) {
             return;
         }
+        // The run's epoch marker: one header naming the request
+        // envelope this run's facts are produced under.
+        sink.stamp_request_header(&runtime.caps, &[]);
 
+        // The prompt lands before the context manager's summariser —
+        // a provider call — not only before the candidates sample.
+        if let Err(error) = sink.flush_log().await {
+            sink.fail(format!("log flush failed: {error}"));
+            return;
+        }
         let prepared =
             prepare_messages_for_shot(&runtime.caps, &input, None).await;
         let request =

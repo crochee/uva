@@ -11,6 +11,8 @@
 use serde::{Deserialize, Serialize};
 use synthia_provider::{ContentPart, SamplingResult};
 
+use crate::agent::approval::Suspension;
+
 // --- AgentEvent ---------------------------------------------------------
 
 /// Serialized with serde internally tagged for dispatch.
@@ -66,13 +68,18 @@ impl AgentEvent {
         }
     }
 
-    /// Returns `true` if this event is durable (state-changing).
+    /// Returns `true` if the host should persist this event from
+    /// the stream as a durable session fact.
+    ///
+    /// No `AgentEvent` is durable today: the durable facts —
+    /// one `assistant_message` row per model turn, one
+    /// `tool_result` row per result — are written by the harness
+    /// itself through the writer installed on the agent, and a
+    /// host that wants them persisted must install one. The
+    /// events are the live stream; the log's source is the
+    /// writer, never the event tap.
     pub fn is_durable(&self) -> bool {
         match self {
-            Self::Model(ContentPart::Text(_))
-            | Self::Model(ContentPart::ToolUse(_))
-            | Self::Model(ContentPart::ToolResult(_))
-            | Self::Model(ContentPart::Resource(_)) => true,
             Self::Model(_) | Self::ModelDone(_) | Self::System(_) => false,
             Self::Agent(_, inner) => inner.is_durable(),
         }
@@ -103,8 +110,21 @@ impl AgentEvent {
 
 // --- SystemEvent --------------------------------------------------------
 
-/// Lifecycle, diagnostic, and terminal state changes reported via [`AgentEvent::System`]. Durable: `SessionStarted` /
-/// `SessionEnded` / `SessionInterrupted` / `PolicyViolation`.
+/// Lifecycle, diagnostic, and terminal state changes reported via
+/// [`AgentEvent::System`].
+///
+/// **No variant here is durable.** The whole event stream is live —
+/// [`AgentEvent::is_durable`] answers `false` for every
+/// `System(_)` — and the durable facts (one `assistant_message` row
+/// per model turn, one `tool_result` row per result) are written by
+/// the harness's own writer, never by a consumer persisting this
+/// stream.
+///
+/// [`Self::Plugin`] is a plugin's own domain event on that live
+/// stream: droppable under backpressure. The durable half of the
+/// same fact is `synthia_session::SessionEvent::Plugin`, a log row
+/// that survives a crash; a consumer that must not miss something
+/// reads the row, not this event.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SystemEvent {
@@ -145,6 +165,52 @@ pub enum SystemEvent {
         pattern: String,
         iteration: Option<usize>,
     },
+    Suspended(Suspension),
+    // Compaction began: the span the summary will replace.
+    CompactionStarted {
+        // Why compaction ran (`context_pressure`).
+        reason: String,
+        // First shadowed surface index.
+        start: usize,
+        // One past the last shadowed surface index.
+        end: usize,
+        // First shadowed log ordinal (absent when nothing is cited).
+        first_seq: Option<u64>,
+        // Last shadowed log ordinal.
+        last_seq: Option<u64>,
+    },
+    // Compaction finished, successfully or not.
+    CompactionFinished {
+        // Why compaction ran.
+        reason: String,
+        // Messages the replace shadowed (`0` when it failed).
+        shadowed_messages: usize,
+        // Tokens the shadowed span cost before pruning.
+        shadowed_tokens: usize,
+        // Terminal state (`committed` / `failed` / `interrupted`).
+        outcome: synthia_session::CompactionLifecycleOutcome,
+        // First shadowed log ordinal.
+        first_seq: Option<u64>,
+        // Last shadowed log ordinal.
+        last_seq: Option<u64>,
+    },
+    // A plugin's own domain event — live only. Never persisted, and
+    // droppable under backpressure; the durable row is
+    // `synthia_session::SessionEvent::Plugin`.
+    Plugin {
+        // Plugin-defined kind. A runtime value, hence a `String`: a
+        // plugin's kind cannot satisfy `'static` without leaking the
+        // string it sent. Unbounded today because nothing constructs
+        // this variant; the producer that does must bound it at the
+        // plugin-host boundary, like the payload below.
+        kind: String,
+        // Plugin-defined payload, as the plugin sent it. Live, so no
+        // log bounds it — but the server serialises every run event
+        // and fans it out to the cluster bus, so the producer that
+        // constructs this variant must bound it (and `kind`) before
+        // the event becomes an `AgentEvent`.
+        payload: serde_json::Value,
+    },
 }
 
 impl SystemEvent {
@@ -159,6 +225,10 @@ impl SystemEvent {
             Self::Warning { .. } => "Warning",
             Self::Usage { .. } => "Usage",
             Self::PolicyViolation { .. } => "PolicyViolation",
+            Self::Suspended(_) => "Suspended",
+            Self::CompactionStarted { .. } => "CompactionStarted",
+            Self::CompactionFinished { .. } => "CompactionFinished",
+            Self::Plugin { .. } => "Plugin",
         }
     }
 }
@@ -174,6 +244,8 @@ pub enum WarningKind {
     EditConflict,
     Guard,
     StructuredOutput,
+    /// A turn carried non-text parts the session log cannot reproduce.
+    Attachments,
 }
 
 // --- AgentMeta ----------------------------------------------------------
@@ -251,6 +323,12 @@ pub enum SessionEndReason {
     Error(String),
     MaxIterations,
     Refused { violation: String },
+    // The run stopped with calls still awaiting approval; a resume
+    // continues it.
+    Suspended,
+    // The request envelope changed since the suspension, so the
+    // resume would not run the call the operator approved.
+    ConfigDrift,
 }
 
 impl SessionEndReason {
@@ -262,6 +340,8 @@ impl SessionEndReason {
             Self::Error(_) => "error",
             Self::MaxIterations => "max_iterations",
             Self::Refused { .. } => "refused",
+            Self::Suspended => "suspended",
+            Self::ConfigDrift => "config_drift",
         }
     }
 }
@@ -369,6 +449,36 @@ fn system_event_len(event: &SystemEvent) -> usize {
             pattern,
             ..
         } => stage.len() + severity.len() + source.len() + pattern.len(),
+        SystemEvent::Suspended(suspension) => match suspension {
+            crate::agent::approval::Suspension::AwaitingApproval {
+                interrupts,
+                resume,
+            } => {
+                interrupts
+                    .iter()
+                    .map(|request| {
+                        request.id.len()
+                            + request.call_id.len()
+                            + request.tool.len()
+                            + request.arguments_hash.len()
+                            + request.agent.len()
+                    })
+                    .sum::<usize>()
+                    + resume.pending.iter().map(String::len).sum::<usize>()
+                    + resume.request_snapshot_hash.len()
+            }
+            crate::agent::approval::Suspension::Paused { resume } => {
+                resume.pending.iter().map(String::len).sum::<usize>()
+                    + resume.request_snapshot_hash.len()
+            }
+        },
+        // Reason + two indices + counters: the digits are bounded
+        // by `u64::MAX`'s 20 characters.
+        SystemEvent::CompactionStarted { reason, .. } => reason.len() + 96,
+        SystemEvent::CompactionFinished { reason, .. } => reason.len() + 96,
+        // The payload is the plugin's: its serialised size is the
+        // cost a consumer buffers, so walk it like any other payload.
+        SystemEvent::Plugin { kind, payload } => kind.len() + json_len(payload),
     }
 }
 

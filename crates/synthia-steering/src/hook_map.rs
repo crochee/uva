@@ -18,6 +18,8 @@ use std::{collections::HashMap, sync::Arc};
 use futures::{FutureExt, future::BoxFuture};
 use synthia_context::AgentState;
 
+use crate::request_params::RequestParams;
+
 /// are deliberately a closed enum: adding a new event forces
 /// every existing handler to update its match, which is the
 /// design goal (no silent payload drift).
@@ -40,6 +42,30 @@ pub enum HookEvent {
         /// End reason string (e.g. `"completed"`,
         /// `"max_iterations"`, `"cancelled"`).
         reason: String,
+    },
+    /// `before_step` — fired before each model call, after the
+    /// step's preparation and before the request is assembled. A
+    /// handler that returns `HookDecision::Terminate` ends the run
+    /// before the call goes out.
+    BeforeStep {
+        /// Agent descriptor name (e.g. `"default"`).
+        agent_name: String,
+        /// Run ordinal within the session.
+        run_idx: u32,
+        /// Zero-based index of the iteration that is about to sample.
+        iteration: u32,
+    },
+    /// `before_request` — fired after the request is assembled and
+    /// before it goes on the wire. The event carries the request's
+    /// current parameters; a handler that returns
+    /// `HookDecision::ReplaceParams` hands back the rewritten copy
+    /// (model, temperature, max tokens, tool choice, tools — the
+    /// message list and the system prompt are out of reach by type).
+    BeforeRequest {
+        /// The provider the request goes to.
+        provider: String,
+        /// The request's current parameters.
+        params: RequestParams,
     },
     /// `before_tool` — fired immediately before a tool dispatch
     /// (after the guard pipeline has accepted the call). A
@@ -109,9 +135,43 @@ pub enum HookEvent {
     },
 }
 
-/// Handler decision. A handler can veto a call (`Block`),
-/// terminate the run (`Terminate`), or stay silent (`Allow`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+impl HookEvent {
+    /// Whether `decision` means anything at this point.
+    ///
+    /// Each point accepts a subset of the vocabulary: a
+    /// `before_tool` hook may block or ask, a `before_request` hook
+    /// may rewrite the request, a `before_run` hook may only end the
+    /// run, and a read-only point accepts nothing but `Allow`. A
+    /// decision a point does not accept is a no-op — the dispatch
+    /// layer records a diagnostic and lets the run continue, because
+    /// a decision that could not be honoured must never be mistaken
+    /// for one that was.
+    #[must_use]
+    pub fn accepts(&self, decision: &HookDecision) -> bool {
+        match decision {
+            HookDecision::Allow => true,
+            HookDecision::Block { .. } | HookDecision::Ask { .. } => {
+                matches!(self, HookEvent::BeforeTool { .. })
+            }
+            HookDecision::ReplaceParams(_) => {
+                matches!(self, HookEvent::BeforeRequest { .. })
+            }
+            HookDecision::Terminate { .. } => matches!(
+                self,
+                HookEvent::BeforeRun { .. }
+                    | HookEvent::BeforeStep { .. }
+                    | HookEvent::BeforeTool { .. }
+                    | HookEvent::AfterTool { .. }
+                    | HookEvent::AfterStep { .. }
+            ),
+        }
+    }
+}
+
+/// Handler decision. A handler can veto a call (`Block`), ask for an
+/// approval (`Ask`), rewrite the request (`ReplaceParams`), end the
+/// run (`Terminate`), or stay silent (`Allow`).
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum HookDecision {
     /// The call proceeds unchanged.
     #[default]
@@ -123,6 +183,17 @@ pub enum HookDecision {
         /// tool result so the model can react.
         reason: String,
     },
+    /// The call waits for an explicit approval. `Ask` never
+    /// short-circuits: the reasons are collected and reported
+    /// together at the end of the gate phase, so one approval
+    /// request can carry every reason the run collected.
+    Ask {
+        /// Human-readable reason the call needs an approval.
+        reason: String,
+    },
+    /// The request's parameters are replaced by these. Only the
+    /// `before_request` point accepts this decision.
+    ReplaceParams(RequestParams),
     /// The agent run ends with the given reason. Distinct from
     /// `Block` (which only affects one tool call).
     Terminate {
@@ -256,10 +327,12 @@ impl HookMap {
     }
 
     /// Fire one event. Every handler registered for the
-    /// event's [`event_name`] runs in registration order. The
-    /// first non-`Allow` decision short-circuits the rest and
-    /// is returned; if every handler returns `Allow` the
-    /// function returns `Allow`.
+    /// event's [`event_name`] runs in registration order. A
+    /// `Block` / `Terminate` / `ReplaceParams` decision
+    /// short-circuits the rest and is returned; an `Ask` does
+    /// not — the reasons are collected and returned as one `Ask`
+    /// decision once every handler has run. If every handler
+    /// returns `Allow` the function returns `Allow`.
     ///
     /// Handler panics are caught and treated as `Allow` (the
     /// registry never poisons the agent run on a user code
@@ -269,6 +342,7 @@ impl HookMap {
         let Some(handlers) = self.inner.get(name) else {
             return HookDecision::Allow;
         };
+        let mut pass = Pass::default();
         for handler in handlers {
             // `catch_unwind` cannot span an `.await`, so the
             // future itself is caught instead of the closure.
@@ -276,10 +350,7 @@ impl HookMap {
                 .catch_unwind()
                 .await;
             match result {
-                Ok(decision) if decision != HookDecision::Allow => {
-                    return decision;
-                }
-                Ok(_) => continue,
+                Ok(decision) => pass.absorb(decision),
                 Err(_) => {
                     // Handler panicked — swallow + log so the
                     // agent run continues.
@@ -290,14 +361,17 @@ impl HookMap {
                     continue;
                 }
             }
+            if pass.decided() {
+                break;
+            }
         }
-        HookDecision::Allow
+        pass.outcome()
     }
 
     /// Fire one event with the live [`AgentState`]. Plain
     /// handlers fire first; state-aware handlers fire next.
-    /// The first non-`Allow` decision short-circuits the rest
-    /// and is returned.
+    /// A `Block` / `Terminate` / `ReplaceParams` decision
+    /// short-circuits the rest; an `Ask` is collected.
     ///
     /// Handler panics are caught and treated as `Allow` (the
     /// registry never poisons the agent run on a user code
@@ -307,25 +381,23 @@ impl HookMap {
         event: &HookEvent,
         state: &AgentState,
     ) -> HookDecision {
+        let mut pass = Pass::default();
         // 1. Plain handlers first (pure-payload vetoes win).
-        let plain = self.dispatch(event).await;
-        if plain != HookDecision::Allow {
-            return plain;
+        pass.absorb(self.dispatch(event).await);
+        if pass.decided() {
+            return pass.outcome();
         }
         // 2. State-aware handlers next.
         let name = event_name(event);
         let Some(handlers) = self.inner_state.get(name) else {
-            return HookDecision::Allow;
+            return pass.outcome();
         };
         for handler in handlers {
             let result = std::panic::AssertUnwindSafe(handler(event, state))
                 .catch_unwind()
                 .await;
             match result {
-                Ok(decision) if decision != HookDecision::Allow => {
-                    return decision;
-                }
-                Ok(_) => continue,
+                Ok(decision) => pass.absorb(decision),
                 Err(_) => {
                     tracing::warn!(
                         event = name,
@@ -334,8 +406,56 @@ impl HookMap {
                     continue;
                 }
             }
+            if pass.decided() {
+                break;
+            }
         }
-        HookDecision::Allow
+        pass.outcome()
+    }
+}
+
+/// One dispatch pass: the decision that ended it, plus the approval
+/// reasons the handlers collected on the way.
+///
+/// `Ask` is the one decision that does not end a pass: the call
+/// waits for an approval, and every reason the run collected belongs
+/// in the same request. A `Block` / `Terminate` / `ReplaceParams`
+/// decision ends the pass immediately and wins over the asks.
+#[derive(Default)]
+struct Pass {
+    decision: Option<HookDecision>,
+    asks: Vec<String>,
+}
+
+impl Pass {
+    /// Fold one handler's decision into the pass.
+    fn absorb(&mut self, decision: HookDecision) {
+        match decision {
+            HookDecision::Allow => {}
+            HookDecision::Ask { reason } => self.asks.push(reason),
+            other => {
+                if self.decision.is_none() {
+                    self.decision = Some(other);
+                }
+            }
+        }
+    }
+
+    /// Whether a decision ended the pass.
+    fn decided(&self) -> bool {
+        self.decision.is_some()
+    }
+
+    /// The pass's outcome: the decision that ended it, else the
+    /// collected asks, else `Allow`.
+    fn outcome(self) -> HookDecision {
+        match self.decision {
+            Some(decision) => decision,
+            None if self.asks.is_empty() => HookDecision::Allow,
+            None => HookDecision::Ask {
+                reason: self.asks.join("; "),
+            },
+        }
     }
 }
 
@@ -347,6 +467,8 @@ pub fn event_name(event: &HookEvent) -> &'static str {
     match event {
         HookEvent::BeforeRun { .. } => "before_run",
         HookEvent::AfterRun { .. } => "after_run",
+        HookEvent::BeforeStep { .. } => "before_step",
+        HookEvent::BeforeRequest { .. } => "before_request",
         HookEvent::BeforeTool { .. } => "before_tool",
         HookEvent::AfterTool { .. } => "after_tool",
         HookEvent::AfterStep { .. } => "after_step",
@@ -773,5 +895,177 @@ mod tests {
             })
             .await;
         assert_eq!(decision, HookDecision::Allow);
+    }
+
+    #[tokio::test]
+    async fn an_ask_does_not_short_circuit_the_handlers_after_it() {
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        let map = HookMap::new()
+            .on("before_tool", |_| {
+                Box::pin(async move {
+                    HookDecision::Ask {
+                        reason: "needs approval".to_string(),
+                    }
+                })
+            })
+            .on("before_tool", move |_| {
+                let counter = Arc::clone(&counter);
+                Box::pin(async move {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    HookDecision::Allow
+                })
+            });
+        let decision = map
+            .dispatch(&HookEvent::BeforeTool {
+                tool_name: "shell".to_string(),
+                call_id: "c1".to_string(),
+                arguments: json!({}),
+            })
+            .await;
+        // The ask is collected, and the handler behind it still ran.
+        assert_eq!(
+            decision,
+            HookDecision::Ask {
+                reason: "needs approval".to_string()
+            }
+        );
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_block_wins_over_an_ask_collected_before_it() {
+        let map = HookMap::new()
+            .on("before_tool", |_| {
+                Box::pin(async move {
+                    HookDecision::Ask {
+                        reason: "needs approval".to_string(),
+                    }
+                })
+            })
+            .on("before_tool", |_| {
+                Box::pin(async move {
+                    HookDecision::Block {
+                        reason: "denied".to_string(),
+                    }
+                })
+            });
+        let decision = map
+            .dispatch(&HookEvent::BeforeTool {
+                tool_name: "shell".to_string(),
+                call_id: "c1".to_string(),
+                arguments: json!({}),
+            })
+            .await;
+        // The block wins: the run does not wait for an approval it
+        // will never get.
+        assert_eq!(
+            decision,
+            HookDecision::Block {
+                reason: "denied".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_terminate_wins_over_an_ask_collected_before_it() {
+        let map = HookMap::new()
+            .on("before_tool", |_| {
+                Box::pin(async move {
+                    HookDecision::Ask {
+                        reason: "needs approval".to_string(),
+                    }
+                })
+            })
+            .on("before_tool", |_| {
+                Box::pin(async move {
+                    HookDecision::Terminate {
+                        reason: "policy ended the run".to_string(),
+                    }
+                })
+            });
+        let decision = map
+            .dispatch(&HookEvent::BeforeTool {
+                tool_name: "shell".to_string(),
+                call_id: "c1".to_string(),
+                arguments: json!({}),
+            })
+            .await;
+        assert!(matches!(decision, HookDecision::Terminate { .. }));
+    }
+
+    #[test]
+    fn each_point_accepts_only_its_own_decisions() {
+        let before_tool = HookEvent::BeforeTool {
+            tool_name: "shell".to_string(),
+            call_id: "c1".to_string(),
+            arguments: json!({}),
+        };
+        let before_run = HookEvent::BeforeRun {
+            agent_name: "x".to_string(),
+            run_idx: 0,
+        };
+        let before_request = HookEvent::BeforeRequest {
+            provider: "p".to_string(),
+            params: crate::RequestParams::from_request(
+                &synthia_provider::CompletionRequest::default(),
+            ),
+        };
+        let after_provider_call = HookEvent::AfterProviderCall {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            stop_reason: None,
+        };
+        let block = HookDecision::Block {
+            reason: "no".to_string(),
+        };
+        let ask = HookDecision::Ask {
+            reason: "maybe".to_string(),
+        };
+        let terminate = HookDecision::Terminate {
+            reason: "stop".to_string(),
+        };
+        // `before_tool` is the point that may block or ask.
+        assert!(before_tool.accepts(&block));
+        assert!(before_tool.accepts(&ask));
+        assert!(before_tool.accepts(&terminate));
+        // `before_run` may only end the run.
+        assert!(before_run.accepts(&terminate));
+        assert!(!before_run.accepts(&block));
+        assert!(!before_run.accepts(&ask));
+        // `before_request` may only rewrite the request.
+        assert!(before_request.accepts(&HookDecision::ReplaceParams(
+            crate::RequestParams::from_request(
+                &synthia_provider::CompletionRequest::default(),
+            )
+        )));
+        assert!(!before_request.accepts(&block));
+        // A read-only point accepts nothing but `Allow`.
+        assert!(after_provider_call.accepts(&HookDecision::Allow));
+        assert!(!after_provider_call.accepts(&terminate));
+        assert!(!after_provider_call.accepts(&block));
+    }
+
+    #[test]
+    fn the_new_points_have_wire_names() {
+        assert_eq!(
+            event_name(&HookEvent::BeforeStep {
+                agent_name: "x".to_string(),
+                run_idx: 0,
+                iteration: 2,
+            }),
+            "before_step"
+        );
+        assert_eq!(
+            event_name(&HookEvent::BeforeRequest {
+                provider: "p".to_string(),
+                params: crate::RequestParams::from_request(
+                    &synthia_provider::CompletionRequest::default(),
+                ),
+            }),
+            "before_request"
+        );
     }
 }

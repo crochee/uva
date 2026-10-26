@@ -2,7 +2,7 @@
 //! three-step lifecycle that makes a crash mid-compaction
 //! detectable in the durable log.
 
-use synthia_session::{CompactionOutcome, SurfaceToken};
+use synthia_session::{CompactionLifecycleOutcome, SurfaceToken};
 
 /// Description of one compaction splice emitted by
 /// [`super::SummarizingContextManager`].
@@ -15,7 +15,9 @@ pub struct CompactionRecord {
     /// `start..end` indices that the splice replaced.
     pub source_indices: Vec<usize>,
     /// Durable identity of each replaced row, parallel to
-    /// `source_indices`: the tool-call id of a tool-result message.
+    /// `source_indices`: the call a tool-result message answers
+    /// (`tool:<call id>`) or the first call an assistant message
+    /// makes (`assistant:<call id>`).
     ///
     /// The indices are positions in the live message vector, which a
     /// durable log cannot be trusted to reproduce (the loop prepends
@@ -70,6 +72,6 @@ pub enum CompactionLifecycle {
         /// Correlation id.
         token: SurfaceToken,
         /// Terminal state.
-        outcome: CompactionOutcome,
+        outcome: CompactionLifecycleOutcome,
     },
 }

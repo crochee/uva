@@ -6,10 +6,10 @@
 //! **lifecycle** triple per attempt ([`CompactionLifecycleView`]) —
 //! and this module is the production end of both:
 //!
-//! - the lifecycle callback writes `compaction_start` /
-//!   `compaction_summary` / `compaction_end` rows immediately, so a
-//!   crash between start and end stays detectable
-//!   ([`crate::repair::orphaned_compactions`]);
+//! - the lifecycle callback hands the `compaction_start` /
+//!   `compaction_summary` / `compaction_end` rows to the writer as
+//!   soon as it fires; they reach the log at the writer's next
+//!   flush;
 //! - the record callback writes the `SessionEvent::Compaction`
 //!   `Replace` **only** when the run's [`SurfaceLedger`] can prove
 //!   where the shadowed rows sit and which seqs identify them. A
@@ -18,14 +18,24 @@
 //!   already landed) and the surface stays foldable instead of
 //!   pointing at the wrong span.
 //!
+//! ## The writer, not a channel
+//!
+//! Both callbacks are synchronous — the manager fires them from the
+//! agent's own task — so they hand their rows to the session's one
+//! [`LogWriter`] through its non-waiting path. A row that does not
+//! fit in the writer's queue waits in the writer's spill and the
+//! next flush writes it: the checkpoint's rows are never dropped,
+//! and the writer's ordinal is the one the reader reproduces.
+//!
 //! ## Why a ledger, not the record's indices
 //!
 //! The manager reports positions in the *in-memory* message list,
 //! which is not the surface: the system prompt is prepended by the
 //! loop and never logged, and one assistant turn can span several
 //! log rows. The only honest mapping goes through the log itself —
-//! each replaced tool result is located by its call id among the rows
-//! the run actually appended. That is what [`SurfaceLedger`] indexes.
+//! each replaced row is located by its durable identity (the call it
+//! makes or the call it answers) among the rows the run actually
+//! appended. That is what [`SurfaceLedger`] indexes.
 //!
 //! ## Deferred resolution
 //!
@@ -43,13 +53,10 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use crate::{
-    events::{CompactionOutcome, SessionEvent},
+    LogWriter,
+    events::{CompactionLifecycleOutcome, SessionEvent},
     log_surface::{MappingGap, ResolvedReplace, SurfaceLedger},
-    typed_event_sink::{
-        CompactionRecordView,
-        TypedEventRecord,
-        TypedEventSink,
-    },
+    typed_event_sink::CompactionRecordView,
 };
 
 /// Mirrored view of `synthia_context::CompactionLifecycle`.
@@ -80,7 +87,7 @@ pub enum CompactionLifecycleView {
         /// Correlation id.
         token: String,
         /// Terminal state.
-        outcome: CompactionOutcome,
+        outcome: CompactionLifecycleOutcome,
     },
 }
 
@@ -123,18 +130,18 @@ impl CompactionLifecycleView {
 }
 
 /// Bridges a [`CompactionRecordView`] / [`CompactionLifecycleView`]
-/// pair to a [`TypedEventSink`].
+/// pair to a [`LogWriter`].
 ///
 /// Install the two callbacks on a `SummarizingContextManager`:
 ///
 /// ```ignore
-/// let checkpoint = CompactionCheckpoint::new(sink, ledger);
+/// let checkpoint = CompactionCheckpoint::new(writer, ledger);
 /// let manager = SummarizingContextManager::new(summarise)
 ///     .with_compaction_emitter(checkpoint.record_callback())
 ///     .with_compaction_lifecycle_emitter(checkpoint.lifecycle_callback());
 /// ```
 pub struct CompactionCheckpoint {
-    sink: TypedEventSink,
+    writer: Arc<LogWriter>,
     ledger: Arc<SurfaceLedger>,
     /// Records whose shadowed rows were not in the ledger when they
     /// were emitted. Retried by [`Self::resolve_pending`], in order.
@@ -142,11 +149,21 @@ pub struct CompactionCheckpoint {
 }
 
 impl CompactionCheckpoint {
-    /// Build a checkpoint over `sink` and the run's `ledger`.
+    /// Build a checkpoint over `writer` and the run's `ledger`.
+    ///
+    /// The writer is the session's one writer: it stamps the rows'
+    /// ordinals and batches their flush. The two callbacks below are
+    /// synchronous — the manager fires them from the agent's own
+    /// task — so they take the writer's non-waiting path, and a row
+    /// that does not fit waits in the writer's spill instead of
+    /// being dropped.
     #[must_use]
-    pub fn new(sink: TypedEventSink, ledger: Arc<SurfaceLedger>) -> Arc<Self> {
+    pub fn new(
+        writer: Arc<LogWriter>,
+        ledger: Arc<SurfaceLedger>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            sink,
+            writer,
             ledger,
             pending: Mutex::new(VecDeque::new()),
         })
@@ -173,13 +190,18 @@ impl CompactionCheckpoint {
 
     /// Callback for
     /// `SummarizingContextManager::with_compaction_lifecycle_emitter`.
+    ///
+    /// The callback is synchronous: it cannot await, so the row goes
+    /// through the writer's non-waiting path. A row that does not
+    /// fit in the writer's queue waits in its spill — the next flush
+    /// writes it — instead of being dropped.
     #[must_use]
     pub fn lifecycle_callback(
         self: &Arc<Self>,
     ) -> Arc<dyn Fn(CompactionLifecycleView) + Send + Sync> {
-        let sink = self.sink.clone();
+        let writer = Arc::clone(&self.writer);
         Arc::new(move |step: CompactionLifecycleView| {
-            sink.record(TypedEventRecord::new(step.to_typed_event()));
+            writer.append_event_nowait(&step.to_typed_event());
         })
     }
 
@@ -187,14 +209,15 @@ impl CompactionCheckpoint {
     /// `SessionEvent::Compaction` rows the caller must append.
     ///
     /// Call this once the run has appended all of its rows (the
-    /// server does, right after draining the typed channel). A record
-    /// that still cannot be mapped is dropped with a warning naming
-    /// the gap: the compaction stays log-only and the surface stays
+    /// server does, right after its run-end flush). A record that
+    /// still cannot be mapped is dropped with a warning naming the
+    /// gap: the compaction stays log-only and the surface stays
     /// foldable.
     ///
-    /// The caller MUST append the returned rows through the same
-    /// writer that feeds [`Self::ledger`], so a later parked record
-    /// sees the earlier replacement applied.
+    /// The caller MUST append the returned rows through the
+    /// checkpoint's own writer — the one that feeds
+    /// [`Self::ledger`] — so a later parked record sees the earlier
+    /// replacement applied.
     #[must_use]
     pub fn resolve_pending(&self) -> Vec<SessionEvent> {
         let parked = {
@@ -227,9 +250,15 @@ impl CompactionCheckpoint {
     }
 
     /// Resolve now, or park and warn.
+    ///
+    /// The resolved record goes through the writer's non-waiting
+    /// path: the callback cannot await, and a row that does not fit
+    /// waits in the writer's spill rather than being dropped.
     fn emit_record(&self, view: CompactionRecordView) {
         match self.resolve(&view) {
-            Ok(event) => self.sink.record(TypedEventRecord::new(event)),
+            Ok(event) => {
+                self.writer.append_event_nowait(&event);
+            }
             Err(gap) => {
                 tracing::warn!(
                     target: "synthia.session",
@@ -282,15 +311,18 @@ fn event_for(
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+    use synthia_core::SystemClock;
 
     use super::*;
     use crate::{
+        LogWriter,
+        SessionSink,
         events::SurfaceOp,
         fold_log_surface,
         fold_surface,
+        in_memory::InMemorySessionSink,
         repair::{compaction_outcomes, orphaned_compactions},
         surface_events_from_log,
-        typed_event_sink::TypedEventReceiver,
     };
 
     /// The production log shape: a user prompt, one assistant text
@@ -321,32 +353,52 @@ mod tests {
         })
     }
 
-    /// A record replacing `keys`, using the in-memory indices a real
-    /// manager would report for the tool batch.
-    fn record(keys: &[&str], summary: &str) -> CompactionRecordView {
+    /// A record replacing the rows `calls` name, using the in-memory
+    /// indices a real manager would report for the tool batch.
+    ///
+    /// The keys are the durable identities the manager reports: a
+    /// tool-result row is named by the call it answers.
+    fn record(calls: &[&str], summary: &str) -> CompactionRecordView {
         CompactionRecordView {
             start: 2,
-            end: 2 + keys.len(),
-            source_indices: (2..2 + keys.len()).collect(),
-            source_keys: keys.iter().map(|k| Some((*k).to_string())).collect(),
+            end: 2 + calls.len(),
+            source_indices: (2..2 + calls.len()).collect(),
+            source_keys: calls
+                .iter()
+                .map(|call| Some(format!("tool:{call}")))
+                .collect(),
             summary_text: summary.to_string(),
         }
     }
 
-    /// Feed a log into a ledger exactly as a run writer would:
-    /// every row, in order, with its 1-based ordinal.
-    fn feed(ledger: &SurfaceLedger, rows: &[Value]) {
-        for (index, row) in rows.iter().enumerate() {
-            ledger.record(index as u64 + 1, row);
-        }
+    /// The session's writer, its sink, and the ledger the writer
+    /// feeds.
+    ///
+    /// The ledger is the writer's: the writer records every row it
+    /// writes, so the checkpoint resolves its span against the same
+    /// ordinals the reader reproduces.
+    fn writer_with_ledger()
+    -> (Arc<LogWriter>, Arc<InMemorySessionSink>, Arc<SurfaceLedger>) {
+        let sink = Arc::new(InMemorySessionSink::new("checkpoint"));
+        let ledger = Arc::new(SurfaceLedger::new());
+        let writer = Arc::new(
+            LogWriter::new(sink.clone(), Arc::new(SystemClock))
+                .with_ledger(Arc::clone(&ledger)),
+        );
+        (writer, sink, ledger)
     }
 
-    fn drain(receiver: &mut TypedEventReceiver) -> Vec<SessionEvent> {
-        let mut events = Vec::new();
-        while let Ok(Some(record)) = receiver.try_recv() {
-            events.push(record.event);
-        }
-        events
+    /// The typed events in the log, in the order they landed.
+    ///
+    /// The run's rows are the legacy envelopes the fold also
+    /// understands; only the checkpoint's rows are typed events.
+    async fn typed_events(sink: &InMemorySessionSink) -> Vec<SessionEvent> {
+        sink.read()
+            .await
+            .expect("the in-memory sink reads while open")
+            .iter()
+            .filter_map(SessionEvent::from_value)
+            .collect()
     }
 
     /// Run one full lifecycle through the checkpoint's callbacks.
@@ -371,21 +423,24 @@ mod tests {
         record(view);
         lifecycle(CompactionLifecycleView::End {
             token: "t1".to_string(),
-            outcome: CompactionOutcome::Committed,
+            outcome: CompactionLifecycleOutcome::Committed,
         });
     }
 
-    #[test]
-    fn checkpoint_writes_lifecycle_and_resolved_replace() {
-        let rows = log_rows();
-        let ledger = Arc::new(SurfaceLedger::new());
-        feed(&ledger, &rows);
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+    #[tokio::test]
+    async fn checkpoint_writes_lifecycle_and_resolved_replace() {
+        let (writer, sink, ledger) = writer_with_ledger();
+        for row in log_rows() {
+            writer.append(row).await.unwrap();
+        }
+        writer.flush().await.unwrap();
 
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
         run_lifecycle(&checkpoint, record(&["c1", "c2"], "compacted tail"));
+        writer.flush().await.unwrap();
 
-        let events = drain(&mut receiver);
+        let events = typed_events(&sink).await;
         assert_eq!(events.len(), 4, "start, summary, record, end: {events:?}");
         let SessionEvent::CompactionStart { token, .. } = &events[0] else {
             panic!("expected start, got {:?}", events[0]);
@@ -426,31 +481,27 @@ mod tests {
         assert_eq!(checkpoint.pending_len(), 0);
     }
 
-    #[test]
-    fn folded_written_log_shows_the_compacted_surface() {
-        let rows = log_rows();
-        let ledger = Arc::new(SurfaceLedger::new());
-        feed(&ledger, &rows);
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+    #[tokio::test]
+    async fn folded_written_log_shows_the_compacted_surface() {
+        let (writer, sink, ledger) = writer_with_ledger();
+        for row in log_rows() {
+            writer.append(row).await.unwrap();
+        }
+        writer.flush().await.unwrap();
+
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
         run_lifecycle(&checkpoint, record(&["c1", "c2"], "compacted tail"));
+        writer.flush().await.unwrap();
 
-        // The written log is the run's rows plus the record the
+        // The written log is the run's rows plus the rows the
         // checkpoint emitted, in append order.
-        let mut written: Vec<Value> = rows;
-        let events = drain(&mut receiver);
-        let compaction = events
-            .iter()
-            .find(|event| matches!(event, SessionEvent::Compaction { .. }))
-            .expect("the checkpoint wrote a record");
-        written
-            .push(serde_json::to_value(compaction).expect("record serialises"));
-
+        let written = sink.read().await.unwrap();
         let folded = fold_surface(&surface_events_from_log(&written))
             .expect("the written log folds");
         assert_eq!(
             folded.surface_seqs,
-            vec![1, 2, 5],
+            vec![1, 2, 7],
             "the shadowed tool rows are gone: {folded:?}"
         );
         assert_eq!(folded.messages.len(), 3);
@@ -470,54 +521,64 @@ mod tests {
         assert_eq!(lenient.surface_seqs, folded.surface_seqs);
     }
 
-    #[test]
-    fn closed_lifecycle_is_paired_and_an_open_one_is_interrupted() {
-        let rows = log_rows();
-        let ledger = Arc::new(SurfaceLedger::new());
-        feed(&ledger, &rows);
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+    #[tokio::test]
+    async fn closed_lifecycle_is_paired_and_an_open_one_is_interrupted() {
+        let (writer, sink, ledger) = writer_with_ledger();
+        for row in log_rows() {
+            writer.append(row).await.unwrap();
+        }
+        writer.flush().await.unwrap();
+
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
         run_lifecycle(&checkpoint, record(&["c1", "c2"], "compacted"));
-        let closed = drain(&mut receiver);
+        writer.flush().await.unwrap();
+        let closed = typed_events(&sink).await;
         assert!(orphaned_compactions(&closed).is_empty());
         assert_eq!(
             compaction_outcomes(&closed),
-            vec![("t1".to_string(), CompactionOutcome::Committed)]
+            vec![("t1".to_string(), CompactionLifecycleOutcome::Committed)]
         );
 
         // A crash between start and end leaves the start unmatched.
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+        let (writer, sink, ledger) = writer_with_ledger();
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
         checkpoint.lifecycle_callback()(CompactionLifecycleView::Start {
             token: "t2".to_string(),
         });
-        let interrupted = drain(&mut receiver);
+        writer.flush().await.unwrap();
+        let interrupted = typed_events(&sink).await;
         assert_eq!(
             compaction_outcomes(&interrupted),
-            vec![("t2".to_string(), CompactionOutcome::Interrupted)]
+            vec![("t2".to_string(), CompactionLifecycleOutcome::Interrupted)]
         );
         let orphans = orphaned_compactions(&interrupted);
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].token, "t2");
     }
 
-    #[test]
-    fn unresolvable_mapping_writes_no_checkpoint() {
+    #[tokio::test]
+    async fn unresolvable_mapping_writes_no_checkpoint() {
         // The ledger knows rows 1..2 only — the tool rows are not
         // there, so nothing may be written for them.
         let rows = log_rows();
-        let ledger = Arc::new(SurfaceLedger::new());
-        feed(&ledger, &rows[..2]);
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+        let (writer, sink, ledger) = writer_with_ledger();
+        for row in rows.iter().take(2) {
+            writer.append(row.clone()).await.unwrap();
+        }
+        writer.flush().await.unwrap();
 
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
         run_lifecycle(
             &checkpoint,
             record(&["c1", "c2"], "must not be written"),
         );
+        writer.flush().await.unwrap();
         assert_eq!(checkpoint.pending_len(), 1, "the record parks");
 
-        let events = drain(&mut receiver);
+        let events = typed_events(&sink).await;
         assert!(
             events
                 .iter()
@@ -554,19 +615,23 @@ mod tests {
         assert_eq!(fold_log_surface(&log).messages.len(), 5);
     }
 
-    #[test]
-    fn deferred_records_resolve_once_their_rows_land() {
-        let rows = log_rows();
-        let ledger = Arc::new(SurfaceLedger::new());
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+    #[tokio::test]
+    async fn deferred_records_resolve_once_their_rows_land() {
+        let (writer, sink, ledger) = writer_with_ledger();
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
 
-        // Emitted before the writer caught up.
+        // The run's rows are queued but not yet flushed: the ledger
+        // has not seen them, so the record parks.
+        for row in log_rows() {
+            writer.append(row).await.unwrap();
+        }
         run_lifecycle(&checkpoint, record(&["c1", "c2"], "late"));
         assert_eq!(checkpoint.pending_len(), 1);
 
-        // The writer appends the run's rows after the fact.
-        feed(&ledger, &rows);
+        // The writer's flush puts the run's rows in the log — and in
+        // the ledger.
+        writer.flush().await.unwrap();
 
         let events = checkpoint.resolve_pending();
         assert_eq!(events.len(), 1);
@@ -585,40 +650,57 @@ mod tests {
         assert_eq!(source_event_seqs, &vec![3_u64, 4]);
         assert_eq!(checkpoint.pending_len(), 0);
 
-        let events = drain(&mut receiver);
-        assert_eq!(events.len(), 3, "the lifecycle rows were never parked");
+        // The caller writes the resolved record through the same
+        // writer; the lifecycle rows were never parked.
+        for event in events {
+            writer.append_event(&event).await.unwrap();
+        }
+        writer.flush().await.unwrap();
+        let written = typed_events(&sink).await;
+        assert_eq!(written.len(), 4, "3 lifecycle rows + the record");
     }
 
-    #[test]
-    fn a_second_compaction_sees_the_first_replacement_applied() {
-        let ledger = Arc::new(SurfaceLedger::new());
+    #[tokio::test]
+    async fn a_second_compaction_sees_the_first_replacement_applied() {
+        let (writer, sink, ledger) = writer_with_ledger();
         let mut rows = log_rows();
         rows.push(tool_result_row("c3"));
-        feed(&ledger, &rows);
-        let (sink, mut receiver) = TypedEventSink::channel(16);
-        let checkpoint = CompactionCheckpoint::new(sink, Arc::clone(&ledger));
+        for row in rows {
+            writer.append(row).await.unwrap();
+        }
+        writer.flush().await.unwrap();
+
+        let checkpoint =
+            CompactionCheckpoint::new(Arc::clone(&writer), Arc::clone(&ledger));
 
         // First compaction shadows c1 + c2.
         checkpoint.record_callback()(record(&["c1", "c2"], "first"));
-        // The writer appends the record it was handed.
-        let first = drain(&mut receiver)
+        // The writer appends the record it was handed — and feeds
+        // the ledger with it.
+        writer.flush().await.unwrap();
+        let first = typed_events(&sink)
+            .await
             .into_iter()
             .find(|event| matches!(event, SessionEvent::Compaction { .. }))
             .expect("first record");
-        let written = serde_json::to_value(&first).expect("serialises");
-        ledger.record(rows.len() as u64 + 1, &written);
+        assert!(
+            matches!(first, SessionEvent::Compaction { .. }),
+            "the first compaction is in the log"
+        );
 
         // Second compaction shadows c3, which now sits one row earlier.
         checkpoint.record_callback()(CompactionRecordView {
             start: 4,
             end: 5,
             source_indices: vec![4],
-            source_keys: vec![Some("c3".to_string())],
+            source_keys: vec![Some("tool:c3".to_string())],
             summary_text: "second".to_string(),
         });
-        let second = drain(&mut receiver)
+        writer.flush().await.unwrap();
+        let second = typed_events(&sink)
+            .await
             .into_iter()
-            .find(|event| matches!(event, SessionEvent::Compaction { .. }))
+            .rfind(|event| matches!(event, SessionEvent::Compaction { .. }))
             .expect("second record");
         let SessionEvent::Compaction { surface_op, .. } = &second else {
             panic!("expected a compaction row");

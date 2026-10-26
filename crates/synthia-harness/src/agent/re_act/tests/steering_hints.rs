@@ -238,9 +238,9 @@ async fn panicking_hint_and_tracker_degrade_on_every_call_site() {
     );
 }
 
-/// A `SystemPrompt`-point hint fires once per session, not once per triggering
-/// iteration: re-appending it each iteration grows the system message and breaks
-/// the prompt-cache stability the crate keeps volatile facts out to protect.
+// A `SystemPrompt`-point hint fires once per session, not once per triggering
+// iteration: re-appending it each iteration grows the system message and breaks
+// the prompt-cache stability the crate keeps volatile facts out to protect.
 #[tokio::test]
 async fn every_system_prompt_hint_is_injected() {
     use synthia_context::AgentState;

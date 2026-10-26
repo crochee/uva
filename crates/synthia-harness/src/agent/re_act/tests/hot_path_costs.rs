@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 use super::{support::*, *};
 use crate::{
     Agent,
-    agent::re_act::synthetic::{SyntheticCall, SyntheticTool},
+    agent::re_act::delegation::{DelegatingTool, DelegationCall},
     input::AgentInput,
 };
 
@@ -128,8 +128,8 @@ impl ModelProvider for ConfigCountingProvider {
     }
 }
 
-/// Exactly once per run; before the `ModelConfig` snapshot this was six reads
-/// (once per iteration in `sample_once_or_fail`, twice in `prepare`).
+// Exactly once per run; before the `ModelConfig` snapshot this was six reads
+// (once per iteration in `sample_once_or_fail`, twice in `prepare`).
 #[tokio::test]
 async fn a_run_asks_the_provider_for_its_config_once() {
     let provider = Arc::new(ConfigCountingProvider::new());
@@ -227,13 +227,13 @@ async fn a_manager_that_freezes_nothing_never_detaches_a_prefetch() {
     );
 }
 
-// -- check 11: validate_synthetic rejects duplicates -------------------
+// -- check 11: with_delegator rejects duplicates -----------------------
 
 struct SharedName {
     seen: Arc<Mutex<Vec<String>>>,
 }
 
-impl SyntheticTool for SharedName {
+impl DelegatingTool for SharedName {
     fn definitions(&self) -> Vec<synthia_provider::ToolDefinition> {
         vec![synthia_provider::ToolDefinition {
             name: "shared".to_string(),
@@ -244,13 +244,9 @@ impl SyntheticTool for SharedName {
         }]
     }
 
-    fn claims(&self, name: &str) -> bool {
-        name == "shared"
-    }
-
     fn execute(
         &self,
-        call: SyntheticCall<'_>,
+        call: DelegationCall<'_>,
     ) -> futures::future::BoxFuture<'static, ToolOutput> {
         self.seen.lock().push(call.call.id.clone());
         Box::pin(async { ToolOutput::text("done") })
@@ -258,12 +254,12 @@ impl SyntheticTool for SharedName {
 }
 
 #[test]
-fn two_synthetic_tools_advertising_one_name_are_rejected() {
+fn two_delegators_advertising_one_name_are_rejected() {
     let seen = Arc::new(Mutex::new(Vec::new()));
-    let first: Arc<dyn SyntheticTool> = Arc::new(SharedName {
+    let first: Arc<dyn DelegatingTool> = Arc::new(SharedName {
         seen: Arc::clone(&seen),
     });
-    let second: Arc<dyn SyntheticTool> = Arc::new(SharedName {
+    let second: Arc<dyn DelegatingTool> = Arc::new(SharedName {
         seen: Arc::clone(&seen),
     });
 
@@ -271,9 +267,9 @@ fn two_synthetic_tools_advertising_one_name_are_rejected() {
         Arc::new(synthia_provider::traits_stub::ModelProviderStub::new()),
         Arc::new(ToolRegistry::new()),
     )
-    .with_synthetic_tool(first)
+    .with_delegator(first)
     .expect("the first install must be accepted");
-    let err = match agent.with_synthetic_tool(second) {
+    let err = match agent.with_delegator(second) {
         Ok(_) => panic!("a duplicate advertised name must be rejected"),
         Err(name) => name,
     };

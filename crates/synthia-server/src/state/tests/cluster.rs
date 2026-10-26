@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use crate::{
     cluster::{ClusterRuntime, LocalBus},
     session::controller::SessionOp,
-    state::AppState,
+    state::{AppState, app_state::PARKED_PROMPT_WINDOW},
 };
 
 fn scripted_provider() -> Arc<dyn ModelProvider> {
@@ -147,6 +147,367 @@ async fn closing_the_owner_hands_the_lease_over() {
     .await
     .unwrap_or(false);
     assert!(ran, "the adopted controller must drive the run itself");
+}
+
+#[tokio::test]
+async fn a_takeover_rebuilds_the_state_from_the_log() {
+    // Task 16 / R3: a node that acquires an expired lease inherits no
+    // memory. Everything the controller reports is re-derived from the
+    // log, so a session suspended on the node that died is still
+    // suspended on the node that took over — and refuses to start a
+    // fresh run for the same reason it did before.
+    let dir = TempDir::new().unwrap();
+    let bus = Arc::new(LocalBus::new());
+    let a = node("a", dir.path(), Arc::clone(&bus)).await;
+    let b = node("b", dir.path(), Arc::clone(&bus)).await;
+
+    let owner = a.get_or_create_session_controller("u", "s").await.unwrap();
+    assert!(!owner.is_remote());
+    // A suspended turn the dead node left behind: one high-risk call
+    // asked and never decided.
+    let writer = a.session_manager.writer("u", "s");
+    writer
+        .append_event(&synthia::session::turn_start(0))
+        .await
+        .unwrap();
+    writer
+        .append_event(&synthia::session::approval_asked(
+            "a1",
+            "c1",
+            "shell",
+            "sha256:args",
+            "high",
+            "default",
+        ))
+        .await
+        .unwrap();
+    writer
+        .append_event(&synthia::session::turn_suspended(vec!["c1".to_string()]))
+        .await
+        .unwrap();
+    writer
+        .append_event(&synthia::session::step_end_suspended())
+        .await
+        .unwrap();
+    writer
+        .append_event(&synthia::session::turn_end_suspended())
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    owner.close().await.unwrap();
+    a.active_sessions
+        .remove(&("u".to_string(), "s".to_string()));
+
+    let adopted = b.get_or_create_session_controller("u", "s").await.unwrap();
+    assert!(!adopted.is_remote(), "node b takes the lease over");
+    assert_eq!(
+        adopted.state(),
+        crate::session::controller::SessionState::AwaitingApproval,
+        "the rebuilt controller reports the log's pause, not its own \
+         fresh-process Idle"
+    );
+    assert_eq!(
+        adopted.session_state().await,
+        crate::session::controller::SessionState::AwaitingApproval
+    );
+}
+
+#[tokio::test]
+async fn a_takeover_requeues_a_prompt_the_dead_node_parked() {
+    // The durable half of `pending_multimodal`: the prompt is a row, so
+    // the node that takes over puts it back in the queue and runs it.
+    let dir = TempDir::new().unwrap();
+    let bus = Arc::new(LocalBus::new());
+    let a = node("a", dir.path(), Arc::clone(&bus)).await;
+    let b = node("b", dir.path(), Arc::clone(&bus)).await;
+
+    let owner = a.get_or_create_session_controller("u", "s").await.unwrap();
+    assert!(!owner.is_remote());
+    let writer = a.session_manager.writer("u", "s");
+    writer
+        .append_event(&synthia::session::SessionEvent::ParkedPrompt {
+            seq: 0,
+            ts: String::new(),
+            park_id: "park-recovered".to_string(),
+            text: "recovered turn".to_string(),
+            attachments: Vec::new(),
+            agent_name: None,
+            rerun: false,
+        })
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    owner.close().await.unwrap();
+    a.active_sessions
+        .remove(&("u".to_string(), "s".to_string()));
+
+    let adopted = b.get_or_create_session_controller("u", "s").await.unwrap();
+    assert!(!adopted.is_remote());
+
+    // The recovered prompt must actually run: the run records the turn
+    // it was started for as a `UserInput` row.
+    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = b
+                .session_manager
+                .sink("u", "s")
+                .read_tail(50)
+                .await
+                .unwrap_or_default();
+            let ran = rows.iter().any(|row| {
+                row["type"] == "UserInput"
+                    && row["data"]["text"] == "recovered turn"
+            });
+            if ran {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the recovered prompt runs");
+    assert!(
+        rows.iter().any(|row| row["type"] == "UserInput"),
+        "the recovered turn is in the log"
+    );
+}
+
+#[tokio::test]
+async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
+    // Two multimodal prompts queued behind a live run produce two parks.
+    // The first run records its turn; the node then crashes. The second
+    // prompt must still be queued — clearing the queue on the first
+    // `UserInput` would lose it although its row is intact.
+    let dir = TempDir::new().unwrap();
+    let bus = Arc::new(LocalBus::new());
+    let state = node("a", dir.path(), Arc::clone(&bus)).await;
+    state
+        .session_manager
+        .create_with_user("u".to_string(), "s".to_string())
+        .await
+        .unwrap();
+    let writer = state.session_manager.writer("u", "s");
+    for (park_id, text) in [("park-1", "first turn"), ("park-2", "second turn")]
+    {
+        writer
+            .append_event(&synthia::session::SessionEvent::ParkedPrompt {
+                seq: 0,
+                ts: String::new(),
+                park_id: park_id.to_string(),
+                text: text.to_string(),
+                attachments: Vec::new(),
+                agent_name: None,
+                rerun: false,
+            })
+            .await
+            .unwrap();
+    }
+    // The first run spent the first park by id and recorded its turn.
+    writer
+        .append_event(&synthia::session::SessionEvent::ParkConsumed {
+            seq: 0,
+            ts: String::new(),
+            park_id: "park-1".to_string(),
+        })
+        .await
+        .unwrap();
+    writer
+        .append(serde_json::json!({
+            "type": "UserInput",
+            "data": { "text": "first turn" },
+        }))
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    // The crash: this process takes the session over cold.
+    state
+        .get_or_create_session_controller("u", "s")
+        .await
+        .expect("the session opens");
+
+    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = state
+                .session_manager
+                .sink("u", "s")
+                .read_tail(50)
+                .await
+                .unwrap_or_default();
+            if rows.iter().any(|row| {
+                row["type"] == "UserInput"
+                    && row["data"]["text"] == "second turn"
+            }) {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the second parked prompt is still queued and runs");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| {
+                row["type"] == "UserInput"
+                    && row["data"]["text"] == "first turn"
+            })
+            .count(),
+        1,
+        "the consumed prompt is not re-queued"
+    );
+}
+
+#[tokio::test]
+async fn a_park_behind_a_long_run_is_still_recovered() {
+    // A prompt queued behind a live run sits *before* everything that
+    // run goes on to write, so a fixed 200-row window can scroll past
+    // it. The takeover read widens until it reaches the consumption
+    // frontier; a silent drop is the one outcome this feature must never
+    // produce.
+    let dir = TempDir::new().unwrap();
+    let bus = Arc::new(LocalBus::new());
+    let state = node("a", dir.path(), Arc::clone(&bus)).await;
+    state
+        .session_manager
+        .create_with_user("u".to_string(), "s".to_string())
+        .await
+        .unwrap();
+    let writer = state.session_manager.writer("u", "s");
+    writer
+        .append_event(&synthia::session::SessionEvent::ParkedPrompt {
+            seq: 0,
+            ts: String::new(),
+            park_id: "park-behind".to_string(),
+            text: "queued behind the run".to_string(),
+            attachments: Vec::new(),
+            agent_name: None,
+            rerun: false,
+        })
+        .await
+        .unwrap();
+    // The live run keeps writing, well past the base window and with no
+    // `UserInput` row of its own (it has not started its turn yet).
+    for index in 0..(PARKED_PROMPT_WINDOW + 60) {
+        writer
+            .append_event(&synthia::session::usage(
+                10 + index,
+                1,
+                11 + index,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+    writer.flush().await.unwrap();
+
+    state
+        .get_or_create_session_controller("u", "s")
+        .await
+        .expect("the session opens");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = state
+                .session_manager
+                .sink("u", "s")
+                .read_tail(50)
+                .await
+                .unwrap_or_default();
+            if rows.iter().any(|row| {
+                row["type"] == "UserInput"
+                    && row["data"]["text"] == "queued behind the run"
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the parked prompt behind the long run is recovered");
+}
+
+#[tokio::test]
+async fn two_concurrent_cold_opens_start_exactly_one_run() {
+    // A cold open is a read-modify-write of the controller cache that
+    // also rebuilds from the log and re-queues a parked prompt. Two
+    // requests racing for one session must produce one controller and
+    // one recovered turn — not the duplicate the rebuild exists to
+    // prevent.
+    let dir = TempDir::new().unwrap();
+    let bus = Arc::new(LocalBus::new());
+    let state = node("a", dir.path(), Arc::clone(&bus)).await;
+    state
+        .session_manager
+        .create_with_user("u".to_string(), "s".to_string())
+        .await
+        .unwrap();
+    let writer = state.session_manager.writer("u", "s");
+    writer
+        .append_event(&synthia::session::SessionEvent::ParkedPrompt {
+            seq: 0,
+            ts: String::new(),
+            park_id: "park-once".to_string(),
+            text: "recovered once".to_string(),
+            attachments: Vec::new(),
+            agent_name: None,
+            rerun: false,
+        })
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    let (first, second) = tokio::join!(
+        state.get_or_create_session_controller("u", "s"),
+        state.get_or_create_session_controller("u", "s"),
+    );
+    let (first, second) = (
+        first.expect("the first open"),
+        second.expect("the second open"),
+    );
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "both callers must get the session's one controller"
+    );
+
+    // Exactly one recovered turn: the run records the prompt once.
+    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = state
+                .session_manager
+                .sink("u", "s")
+                .read_tail(50)
+                .await
+                .unwrap_or_default();
+            if rows.iter().any(|row| {
+                row["type"] == "UserInput"
+                    && row["data"]["text"] == "recovered once"
+            }) {
+                return rows;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the recovered prompt runs");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let rows = state
+        .session_manager
+        .sink("u", "s")
+        .read_tail(50)
+        .await
+        .unwrap_or(rows);
+    let runs = rows
+        .iter()
+        .filter(|row| {
+            row["type"] == "UserInput"
+                && row["data"]["text"] == "recovered once"
+        })
+        .count();
+    assert_eq!(runs, 1, "the recovered turn must start exactly once");
 }
 
 #[tokio::test]

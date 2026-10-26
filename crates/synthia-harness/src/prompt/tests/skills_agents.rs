@@ -27,7 +27,7 @@ fn disabled_skills_are_never_pushed_by_caller() {
     assert!(!out.contains("<name>inactive</name>"));
 }
 
-/// The verbose XML envelope is a model-training wire format, not a style choice.
+// The verbose XML envelope is a model-training wire format, not a style choice.
 #[test]
 fn available_skills_uses_opencode_xml_envelope() {
     let d = descriptor_with_instructions("BASE");

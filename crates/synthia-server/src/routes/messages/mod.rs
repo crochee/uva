@@ -61,8 +61,8 @@
 //!    tool calls and results;
 //! 3. the final user turn is dispatched through the same
 //!    [`SessionOp::PromptMulti`] the chat surface uses, and the response
-//!    is folded from the same event broadcast
-//!    (`routes::chat::stream_messages` reads it the same way);
+//!    is folded from the same event broadcast that
+//!    `routes::follow` projects for the chat surface;
 //! 4. when the turn ends the session is closed and evicted, so a
 //!    stateless client cannot grow the controller cache (nothing else
 //!    ever evicts it).
@@ -125,6 +125,14 @@
 //!   per-dispatch override.
 //! - **`model` is echoed, not switched.** The run resolves its
 //!   provider/model the same way `/api/v1/chat/*` does.
+//! - **Approvals are not answerable here.** A run that suspends on a
+//!   high-risk call terminates the request with the protocol's error
+//!   envelope — an `error` SSE event, or a `409` for a non-streaming
+//!   request. A later request against that session is refused up front
+//!   instead of queueing behind a run that cannot start. The session
+//!   must be resumed through the session API
+//!   (`POST /api/v1/sessions/{id}/resume`), which is the only wire
+//!   that carries a decision.
 //! - **Audio has no block** in this protocol, so an `audio/*`
 //!   attachment cannot ride this endpoint at all. `/api/v1/chat/*` is
 //!   the wire that carries one (`kind: "audio"`); here the client is
@@ -163,7 +171,6 @@ use serde_json::json;
 use synthia::{
     harness::{AgentEvent, SessionEndReason, SystemEvent},
     provider::{Message, traits::ModelProvider},
-    session::SessionSink,
 };
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -178,7 +185,12 @@ use crate::{
     middleware::auth::RequestUserId,
     session::{
         EPHEMERAL_SESSION_PREFIX,
-        controller::{PinnedProvider, SessionController, SessionOp},
+        controller::{
+            PinnedProvider,
+            SessionController,
+            SessionOp,
+            SessionState,
+        },
     },
     state::AppState,
 };
@@ -275,13 +287,47 @@ pub(crate) async fn create_message(
     {
         Ok(turn) if streaming => streaming_response(turn),
         Ok(turn) => complete_response(turn).await,
-        Err(error) => error_response(
+        Err(BeginTurnError::AwaitingApproval) => error_response(
+            StatusCode::CONFLICT,
+            error_type::INVALID_REQUEST,
+            APPROVAL_REQUIRED,
+        ),
+        Err(BeginTurnError::Setup(error)) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             error_type::API,
             format!("could not start the agent run: {error}"),
         ),
     }
 }
+
+/// Why a turn could not be started.
+enum BeginTurnError {
+    /// The session has an undecided approval interrupt. This protocol
+    /// has no frame that answers one, so a request that would only
+    /// queue a turn behind a run that can never start is refused
+    /// instead of hanging until the client disconnects.
+    AwaitingApproval,
+    /// Anything else setup rejected (a sink write, a closed
+    /// controller).
+    Setup(anyhow::Error),
+}
+
+impl From<anyhow::Error> for BeginTurnError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Setup(error)
+    }
+}
+
+/// The terminal answer for a run that suspended.
+///
+/// A suspended run is not a completed one: the session holds an open
+/// interrupt and a later request would wait on a run this endpoint
+/// cannot start. Both response shapes say so — an SSE `error` frame
+/// mid-stream, and a `409` for the non-streaming request.
+const APPROVAL_REQUIRED: &str = "the agent suspended awaiting approval; \
+     /v1/messages cannot answer an approval prompt. Decide the open \
+     interrupt through the session API (POST /api/v1/sessions/{id}/resume), \
+     then continue the conversation.";
 
 /// Which protocol error type a model-selection failure carries.
 ///
@@ -390,7 +436,7 @@ async fn begin_turn(
     canonical: CanonicalRequest,
     target: Target,
     provider: Arc<dyn ModelProvider>,
-) -> anyhow::Result<StartedTurn> {
+) -> Result<StartedTurn, BeginTurnError> {
     let CanonicalRequest {
         system,
         history,
@@ -430,7 +476,15 @@ async fn begin_turn(
             None,
             None,
         )
-        .await?;
+        .await
+        .map_err(|error| BeginTurnError::Setup(error.into()))?;
+    // An open interrupt is a log fact. A fresh run would be queued and
+    // never started (the controller refuses one while paused), so this
+    // request would wait forever for a terminal event that cannot
+    // come. Refuse it now, before anything is queued.
+    if controller.session_state().await == SessionState::AwaitingApproval {
+        return Err(BeginTurnError::AwaitingApproval);
+    }
     // Subscribe before dispatching: the broadcaster only replays
     // nothing, so a subscriber that arrives after the run starts would
     // miss the opening frames.
@@ -504,33 +558,36 @@ async fn seed_history(
     system: Option<String>,
     history: Vec<Message>,
 ) -> anyhow::Result<()> {
-    let sink = state.session_manager.sink(user_id, session_id);
+    // The session's one writer: the seeded rows draw from the same
+    // ordinal sequence the run's rows will, and one flush at the
+    // tail lands them together before the turn starts.
+    let writer = state.session_manager.writer(user_id, session_id);
     if let Some(system) = system {
         append_message(
-            &sink,
+            &writer,
             Message::user(format!("{SYSTEM_LABEL}\n{system}")),
         )
         .await?;
     }
     for message in &history {
-        append_message(&sink, message.clone()).await?;
+        append_message(&writer, message.clone()).await?;
     }
-    Ok(())
+    writer.flush().await.map_err(|error| {
+        anyhow::anyhow!("flush seeded session history: {error}")
+    })
 }
 
 /// Append one canonical message as the fold's lossless `Message`
 /// envelope.
 async fn append_message(
-    sink: &Arc<dyn SessionSink>,
+    writer: &Arc<synthia::session::LogWriter>,
     message: Message,
 ) -> anyhow::Result<()> {
     let row = json!({ "type": "Message", "data": message });
-    // The row's ordinal is reserved here, like every other writer
-    // on this session: the seeded history and the rows the run
-    // writes later share one counter.
-    sink.alloc_seq();
-    sink.append(&row)
+    writer
+        .append(row)
         .await
+        .map(|_| ())
         .map_err(|error| anyhow::anyhow!("seed session history: {error}"))
 }
 
@@ -607,17 +664,25 @@ async fn complete_response(turn: StartedTurn) -> Response {
     }
     turn.accumulator.finish();
     let failure = match turn.accumulator.end_reason() {
-        Some(SessionEndReason::Error(message)) => Some(message.clone()),
+        Some(SessionEndReason::Error(message)) => Some((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            error_type::API,
+            message.clone(),
+        )),
+        // A suspension is a terminal state for this protocol: the
+        // client gets the protocol's error envelope, never a `200`
+        // for a message that never finished.
+        Some(SessionEndReason::Suspended) => Some((
+            StatusCode::CONFLICT,
+            error_type::INVALID_REQUEST,
+            APPROVAL_REQUIRED.to_string(),
+        )),
         _ => None,
     };
     let message = turn.accumulator.message();
     close_turn(&turn).await;
     match failure {
-        Some(message) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            error_type::API,
-            message,
-        ),
+        Some((status, kind, message)) => error_response(status, kind, message),
         None => axum::Json(message).into_response(),
     }
 }
@@ -647,6 +712,11 @@ async fn close_turn(turn: &StartedTurn) {
 }
 
 /// The terminal event of a run.
+///
+/// A suspension ends the run (`SessionEnded { Suspended }`), and the
+/// stream and the non-streaming body both turn that into the
+/// protocol's error envelope: this endpoint can report the pause but
+/// cannot answer it.
 fn is_terminal(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::System(SystemEvent::SessionEnded { .. }))
 }

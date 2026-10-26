@@ -36,6 +36,7 @@ use std::sync::{
 
 use futures::StreamExt;
 use synthia::prelude::*;
+use synthia::session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 
 // ---------------------------------------------------------------------
 // 1. The provider — the only piece with no default.
@@ -184,8 +185,12 @@ async fn main() {
     let context_manager: Arc<dyn ContextManager> =
         Arc::new(TruncatingContextManager);
 
-    // 5. session sink — a bounded channel the consumer drains.
-    let (typed_sink, mut typed_rx) = TypedEventSink::channel(64);
+    // 5. session sink — the log the session's one writer writes.
+    let sink = Arc::new(InMemorySessionSink::new("minimal-consumer"));
+    let writer = Arc::new(LogWriter::new(
+        sink.clone(),
+        Arc::new(SystemClock),
+    ));
 
     // 6. cancel token — std only, no runtime type in the signature.
     let cancel: Arc<dyn CancelToken> = AtomicCancelToken::shared();
@@ -195,7 +200,7 @@ async fn main() {
         .with_workspace(".")
         .with_steering(steering)
         .with_context_manager(context_manager)
-        .with_typed_event_sink(typed_sink)
+        .with_log_writer(writer)
         .with_max_iterations(4)
         .with_name("minimal-consumer")
         .with_instructions("Answer in one short sentence.");
@@ -216,11 +221,7 @@ async fn main() {
         }
     }
 
-    let mut structural = 0usize;
-    while let Ok(Some(record)) = typed_rx.try_recv() {
-        let _ = record.as_value();
-        structural += 1;
-    }
+    let structural = sink.read().await.expect("read").len();
 
     assert_eq!(
         tool_calls.load(Ordering::SeqCst),

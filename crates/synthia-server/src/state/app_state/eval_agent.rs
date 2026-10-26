@@ -2,13 +2,15 @@
 //! drives a one-shot `ReActAgent` per eval case.
 //!
 //! Every `respond` call assembles a fresh agent from the server's
-//! default provider + a snapshot of the live tool registry (the
-//! minimal subset of the boot assembly chain: name, instructions,
-//! workspace), runs it to completion on the case input with a
-//! private cancel token, and returns the drained assistant text.
-//! The drain is the same shape `ServerWorkflowHost::spawn_agent`
-//! uses: accumulate `AgentEvent::Model` text parts, require a
-//! `Completed` terminal event, and treat anything else as an error.
+//! default provider + the node's shared tool registry (the same
+//! handle a chat run binds, plugin tools included) and the
+//! deployment's plugin host (a clone; the host is already bound to
+//! that registry, so binding again is a no-op), runs it to
+//! completion on the case input with a private cancel token, and
+//! returns the drained assistant text. The drain is the same shape
+//! `ServerWorkflowHost::spawn_agent` uses: accumulate
+//! `AgentEvent::Model` text parts, require a `Completed` terminal
+//! event, and treat anything else as an error.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -21,12 +23,12 @@ use synthia::{
     provider::traits::ModelProvider,
     tool::ToolRegistry,
 };
-use tokio::sync::RwLock;
 
 /// A callable agent under test backed by the real harness loop.
 pub struct HarnessEvalAgent {
     provider: Arc<dyn ModelProvider>,
-    tools: Arc<RwLock<ToolRegistry>>,
+    tools: Arc<ToolRegistry>,
+    host: synthia::harness::Host,
     instructions: String,
     workspace_root: PathBuf,
 }
@@ -37,21 +39,18 @@ impl HarnessEvalAgent {
     #[must_use]
     pub fn new(
         provider: Arc<dyn ModelProvider>,
-        tools: Arc<RwLock<ToolRegistry>>,
+        tools: Arc<ToolRegistry>,
+        host: synthia::harness::Host,
         instructions: impl Into<String>,
         workspace_root: PathBuf,
     ) -> Self {
         Self {
             provider,
             tools,
+            host,
             instructions: instructions.into(),
             workspace_root,
         }
-    }
-
-    async fn snapshot_tools(&self) -> Arc<ToolRegistry> {
-        let guard = self.tools.read().await;
-        Arc::new(guard.clone())
     }
 }
 
@@ -67,7 +66,7 @@ impl EvalAgent for HarnessEvalAgent {
         let agent =
             crate::agent_assembly::AgentAssembly {
                 provider: Arc::clone(&self.provider),
-                tool_registry: self.snapshot_tools().await,
+                tool_registry: Arc::clone(&self.tools),
                 workspace_root: self.workspace_root.clone(),
                 descriptor,
                 prompt_context: Arc::new(
@@ -75,12 +74,17 @@ impl EvalAgent for HarnessEvalAgent {
                 ),
                 steering: Arc::new(synthia::steering::Steering::noop()),
                 max_iterations: synthia::harness::DEFAULT_MAX_ITERATIONS,
-                synthetic: Vec::new(),
+                delegators: Vec::new(),
                 tool_surface: None,
                 strategy: None,
                 tool_restriction: None,
-                typed_event_sink: None,
+                log_writer: None,
+                subagent_writers: None,
                 context_manager: None,
+                // The deployment's host, so an eval case runs the
+                // same plugin surface chat does. The host is shared
+                // (a clone), so no plugin process is spawned here.
+                host: Some(self.host.clone()),
             }
             .build();
         // A fresh token per case: eval cases run to completion and

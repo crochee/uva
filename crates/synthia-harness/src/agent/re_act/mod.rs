@@ -1,15 +1,15 @@
-//! ReAct loop: [`ReActAgent`] factory, [`ReActStrategy`] default, the state machine in `loop`, stream translator in `stream`, the synthetic-tool seam, and the `state` types. See `crate::agent::ReasoningStrategy` to swap the loop without rebuilding the agent.
+//! ReAct loop: [`ReActAgent`] factory, [`ReActStrategy`] default, the state machine in `loop`, stream translator in `stream`, the delegation seam, and the `state` types. See `crate::agent::ReasoningStrategy` to swap the loop without rebuilding the agent.
 /// Default per-run iteration cap. Override via [`ReActAgent::with_max_iterations`].
 pub const DEFAULT_MAX_ITERATIONS: usize = 25;
 
 mod agent;
+pub(crate) mod delegation;
 pub mod descriptor;
 mod r#loop;
 mod panic;
-mod projection;
+pub(crate) mod projection;
 mod state;
 pub(crate) mod stream;
-pub(crate) mod synthetic;
 
 pub use agent::ReActAgent;
 use async_trait::async_trait;

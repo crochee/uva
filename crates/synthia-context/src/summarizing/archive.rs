@@ -6,7 +6,32 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use synthia_provider::{ContentPart, Message, Role};
 
-/// One tool call's worth of context held in the in-memory archive.
+/// What one archived record preserves.
+///
+/// The archive outlives a single crate's assumptions: a compaction
+/// that widens its range backward (to keep every `tool_result` with
+/// its issuing `tool_use`) also orphans the assistant turn's text
+/// and thinking, so those are archived too. Without a discriminator
+/// an assistant record would look like a tool call with an empty
+/// tool name, and `context_tree_query` could not tell the caller
+/// which of the two it is reading.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallRecordKind {
+    /// A `tool` message: one tool call's result, keyed by its
+    /// canonical `tool_use_id`.
+    #[default]
+    ToolResult,
+    /// An assistant turn whose text/thinking the compaction had to
+    /// shadow. Its `tool_call_id` is synthetic (`assistant-turn:…`),
+    /// so it is recoverable by listing the archive rather than by
+    /// resolving a `tool_use_id` the model was shown.
+    AssistantTurn,
+}
+
+/// One entry's worth of context held in the in-memory archive.
 ///
 /// Stored verbatim — callers may surface these to the model via a
 /// `context_tree_query` tool when it needs to recover the raw
@@ -14,16 +39,25 @@ use synthia_provider::{ContentPart, Message, Role};
 /// summary, then needs the full text to answer a follow-up).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCallRecord {
-    /// Stable `tool_use_id` from the original `ToolUse`.
+    /// Stable `tool_use_id` from the original `ToolUse`, or a
+    /// synthetic `assistant-turn:…` id for an
+    /// [`AssistantTurn`](ToolCallRecordKind::AssistantTurn).
     pub tool_call_id: String,
-    /// Tool name (e.g. `"read_file"`, `"shell"`).
+    /// Tool name (e.g. `"read_file"`, `"shell"`), or `"assistant"`
+    /// for an [`AssistantTurn`](ToolCallRecordKind::AssistantTurn).
     pub tool_name: String,
-    /// Original argument object the model sent.
+    /// Original argument object the model sent. `Null` for an
+    /// assistant turn.
     pub args: serde_json::Value,
-    /// The text the tool returned, after any per-tool truncation.
+    /// The text the tool returned, after any per-tool truncation, or
+    /// the assistant turn's text + thinking.
     pub result_text: String,
     /// `true` when the tool surfaced a non-zero exit / error.
     pub is_error: bool,
+    /// Which message this record preserves. Older serialised
+    /// records predate the field and read back as tool results.
+    #[serde(default)]
+    pub kind: ToolCallRecordKind,
 }
 
 /// Process-wide archive of every tool call that has been
@@ -72,10 +106,25 @@ impl ToolCallArchive {
     }
 }
 
-pub(super) fn archive_record_for(msg: &Message) -> Option<ToolCallRecord> {
-    if msg.role != Role::Tool {
-        return None;
+/// Build the archive entry for one message inside a replaced range.
+///
+/// Tool results keep their canonical `tool_use_id`, which is the
+/// identity `context_tree_query` resolves. An assistant turn has no
+/// such id, so its record gets a synthetic one derived from the
+/// tool calls it issued (unique per call group) and the
+/// [`ToolCallRecordKind::AssistantTurn`] discriminator.
+pub(super) fn archive_record_for(
+    index: usize,
+    msg: &Message,
+) -> Option<ToolCallRecord> {
+    match msg.role {
+        Role::Tool => tool_record(msg),
+        Role::Assistant => assistant_record(index, msg),
+        _ => None,
     }
+}
+
+fn tool_record(msg: &Message) -> Option<ToolCallRecord> {
     let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
     if tool_call_id.is_empty() {
         return None;
@@ -112,5 +161,31 @@ pub(super) fn archive_record_for(msg: &Message) -> Option<ToolCallRecord> {
         args,
         result_text,
         is_error,
+        kind: ToolCallRecordKind::ToolResult,
+    })
+}
+
+fn assistant_record(index: usize, msg: &Message) -> Option<ToolCallRecord> {
+    let result_text = super::prompt::extract_assistant_text(msg)?;
+    let issuing: Vec<String> = msg
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolUse(call) => Some(call.id.clone()),
+            _ => None,
+        })
+        .collect();
+    let tool_call_id = if issuing.is_empty() {
+        format!("assistant-turn-{index}")
+    } else {
+        format!("assistant-turn:{}", issuing.join("+"))
+    };
+    Some(ToolCallRecord {
+        tool_call_id,
+        tool_name: "assistant".to_string(),
+        args: serde_json::Value::Null,
+        result_text,
+        is_error: false,
+        kind: ToolCallRecordKind::AssistantTurn,
     })
 }

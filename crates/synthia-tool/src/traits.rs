@@ -25,6 +25,62 @@ pub enum ExecutionMode {
     Sequential,
 }
 
+/// How risky a tool call is.
+///
+/// The approval policy asks about the risky calls and lets the rest
+/// through. `Unknown` is the default: a tool that did not classify
+/// itself is neither safe nor dangerous, and the policy — not the
+/// enum — decides what to do with it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Risk {
+    /// Safe to run without asking.
+    Low,
+    /// Needs an explicit approval before it runs.
+    High,
+    /// The tool did not classify itself.
+    #[default]
+    Unknown,
+}
+
+impl Risk {
+    /// Stable wire name (`"low"` | `"high"` | `"unknown"`), used by
+    /// the log rows so a reader does not need the enum.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The risk a tool's advisory annotations declare, as an upper
+    /// bound for one call. A read-only tool is low risk; a tool that
+    /// may be destructive or steps outside the workspace is high; a
+    /// tool with no annotations is unknown. Tools whose risk depends
+    /// on the arguments override [`Tool::risk`] instead.
+    #[must_use]
+    pub fn from_annotations(
+        annotations: Option<crate::registry::ToolAnnotations>,
+    ) -> Self {
+        let Some(annotations) = annotations else {
+            return Self::Unknown;
+        };
+        if annotations.read_only_hint == Some(true) {
+            return Self::Low;
+        }
+        if annotations.destructive_hint == Some(true)
+            || annotations.open_world_hint == Some(true)
+        {
+            return Self::High;
+        }
+        Self::Unknown
+    }
+}
+
 /// Tool stream output — items yielded by [`Tool::stream`].
 ///
 /// - `Progress`: intermediate progress (e.g. file change events,
@@ -88,6 +144,16 @@ pub trait Tool: Send + Sync {
     /// listings.
     fn annotations(&self) -> Option<crate::registry::ToolAnnotations> {
         None
+    }
+
+    /// How risky *this call* is.
+    ///
+    /// The annotations are a tool-level upper bound; a tool whose risk
+    /// depends on its arguments (a shell that can run `ls` or `rm`)
+    /// overrides this so one call is not treated like another. The
+    /// default derives the risk from [`Self::annotations`].
+    fn risk(&self, _input: &serde_json::Value) -> Risk {
+        Risk::from_annotations(self.annotations())
     }
 
     /// Simple execution path: receive JSON input + context, return one
@@ -175,6 +241,78 @@ pub trait Tool: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use super::Risk;
+
+    #[test]
+    fn an_unclassified_tool_is_unknown() {
+        // The default is the honest one: a tool that did not
+        // classify itself is neither safe nor dangerous.
+        assert_eq!(Risk::default(), Risk::Unknown);
+        assert_ne!(Risk::Low, Risk::High);
+        assert_ne!(Risk::High, Risk::Unknown);
+    }
+
+    #[test]
+    fn risk_defaults_to_the_annotation_upper_bound() {
+        fn risk_of(
+            annotations: Option<crate::registry::ToolAnnotations>,
+        ) -> Risk {
+            struct Annotated(Option<crate::registry::ToolAnnotations>);
+            #[async_trait::async_trait]
+            impl Tool for Annotated {
+                fn name(&self) -> &str {
+                    "annotated"
+                }
+
+                fn description(&self) -> &str {
+                    "annotated"
+                }
+
+                fn parameters(&self) -> serde_json::Value {
+                    serde_json::json!({})
+                }
+
+                fn annotations(
+                    &self,
+                ) -> Option<crate::registry::ToolAnnotations> {
+                    self.0
+                }
+
+                async fn call(
+                    &self,
+                    _input: serde_json::Value,
+                    _context: &Context,
+                ) -> ToolOutput {
+                    ToolOutput::text("")
+                }
+            }
+            Annotated(annotations).risk(&serde_json::json!({}))
+        }
+
+        assert_eq!(risk_of(None), Risk::Unknown);
+        assert_eq!(
+            risk_of(Some(crate::registry::ToolAnnotations {
+                read_only_hint: Some(true),
+                ..Default::default()
+            })),
+            Risk::Low
+        );
+        assert_eq!(
+            risk_of(Some(crate::registry::ToolAnnotations {
+                destructive_hint: Some(true),
+                ..Default::default()
+            })),
+            Risk::High
+        );
+        assert_eq!(
+            risk_of(Some(crate::registry::ToolAnnotations {
+                open_world_hint: Some(true),
+                ..Default::default()
+            })),
+            Risk::High
+        );
+    }
+
     use futures::StreamExt;
 
     use super::*;

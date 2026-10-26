@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
+import { DeploymentPlugins } from '../components/plugins/DeploymentPlugins';
 import { SkeletonList } from '../components/ui/SkeletonList';
 import { ChatMessageList, type ChatMessageViewItem } from '../components/chat/ChatMessageView';
 import {
@@ -19,7 +20,12 @@ import {
 } from '../components/ui/visual';
 import { api } from '../api/client';
 import type { OperationSnapshot, SessionArtifact, SessionDetail, SessionPart } from '../api/types';
-import { reconstructMessagesFromSession, seedChatFromSession } from '../lib/session-to-messages';
+import {
+  messageParts,
+  reconstructMessagesFromSession,
+  seedChatFromSession,
+  type ChatMessageLike,
+} from '../lib/session-to-messages';
 import './SessionDetailPage.css';
 import './ChatPage.css';
 
@@ -118,6 +124,11 @@ function groupArtifactsByToolUse(artifacts: ReadonlyArray<SessionArtifact>): Too
  * tool calls, tool results, and sub-agent turns the
  * transcript contains. Cheap O(n) pass used by the property
  * grid at the top of the page.
+ *
+ * The assistant count comes from the *projected* transcript, not
+ * from the rows: a run that calls a tool writes two model turns
+ * (the call and the answer) but shows one assistant bubble, and the
+ * grid sits right above that transcript — the two must agree.
  */
 interface SessionMetrics {
   userTurns: number;
@@ -128,7 +139,10 @@ interface SessionMetrics {
   total: number;
 }
 
-function computeSessionMetrics(detail: SessionDetail): SessionMetrics {
+function computeSessionMetrics(
+  detail: SessionDetail,
+  messages: ReadonlyArray<ChatMessageLike>,
+): SessionMetrics {
   const m: SessionMetrics = {
     userTurns: 0,
     assistantTurns: 0,
@@ -141,8 +155,10 @@ function computeSessionMetrics(detail: SessionDetail): SessionMetrics {
     const t = (turn.type ?? '').toLowerCase();
     const data = turn.data;
     if (t === 'userinput') m.userTurns += 1;
-    else if (t === 'model') m.assistantTurns += 1;
-    else if (t === 'agent') {
+    else if (t === 'assistant_message') {
+      // The row's `tool_use` parts are the calls the turn made.
+      m.toolCalls += messageParts(data).filter((part) => part.type === 'tool_use').length;
+    } else if (t === 'agent') {
       // Recursive envelope — the inner event dictates what we
       // count. A delegated sub-agent always wraps a Model /
       // Tool / Agent frame, so peel one layer.
@@ -150,13 +166,14 @@ function computeSessionMetrics(detail: SessionDetail): SessionMetrics {
       if (Array.isArray(data) && data.length >= 2) {
         const inner = data[1] as { type?: string };
         const it = (inner?.type ?? '').toLowerCase();
-        if (it === 'model') m.assistantTurns += 1;
-        else if (it === 'tool_use' || it === 'toolcall') m.toolCalls += 1;
+        if (it === 'tool_use' || it === 'toolcall') m.toolCalls += 1;
         else if (it === 'tool_result' || it === 'toolresult') m.toolResults += 1;
       }
     } else if (t === 'tool_use' || t === 'toolcall') m.toolCalls += 1;
     else if (t === 'tool_result' || t === 'toolresult') m.toolResults += 1;
   }
+  // The projected bubbles, not the model's turns.
+  m.assistantTurns += messages.filter((message) => message.role === 'assistant').length;
   return m;
 }
 
@@ -244,11 +261,6 @@ export function SessionDetailPage() {
     [sessionDetail],
   );
 
-  const metrics = useMemo(
-    () => (sessionDetail ? computeSessionMetrics(sessionDetail) : null),
-    [sessionDetail],
-  );
-
   // Reconstruct chat-shaped messages from the persisted
   // session history so the History card renders with the same
   // chat-style cards, role borders, markdown, and tool-block
@@ -267,6 +279,14 @@ export function SessionDetailPage() {
     () => (sessionDetail ? reconstructMessagesFromSession(sessionDetail) : []),
     [sessionDetail],
   );
+
+  // The grid counts the assistant bubbles the projection produced,
+  // so the numbers it shows and the transcript below it agree.
+  const metrics = useMemo(
+    () => (sessionDetail ? computeSessionMetrics(sessionDetail, reconstructed) : null),
+    [sessionDetail, reconstructed],
+  );
+
   const viewMessages: ChatMessageViewItem[] = useMemo(
     () =>
       reconstructed.map((m) => ({
@@ -513,6 +533,11 @@ export function SessionDetailPage() {
               )}
             </div>
           </Section>
+
+          {/* What this deployment actually runs. Deployment-wide, not
+              per-session: a skipped plugin is the one fact no other
+              surface reports. */}
+          <DeploymentPlugins />
 
           <Section
             title="History"

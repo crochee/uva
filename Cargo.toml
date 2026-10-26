@@ -38,6 +38,8 @@ members = [
     "crates/synthia-reflection",
     "crates/synthia-budget",
     "crates/synthia-hpc-batch",
+    "crates/synthia-plugin-protocol",
+    "crates/synthia-plugin-host",
 ]
 resolver = "2"
 
@@ -86,6 +88,15 @@ synthia-budget = { path = "crates/synthia-budget" }
 # zero-dep; the new crate's `make check-mvp-deps` segment
 # asserts that.
 synthia-hpc-batch = { path = "crates/synthia-hpc-batch" }
+# The dynamic plugin channel's wire contract. serde-only on purpose:
+# a third-party plugin author depends on this alone, so it must never
+# grow a harness or runtime dependency.
+synthia-plugin-protocol = { path = "crates/synthia-plugin-protocol" }
+# The dynamic plugin channel's host half: it turns a plugin *process*
+# speaking the wire protocol into `Host` registrations. Runtime-free
+# on purpose (std process + the `Blocking`/`Sleeper` seams), which is
+# why it cannot reuse `synthia-mcp`'s tokio transport stack.
+synthia-plugin-host = { path = "crates/synthia-plugin-host" }
 syn = "2.0"
 quote = "1.0"
 proc-macro2 = "1.0"

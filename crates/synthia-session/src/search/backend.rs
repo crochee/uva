@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use synthia_core::blocking::Blocking;
 
 use super::{
     query::{
@@ -22,7 +23,7 @@ use super::{
     score::{entry_score, snippet},
     text::message_text,
 };
-use crate::fold_log_surface;
+use crate::{fold_log_surface, fs::FsBackend};
 
 /// One indexed entry: the searchable text plus where it came from.
 #[derive(Debug, Clone)]
@@ -61,6 +62,10 @@ struct SessionIndex {
 /// whose size changed.
 pub struct JsonlSessionSearch {
     root: PathBuf,
+    /// The blocking seam the store walk runs on. Runtime-free by
+    /// default; a host installs its own adapter with
+    /// [`Self::with_blocking`].
+    fs: FsBackend,
     /// Sessions the caller asked to forget, keyed the same way as the
     /// index. A tombstone keeps a log that still exists on disk from
     /// resurrecting itself on the next [`SessionSearch::sync`] — a
@@ -87,9 +92,21 @@ impl JsonlSessionSearch {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
+            fs: FsBackend::default(),
             removed: parking_lot::RwLock::new(std::collections::HashSet::new()),
             index: parking_lot::RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Install the blocking seam the store walk runs on.
+    ///
+    /// The default is the runtime-free
+    /// [`ThreadBlocking`](synthia_core::blocking::ThreadBlocking); a
+    /// host on a runtime installs that runtime's adapter.
+    #[must_use]
+    pub fn with_blocking(mut self, blocking: Arc<dyn Blocking>) -> Self {
+        self.fs = FsBackend::new(blocking);
+        self
     }
 
     /// The directory being indexed.
@@ -104,7 +121,7 @@ impl JsonlSessionSearch {
         self.index.read().len()
     }
 
-    /// Scan the store on the blocking pool: the IO is `std::fs`, so the
+    /// Scan the store on the blocking seam: the IO is `std::fs`, so the
     /// async signature stays non-blocking without a runtime-specific API.
     ///
     /// A `user` restricts the walk to that user's directory, so a
@@ -127,11 +144,12 @@ impl JsonlSessionSearch {
             .collect();
         let forgotten: std::collections::HashSet<SessionKey> =
             self.removed.read().clone();
-        tokio::task::spawn_blocking(move || {
-            scan_store(&root, user.as_deref(), &known, &forgotten)
-        })
-        .await
-        .map_err(|e| SearchError::Io(format!("join scan: {e}")))?
+        // The seam is fire-and-forget; `FsBackend::run` carries the
+        // scan's result back out of it.
+        self.fs
+            .run(move || scan_store(&root, user.as_deref(), &known, &forgotten))
+            .await
+            .map_err(SearchError::Io)?
     }
 }
 

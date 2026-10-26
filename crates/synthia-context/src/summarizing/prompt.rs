@@ -34,6 +34,33 @@ pub(super) fn extract_tool_result_text(msg: &Message) -> Option<String> {
     Some(out)
 }
 
+/// The parts of an assistant turn that a widening splice would
+/// otherwise delete silently: its text and its thinking.
+///
+/// `None` when the turn carries neither, so a pure `tool_use`
+/// message needs no archive record.
+pub(super) fn extract_assistant_text(msg: &Message) -> Option<String> {
+    if msg.role != Role::Assistant {
+        return None;
+    }
+    let mut out = String::new();
+    for part in &msg.content {
+        let block = match part {
+            ContentPart::Text(tc) => tc.text.as_str(),
+            ContentPart::Reasoning(rc) => rc.text.as_str(),
+            _ => continue,
+        };
+        if block.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(block);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
 /// Serialise `batch` (indices into `messages`) as the summariser
 /// prompt body: one `[n] tool_call_id=… tool=… is_error=…` block per
 /// tool call, so the entire payload sits inside `<tool_outputs>`

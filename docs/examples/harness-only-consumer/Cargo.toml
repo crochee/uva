@@ -1,0 +1,47 @@
+[package]
+name = "synthia-harness-only-consumer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Same posture as `../minimal-consumer`: the empty `[workspace]` table
+# keeps this crate OUT of the synthia workspace, so it compiles as an
+# independent consumer would and its dependency tree is its own.
+[workspace]
+
+# The proof: this crate depends on the harness and the *seams* the
+# harness's signatures name — no runtime crate. There is deliberately
+# no `tokio` line here, and the verification is that no `tokio` appears
+# in `cargo tree` either (see `docs/examples/README.md`). If the
+# harness closure ever grows one, this fixture is the tripwire: do not
+# add tokio to make it build.
+#
+# A harness-only consumer writes four crates, because the harness
+# re-exports none of the traits it hands back:
+#
+#   synthia-harness  — the loop, the seams, the event stream
+#   synthia-core     — CancelToken / Spawner / Clock
+#   synthia-provider — the ModelProvider trait and the message types
+#   synthia-tool     — the Tool trait and ToolRegistry
+#
+# `async-trait` expands the attribute those traits are declared with;
+# it is a proc-macro crate, not a runtime. `futures` drives the event
+# stream (`StreamExt`) and `serde_json` types the tool arguments, so
+# the seven lines below are this crate's direct dependencies — the
+# count the harness README and the tutorial quote.
+#
+# The provider line carries `default-features = false`, and that flag
+# is the whole reason this tree is runtime-free: `synthia-provider`'s
+# default feature set (`default = ["anthropic", "openai"]`) turns on
+# the two shipped HTTP adapters, each of which carries `reqwest`,
+# `tokio` and `tokio-util`. A consumer who writes the plain
+# `synthia-provider = "0.1"` gets all three. (`synthia-tool` has no
+# feature set at all, so the flag on it below is a no-op.)
+[dependencies]
+synthia-harness = { path = "../../../crates/synthia-harness" }
+synthia-core = { path = "../../../crates/synthia-core" }
+synthia-provider = { path = "../../../crates/synthia-provider", default-features = false }
+synthia-tool = { path = "../../../crates/synthia-tool", default-features = false }
+async-trait = "0.1"
+futures = "0.3"
+serde_json = "1"

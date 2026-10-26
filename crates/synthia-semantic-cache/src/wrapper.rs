@@ -143,7 +143,8 @@ impl ModelProvider for SemanticCacheProvider {
         // `Arc::get_mut` (only succeeds with a single strong ref).
         // We instead require the caller to initialise the inner
         // provider before wrapping — the typical pattern is
-        // `let mut p = AnthropicProvider::from_env()?; p.initialize(...).await?;`
+        // `let mut p = AnthropicProvider::new(model_config)
+        //     .with_api_key(key); p.initialize(cfg).await?;`
         // followed by `Arc::new(p)` and then `SemanticCacheProvider::new(...)`.
         // This matches the harness's own usage (no `initialize`
         // call site): providers come pre-initialised.

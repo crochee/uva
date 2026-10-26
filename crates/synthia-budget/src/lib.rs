@@ -17,23 +17,27 @@
 //!     BudgetProvider,
 //!     CostBudget,
 //!     LatencyBudget,
+//!     SharedClock,
 //!     StaticPricingTable,
 //!     TokenBudget,
 //! };
 //!
-//! let pricing = Arc::new(StaticPricingTable::anthropic_2026());
+//! // `StaticPricingTable::anthropic_2026()` already hands back an
+//! // `Arc`; `CostBudget` wants the trait object.
+//! let pricing = StaticPricingTable::anthropic_2026();
 //! let budget = Budget::builder()
 //!     .tokens(TokenBudget::new(200_000))
-//!     .latency(LatencyBudget::new(Duration::from_secs(120)))
-//!     .cost(CostBudget::new(50_00, pricing))
+//!     .latency(LatencyBudget::new(
+//!         Duration::from_secs(120),
+//!         Arc::new(SharedClock::system()),
+//!     ))
+//!     .cost(CostBudget::new(5_000, pricing))
 //!     .build();
-//! # let _: Arc<dyn synthia_provider::ModelProvider> = Arc::new(
-//! #     synthia_provider::traits_stub::ModelProviderStub::default(),
-//! # );
-//! let _ = BudgetProvider::new(
-//!     Arc::new(synthia_provider::traits_stub::ModelProviderStub::default()),
-//!     budget,
-//! );
+//! // A test double so the example runs without an HTTP adapter;
+//! // wire your own provider here.
+//! let provider: Arc<dyn synthia_provider::ModelProvider> =
+//!     Arc::new(synthia_provider::traits_stub::ModelProviderStub::default());
+//! let _ = BudgetProvider::new(provider, budget);
 //! ```
 
 pub mod budget;
@@ -55,6 +59,15 @@ pub use pricing::{PricingTable, StaticPricingTable};
 pub use provider::BudgetProvider;
 pub use synthia_core::{Clock, FixedClock, SharedClock};
 pub use tool::BudgetTool;
+
+/// The README, **compiled**.
+///
+/// The `rust` fences in [`README.md`](../README.md) are doctests,
+/// so a wiring recipe that stops compiling fails
+/// `cargo test -p synthia-budget`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct Readme;
 
 #[cfg(test)]
 mod tests;

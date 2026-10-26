@@ -14,7 +14,9 @@
 //! | [`error`] | [`Error`] — the single domain enum every fallible API returns | avoids `Box<dyn Error>` at every call site; one wire code (`Error::kind()`) |
 //! | [`cancel`] | [`CancelToken`] trait + std-only [`AtomicCancelToken`] | runtime-neutral cancellation; tokio `CancellationToken` adapts without exposing runtime types in a lib signature |
 //! | [`spawn`] | [`Spawner`](spawn::Spawner) trait — detached work, no runtime in the signature | the agent loop and tool dispatch detach work; naming `tokio::spawn` there would make the whole framework tokio-only |
+//! | [`blocking`] | [`Blocking`] trait + [`ThreadBlocking`] | a blocking call with no runtime in the signature — the fs write a session makes must not name `tokio::task::spawn_blocking` |
 //! | [`clock`] | [`Clock`] trait + [`SystemClock`] / [`FixedClock`] + [`SharedClock`] | chrono `DateTime<Utc>` is the wall-clock vocabulary; the trait is the testability seam |
+//! | [`sleeper`] | [`Sleeper`] trait + [`ThreadSleeper`] / [`FixedSleeper`] | a delay with no runtime in the signature — a timeout the harness arms must not name `tokio::time::sleep` |
 //! | [`idgen`] | [`IdGen`] trait + [`UlidGenerator`] / [`SequenceGenerator`] + [`SharedIdGen`] | session / event / tool-call IDs under one injectable seam |
 //! | [`agent`] | [`AgentDescriptor`] / [`AgentFilter`] — industry-aligned agent identity metadata | cross-crate surface (registry filters, delegation peers, server routes, eval harnesses) names agent identity without pulling the agent runtime in |
 //! | [`registry`] | [`Registry`] / [`RegistryItem`] — generic catalog with cursor pagination, [`MAX_LIMIT`] = 100 | every "named catalog" in the workspace (agents, tools, skills, memories) plugs into one trait; the page-size cap is the single source of truth the server's wire-level limit aliases to |
@@ -33,9 +35,10 @@
 //!   `synthia-core` does not transitively depend on a model SDK.
 //! - **No async runtime** — every primitive compiles on stable with no
 //!   `tokio` / `async-std` / `smol` in the public API. The only async
-//!   surface is the cooperative-cancellation future on
-//!   [`CancelToken::cancelled`], which is hand-written and runtime
-//!   agnostic.
+//!   surfaces are the cooperative-cancellation future on
+//!   [`CancelToken::cancelled`], the delay future on
+//!   [`Sleeper::sleep`], and the completion future on
+//!   [`Blocking::run`], all runtime agnostic.
 //! - **No agent loop, tool, steering, memory, or session logic** —
 //!   those belong in their own crates so each can be removed
 //!   independently. A consumer that wants just the cancellation
@@ -52,6 +55,7 @@
 //! [`synthia_provider`]: ../synthia_provider/index.html
 
 pub mod agent;
+pub mod blocking;
 pub mod breaker;
 pub mod cancel;
 pub mod clock;
@@ -64,6 +68,7 @@ pub mod panic;
 pub mod registry;
 pub mod schema;
 pub mod sensitive;
+pub mod sleeper;
 pub mod spawn;
 pub mod sync;
 pub mod text;
@@ -73,6 +78,7 @@ pub mod token;
 /// type [`Error`]. Callers returning a different error type can
 /// still override the parameter (`synthia_core::Result<T, E>`),
 pub use agent::{AgentDescriptor, AgentFilter};
+pub use blocking::{Blocking, ThreadBlocking};
 pub use breaker::{
     BreakerConfig,
     BreakerObservation,
@@ -102,6 +108,7 @@ pub use sensitive::{
     redact_partial,
     redact_partial_with,
 };
+pub use sleeper::{FixedSleeper, Sleeper, ThreadSleeper};
 pub use text::{cap_to_char_boundary, truncate_chars};
 
 pub use crate::error::Error;

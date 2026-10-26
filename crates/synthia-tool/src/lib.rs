@@ -174,7 +174,7 @@ pub use surface::{
     called_tool_names,
     project_tool_definitions,
 };
-pub use traits::{ExecutionMode, StreamOutput, Tool};
+pub use traits::{ExecutionMode, Risk, StreamOutput, Tool};
 pub use truncate::{
     OutputBound,
     OverflowStrategy,

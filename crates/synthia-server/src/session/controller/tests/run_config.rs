@@ -13,15 +13,14 @@
 //! strategy (the `ToolCapturingProvider` records the request
 //! tool list); R58 deny-list reaches the wire.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use synthia::harness::{AgentEvent, AgentInput, PromptContext};
-use tokio_util::sync::CancellationToken;
+use parking_lot::Mutex;
+use synthia::{
+    core::AtomicCancelToken,
+    harness::{AgentEvent, AgentInput, PromptContext},
+};
 
 use super::{
     super::{AgentRunStreamFactory, RunStreamFactory},
@@ -56,8 +55,9 @@ async fn run_config_carries_the_dependencies_tool_surface() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        manager.input_queue(),
+        crate::session::input_queue::InputQueue::default(),
         manager.sink("alice", "s1"),
+        manager.writer("alice", "s1"),
         deps,
         Duration::from_secs(60),
         factory,
@@ -72,7 +72,7 @@ async fn run_config_carries_the_dependencies_tool_surface() {
         .unwrap();
     wait_for_runs(&calls, 1).await;
 
-    let configs = calls.lock().unwrap();
+    let configs = calls.lock();
     assert_eq!(
         configs[0].overrides.tool_surface.as_ref(),
         Some(&policy),
@@ -108,8 +108,9 @@ async fn run_config_carries_the_dependencies_strategy() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        manager.input_queue(),
+        crate::session::input_queue::InputQueue::default(),
         manager.sink("alice", "s1"),
+        manager.writer("alice", "s1"),
         deps,
         Duration::from_secs(60),
         factory,
@@ -124,7 +125,7 @@ async fn run_config_carries_the_dependencies_strategy() {
         .unwrap();
     wait_for_runs(&calls, 1).await;
 
-    let configs = calls.lock().unwrap();
+    let configs = calls.lock();
     assert_eq!(
         configs[0]
             .overrides
@@ -160,8 +161,9 @@ async fn run_config_carries_the_dependencies_tool_restriction() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        manager.input_queue(),
+        crate::session::input_queue::InputQueue::default(),
         manager.sink("alice", "s1"),
+        manager.writer("alice", "s1"),
         deps,
         Duration::from_secs(60),
         factory,
@@ -176,7 +178,7 @@ async fn run_config_carries_the_dependencies_tool_restriction() {
         .unwrap();
     wait_for_runs(&calls, 1).await;
 
-    let configs = calls.lock().unwrap();
+    let configs = calls.lock();
     let carried = configs[0]
         .overrides
         .tool_restriction
@@ -228,7 +230,9 @@ async fn run_factory_narrows_the_wire_tools_to_the_tool_surface() {
         max_iterations: Some(1),
         steering: Arc::new(synthia::steering::Steering::noop()),
         agent_registry: None,
-        typed_event_sink: None,
+        log_writer: None,
+        subagent_writers: None,
+        host: None,
     };
     let overrides = RunOverrides {
         context_manager: None,
@@ -241,7 +245,7 @@ async fn run_factory_narrows_the_wire_tools_to_the_tool_surface() {
         config,
         overrides,
         AgentInput::text("go"),
-        Arc::new(CancellationToken::new()),
+        Arc::new(AtomicCancelToken::new()),
     );
     let _events: Vec<AgentEvent> = stream.collect().await;
 
@@ -296,7 +300,9 @@ async fn run_factory_runs_the_configured_strategy() {
             max_iterations: Some(2),
             steering: Arc::new(synthia::steering::Steering::noop()),
             agent_registry: None,
-            typed_event_sink: None,
+            log_writer: None,
+            subagent_writers: None,
+            host: None,
         };
         let overrides = RunOverrides {
             context_manager: None,
@@ -309,7 +315,7 @@ async fn run_factory_runs_the_configured_strategy() {
             config,
             overrides,
             AgentInput::text("go"),
-            Arc::new(CancellationToken::new()),
+            Arc::new(AtomicCancelToken::new()),
         );
         let _events: Vec<AgentEvent> = stream.collect().await;
 
@@ -338,7 +344,9 @@ async fn run_factory_runs_the_configured_strategy() {
         max_iterations: Some(2),
         steering: Arc::new(synthia::steering::Steering::noop()),
         agent_registry: None,
-        typed_event_sink: None,
+        log_writer: None,
+        subagent_writers: None,
+        host: None,
     };
     let overrides = RunOverrides {
         context_manager: None,
@@ -352,7 +360,7 @@ async fn run_factory_runs_the_configured_strategy() {
         config,
         overrides,
         AgentInput::text("go"),
-        Arc::new(CancellationToken::new()),
+        Arc::new(AtomicCancelToken::new()),
     );
     let _events: Vec<AgentEvent> = stream.collect().await;
     let captured = provider.captured.lock();

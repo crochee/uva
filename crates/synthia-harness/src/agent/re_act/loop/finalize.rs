@@ -27,6 +27,18 @@ impl ReActLoop {
             );
             end_reason = SessionEndReason::MaxIterations;
         }
+        // Close the turn this run opened. A suspended run already
+        // wrote its own `turn_end_suspended` at the suspension
+        // boundary, and a run that never opened an ordinary turn (a
+        // refused resume continues the suspended one) has nothing to
+        // close here.
+        if self.turn_open && !matches!(end_reason, SessionEndReason::Suspended)
+        {
+            self.emit_typed(synthia_session::turn_end(
+                super::TURN_ORDINAL,
+                end_reason.as_str(),
+            ));
+        }
         self.persist_checkpoint(&session, &end_reason);
         // The last flush: a run that ends (completed, cancelled or
         // failed) must not leave a row in the buffer. The rows of
@@ -44,16 +56,17 @@ impl ReActLoop {
         );
         self.warn_missing_structured_output(&session, &end_reason);
         self.sink.end(end_reason.clone());
-        // Decision ignored: `AfterRun` is observational.
-        let _ =
-            super::hooks::dispatch_hook(&self.caps.control.steering, || {
-                HookEvent::AfterRun {
-                    agent_name: self.caps.model.descriptor.name.clone(),
-                    run_idx: 0,
-                    reason: end_reason.as_str().to_string(),
-                }
-            })
-            .await;
+        // `AfterRun` is observational: the run has ended, so the point
+        // accepts no decision — a handler that returns one is
+        // recorded as a diagnostic.
+        super::hooks::dispatch_hook(&self.caps.control, || {
+            HookEvent::AfterRun {
+                agent_name: self.caps.model.descriptor.name.clone(),
+                run_idx: 0,
+                reason: end_reason.as_str().to_string(),
+            }
+        })
+        .await;
     }
 
     fn persist_checkpoint(
@@ -76,6 +89,15 @@ impl ReActLoop {
                         "checkpoint delete failed"
                     );
                 }
+            }
+            // A log-backed run is resumed from the log, never from a
+            // snapshot: saving one would write a transcript no reader
+            // consumes. Completed still deletes the key above.
+            _ if session.history.is_some() => {
+                tracing::debug!(
+                    key = %key,
+                    "checkpoint save skipped: the session log owns the transcript"
+                );
             }
             other => {
                 let (thread_id, agent_id) = split_resume_key(key);

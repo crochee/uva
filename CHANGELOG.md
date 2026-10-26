@@ -12,6 +12,805 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Added (`synthia-server`: the plugin composition is observable)
+
+- **`GET /api/v1/plugins`.** Boot has always recorded which plugins
+  installed (`Composition::resolved`) and which entries it skipped with
+  the reason (`Composition::skipped`), and nothing read either set: an
+  operator could configure a plugin, see `plugin skipped; boot
+  continues` once in the log, and then have no way to ask what the
+  deployment actually runs. The route returns both halves — resolved
+  plugins with name, kind (static / remote), authority, risk and the
+  tool names they claimed, plus each skipped entry's name and verbatim
+  reason.
+- **`ResolvedPlugin` carries the facts the route publishes.** It held
+  only `name` and `source`; it now also records the granted
+  `authority`, the `risk` the plugin's tools are judged at, and the
+  claimed tool names. A remote entry reports its configured authority
+  and risk; a static one reports `Authority::Full` (it is in-process
+  code, so the escalation that names is already inherent) and the worst
+  declared risk bound among the tools it registered.
+- **The web shows it.** The session page renders the deployment's
+  plugin composition: each resolved plugin with its channel, authority,
+  risk and tools, and — always visible, with a count in the section
+  header — every skipped entry with the reason boot recorded.
+- **`docs/examples/harness-only-consumer`.** A standalone crate (not a
+  workspace member) depending on `synthia-harness`, driven by
+  `futures::executor::block_on` over a `std::thread` spawner: its
+  `cargo tree` contains **zero** `tokio`, which `make examples` asserts
+  before running it. The harness closure is runtime-*free*, not merely
+  runtime-tolerant, and the fixture is the tripwire if that ever
+  changes.
+- **Two tutorial chapters for a plugin author.** "Write a static
+  plugin" (a crate: `impl Plugin` → `install` → `PluginHandle`, then
+  the binary's `StaticPlugins` factory table and the two-field config
+  entry) and "write a dynamic plugin" (a stdlib-only Python process
+  speaking the `synthia-plugin-protocol` method set, its config entry,
+  and what `GET /api/v1/plugins` shows afterwards). Run transcripts are
+  the observed ones.
+
+### Fixed (`synthia-session`: a retried flush does not write a row twice)
+
+- **The sink recognises a row it already holds.** A flush that
+  failed after its bytes reached the file used to be written again
+  by the next flush, and the log ended up with two rows under one
+  ordinal — the reader that replays the log saw the row twice.
+  `JsonlSessionSink` now keeps the highest ordinal it has written
+  and skips the rows at or below it. A row with no top-level `seq`
+  cannot be identified and is still written: what cannot be
+  recognised cannot be skipped.
+- **A refusal says what it left behind.** The write and the
+  durability barrier fail differently: a refused *write* is rolled
+  back and the batch is **not** in the log, while a refused
+  *barrier* comes after the bytes reached the file and the batch
+  **is**. The sink needs that difference — it moves its mark for a
+  batch that landed and leaves it alone for a batch that was rolled
+  back, so the retry writes the rows that are missing and skips the
+  ones that are there.
+- **The batches reach the log in ordinal order.** The writer's
+  drain holds the queue's sender while it takes the rows, so a
+  producer cannot slip a row past the batch that was drained, and a
+  copy reserves its ordinals under the flush lock. That is what the
+  sink's mark rests on: a row that arrived after a later ordinal was
+  written would otherwise look like a row the log already holds.
+
+### Fixed (`synthia-context`: automatic compaction keeps each tool call with its result)
+
+- **The summarising manager no longer splits a `tool_use` from its
+  `tool_result`.** It replaced the contiguous run of tool-result
+  messages and left the assistant turn that issued their calls in
+  place, so the provider rejected the next request (`400 … an
+  assistant message with 'tool_calls' must be followed by tool
+  messages …`) and the turn ended in error. Every seed run is now
+  widened into its tool-call group before splicing: the start moves
+  back to the nearest cut whose prefix has no unanswered `tool_use`
+  (the same `balanced_prefix` predicate `synthia-session` exposes for
+  the manual path) and the end moves forward until the range answers
+  every call inside it. The summary-size guard compares against the
+  extended range, and `CompactionRecord` reports the extended span so
+  the emitted record matches what left the history.
+- **The assistant turn the widening swallows is archived.** Its text
+  and thinking become a `ToolCallRecord` with the new
+  `ToolCallRecordKind::AssistantTurn` discriminator and a synthetic
+  id, so `context_tree_query` can still recover what the compaction
+  replaced.
+- **The tutorial no longer ships `context_window: 3000`.** It is
+  below the fixed prompt cost (~9.3k tokens), so every turn compacted
+  — a poor example that also hid how rare the bad boundary was. The
+  tutorial uses the model's real window; 3000 stays as the
+  `synthia-context` regression value.
+
+### Fixed (two examples had a tokio feature their code already used)
+
+- `synthia-test-support`'s library calls `tokio::time::sleep` for
+  `ReplayProvider`'s optional `pace`, but declared tokio with only
+  `sync`; the lib did not compile in a build that enabled nothing else
+  (it worked only where another crate in the same build happened to
+  turn `time` on). `synthia-hpc-batch`'s `completer_batch_demo` had the
+  same mismatch in its dev-dependencies. Both now declare `time`, so
+  `make examples` is green from a clean tree.
+
+### Added (`synthia-server`: the per-node session state is a cache, not the truth)
+
+- **A parked prompt is a log row.** `SessionEvent::ParkedPrompt`
+  (`parked_prompt`) is appended — and flushed — the moment a multimodal
+  prompt parks, so a crash between the park and the run no longer loses
+  the turn. The row carries the prompt's text, the turn's agent
+  selection, its rerun flag and `AttachmentRefRow`s; it never carries
+  the bytes. `synthia_session::repair::parked_prompts` reads back the
+  prompts no run consumed, and a node that acquires the session lease
+  re-queues them.
+- **Attachment refs are re-readable.** A multimodal part's payload is
+  stored in the deployment's `AttachmentStore` first (content-addressed
+  by its SHA-256 — `save_image` keeps its image allow-list for images,
+  `save_blob` stores audio and files), and the ref carries the `hash`.
+  The metadata-only refs a `UserInput` row used to hold could say an
+  attachment was there; they could not fetch it. A ref without a hash
+  says *why* (`unstored`: never local, or the store's own refusal), so
+  "unavailable" is not one undifferentiated state on the wire.
+- **A hash is enough to read the bytes back.** `FilesystemBackend`
+  resolved a ref through the MIME-derived filename, so a hash-only
+  reader (the `GET /attachments/{hash}` route, the parked-prompt
+  recovery) found nothing once the writing process's cache was gone.
+  A hash-only probe now falls back to the stored file under the
+  hash's directory: content addressing is the address.
+- **One run consumes one park, by id.** `SessionEvent::ParkConsumed`
+  (`park_consumed`) names the `park_id` of the row the run started
+  from, and the run appends it before its own prompt row;
+  `repair::parked_prompts` folds the pairs by that id. Order was not
+  identity: a plain `Prompt` is never parked yet every run writes a
+  `UserInput` row, so pairing the n-th consumer with the n-th park let
+  an unrelated turn spend a park — and a crash before the park's own
+  run then dropped a prompt whose row was intact. A park whose append
+  reported failure is still spent by its own run (the id is minted
+  before the append), and a `parked_prompt` row written before the link
+  existed stays pending rather than being assumed spent.
+- **`SessionSink::{read_tail, read_head}`.** `JsonlSessionSink` overrides
+  both with bounded reads from the end (or the start) of the file, so a
+  reader that wants the last N rows — or the session's first row —
+  pays for those rows instead of the whole log. `read()` is unchanged:
+  the transcript and the fold still need all of it.
+- **`SessionOp::StartPending`.** Starts the next turn if the controller
+  already holds work, appending nothing: the operation a takeover uses
+  to run a prompt the previous owner had parked.
+
+### Changed (`synthia-server`: a lease takeover rebuilds from the log)
+
+- **`follow`'s baseline reads the tail.** The route called
+  `SessionSink::read()` and sliced the last `FOLLOW_WINDOW` rows in
+  memory, so every subscription cost the session's whole history; the
+  window now comes from `read_tail`, the header's two whole-log facts
+  from `read_head`, and the durable poll resumes by ordinal from the
+  same bounded tail. The three folds that are whole-log by nature — the
+  context meter, the model window it is priced against, and the resume
+  fingerprint — still read the full log **when the window cannot prove
+  it holds the last turn** (a turn longer than the window writes its
+  `request_header` before the window starts). Folding the window there
+  priced the request against the default model and reported an empty
+  fingerprint, which the wire reads as "no request envelope". The
+  window must also carry a provider usage anchor: without one its fold
+  has no baseline and prices the *window's* surface, while
+  `GET /sessions/{id}/usage` prices the whole surface — two routes, one
+  session, two numbers. The open-interrupt fold follows the same rule,
+  from the log rather than from the controller, so a node that only
+  *follows* another node's session keeps its `pending_interrupts`.
+- **A cold open happens once per session.** Opening the controller is a
+  read-modify-write of the cache that also rebuilds from the log and
+  re-queues a parked prompt; a per-session gate serialises it, so two
+  concurrent requests cannot spawn two controllers that both start the
+  recovered turn. The gate is keyed by `(user, session)` and evicted
+  with its controller (`AppState::forget_session`, called by `DELETE
+  /sessions`), so the map holds one entry per *live* session rather than
+  one per session the process ever opened; a waiter whose gate was
+  evicted re-checks under the lock and retries on the current one
+  instead of proceeding on a detached lock. The wait is bounded: a gate
+  held by a wedged open (a filesystem read, a lease acquisition) fails
+  the waiter with a diagnostic naming the session instead of blocking
+  every request for it forever.
+- **A takeover widening read finds a park behind a long run.** The
+  parked-prompt read starts at 200 rows and grows until it reaches the
+  consumption frontier (a `park_consumed` row, or a legacy `UserInput`
+  one) or the log's start, so a prompt queued behind a busy run is
+  recovered rather than left behind the window.
+- **The controller's state is adopted from the log on takeover.**
+  `AppState::get_or_create_session_controller` spawns over the existing
+  log, derives the state (`repair` → fold → `SessionState`) and records
+  it: a session suspended on the node that died reports the pause on
+  the node that took over, and refuses a fresh run for the same reason.
+- **A resubmitted resume is a no-op.** The token is derived from the log
+  (last durable seq + undecided call ids), so once the decisions are
+  rows a second submission of the same token matches nothing. The server
+  still remembers no decision for the client (§5.11): the retry is safe
+  because it cannot execute the turn twice. Only a *successful* empty
+  read counts as "spent" — an unreadable log parks the resume and lets
+  the harness validate the token, rather than dropping a resume the
+  route already answered.
+- **`[tools]` is applied after the plugin bind**, so a config entry can
+  mark a plugin's tool deferred or hidden. Applied before the bind the
+  registry did not hold the tool yet and the entry was silently skipped
+  as unknown.
+
+### Fixed (`synthia-server`, `synthia-plugin-host`, `synthia-tool`: refused registrations)
+
+- **The bind runs before any install.** A host already bound to a
+  different registry refuses the bind, and installing first registered
+  every plugin into the *foreign* registry while `resolved()` listed
+  them here. A refused bind now installs nothing: every configured
+  entry is skipped with the bind's own reason and `resolved()` is
+  empty.
+- **`Host::bind` returns its own refusals.** The composition folded
+  `Host::diagnostics()`, a process-lifetime vector with no drain and a
+  64-entry cap, so a second composition re-reported the first's
+  refusals, misnamed them, and could drop them past the cap while
+  `resolved()` still claimed the registrations. `bind` now returns what
+  *that call* refused, and the composition folds the returned list.
+- **A refused plugin is withdrawn whole.** A plugin whose second tool
+  the registry would not take kept its first tool registered and
+  callable while leaving `resolved()`, so the two lists no longer
+  partitioned what was live. A refusal now withdraws the entire
+  install — `PluginRegistry::withdraw` drops the handle and frees the
+  claims — and the plugin is skipped naming the refused tool.
+- **Duplicate static tool names are refused.** Only remote claims went
+  through `PluginRegistry`, so two `static` entries could register one
+  name and the later shadowed the earlier. Statics run the same claim
+  check, against remotes and statics alike.
+- **Tool registration is one write guard.** `POST /api/v1/tools` read
+  the name and then registered it, so two concurrent requests for one
+  name could both pass the check and the second would shadow the
+  first. `ToolRegistry::register_entry_if_absent` decides and inserts
+  under one write guard, and the route uses it.
+- **Core tool names are queryable and creatable.**
+  `ToolRegistry::core_owns` exposes the immutability predicate
+  registration refuses on, so a caller that learns a name out of band
+  can ask the same question; `ToolRegistry::register_core_entry` is the
+  way to file a tool as `Core`.
+
+### Added (`synthia-plugin-host`: a plugin can be a process)
+
+- **The host half of the dynamic plugin channel.** `synthia-plugin-host`
+  spawns a plugin with `std::process::Command`, speaks line-delimited
+  JSON-RPC 2.0 to it over stdin/stdout — requests correlated by `id`,
+  one reader thread per plugin — and turns the plugin's
+  `synthia/tools/list` descriptors into `synthia_tool::Tool`
+  implementations registered on the harness's `Host`. The wire
+  vocabulary is `synthia-plugin-protocol`'s, unchanged.
+- **A remote tool's risk is the host's decision.** `RemoteTool::risk`
+  returns `RemotePluginConfig::risk`, never
+  `Risk::from_annotations(..)`: a plugin that advertises
+  `destructive_hint: false` in its descriptor cannot exempt itself from
+  the approval policy.
+- **Authority has two levels and one default.** `Authority::Reduced`
+  (the default) registers tools and — when both the config and the
+  handshake announce `observe` — a read-only observer that forwards
+  hook events as `synthia/event` notifications. A reduced plugin gets
+  no gate, no request transformer and no prompt section;
+  `RemotePlugin::exposes_gate()` reports `Authority::Full`, which only
+  an operator can grant. The gate's decision mapping and the audit row
+  for a remote rewrite are in the section below.
+- **The deadline covers the write, and expiry kills the plugin.** A
+  plugin that stops reading its stdin fills the pipe and blocks the
+  host's writer, so a deadline on the answer alone would stall the turn.
+  Every request registers a slot with a monotonic deadline; one reaper
+  thread per plugin expires the matured slots and **kills the process**,
+  which releases the blocked `write_all` and the stdin lock. A
+  notification registers a slot for the same reason. A plugin that dies
+  fails every pending request with `PluginError::Unavailable`, later
+  calls fail immediately, and `install` returns an error instead of
+  hanging.
+- **The crate is runtime-free.** No tokio in its dependency graph or
+  its public API: the plugin is a `std::process::Command` and blocking
+  protocol IO runs through `synthia_core::blocking::Blocking`
+  (`RemotePlugin::with_blocking`). The deadline is not a sleep — a
+  delay seam's wait cannot be cancelled, so a reaper built on one would
+  either spawn a thread per request or delay shutdown by a whole
+  timeout — it is a condition variable in the connection's own reaper
+  thread, which also means a constant two threads per plugin whatever
+  the call rate.
+- **Tool names belong to plugins.** `Host` has no notion of plugin
+  identity: two dynamic tools may share a name, and the later entry
+  wins it with *its* process and *its* host risk — capability
+  substitution. The new `PluginRegistry` remembers which plugin claimed
+  which name and refuses the install with
+  `HostError::DuplicateToolName` before registering anything.
+  `RemotePluginConfig` also rejects unknown keys: it decides `authority`
+  and `risk`, so a misspelt key must fail loudly.
+- The facade gained the `plugin-host` feature, which pulls `harness`,
+  `tool`, `core` and `plugin-protocol` because the re-exported types
+  name them. `TransportKind::Http` is part of the config surface but is
+  not implemented — an HTTP client would put a runtime in the crate —
+  so `install` reports `HostError::UnsupportedTransport` for it.
+
+### Added (the remote authority matrix, and an audit row for a rewrite)
+
+- **A `Full`-authority plugin can veto a tool call; a `Reduced` one
+  cannot.** `RemotePlugin::install` registers `synthia_harness::Gate`
+  behind `exposes_gate()`, the one branch that decides the escalation,
+  so a reduced plugin has no path to a veto. The gate answers
+  `PluginDecision` over `synthia/gate` and the host maps it onto
+  `HookDecision` (`Allow` / `Block` / `Ask` / `Terminate`); a variant
+  this build does not know reads as `Allow`, because an uninterpretable
+  decision must not become a veto. Only `before_tool` is gated — it is
+  a tool gate, not a policy engine — and every failure is fail-closed:
+  a dead channel, an expired deadline or an answer that is not a
+  decision is an `Err`, which the harness already treats as a block.
+- **A remote plugin may rewrite a tool result at either authority.**
+  The matrix grants "rewrite a tool result" to the default, because it
+  changes what one result says rather than whether the call happens,
+  so `capabilities.transform` registers a `ResultTransformer` for a
+  reduced plugin too. The plugin gets the result as JSON and answers
+  with the rewritten result; a rewrite that fails leaves the tool's own
+  output and records a diagnostic.
+- **A rewrite leaves a provenance row.** When the aggregate tool result
+  changes, the harness appends one `SessionEvent::ToolResultTransformed
+  { transformers, tool_name, call_id, before, after }` row — log-only,
+  never in the model's history, carrying a `sha256` digest of each side
+  (over the output's canonical JSON) rather than the payload.
+  Transformers run *before* the loop commits the result, so the
+  `tool_result` row already holds the rewritten text: the log and the
+  model agree, and this row is provenance — which registered
+  transformers altered the result on the way to that commit — not
+  reconciliation. The change is *measured*: `Host::apply_result_transformers`
+  snapshots the output, runs the chain and compares, so
+  `ResultTransformer::transform` keeps its `Result<(), String>`
+  signature and reports nothing. A run whose host holds no result
+  transformer takes no snapshot and writes no row: the loop asks
+  `Host::has_result_rewriters` first.
+- **`gate` is a capability, not an inference.** `PluginCapabilities`
+  gains `gate: bool` (absent key = `false`, so the wire stays
+  compatible both ways). The host speaks `synthia/gate` only to a plugin
+  that is both promoted to `authority: full` and announces the flag, and
+  `install` now refuses the promotion when a plugin does not announce it
+  — naming the fix — instead of installing cleanly and then blocking
+  every tool call in the host, one deadline at a time. Fail-closed stays
+  the per-call default; silent at install it does not.
+  **Operator action:** a plugin promoted to `authority: full` must now send
+  `"gate": true` in its `initialize` reply; a pre-existing plugin that
+  predates this key is refused at install rather than silently blocking
+  every call. The reverse direction is safe — an older host ignores the key.
+- `SessionEvent::ToolResultTransformed` joins
+  `KNOWN_SESSION_EVENT_TYPES` (28 typed rows).
+
+### Removed (five dead public items)
+
+- Five public items with exactly one reference each — their own
+  definition — are gone: `synthia_session::TypedEventRecord::as_value`,
+  `synthia_session::SummaryCompactor::with_prune_threshold`,
+  `synthia_provider::WorkspaceConfig::create_default_provider`,
+  `synthia_provider::OpenAIProfile::openai_compat`, and
+  `synthia_context::SummarizingContextManager::with_archive`. Nothing
+  in the tree called any of them, so nothing in the tree changes
+  behaviour:
+  - `with_prune_threshold` was the only writer of `prune_min_chars`,
+    which made `SummaryCompactor`'s `prune` override a copy of the
+    trait default (`prune_tool_results(…, DEFAULT_PRUNE_MIN_CHARS)`)
+    once the setter was gone. Both the field and the override are
+    deleted; the trait default is the same code.
+  - `with_archive` was a second constructor for
+    `SummarizingContextManager`. `new` still builds the (empty) archive,
+    and `archive()` still hands it out.
+  - `create_default_provider` was `create_provider(&self.default_provider)`
+    spelled as a second entry point; `create_provider` takes the entry
+    name explicitly.
+  - `openai_compat` was an `OpenAIProfile` constructor for an arbitrary
+    base URL and model id; `openai_default` and `openai_mini` remain.
+  - `as_value` was the sole `serde_json` user in `typed_event_sink`;
+    the writer takes a `SessionEvent` directly.
+- `CacheControlMark::hash_to_u64` is **not** removed but no longer
+  public: its ten references all sit in its own module's tests, so it
+  is now a `#[cfg(test)]` private function. `ahash` follows it to
+  `[dev-dependencies]`, so a consumer of `synthia-provider` no longer
+  compiles a hasher no production path calls.
+- `synthia-server` is marked `publish = false`: it is the application
+  crate and its 40k lines are not a crates.io contract. The **facade
+  `synthia` stays publishable** — it is the documented `cargo add
+  synthia` entry point.
+
+### Fixed (harness: a plugin's prompt section reaches the model)
+
+- **`Host::prompt_section` registrations are rendered.** The
+  registration API and its `Host::prompt_sections` reader have existed
+  since the plugin host landed, but the assembler never consulted the
+  host — the reader's only caller in the tree was a host unit test — so
+  a plugin's contributed block was accepted and then silently dropped
+  before the model ever saw it. A run now snapshots the host's sections
+  into its prompt manifest once, at run start, and renders each one as
+  a `## title` heading over its body immediately after the identity
+  block. Registration order is preserved; a blank section renders
+  nothing and does not enter the request-envelope fingerprint; with no
+  sections registered the assembled prompt is byte-identical to before.
+  A section registered *during* a run appears on the next run, not the
+  current one — the prompt stays byte-stable within a run, which is
+  what the provider's prefix cache needs.
+- **`PromptContext::with_sections` / `PromptContext::sections`** expose
+  that manifest to a caller that assembles a prompt itself; a
+  per-dispatch `AgentInput::prompt_context` now carries the host's
+  sections too, so a dispatch-level manifest cannot drop a plugin's
+  contribution. The internal `prompt::resolve_prompt_context` resolver
+  is deleted — the run manifest replaces it in every one of its three
+  callers.
+
+### Changed (server: one tool registry and one plugin host per node)
+
+- **Plugins installed at boot are reachable from chat.** The runtime
+  composition used to install into the boot agent's `Host` while every
+  per-run session agent was assembled with no host and its own
+  `ToolRegistry`, so a configured plugin's tools never reached the
+  agent that serves a conversation. `AppState` now owns one `Host`;
+  the composition installs into it, and every agent the server builds
+  — boot, per-run session, eval, dynamically registered — receives a
+  clone. A host clone shares its registrations, so nothing is spawned
+  per run.
+- **`AppState::tool_registry` is `Arc<ToolRegistry>`.** The
+  `ToolRegistry` already carries its own interior lock, so the outer
+  `Arc<RwLock<_>>` only forced agents to clone a snapshot. One handle
+  per node is now threaded to every agent, and a plugin's tool
+  registered at boot is visible to every later run.
+- **`Host::bind` is idempotent by identity.** Binding the same
+  registry again is a no-op; binding a *different* one records a
+  `RegistryAlreadyBound` diagnostic and keeps the original binding,
+  because the existing tool tokens name entries in it — moving the
+  host would strand them.
+
+### Added (a runtime-neutral delay seam)
+
+- **`synthia_core::Sleeper`** — the delay a timeout needs, with no
+  runtime in the signature: `sleep(&self, duration) -> BoxFuture<'static, ()>`.
+  Arming a timer is the one thing a library cannot do for its caller
+  without naming a runtime, so the seam is a trait the consumer fills:
+  `ThreadSleeper` (a std thread plus a oneshot channel) and
+  `FixedSleeper` (resolves immediately, for tests) ship in-tree, and
+  the trait is object-safe so a component holds an `Arc<dyn Sleeper>`.
+  The wait starts on the future's first poll — the laziness
+  `tokio::time::sleep` has — so a timeout that is abandoned before
+  it is ever polled starts no timer at all.
+
+### Added (a runtime-neutral blocking seam)
+
+- **`synthia_core::Blocking`** — the offload a blocking call needs,
+  with no runtime in the signature: `run(&self, f) -> BoxFuture<'static, ()>`.
+  Moving a file write off the caller's thread is the one thing a
+  library cannot do for its caller without naming a runtime, so the
+  seam is a trait the consumer fills: `ThreadBlocking` (a std thread
+  plus a oneshot channel) ships in-tree, and the trait is object-safe
+  so a component holds an `Arc<dyn Blocking>`. The closure starts on
+  the future's first poll, and a closure that has to report a
+  `Result` carries it out through a channel of its own — the
+  awaitable counterpart to `Spawner::spawn_blocking`, which is
+  fire-and-forget.
+
+### Changed (provider and steering carry no tokio dependency)
+
+- **`synthia-provider`'s `tokio` is optional**, enabled by the
+  `anthropic` / `openai` features — the adapter code (the SSE pump,
+  the retry backoff) is the only production code that awaits a runtime
+  primitive. A build with `default-features = false` now compiles no
+  tokio at all, and `synthia-provider` / `synthia-steering` no longer
+  turn on `synthia-core`'s `tokio-util` feature from their normal
+  dependency list: the `CancellationToken` bridge there is a
+  test-time convenience in both crates.
+- **`synthia-server` cancels with `synthia_core::AtomicCancelToken`**
+  instead of `tokio_util::sync::CancellationToken` — the run-stream
+  factory, the controller's in-flight run handle, and the binary's
+  graceful-shutdown token. The server drops `tokio-util` entirely; the
+  runtime-neutral token implements the same `CancelToken` trait and
+  `Arc<AtomicCancelToken>` coerces where `Arc<dyn CancelToken>` is
+  expected.
+
+### Removed (provider: two dead retry helpers)
+
+- **`synthia_provider::retry_with_backoff` and
+  `synthia_provider::retry_with_retry_after`** — both had zero call
+  sites; their only references were the `lib.rs` re-exports.
+  `retry_with_classification` stays, now compiled only with an adapter
+  feature (its only callers) and reachable as
+  `synthia_provider::retry::retry_with_classification` — it leaves the
+  crate root so the retry vocabulary keeps its one-line re-export. The
+  same-named helper in `synthia-resilience` is unrelated and unchanged.
+
+### Changed (`synthia-session` is runtime-free)
+
+- **`synthia-session` compiles no tokio.** Its normal dependency list
+  no longer names a runtime: the `tokio::sync::Mutex` over the file
+  handle is `futures::lock::Mutex`, and the three `spawn_blocking`
+  fs calls (append, batch append, read) go through the new
+  `synthia_session::fs::FsBackend` over the `Blocking` seam. The
+  search index's store walk takes the same seam. Both default to the
+  runtime-free implementation, so the sink works on a bare `futures`
+  executor; a host on a runtime swaps its own in with
+  `JsonlSessionSink::with_blocking` / `JsonlSessionSearch::with_blocking`
+  / `SessionRegistry::with_blocking`. tokio remains a
+  **dev**-dependency (the crate's own tests are `#[tokio::test]`).
+- **`SummaryCompactor`'s timeout is armed by a `Sleeper`** instead of
+  `tokio::time::timeout`: `with_sleeper(Arc<dyn Sleeper>)` races
+  `cancel.cancelled()` against `sleeper.sleep(timeout)` with
+  `futures::select_biased!`, keeping the `Cancelled` / `Timeout`
+  outcomes and the cancellation-first priority. The default
+  `ThreadSleeper` needs no reactor, so the deadline now works with
+  `with_timeout` on any executor.
+- **The server installs its own tokio adapters.** `synthia-server`'s
+  `spawner` module gains `ServerBlocking` and `ServerSleeper` beside
+  `ServerSpawner` (same reason: R121 keeps the server on the facade,
+  so the ~10-line adapters are local rather than a facade feature),
+  and every site that builds a sink, the search index, the registry
+  or the manual compactor installs them. `ServerSleeper::sleep`
+  anchors its deadline on first poll, as the trait requires.
+
+### Removed (`synthia::session::manager::InputQueue`)
+
+- **`InputQueue` is now the server's type**
+  (`synthia_server::session::input_queue::InputQueue`), not the
+  session crate's: it is the application's bridge between
+  `submit(Prompt | Steer)` and its run loop, not a property of a
+  durable log. The facade path `synthia::session::manager::InputQueue`
+  is **gone, not aliased** — no alias, no shim. `synthia-session` drops
+  the type and its `PendingEntry`, and the queue is held by
+  `AppState` (one per process, cloned into every controller) so a
+  route or a test sees the same queue the controller drains. The
+  queue is backed by `futures::lock::Mutex`.
+
+### Changed (the web client reads `follow`; the old SSE route is gone)
+
+- **The chat page's transcript is `GET
+  /api/v1/sessions/{id}/follow`.** Every open replaces the window from
+  the baseline (header, durable window, cursor, live projection, context
+  meter, pending interrupts, request fingerprint), then applies rows past
+  the cursor. The local `synthia.messages.*` cache and the
+  `synthia.streamIndex.*` replay cursor are gone: a reconnect is a
+  replace, not a splice, so partial text can neither duplicate nor go
+  missing.
+- **`GET /api/v1/chat/sessions/{id}/messages/stream` is removed**, not
+  aliased. `routes::chat::stream_messages` and its replay/cursor helpers
+  are deleted; the route table no longer mounts either path
+  (`/api/v1/chat/...` or the `chat_router()` builder). The integration
+  tests that only exercised it are removed, and the surviving route test
+  asserts the old path answers `404`.
+- **Composer: `Send` (queue) and `Steer` (inject).** A steer shows
+  `accepted` (durable) → `injected step N` → `consumed`, or `next turn`
+  when the run settled first; `Stop` returns un-injected steers to the
+  editor. A queued turn shows as an outbox chip until the run logs its
+  row.
+- **Approval card bound to the held call.** Approve-once / reject per
+  interrupt; the resume posts every decision and the token rebuilt from
+  the follow baseline (`cursor`, pending call ids, request fingerprint).
+  The composer is disabled while a decision is outstanding, and a
+  rejection reads back as the model-visible `is_error` tool result.
+- **Compaction is visible.** The durable `compaction` row renders a
+  timeline marker with its summary and the shadowed surface/seq range;
+  the footer shows the session's context occupancy plus its own token
+  totals from `/usage`, and offers a manual `Compact` action.
+- **`POST /api/v1/chat/sessions/{id}/messages` accepts attachment-only
+  turns** (`text` may be empty when `attachments` carry the turn; a
+  request with neither is `400 empty_message`), and a named agent now
+  rides the prompt op, so the composer's agent selection is honoured for
+  plain-text turns instead of falling back to the deployment default.
+
+### Added (follow, resume, compact, and session usage)
+
+- **`GET /api/v1/sessions/{id}/follow`** opens with a complete
+  baseline — header, the last durable window, its cursor, the live
+  projection of the in-progress turn (`live_seq`), the context meter,
+  the open interrupts and the request-envelope fingerprint — and then
+  streams `row` frames (durable, `seq`) and `live` frames (transient,
+  `live_seq`). A reconnect replaces the client's window from the new
+  baseline; a durable row for a turn supersedes that turn's live
+  projection. The stream stays open across turns.
+- **`POST /api/v1/sessions/{id}/resume`** takes
+  `{ resume_token, interrupts: [{ id, status, payload }] }`. A
+  `resolved` call executes once; `cancelled` / `rejected` writes the
+  model-visible `is_error` tool result and no dispatch intent. The
+  decisions must cover every open interrupt: partial coverage is `422`,
+  a stale token or a changed envelope is `409`, each with a diagnostic.
+- **`POST /api/v1/sessions/{id}/compact`** runs one manual compaction
+  pass through the configured policy and returns the committed range
+  and summary metadata; a running session, a suspended one, or a
+  deployment with no compaction policy is `409`.
+- **`GET /api/v1/sessions/{id}/usage`** reports the session's own
+  token/cost fold (not the process-wide counters) plus turns and the
+  next-request context projection.
+- **Harness: per-call resume decisions.** `ResumeDecision` /
+  `ResumeStatus` and `AgentInput::resume_decisions(token, decisions)`;
+  `agent::approval::{open_requests, check_coverage,
+  latest_request_snapshot_hash}` expose the log-derived paused state
+  and token integrity to hosts. `SessionState::AwaitingApproval` is
+  derived from the log, and `maybe_start_run` refuses a fresh run while
+  it holds.
+
+### Added (compaction seam: a summary that replaces a span, with provenance)
+
+- **`synthia_session::Compactor`.** `plan` decides which projected
+  messages to shadow and `summarize` produces the replacement; the trait
+  owns no provider, so a deployment can summarise with a cheap model
+  without teaching the loop about it. `SummaryCompactor` is the default:
+  it keeps a balanced recent tail (never splitting a `tool_use` from its
+  result), prunes oversized tool results **before** the summary call,
+  and asks its provider once.
+- **The harness owns provenance.** A plan names a message range; the
+  loop fills `shadowed_seqs` from the fold, so the durable `Compaction`
+  `Replace` cites exactly the rows the model saw — each one before the
+  compaction row and no later than the previous surface maximum.
+- **Optional, boundary-only.** `ControlCaps.compactor` (default `None`)
+  and `ReActAgent::with_compactor`. Only a writer-backed run compacts,
+  only at a step boundary and never while suspended. A summariser
+  failure warns and continues without compaction; the turn is not lost.
+  The context manager's request-local pruning is unchanged and
+  independent.
+- **Live events.** `SystemEvent::CompactionStarted` /
+  `CompactionFinished` (`kind`, `size_hint`, the shadowed indices and
+  the first/last shadowed log ordinal) let a UI mark the timeline and
+  address the summary's span; the log-only `compaction_start` /
+  `compaction_summary` / `compaction_end` audit rows carry the rest.
+- **The summary row names its author.** `CompactionOutcome` gained
+  `provider` / `model` / `usage`, and the durable `compaction` row
+  records them beside the summary and the shadowed token count. The
+  harness always writes its own bound range and seqs, so a compactor
+  cannot cite rows the fold did not hand it; the outcome's echo is
+  advisory. A pass whose only shadowable row is the previous summary
+  is skipped.
+
+### Changed (the compaction lifecycle outcome is named for its lifecycle)
+
+- **`synthia_session::CompactionOutcome` → `CompactionLifecycleOutcome`**
+  (breaking). `CompactionOutcome` now names the seam's result
+  (`summary`, `shadowed_seqs`, `shadowed_tokens`); the old enum still
+  serialises as `committed` / `failed` / `interrupted` and still drives
+  `CompactionEnd`.
+
+### Changed (`DelegatingTool`: name-keyed dispatch and a host registration)
+
+- **`SyntheticTool` → `DelegatingTool`** (breaking): the seam for a
+  plugin that runs work *inside* the loop was never "synthetic" — it
+  delegates. `SyntheticCall` → `DelegationCall`, the module is now
+  `agent/re_act/delegation.rs`, and `ReActAgent::with_synthetic_tool` →
+  `with_delegator` (same fallible duplicate-name contract).
+- **Dispatch is a name-keyed table.** `claims(name)` — a linear scan of
+  every installed plugin on every call — is gone: the loop indexes the
+  advertised definitions once per run, so a run with several delegators
+  pays one map lookup.
+- **`DelegationCall` carries `context`.** A delegator receives the same
+  `synthia_tool::Context` (workspace root, session id, output bound) a
+  registry tool gets; `emit` / `cancel` / `depth` / `subagent_writers`
+  are unchanged.
+- **`DelegatingTool::mode()` / `annotations()`.** `mode()` defaults to
+  `Sequential`, and the batch bucketer now reads it for a delegated name:
+  before, the registry knew nothing about these names and filed them under
+  its missing-tool default (also sequential), so a delegator could not
+  declare `Parallel` at all. `annotations()` applies to the definitions
+  that carry none of their own.
+- **`Host::delegator`.** A plugin installs a delegator through the host
+  and gets the same reversible registration as observers, gates and
+  tools: dropping the `Registration` withdraws it from the next run.
+  Installing one delegator through both the agent and its host leaves
+  one entry.
+
+### Changed (every strategy persists its turn, and the prompt is durable first)
+
+- **Every reasoning strategy writes its assistant turn.** The write is
+  one `EventSink` method (`write_assistant_turn`): the ReAct loop
+  calls it where it always wrote the row, and the chain-of-thought,
+  best-of-N and plan-and-execute strategies call it where they publish
+  the model's text. Before, only the ReAct loop wrote the row — a run
+  driven by any other strategy streamed a whole answer and left the
+  session's log without it.
+- **The run's prompt is on disk before the model sees it.** The loop
+  flushes the session's writer at the step boundary, before the
+  provider call, so the user's message (and a delegated child's own
+  enter header and prompt) survives a crash in the window between the
+  prompt and the answer. Before, nothing was flushed until the first
+  row of the reply.
+- **One `request_header` row per run.** The harness stamps it — the
+  provider that ran, the model, and the hash of the tool set the model
+  was actually offered — and the server no longer writes a second one
+  before the run's prompts.
+- **`make check-single-writer`.** A gate over the workspace's
+  production code: outside the session crate's writer, no
+  `SessionSink::append` / `append_many` call site. The invariant this
+  round is named after now has something holding it.
+
+### Changed (one assistant turn is one durable row)
+
+- **An assistant turn is one row, not one row per delta.**
+  The harness writes the assembled turn — its text and its tool calls
+  together — as a single `assistant_message` row, and a tool's outcome
+  as a single `tool_result` row. The per-delta `Model` rows are gone
+  from the log: the deltas stay on the event stream, where the live
+  rendering reads them, and only the finished turn is durable. Before,
+  a reply of forty deltas left forty rows, and a resumed session read
+  them back as forty assistant messages — the model saw its own last
+  answer in pieces.
+- **A tool result row says whether the tool failed.** The row's `data`
+  is the tool *message* — the tool's output and the id of the call it
+  answers — and the message carries no failure flag of its own, so the
+  flag rides beside it as `is_error`. A row without the flag is a tool
+  that returned, and the wire keeps the shape it had before.
+- **The web reads the new rows.** The chat page's history projection
+  and the session detail page understand `assistant_message` and
+  `tool_result`, so a reloaded session shows the same assistant turn
+  the live view showed: one message, its text complete, and its tool
+  calls as tool blocks that carry their results.
+
+### Added (the writer is handed to a run, and to a run's children)
+
+- **`AgentInput::log_writer` and `AgentInput::subagent_writers`.**
+  A run can name the session's writer for its own rows and the source
+  that opens the sessions its delegated children run in, so a child
+  writes its model facts into its own log through its own writer
+  instead of the parent's router copying them over.
+- **`SubagentWriters` / `ReActAgent::with_subagent_writers`.** The
+  harness-side seam a host implements to open a child session: the
+  delegation plugin hands the input down run by run, so every nesting
+  level resolves its own child session.
+- **`LogWriter::append_request_header`.** The writer stamps the run's
+  request header and remembers the envelope, so the row says
+  `initial` / `change` / `same` instead of guessing.
+
+### Changed (the row's own `seq` is the ordinal)
+
+- **A reader takes the ordinal from the row.** The fold, the ledger's
+  seed and the writer's counter continuation read the `seq` a row
+  carries instead of counting rows in the file: a stamped log is
+  numbered by the numbers its writer stamped, and a compaction
+  checkpoint's `source_event_seqs` cite real earlier rows. A log that
+  carries no `seq` at all — an old one — is still numbered by
+  position, exactly as before. Deciding row by row would mix the two
+  schemes and produce duplicate ordinals.
+
+### Changed (the context crate's write points go through the session's writer)
+
+- **The memory tier writes through the session's writer.**
+  `SessionMemory::new(writer)` replaces `SessionMemory::new(sink)`: the
+  tier holds the session's `LogWriter`, reads the log through it, and
+  writes the `"Message"` envelope through it. The row now carries the
+  ordinal the writer handed out and the writer's wall clock — before,
+  the tier's row carried no `seq` at all, so a log that held one fell
+  back to positional numbering for the whole file.
+  `SessionMemory::sink` is gone: the sink handle is the writer's now.
+- **The crash repair writes through the session's writer.**
+  `repair_session(writer)` replaces `repair_session(sink)`: the closers
+  it appends carry the writer's ordinal and land in the writer's batch,
+  so a repair is one flush instead of one append per closer. The
+  repair still only appends — it never truncates the log.
+- **The writer can read the log it owns.**
+  `LogWriter::read` returns the session's rows in the order they were
+  written, so a caller that holds only the writer — the memory tier
+  and the crash repair — can still project the log.
+
+### Changed (the harness's structural rows go through the session's writer)
+
+- **The harness writes its structural rows through the session's one
+  writer.** `EventSink` now holds an `Option<Arc<synthia_session::LogWriter>>`
+  and nothing else: `EventSink::new(tx, log_writer)` takes two
+  parameters, and `emit_typed` writes the row through the writer's
+  non-waiting path (`append_event_nowait`) — the loop must not block on
+  a queue, and a row that does not fit waits in the writer's spill
+  instead of being dropped. Without a writer the row goes nowhere: a
+  structural row is a log fact, and a run with no writer has no log.
+  `ReActAgent::with_log_writer` now takes the session crate's writer;
+  the harness's own writer and its `log` module are gone.
+- **The typed-event channel is gone.** `synthia_session::TypedEventSink`
+  and `TypedEventReceiver` are removed — the channel was fire-and-forget,
+  so a full buffer dropped a structural row and left a hole in the
+  log's ordinals that no later reader could repair. The writer replaced
+  it. `TypedEventRecord` and `CompactionRecordView` stay: they are
+  public API, and the latter is part of the server's own surface.
+- **`Durability` is gone.** The flush cadence is the caller's business:
+  the harness flushes the writer at the step boundary — before each
+  provider call — and again when a tool result's row is written, before
+  that result's event goes out. (The assistant turn's deltas and its
+  `ModelDone` are emitted as they stream; its row is written and
+  flushed right after the turn completes.) The server's own rows are
+  queued and land on the same flush. With the enum gone,
+  `synthia::harness::{LogWriter, Durability}` no longer has a place in
+  the public surface; the writer's path is
+  `synthia::session::LogWriter`.
+- **The server writes the agent's structural rows through the same
+  writer.** `AgentRunConfig::typed_event_sink` becomes
+  `AgentRunConfig::log_writer`, and the run task installs the session's
+  writer on the agent instead of draining a channel at the end of the
+  run.
+
+### Changed (one writer per session: the registry hands it out, the checkpoint writes through it)
+
+- **The session registry hands out one writer per session.**
+  `SessionRegistry::writer(user_id, session_id)` returns the session's
+  `LogWriter` — cached per session, next to the sink it wraps, and
+  dropped with the session. One session has one writer, so one ordinal
+  source and one flush cadence: two writers over one sink would each
+  hold their own queue and their own flush timing, and the rows they
+  write could reach the log in an order their ordinals do not match.
+- **The compaction checkpoint writes through that writer.**
+  `CompactionCheckpoint::new(writer, ledger)` replaces the channel it
+  used to hold. Its two callbacks are synchronous — the summarising
+  manager fires them from the agent's own task — so they take the
+  writer's non-waiting path: a row that does not fit in the writer's
+  queue waits in the writer's spill and the next flush writes it. The
+  checkpoint's rows are no longer dropped by a full channel, and the
+  ordinal they carry is the one the reader reproduces.
+- **The crash-repair closers no longer number themselves.**
+  `interrupted_turn_closers` used to derive each closer's ordinal
+  from the log's last sequence number — a second ordinal source, and a
+  third once the writer existed. The closers now carry `seq: 0`, and
+  the appender that writes them stamps the ordinal the sink hands out.
+
 ### Changed (harness v2 foundation: the log owns the ordinal)
 
 - **The sink owns the ordinal; the writer stamps it.**
@@ -23,13 +822,13 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   no longer collide with the run's ordinals and make a compaction
   checkpoint's provenance unresolvable. `append_with_key` and
   `append_many` follow the same shape.
-- **`synthia-harness` grew a `LogWriter`.** It stamps each row's
-  ordinal, buffers it in a bounded queue (a synchronous producer
-  waits in a spill rather than dropping the row), and flushes the
-  batch at every step boundary — the only moment the run waits for
-  the disk. `ReActAgent::with_log_writer` installs one over the
-  host's `SessionSink`; `Durability` selects the cadence
-  (`StepBoundary` / `Batched` / `Sync` / `Off`).
+- **A writer stamps each row's ordinal.** (Superseded below: the
+  writer this bullet announced first lived in `synthia-harness` and
+  selected its flush cadence with a `Durability` enum. The writer
+  moved to `synthia-session` — one per session, handed out by the
+  registry — its cadence is the caller's, and `Durability` is gone.
+  Read the "one writer per session" and "the harness's structural
+  rows" sections for the shipped shape.)
 - **Dead harness APIs removed**: the `RunInbox` family
   (`RunInbox` / `MpscInbox` / `RunInboxHandle` /
   `with_run_inbox` / `run_inbox`) and the loop's steering-drain and

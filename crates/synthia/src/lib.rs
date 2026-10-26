@@ -53,11 +53,11 @@
 //! pairs until the window fits); the [`ContextManager`] trait lets you
 //! swap in summarisation or a DAG without touching the loop.
 //!
-//! **5. The session sink** — `synthia-session`'s log, drained through
-//! a [`TypedEventSink`]: structural boundary events (iteration, step,
-//! request header, usage) travel a `futures` channel to whatever
-//! durable store you own. Leave it out and the agent simply keeps no
-//! structural log.
+//! **5. The session sink** — `synthia-session`'s log, written through
+//! its one writer: the structural boundary events (iteration, step,
+//! request header, usage) go straight into the writer, which stamps
+//! their ordinal and writes them with the rest of the batch. Leave the
+//! writer out and the agent simply keeps no structural log.
 //!
 //! **6. The cancel token** — [`CancelToken`] is the whole cancellation
 //! vocabulary: `is_cancelled`, `cancel`, `cancelled().await`.
@@ -133,12 +133,10 @@
 //!     // when you actually have an embedding endpoint.
 //! }
 //!
-//! let (typed_sink, _typed_rx) = TypedEventSink::channel(64);
 //! let agent = ReActAgent::new(Arc::new(ScriptedProvider), Arc::new(ToolRegistry::new()))
 //!     .with_workspace(".")
 //!     .with_steering(Arc::new(Steering::noop()))
 //!     .with_context_manager(Arc::new(TruncatingContextManager))
-//!     .with_typed_event_sink(typed_sink)
 //!     .with_name("tutorial-agent")
 //!     .with_instructions("Answer in one short sentence.");
 //!
@@ -208,12 +206,13 @@
 //! | `resilience` | [`resilience`] | `synthia-resilience` | no |
 //! | `strategy-plan-execute` | [`strategy_plan_execute`] | `synthia-strategy-plan-execute` | no |
 //! | `reflection` | [`reflection`] | `synthia-reflection` | no |
-//! | `budget` | [`budget`] | `synthia-budget` | no |
+//! | `budget` | `synthia::budget` | `synthia-budget` | no |
 //! | `hpc-pool` | `synthia::hpc_pool` | `synthia-provider/hpc-pool` | no |
 //! | `hpc-simd` | `synthia::hpc_simd` | `synthia-search/simd` | no |
 //! | `hpc-batch` | `synthia::hpc_batch` | `synthia-hpc-batch` | no |
 //! | `sqlite` | `synthia::context::memory` | `synthia-context/sqlite` | no |
 //! | `test-support` | `synthia::test_support` | `synthia-test-support` | no |
+//! | `plugin-host` | `synthia::plugin_host` | `synthia-plugin-host` | no |
 //!
 //! Enabling a feature enables the modules its types refer to, so a
 //! name from a sibling module is never left unnameable. The `prelude`
@@ -248,7 +247,6 @@
 //! [`Steering::noop`]: crate::prelude::Steering::noop
 //! [`TruncatingContextManager`]: crate::prelude::TruncatingContextManager
 //! [`ContextManager`]: crate::prelude::ContextManager
-//! [`TypedEventSink`]: crate::prelude::TypedEventSink
 //! [`CancelToken`]: crate::prelude::CancelToken
 //! [`AtomicCancelToken`]: crate::prelude::AtomicCancelToken
 //! [`ReActAgent`]: crate::prelude::ReActAgent
@@ -487,6 +485,10 @@ pub mod hpc_simd;
 pub mod macros;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(feature = "plugin-host")]
+pub mod plugin_host;
+#[cfg(feature = "plugin-protocol")]
+pub mod plugin_protocol;
 pub mod prelude;
 #[cfg(feature = "provider")]
 pub mod provider;

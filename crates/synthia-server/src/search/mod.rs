@@ -47,8 +47,6 @@ use synthia::{
     session::SharedSessionSearch,
     tool::{ToolExposure, ToolRegistry},
 };
-use tokio::sync::RwLock;
-
 /// Domain label: server tool plugins (`read` / `write` / `shell` …).
 pub const DOMAIN_TOOL: &str = "tool";
 /// Domain label: tools published by configured MCP servers
@@ -76,7 +74,7 @@ const SKILL_REFRESH_SECS: i64 = 60;
 
 /// Every live source the six engines read.
 pub struct SearchSources {
-    pub tool_registry: Arc<RwLock<ToolRegistry>>,
+    pub tool_registry: Arc<ToolRegistry>,
     pub agent_registry: Arc<AgentRegistry>,
     pub workspace_root: std::path::PathBuf,
     pub memory: Arc<dyn Memory>,
@@ -118,21 +116,14 @@ fn tool_docs(registry: &ToolRegistry, mcp_only: bool) -> Vec<SearchDoc> {
 /// The two tool-registry domains share one snapshot walk: version
 /// probe + filtered projection, parameterised by the `mcp__` split.
 fn tool_catalog(
-    tool_registry: &Arc<RwLock<ToolRegistry>>,
+    tool_registry: &Arc<ToolRegistry>,
     mcp_only: bool,
 ) -> CatalogEngine {
     let probe = Arc::clone(tool_registry);
     let snap = Arc::clone(tool_registry);
     CatalogEngine::new(
-        Box::new(move || probe.try_read().map(|g| g.version()).unwrap_or(0)),
-        Box::new(move || {
-            match snap.try_read() {
-                Ok(g) => tool_docs(&g, mcp_only),
-                // A writer holds the registry; answer from the
-                // cached snapshot by reporting "no change".
-                Err(_) => Vec::new(),
-            }
-        }),
+        Box::new(move || probe.version()),
+        Box::new(move || tool_docs(&snap, mcp_only)),
     )
 }
 
@@ -294,8 +285,8 @@ mod tests {
         // Capability 1: the agent registry is the model-facing
         // `search` tool, deferred so the cold tool list stays
         // name + description.
-        let g = state.tool_registry.read().await;
-        let d = g
+        let d = state
+            .tool_registry
             .descriptors()
             .into_iter()
             .find(|d| d.name == "search")

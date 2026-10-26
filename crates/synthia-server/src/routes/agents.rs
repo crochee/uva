@@ -167,21 +167,12 @@ pub(crate) fn build_react_agent(
     descriptor: AgentDescriptor,
     max_iterations: Option<usize>,
 ) -> std::sync::Arc<dyn Agent> {
-    let tool_registry = {
-        match state.tool_registry.try_read() {
-            Ok(g) => Arc::new(g.clone()),
-            Err(_) => {
-                tracing::warn!(
-                    "tool registry lock contention while building agent; \
-                     falling back to an empty registry"
-                );
-                Arc::new(synthia::tool::ToolRegistry::new())
-            }
-        }
-    };
     let agent = crate::agent_assembly::AgentAssembly {
         provider: Arc::clone(&state.default_provider),
-        tool_registry,
+        // The node's one registry, not a snapshot: a registered agent
+        // advertises the same live surface (plugin tools included) a
+        // session run does.
+        tool_registry: Arc::clone(&state.tool_registry),
         workspace_root: state.workspace_root.clone(),
         descriptor,
         prompt_context: state.prompt_context.clone(),
@@ -197,7 +188,7 @@ pub(crate) fn build_react_agent(
         // `task` tool plugin; the registry is shared so children
         // resolve the same catalog (depth-capped to prevent
         // cycles).
-        synthetic: vec![Arc::new(TaskDelegator::new(Arc::clone(
+        delegators: vec![Arc::new(TaskDelegator::new(Arc::clone(
             &state.agent_registry,
         )))],
         tool_surface: None,
@@ -210,8 +201,13 @@ pub(crate) fn build_react_agent(
         // registered agent and a session run are restricted the
         // same way.
         tool_restriction: state.default_tool_restriction.clone(),
-        typed_event_sink: None,
+        log_writer: None,
+        subagent_writers: None,
         context_manager: None,
+        // The deployment's host: a clone shares the registrations,
+        // so a registered agent runs the same plugin surface without
+        // spawning another plugin process.
+        host: Some(state.plugin_host.clone()),
     }
     .build();
     Arc::new(agent)

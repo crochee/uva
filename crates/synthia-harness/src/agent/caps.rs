@@ -9,17 +9,18 @@ use synthia_core::{
     spawn::Spawner,
 };
 use synthia_provider::ModelProvider;
-use synthia_session::TypedEventSink;
+use synthia_session::{Compactor, LogWriter};
 use synthia_steering::Steering;
 use synthia_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
 
 use crate::{
     ReasoningStrategy,
     agent::{
+        approval::ApprovalPolicy,
         checkpoint::Checkpointer,
-        re_act::{ReActStrategy, synthetic::SyntheticTool},
+        host::Host,
+        re_act::{ReActStrategy, delegation::DelegatingTool},
     },
-    log::LogWriter,
     prompt::PromptContext,
 };
 
@@ -35,7 +36,10 @@ pub struct ToolCaps {
     pub registry: Arc<ToolRegistry>,
     pub surface: Option<Arc<ToolSurfacePolicy>>,
     pub restriction: Option<Arc<ToolRestriction>>,
-    pub synthetic: Vec<Arc<dyn SyntheticTool>>,
+    /// The delegating tools the agent installs directly. The loop merges
+    /// each host-registered delegator into the same name-keyed table, so a
+    /// plugin may install either way.
+    pub delegators: Vec<Arc<dyn DelegatingTool>>,
 }
 
 #[derive(Clone)]
@@ -43,6 +47,17 @@ pub struct ControlCaps {
     pub steering: Arc<Steering>,
     pub max_iterations: usize,
     pub context_manager: Arc<dyn ContextManager>,
+    /// The agent's plugin host: the registrations a plugin installed
+    /// and the arbitration they run through. One host belongs to one
+    /// agent — there is no global one.
+    pub host: Host,
+    /// Which calls the run stops to ask about. The default holds
+    /// high-risk calls; a low-risk call never waits.
+    pub approval: ApprovalPolicy,
+    /// The run's compactor. `None` — the default — means the loop
+    /// never compacts; the context manager's request-local pruning
+    /// is a separate, always-on pass.
+    pub compactor: Option<Arc<dyn Compactor>>,
 }
 
 #[derive(Clone)]
@@ -55,7 +70,13 @@ pub struct EnvCaps {
     /// structural rows through it and flushes them at the step
     /// boundary.
     pub log_writer: Option<Arc<LogWriter>>,
-    pub typed_sink: Option<TypedEventSink>,
+    /// Writer source resolving the log writer of a session a
+    /// delegated child runs in. The loop hands it to delegating
+    /// tools (the `task` delegator), which resolve each child's
+    /// writer before starting the child run. `None` (the
+    /// default) means this agent delegates without persisting
+    /// its children.
+    pub subagent_writers: Option<Arc<dyn crate::input::SubagentWriters>>,
 }
 
 #[derive(Clone)]
@@ -88,7 +109,7 @@ impl AgentCaps {
                 registry,
                 surface: None,
                 restriction: None,
-                synthetic: Vec::new(),
+                delegators: Vec::new(),
             },
             control: ControlCaps {
                 steering: Arc::new(Steering::noop()),
@@ -96,6 +117,9 @@ impl AgentCaps {
                 context_manager: Arc::new(
                     synthia_context::TruncatingContextManager,
                 ),
+                host: Host::new(),
+                approval: ApprovalPolicy::default(),
+                compactor: None,
             },
             env: EnvCaps {
                 workspace_root,
@@ -103,7 +127,7 @@ impl AgentCaps {
                 spawner: Arc::new(synthia_core::spawn::InlineSpawner),
                 checkpointer: None,
                 log_writer: None,
-                typed_sink: None,
+                subagent_writers: None,
             },
         }
     }
@@ -121,6 +145,29 @@ impl AgentCaps {
             ),
             Arc::new(PromptContext::default()),
         )
+    }
+
+    /// The manifest one run renders: the per-dispatch context when the caller
+    /// supplied one, else the agent's default, plus the host's prompt sections
+    /// in registration order.
+    ///
+    /// Take it **once per run** — the loop's constructor does, and the
+    /// single-shot strategy once per request. That boundary is the contract: a
+    /// section a plugin registers *during* a run lands on the next run, never
+    /// mid-run, because the system prompt has to stay byte-stable within a run
+    /// for the provider's prefix cache to hold. With no sections registered
+    /// this shares the manifest (`Arc::clone`); only a run that actually has a
+    /// plugin section pays for the copy.
+    pub(crate) fn run_prompt_context(
+        &self,
+        dispatch: Option<&Arc<PromptContext>>,
+    ) -> Arc<PromptContext> {
+        let base = dispatch.unwrap_or(&self.model.prompt_context);
+        let sections = self.control.host.prompt_sections();
+        if sections.is_empty() {
+            return Arc::clone(base);
+        }
+        Arc::new(base.as_ref().clone().with_sections(sections))
     }
 }
 

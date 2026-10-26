@@ -49,6 +49,11 @@ otel = ["synthia-telemetry/otlp", "dep:opentelemetry"]
 [dev-dependencies]
 # The tests script `ModelProvider` impls and cancel through the same
 # primitives the agent tests use; the lib itself names no runtime.
+# `synthia-core`'s `tokio-util` feature supplies the
+# `impl CancelToken for tokio_util::sync::CancellationToken` the tests
+# pass to `Agent::run` — no longer provided by another crate's
+# dependency list.
+synthia-core = { workspace = true, features = ["tokio-util"] }
 async-trait.workspace = true
 tokio-util.workspace = true
 

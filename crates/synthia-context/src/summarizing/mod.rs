@@ -54,7 +54,7 @@ mod manager;
 mod prompt;
 mod refs;
 
-pub use archive::{ToolCallArchive, ToolCallRecord};
+pub use archive::{ToolCallArchive, ToolCallRecord, ToolCallRecordKind};
 pub use hook::{CompactionHookFn, as_summarise_fn};
 pub use lifecycle::{CompactionLifecycle, CompactionRecord};
 pub use manager::SummarizingContextManager;
@@ -84,6 +84,7 @@ pub type SummariseFn = Arc<
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         path::PathBuf,
         sync::{
             Arc,
@@ -96,11 +97,13 @@ mod tests {
         Content,
         ContentPart,
         Message,
+        ReasoningContent,
         Role,
         TextContent,
         ToolResult,
+        ToolUse,
     };
-    use synthia_session::CompactionOutcome;
+    use synthia_session::CompactionLifecycleOutcome;
 
     use super::*;
     use crate::{
@@ -134,6 +137,63 @@ mod tests {
             let s = s.clone();
             Box::pin(async move { Some(s) })
         })
+    }
+
+    /// An assistant turn that issues `ids` in one message, carrying
+    /// prose and thinking the widening splice must not drop.
+    fn assistant_with_calls(
+        text: &str,
+        thinking: &str,
+        ids: &[&str],
+    ) -> Message {
+        let mut parts = vec![
+            ContentPart::Text(TextContent {
+                text: text.to_string(),
+                cache_control: None,
+            }),
+            ContentPart::Reasoning(ReasoningContent {
+                text: thinking.to_string(),
+                signature: None,
+            }),
+        ];
+        parts.extend(ids.iter().map(|id| {
+            ContentPart::ToolUse(ToolUse {
+                id: (*id).to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({ "path": "notes.txt" }),
+            })
+        }));
+        Message::new(Role::Assistant, Content::parts(parts))
+    }
+
+    /// The invariant the automatic splice used to violate: every
+    /// `tool_use` has its `tool_result` and every result its call.
+    fn assert_tool_calls_paired(history: &[Message]) {
+        let mut calls = HashSet::new();
+        let mut results = HashSet::new();
+        for message in history {
+            for part in &message.content {
+                match part {
+                    ContentPart::ToolUse(call) => {
+                        calls.insert(call.id.clone());
+                    }
+                    ContentPart::ToolResult(result) => {
+                        results.insert(result.tool_use_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if message.role == Role::Tool
+                && let Some(id) = message.tool_call_id.clone()
+            {
+                results.insert(id);
+            }
+        }
+        assert_eq!(
+            calls, results,
+            "every tool_use must keep its tool_result and every \
+             tool_result its tool_use"
+        );
     }
 
     #[tokio::test]
@@ -225,6 +285,122 @@ mod tests {
             .expect("c1 must be archived under its real id");
         assert_eq!(c1.tool_name, "read_file");
         assert_eq!(c1.result_text, "raw output bytes");
+    }
+
+    /// R1/R2/R5: under the tutorial's 3000-token window, a batch
+    /// that covers only the two tool *results* must widen to the
+    /// assistant turn that issued them. The old splice shadowed the
+    /// results and left the `tool_use` blocks behind, which the
+    /// provider rejects as a protocol violation for the rest of the
+    /// session.
+    #[tokio::test]
+    async fn compaction_never_splits_a_tool_call_from_its_result() {
+        let mgr = SummarizingContextManager::new(summarise_that_returns(
+            "read notes.txt, then listed the directory".into(),
+        ))
+        .with_settings(crate::CompactionSettings {
+            reserve_tokens: 800,
+            keep_recent_tokens: 500,
+            min_messages_between_compaction: 1,
+            ..crate::CompactionSettings::default()
+        });
+        let payload = "x".repeat(5_000);
+        let mut msgs = vec![
+            Message::system("sys"),
+            Message::user("read notes.txt, then run ls -la ."),
+            assistant_with_calls(
+                "I will read the file, then list the directory.",
+                "two independent tool calls",
+                &["c1", "c2"],
+            ),
+            tool_msg("c1", "read_file", &payload),
+            tool_msg("c2", "shell", &payload),
+            Message::assistant("done"),
+        ];
+        let mut state = AgentState::with_window(3000);
+        mgr.prepare(&mut msgs, &mut state).await;
+
+        assert!(state.last_truncated, "the 3000-token window must compact");
+        assert_tool_calls_paired(&msgs);
+        assert_eq!(
+            msgs.len(),
+            4,
+            "the issuing turn and both results collapse into one summary"
+        );
+        // R2: the assistant prose the widening swallowed is still
+        // recoverable, thinking included.
+        let archived = mgr.archive().list();
+        let turn = archived
+            .iter()
+            .find(|record| record.kind == ToolCallRecordKind::AssistantTurn)
+            .expect("the issuing assistant turn must be archived");
+        assert!(
+            turn.result_text.contains("I will read the file"),
+            "archived turn lost its text: {}",
+            turn.result_text
+        );
+        assert!(
+            turn.result_text.contains("two independent tool calls"),
+            "archived turn lost its thinking: {}",
+            turn.result_text
+        );
+    }
+
+    /// R3: the emitted record covers the range that actually left the
+    /// history, not the narrower tool-result run.
+    #[tokio::test]
+    async fn compaction_record_covers_the_extended_range() {
+        use std::sync::Mutex;
+        let records: Arc<Mutex<Vec<CompactionRecord>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&records);
+        let mgr = SummarizingContextManager::new(summarise_that_returns(
+            "short".into(),
+        ))
+        .with_compaction_emitter(move |record| {
+            sink.lock().expect("records mutex").push(record);
+        });
+        let mut msgs = vec![
+            Message::system("sys"),
+            Message::user("go"),
+            assistant_with_calls("working", "", &["c1", "c2"]),
+            tool_msg("c1", "read_file", "raw output bytes"),
+            tool_msg("c2", "shell", "another tool output"),
+            Message::assistant("done"),
+        ];
+        let before = msgs.clone();
+        let mut state = AgentState::with_window(3000);
+        mgr.prepare(&mut msgs, &mut state).await;
+
+        let captured = records.lock().expect("records mutex").clone();
+        assert_eq!(captured.len(), 1, "exactly one compaction splice");
+        let record = &captured[0];
+        assert_eq!(record.start, 2, "the issuing assistant turn is included");
+        assert_eq!(record.end, 5);
+        assert_eq!(record.source_indices, vec![2, 3, 4]);
+        assert_eq!(
+            record.source_keys,
+            vec![
+                Some("assistant:c1".to_string()),
+                Some("tool:c1".to_string()),
+                Some("tool:c2".to_string()),
+            ],
+            "every shadowed row carries a durable identity: the turn \
+             that made the calls, and the results that answer them",
+        );
+        // What the record claims is exactly what left the history.
+        assert_eq!(&msgs[..record.start], &before[..record.start]);
+        assert_eq!(&msgs[record.start + 1..], &before[record.end..]);
+        assert_eq!(msgs.len(), before.len() - (record.end - record.start) + 1);
+        assert!(
+            !msgs.iter().any(|message| {
+                message
+                    .content
+                    .extract_text()
+                    .is_some_and(|text| text.contains("working"))
+            }),
+            "the shadowed assistant prose must not survive verbatim"
+        );
     }
 
     #[tokio::test]
@@ -471,7 +647,7 @@ mod tests {
         match &captured[2] {
             CompactionLifecycle::End { token: t, outcome } => {
                 assert_eq!(t, &token, "end must share the start token");
-                assert_eq!(*outcome, CompactionOutcome::Committed);
+                assert_eq!(*outcome, CompactionLifecycleOutcome::Committed);
             }
             other => panic!("third step must be End, got {other:?}"),
         }
@@ -510,7 +686,7 @@ mod tests {
         assert!(matches!(captured[0], CompactionLifecycle::Start { .. }));
         match &captured[1] {
             CompactionLifecycle::End { outcome, .. } => {
-                assert_eq!(*outcome, CompactionOutcome::Failed);
+                assert_eq!(*outcome, CompactionLifecycleOutcome::Failed);
             }
             other => panic!("expected End(Failed), got {other:?}"),
         }

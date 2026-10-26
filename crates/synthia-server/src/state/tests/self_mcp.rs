@@ -32,7 +32,7 @@ async fn boot_registers_self_management_tools() {
     // management surface stays under explicit test control.
     self_mcp::register_self_mcp(&state).await;
 
-    let registry = state.tool_registry.read().await;
+    let registry = state.tool_registry.as_ref();
     let self_tools: Vec<String> = registry
         .descriptors()
         .iter()
@@ -73,7 +73,6 @@ async fn boot_registers_self_management_tools() {
         .get("mcp__self__models")
         .expect("models tool must be registered");
     let tool = entry.tool_instance();
-    drop(registry);
     let output: synthia::tool::ToolOutput = tool
         .call(
             serde_json::json!({"action": "list"}),

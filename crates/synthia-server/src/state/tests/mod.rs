@@ -23,6 +23,8 @@
 //!   application.
 //! - [`self_mcp`] — the self-management MCP server the
 //!   boot publishes (`mcp__self__*`).
+//! - [`sessions`] — the cold-open gate: evicted with its
+//!   controller, and bounded so a wedged open fails.
 //! - [`support`] — the shared fixtures (`StubAgent`,
 //!   `ScopedHome`, `empty_descriptor`, …) only.
 
@@ -37,5 +39,6 @@ mod resolve_agent_name;
 mod resolve_server;
 mod ropt_tier1;
 mod self_mcp;
+mod sessions;
 mod support;
 mod unapplied_keys;

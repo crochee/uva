@@ -12,6 +12,7 @@
 //! ```
 //! use std::sync::Arc;
 //!
+//! use synthia_tool::{Context, Tool, ToolOutput};
 //! use synthia_tool_memo::{
 //!     InMemoryMemoStore,
 //!     MemoConfig,
@@ -19,16 +20,48 @@
 //!     MemoizedTool,
 //! };
 //!
-//! # #[tokio::main(flavor = "current_thread")]
-//! # async fn main() {
-//! let inner: Arc<dyn synthia_tool::Tool> =
-//!     Arc::new(synthia_tool::ToolStub::default());
+//! struct Echo;
+//!
+//! #[async_trait::async_trait]
+//! impl Tool for Echo {
+//!     fn name(&self) -> &str {
+//!         "echo"
+//!     }
+//!
+//!     fn description(&self) -> &str {
+//!         "Echo the input back."
+//!     }
+//!
+//!     fn parameters(&self) -> serde_json::Value {
+//!         serde_json::json!({ "type": "object" })
+//!     }
+//!
+//!     async fn call(
+//!         &self,
+//!         input: serde_json::Value,
+//!         _context: &Context,
+//!     ) -> ToolOutput {
+//!         ToolOutput::text(input.to_string())
+//!     }
+//! }
+//!
+//! let inner: Arc<dyn Tool> = Arc::new(Echo);
 //! let memo = MemoizedTool::new(
 //!     inner,
 //!     MemoConfig::default().scope(MemoScope::Process),
 //!     Arc::new(InMemoryMemoStore::default()),
+//!     Arc::new(synthia_core::SystemClock),
 //! );
-//! # }
+//!
+//! // The second identical call is served from the store.
+//! futures::executor::block_on(async {
+//!     let context = Context::default();
+//!     let first = memo.call(serde_json::json!({ "x": 1 }), &context).await;
+//!     let second = memo.call(serde_json::json!({ "x": 1 }), &context).await;
+//!     assert_eq!(first, second);
+//!     assert_eq!(memo.miss_count(), 1);
+//!     assert_eq!(memo.hit_count(), 1);
+//! });
 //! ```
 //!
 //! ## Layering

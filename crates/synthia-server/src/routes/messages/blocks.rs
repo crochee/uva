@@ -351,6 +351,16 @@ impl Turn {
                     message.clone(),
                 )));
             }
+            // A suspension is not a successful stop. `/v1/messages`
+            // has no approval frame, so the stream terminates with the
+            // protocol's `error` event rather than a `message_stop`
+            // the client would read as a finished answer.
+            Some(SessionEndReason::Suspended) => {
+                frames.push(Frame::Error(ErrorEnvelope::new(
+                    error_type::INVALID_REQUEST,
+                    super::APPROVAL_REQUIRED,
+                )));
+            }
             _ => {
                 frames.push(Frame::MessageDelta {
                     delta: MessageDelta {

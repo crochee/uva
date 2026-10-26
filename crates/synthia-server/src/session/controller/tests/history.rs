@@ -6,11 +6,9 @@
 //! checkpoint written by an earlier run must fold to the
 //! compacted surface (summary in place of tool results).
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
+use parking_lot::Mutex;
 use synthia::provider::{Content, ContentPart, Role, TextContent};
 
 use super::{
@@ -77,7 +75,7 @@ async fn test_second_prompt_seeds_history_from_persisted_turns() {
     // first run's stream has been fully consumed.
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if calls.lock().unwrap().len() == 1 {
+            if calls.lock().len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -108,7 +106,7 @@ async fn test_second_prompt_seeds_history_from_persisted_turns() {
     // select! iteration that picks up op_rx.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if calls.lock().unwrap().len() >= 2 {
+            if calls.lock().len() >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -117,7 +115,7 @@ async fn test_second_prompt_seeds_history_from_persisted_turns() {
     .await
     .expect("second run should start");
 
-    let recorded = calls.lock().unwrap();
+    let recorded = calls.lock();
     assert_eq!(recorded.len(), 2, "controller should have spawned two runs");
 
     // The second run's input must carry the first run's
@@ -206,7 +204,7 @@ async fn test_user_prompt_persists_and_reacts_to_role_user_in_history() {
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if calls.lock().unwrap().len() == 1 {
+            if calls.lock().len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -226,7 +224,7 @@ async fn test_user_prompt_persists_and_reacts_to_role_user_in_history() {
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if calls.lock().unwrap().len() >= 2 {
+            if calls.lock().len() >= 2 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -235,7 +233,7 @@ async fn test_user_prompt_persists_and_reacts_to_role_user_in_history() {
     .await
     .expect("second run should start");
 
-    let recorded = calls.lock().unwrap();
+    let recorded = calls.lock();
     assert_eq!(recorded.len(), 2);
     let second = &recorded[1];
 
@@ -342,13 +340,13 @@ async fn resumed_history_shows_the_durable_compaction_checkpoint() {
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
-        while calls.lock().unwrap().is_empty() {
+        while calls.lock().is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .expect("the run factory was not invoked in time");
-    let recorded = calls.lock().unwrap();
+    let recorded = calls.lock();
     let history = &recorded[0].history;
     let flattened = format!("{history:?}");
     assert!(

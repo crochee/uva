@@ -132,6 +132,27 @@ impl ImageAttachmentRef {
     }
 }
 
+/// Build the content-addressed ref for arbitrary bytes.
+///
+/// [`ImageAttachmentRef::from_bytes`] validates the image MIME
+/// allow-list, which is the right gate for an uploaded image and the
+/// wrong one for the other payloads a multimodal prompt carries
+/// (audio, a binary file). Those are still content-addressed and still
+/// size-checked; only the MIME gate is skipped, because a MIME
+/// allow-list for audio would be a second policy nobody wrote.
+fn blob_ref(
+    bytes: &[u8],
+    mime_type: &str,
+) -> Result<ImageAttachmentRef, AttachmentError> {
+    validate_size(bytes.len())?;
+    Ok(ImageAttachmentRef {
+        hash: sha256_hex(bytes),
+        mime_type: mime_type.to_string(),
+        byte_len: bytes.len(),
+        saved_at: saved_at_default(),
+    })
+}
+
 /// Adapter hook: render an [`ImageAttachmentRef`] into a
 /// `ContentPart::Image(ImageContent)` for the LLM wire format.
 /// The caller supplies the inline base64 bytes (typically fetched
@@ -188,6 +209,22 @@ pub trait AttachmentBackend: Send + Sync {
         bytes: &[u8],
         mime_type: &str,
     ) -> Result<ImageAttachmentRef, AttachmentError>;
+
+    /// Save `bytes` of any MIME type, content-addressed like
+    /// [`Self::save`] but without the image allow-list.
+    ///
+    /// The default refuses nothing the image path accepts and
+    /// delegates to it, so a third-party backend keeps working; a
+    /// backend that stores arbitrary payloads (both built-ins do)
+    /// overrides it so audio and binary parts of a multimodal prompt
+    /// are storable too.
+    fn save_blob(
+        &self,
+        bytes: &[u8],
+        mime_type: &str,
+    ) -> Result<ImageAttachmentRef, AttachmentError> {
+        self.save(bytes, mime_type)
+    }
 
     /// Read the bytes for `ref_`. Returns `NotFound` if absent
     /// or `HashMismatch` if the stored bytes can't be verified.
@@ -320,6 +357,30 @@ impl AttachmentStore {
         Ok(ref_)
     }
 
+    /// Save `bytes` of any MIME type (validating size only) and
+    /// return the canonical ref.
+    ///
+    /// [`Self::save_image`] gates on the image allow-list, which is
+    /// exactly right for an image upload and wrong for the other
+    /// payloads a multimodal prompt carries — an audio part or a
+    /// binary file is still content-addressed, still deduped, still
+    /// readable by hash, and has no MIME allow-list of its own.
+    ///
+    /// # Errors
+    ///
+    /// [`AttachmentError::TooLarge`] over [`DEFAULT_MAX_BYTES`], plus
+    /// whatever the backend reports.
+    pub fn save_blob(
+        &self,
+        bytes: &[u8],
+        mime_type: &str,
+    ) -> Result<ImageAttachmentRef, AttachmentError> {
+        let mut ref_ = self.backend.save_blob(bytes, mime_type)?;
+        ref_.saved_at = self.clock.now();
+        self.insert_cache(&ref_.hash, bytes.to_vec());
+        Ok(ref_)
+    }
+
     /// Read the bytes for `ref_`, populating the cache on the
     /// way out.
     pub fn read_image(
@@ -425,6 +486,58 @@ impl FilesystemBackend {
             .join(prefix)
             .join(format!("{}.{}", ref_.hash, ext))
     }
+
+    /// The file a ref's bytes live in, or `None` when the store does not
+    /// have them.
+    ///
+    /// The stored name carries the MIME extension, but a reader that
+    /// knows only the hash (the `GET /attachments/{hash}` path, the
+    /// parked-prompt recovery) has no MIME to derive it from. The hash
+    /// *is* the identity — the extension is a human convenience — so a
+    /// hash-only probe falls back to the one file under the hash's
+    /// directory. Without that, bytes written by one process were
+    /// unreadable by a fresh store, which is the whole promise of
+    /// content addressing.
+    fn resolve(&self, ref_: &ImageAttachmentRef) -> Option<PathBuf> {
+        let path = self.path_for(ref_);
+        if path.exists() {
+            return Some(path);
+        }
+        if !ref_.mime_type.is_empty() {
+            return None;
+        }
+        let prefix: String = ref_.hash.chars().take(2).collect();
+        let dir = self.root.join(prefix);
+        std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|candidate| {
+                candidate
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem == ref_.hash)
+            })
+    }
+
+    /// Store `bytes` at the ref's content-addressed path. A file that
+    /// already exists holds the same bytes (the path *is* the hash),
+    /// so the save is a no-op.
+    fn write(
+        &self,
+        ref_: &ImageAttachmentRef,
+        bytes: &[u8],
+    ) -> Result<(), AttachmentError> {
+        let path = self.path_for(ref_);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(AttachmentError::Io)?;
+        }
+        if path.exists() {
+            return Ok(());
+        }
+        std::fs::write(&path, bytes).map_err(AttachmentError::Io)?;
+        Ok(())
+    }
 }
 
 impl AttachmentBackend for FilesystemBackend {
@@ -434,16 +547,17 @@ impl AttachmentBackend for FilesystemBackend {
         mime_type: &str,
     ) -> Result<ImageAttachmentRef, AttachmentError> {
         let ref_ = ImageAttachmentRef::from_bytes(bytes, mime_type)?;
-        let path = self.path_for(&ref_);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(AttachmentError::Io)?;
-        }
-        // Content-addressed dedup: if the file already exists
-        // with the same hash, the save is a no-op.
-        if path.exists() {
-            return Ok(ref_);
-        }
-        std::fs::write(&path, bytes).map_err(AttachmentError::Io)?;
+        self.write(&ref_, bytes)?;
+        Ok(ref_)
+    }
+
+    fn save_blob(
+        &self,
+        bytes: &[u8],
+        mime_type: &str,
+    ) -> Result<ImageAttachmentRef, AttachmentError> {
+        let ref_ = blob_ref(bytes, mime_type)?;
+        self.write(&ref_, bytes)?;
         Ok(ref_)
     }
 
@@ -451,12 +565,14 @@ impl AttachmentBackend for FilesystemBackend {
         &self,
         ref_: &ImageAttachmentRef,
     ) -> Result<Vec<u8>, AttachmentError> {
-        let path = self.path_for(ref_);
-        if !path.exists() {
-            return Err(AttachmentError::NotFound {
-                hash: ref_.hash.clone(),
-            });
-        }
+        let path = match self.resolve(ref_) {
+            Some(path) => path,
+            None => {
+                return Err(AttachmentError::NotFound {
+                    hash: ref_.hash.clone(),
+                });
+            }
+        };
         std::fs::read(&path).map_err(AttachmentError::Io)
     }
 }
@@ -479,6 +595,18 @@ impl AttachmentBackend for InMemoryBackend {
         mime_type: &str,
     ) -> Result<ImageAttachmentRef, AttachmentError> {
         let ref_ = ImageAttachmentRef::from_bytes(bytes, mime_type)?;
+        self.inner
+            .write()
+            .insert(ref_.hash.clone(), (bytes.to_vec(), mime_type.to_string()));
+        Ok(ref_)
+    }
+
+    fn save_blob(
+        &self,
+        bytes: &[u8],
+        mime_type: &str,
+    ) -> Result<ImageAttachmentRef, AttachmentError> {
+        let ref_ = blob_ref(bytes, mime_type)?;
         self.inner
             .write()
             .insert(ref_.hash.clone(), (bytes.to_vec(), mime_type.to_string()));
@@ -738,5 +866,48 @@ mod tests {
         assert!(SUPPORTED_IMAGE_MIME.contains(&"image/webp"));
         assert!(SUPPORTED_IMAGE_MIME.contains(&"image/bmp"));
         assert_eq!(SUPPORTED_IMAGE_MIME.len(), 5);
+    }
+
+    /// A hash is the address. A fresh store over the same root — a
+    /// restart — must resolve bytes from a hash alone, without the MIME
+    /// the writer used to name the file.
+    #[test]
+    fn a_fresh_filesystem_store_resolves_a_hash_only_ref() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let store = AttachmentStore::new_fs(dir.path()).expect("a store");
+        let bytes = png_bytes();
+        let saved = store.save_image(&bytes, "image/png").expect("save");
+        store.evict(&saved.hash);
+
+        let fresh = AttachmentStore::new_fs(dir.path()).expect("a fresh store");
+        assert_eq!(
+            fresh
+                .read_base64_raw(&saved.hash)
+                .expect("a hash is enough to find the bytes"),
+            bytes
+        );
+    }
+
+    /// A multimodal prompt carries audio and files too, and those are
+    /// storable by hash even though the image allow-list refuses their
+    /// MIME — the prompt is what must not be lost.
+    #[test]
+    fn save_blob_stores_a_non_image_payload_and_reads_it_back() {
+        let store = AttachmentStore::default();
+        let bytes: Vec<u8> = (0..=255).collect();
+        assert!(
+            store.save_image(&bytes, "audio/wav").is_err(),
+            "the image path keeps its allow-list"
+        );
+        let ref_ = store.save_blob(&bytes, "audio/wav").expect("stored");
+        assert_eq!(ref_.mime_type, "audio/wav");
+        assert_eq!(ref_.byte_len, bytes.len());
+        assert!(ref_.matches(&bytes), "content-addressed by the bytes");
+        assert_eq!(store.read_base64_raw(&ref_.hash).expect("readable"), bytes);
+        assert_eq!(
+            store.read_image(&ref_).expect("readable"),
+            bytes,
+            "the read path does not care which save wrote the bytes"
+        );
     }
 }

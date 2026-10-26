@@ -4,8 +4,10 @@
 //! content. The `CacheScope` **MUST** contain `user_id` to prevent
 //! cross-session cache leakage (per security review R2/R5/R6).
 
+#[cfg(test)]
 use std::hash::{Hash, Hasher};
 
+#[cfg(test)]
 use ahash::AHasher;
 use serde::{Deserialize, Serialize};
 
@@ -46,9 +48,8 @@ impl Default for CacheScope {
 
 /// Marks a prompt snapshot for cache control tracking.
 ///
-/// All fields feed into the `cache_control_hash` so the
-/// `CacheBreakDetector` can detect cache control changes independently of
-/// the system prompt content.
+/// All fields participate in the mark's hash, so a change to any of
+/// them is distinguishable from a change to the system prompt content.
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default,
 )]
@@ -60,7 +61,12 @@ pub struct CacheControlMark {
 
 impl CacheControlMark {
     /// Deterministically hash the mark using `ahash::AHasher`.
-    pub fn hash_to_u64(&self) -> u64 {
+    ///
+    /// Compiled for tests only: the assertions in this module are its
+    /// sole callers, so it is neither part of the crate's surface nor
+    /// part of the shipped binary.
+    #[cfg(test)]
+    fn hash_to_u64(&self) -> u64 {
         let mut h = AHasher::default();
         self.ttl.hash(&mut h);
         self.scope.0.hash(&mut h);
@@ -188,8 +194,7 @@ mod tests {
 
     /// `pinned` is part of the cache-key hash — a
     /// change from `pinned: true` to `pinned: false`
-    /// MUST yield a different `hash_to_u64()` so the
-    /// `CacheBreakDetector` can flag the boundary.
+    /// MUST yield a different `hash_to_u64()`.
     #[test]
     fn hash_differs_when_pinned_flag_changes() {
         let pinned = CacheControlMark {

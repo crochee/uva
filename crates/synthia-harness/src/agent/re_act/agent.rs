@@ -6,7 +6,7 @@ use futures::{Stream, channel::mpsc};
 use synthia_context::ContextManager;
 use synthia_core::{agent::AgentDescriptor, registry::RegistryItem};
 use synthia_provider::ModelProvider;
-use synthia_session::TypedEventSink;
+use synthia_session::LogWriter;
 use synthia_steering::Steering;
 use synthia_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
 
@@ -16,11 +16,10 @@ use crate::{
         AgentRuntime,
         ReasoningStrategy,
         checkpoint::Checkpointer,
-        re_act::synthetic::SyntheticTool,
+        re_act::delegation::{DelegatingTool, Delegators},
     },
     events::AgentEvent,
     input::AgentInput,
-    log::LogWriter,
     prompt::PromptContext,
 };
 
@@ -87,13 +86,28 @@ impl crate::agent::Agent for ReActAgent {
         cancel: Arc<dyn synthia_core::CancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
         let (tx, rx) = mpsc::unbounded::<AgentEvent>();
+        // Per-run overrides win: a delegated child's input names
+        // the child session's writer and carries the writer
+        // source for its own children; otherwise the agent's
+        // configured handles apply. Both live on the runtime's
+        // caps so the loop and its delegating tools see them.
+        let log_writer = input
+            .log_writer
+            .clone()
+            .or_else(|| self.caps.env.log_writer.clone());
+        let subagent_writers = input
+            .subagent_writers
+            .clone()
+            .or_else(|| self.caps.env.subagent_writers.clone());
         let sink = crate::agent::sink::EventSink::new(
             Arc::new(tx),
-            self.caps.env.log_writer.clone(),
-            self.caps.env.typed_sink.clone(),
+            log_writer.clone(),
         );
+        let mut caps = self.caps.clone();
+        caps.env.log_writer = log_writer;
+        caps.env.subagent_writers = subagent_writers;
         let runtime = AgentRuntime {
-            caps: Arc::new(self.caps.clone()),
+            caps: Arc::new(caps),
             cancel,
             subagent_depth: input.subagent_depth,
         };
@@ -148,15 +162,65 @@ impl ReActAgent {
         self
     }
 
-    /// Install a synthetic-tool plugin. Returns `Err` with the name when an installed synthetic tool already advertises it —
-    /// same-name dispatch has no defined precedence.
-    pub fn with_synthetic_tool(
+    /// Install the run's compactor.
+    ///
+    /// Without one the loop never compacts: history stays whatever
+    /// the log derives, and only the context manager's
+    /// request-local pruning shortens a request. A compactor is
+    /// what makes a summary durable.
+    #[must_use]
+    pub fn with_compactor(
         mut self,
-        tool: Arc<dyn SyntheticTool>,
+        compactor: Arc<dyn synthia_session::Compactor>,
+    ) -> Self {
+        self.caps.control.compactor = Some(compactor);
+        self
+    }
+
+    /// Install the agent's plugin host.
+    ///
+    /// The host is per agent: it holds the registrations a plugin
+    /// installed (observers, gates, transformers, prompt sections,
+    /// tools) and the arbitration they run through.
+    ///
+    /// The host is bound to the agent's tool registry here, so the
+    /// host's tools are callable — and withdrawing a tool
+    /// registration (dropping the plugin's handle) withdraws it from
+    /// the registry too. A tool whose name a core tool already owns
+    /// is refused, and the host records the collision as a
+    /// diagnostic.
+    ///
+    /// A host already bound to a different registry keeps that
+    /// binding: the refusal is recorded on the host, and the
+    /// deployment's boot — which owns the composition — is where a
+    /// refused bind is reported to the operator.
+    #[must_use]
+    pub fn with_host(mut self, host: crate::agent::host::Host) -> Self {
+        let _refused = host.bind(Arc::clone(&self.caps.tools.registry));
+        self.caps.control.host = host;
+        self
+    }
+
+    /// Install a delegating tool. Returns `Err` with the name when a
+    /// delegator the agent already installed advertises it — same-name
+    /// dispatch has no defined precedence.
+    ///
+    /// A host-registered delegator joins the same table at run start. The
+    /// precedence is by source, not chronological: the agent's own installs
+    /// are merged first, then the host's rows in registration order, and the
+    /// first owner of a name keeps it. A host row registered before the agent
+    /// is built therefore still loses to `with_delegator`; the same delegator
+    /// installed both ways leaves one entry; a name only the host owns is
+    /// dispatched normally.
+    pub fn with_delegator(
+        mut self,
+        tool: Arc<dyn DelegatingTool>,
     ) -> Result<Self, String> {
-        let defs = tool.definitions();
-        validate_synthetic(&self.caps.tools.synthetic, &defs)?;
-        self.caps.tools.synthetic.push(tool);
+        let installed = Delegators::from_installed(&self.caps.tools.delegators);
+        if let Some(taken) = installed.conflict(&tool.definitions()) {
+            return Err(taken);
+        }
+        self.caps.tools.delegators.push(tool);
         Ok(self)
     }
 
@@ -204,27 +268,50 @@ impl ReActAgent {
         self
     }
 
+    /// Replace the run-wide approval policy.
+    ///
+    /// The policy decides which calls are held for an approval; the
+    /// default holds a call whose tool declared it high risk.
+    #[must_use]
+    pub fn with_approval_policy(
+        mut self,
+        policy: crate::agent::approval::ApprovalPolicy,
+    ) -> Self {
+        self.caps.control.approval = policy;
+        self
+    }
+
     #[must_use]
     pub fn with_workspace(mut self, root: impl Into<PathBuf>) -> Self {
         self.caps.env.workspace_root = root.into();
         self
     }
 
-    #[must_use]
-    pub fn with_typed_event_sink(mut self, sink: TypedEventSink) -> Self {
-        self.caps.env.typed_sink = Some(sink);
-        self
-    }
-
     /// Install the run's log writer.
     ///
-    /// The writer stamps each structural row's ordinal, buffers it,
-    /// and flushes the buffer at every step boundary — the only
-    /// moment the run waits for the disk. Without a writer the
-    /// structural rows go to the typed sink the host wired.
+    /// The writer is the session's one writer: it stamps each
+    /// structural row's ordinal, buffers it, and flushes the buffer
+    /// at every step boundary — the only moment the run waits for
+    /// the disk. Without a writer the run keeps no structural log.
     #[must_use]
     pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self {
         self.caps.env.log_writer = Some(writer);
+        self
+    }
+
+    /// Install the writer source for delegated children.
+    ///
+    /// The loop hands the source to the `task` delegator, which
+    /// resolves each child's session writer before starting the
+    /// child run — so the child's harness writes its model facts
+    /// into the child's own session log. Without one, this
+    /// agent's children stream live but persist nothing.
+    #[must_use]
+    pub fn with_subagent_writers(
+        mut self,
+        writers: Arc<dyn crate::input::SubagentWriters>,
+    ) -> Self {
+        self.caps.env.subagent_writers = Some(writers);
         self
     }
 
@@ -264,22 +351,4 @@ impl ReActAgent {
         }
         self
     }
-}
-
-/// Reject a synthetic tool whose advertised name an installed one already claims: same-name dispatch has no defined precedence,
-/// so the loop cannot tell which plugin should handle the call. The `Result` carries the conflicting tool name. The candidate's
-/// already-built [`definitions`](SyntheticTool::definitions) arrive by reference — callers that hold them (the loop prebuilds
-/// every definition once per run) never rebuild them here. Existing plugins are asked
-/// [`claims`](SyntheticTool::claims) rather than `definitions`: building the advertised
-/// `Vec<ToolDefinition>` per already-installed plugin made installing n plugins O(n²) allocations.
-pub(crate) fn validate_synthetic(
-    existing: &[Arc<dyn SyntheticTool>],
-    new_definitions: &[synthia_provider::ToolDefinition],
-) -> Result<(), String> {
-    for def in new_definitions {
-        if existing.iter().any(|i| i.claims(&def.name)) {
-            return Err(def.name.clone());
-        }
-    }
-    Ok(())
 }

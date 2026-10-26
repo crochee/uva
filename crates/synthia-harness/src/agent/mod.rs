@@ -10,14 +10,19 @@ use crate::{events::AgentEvent, input::AgentInput};
 
 pub(crate) mod re_act;
 pub use re_act::descriptor;
+pub(crate) mod history;
 mod registry;
 
 mod sink;
 pub mod strategy;
 
+/// The approval vocabulary: `Risk` and `ApprovalRequest`.
+pub mod approval;
 /// The durability seam: `Checkpointer` / `InMemoryCheckpointer`.
 pub mod caps;
 pub mod checkpoint;
+/// The plugin host: the per-agent registry and its arbitration.
+pub mod host;
 
 pub use caps::{
     AgentCaps,
@@ -31,7 +36,7 @@ pub use re_act::{
     DEFAULT_MAX_ITERATIONS,
     ReActAgent,
     ReActStrategy,
-    synthetic::{SyntheticCall, SyntheticTool},
+    delegation::{DelegatingTool, DelegationCall},
 };
 pub use registry::{AgentEntry, AgentRegistry};
 pub use sink::EventSink;

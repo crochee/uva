@@ -1,6 +1,6 @@
 # synthia-harness
 
-The agent runtime: the core ReAct loop, `Agent` / `SyntheticTool` /
+The agent runtime: the core ReAct loop, `Agent` / `DelegatingTool` /
 strategy seams, `AgentRegistry`, type definitions. One crate turns a
 model + a tool set into a streaming `AgentEvent` flow; everything is
 runtime-agnostic so the same loop runs on tokio, async-std, smol, or
@@ -8,6 +8,73 @@ test-threaded executors.
 
 公开 API 与 seam 规则见 [`src/lib.rs`](src/lib.rs)；7 大组件的可替换点见
 > [`SEAMS.md`](../../SEAMS.md)。
+
+## What a consumer depends on
+
+`synthia-harness` is not a dependency a consumer can hold alone: the
+harness hands back traits it does not own, and it does not re-export
+them. A consumer declares four crates — `synthia-harness`,
+`synthia-core`, `synthia-provider` and `synthia-tool` — plus
+`async-trait`, the proc macro those traits are declared with:
+
+| Crate | What the consumer takes from it |
+|---|---|
+| `synthia-harness` | the loop, the seams, the event stream |
+| `synthia-core` | `CancelToken`, `Spawner`, `Clock` |
+| `synthia-provider` | the `ModelProvider` trait, the message types |
+| `synthia-tool` | the `Tool` trait, `ToolRegistry` |
+
+`Spawner`, `ModelProvider` and `Tool` stay in the crates that define
+them. Re-exporting them would put names the harness does not own on
+the surface it promises, and would tie the harness's runtime-free
+promise to feature sets it cannot vouch for — the harness takes
+`synthia-provider` with `default-features = false` for exactly that
+reason (`synthia-tool` has no feature set at all, so the flag on it
+is a no-op).
+
+Those three crates are already inside the harness's own closure (it
+names them in its signatures), so naming them in your own manifest
+says *which* traits you implement — it does not grow your tree.
+
+That last sentence has one premise, and it is about
+`synthia-provider`: its default feature set (`default = ["anthropic",
+"openai"]`) turns on the two shipped HTTP adapters, and each adapter
+carries `reqwest`, `tokio` and `tokio-util`. A consumer that writes
+`synthia-provider = "0.1"` — the plain crates.io spelling — gets all
+three into its tree. The harness inherits the provider with the
+defaults off; a consumer who wants the same tree writes the same
+line:
+
+```toml
+synthia-provider = { version = "0.1", default-features = false }
+```
+
+The reference consumer (`docs/examples/harness-only-consumer`) declares
+7 direct dependencies — those four crates plus `async-trait`,
+`futures` and `serde_json` — and its `cargo tree` carries no `tokio`:
+its provider line turns the default features off, so no adapter, no
+`reqwest` and no runtime come along (the fixture drives the loop on
+`futures::executor::block_on`):
+
+```bash
+cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
+  | grep -c tokio     # must print 0
+```
+
+## The two public layers
+
+The crate root re-exports a curated facade of 59 names. That facade is
+the promised surface: depend on it, and a release will not move your
+names.
+
+The crate is public further down, under `synthia_harness::agent::…` and
+`synthia_harness::events::…`. Only a deep path reaches 64 names:
+rustdoc records 117 public paths under those two modules, 54 of them
+being facade names at their defining path, which leaves 63 names the
+facade does not carry — plus `Risk`, re-exported from `synthia-tool`
+into the public `agent::approval` module, which has no path of its own
+inside the harness. None of these names is promised: they may move or
+change in any release.
 
 ## 5-minute tour
 
@@ -93,19 +160,21 @@ strategies live in the sibling plugin crates
 ### 4. Plug into the tool dispatch seams
 
 ```rust
-// Synthetic-tool plugin: implement `SyntheticTool` (multi-agent
+// Delegating tool: implement `DelegatingTool` (multi-agent
 // delegation lives in `synthia-tool-task`).
 let agent = ReActAgent::new(provider, registry)
-    .with_synthetic_tool(Arc::new(MyTaskDelegator))
-    .expect("no synthetic tool already advertises this name");
+    .with_delegator(Arc::new(MyTaskDelegator))
+    .expect("no delegator already advertises this name");
 ```
 
 Vetoing and observing a run uses the `HookMap` — see
 [Extending the loop](#extending-the-loop).
 
-Install fails with the conflicting name when two synthetic tools
+Install fails with the conflicting name when two delegators
 advertise the same tool — same-name dispatch has no defined
-precedence.
+precedence. A host plugin can register the same delegator instead
+(`host.delegator`); the registration is reversible, and the loop
+merges it into the same name-keyed table.
 
 ### 5. Run on any runtime
 
@@ -133,7 +202,7 @@ different reasons:
   is *seam completeness*: the seven swap points
   (`ModelProvider` / `Tool` / `ContextManager` / `Steering` /
   `SessionSink` / `CancelToken` / `Agent`, plus
-  `SyntheticTool` / `Checkpointer` / `Spawner`)
+  `DelegatingTool` / `Checkpointer` / `Spawner`)
   cover the extension surface without runtime patching.
 
 synthia takes the intersection and adds two constraints neither
@@ -155,7 +224,7 @@ the measurement instead of re-deriving it:
   — `AgentEvent`'s ownership shape is a wire decision, not an optimisation.
 - **Terminal `SamplingResult` cloned** (`src/agent/re_act/stream.rs`) — same:
   removing it changes what the event stream hands the consumer.
-- **`serde_json::Value` tree built per delta for the typed sink**
+- **`serde_json::Value` tree built per delta for the log writer**
   (`src/agent/re_act/stream.rs`) — the payload `SessionEvent` carries is a
   public contract.
 
@@ -167,20 +236,35 @@ every handler is `async`, so a handler may await its own I/O.
 
 | `HookEvent` | Fires |
 |---|---|
-| `BeforeRun` | once per run, before the first sample |
+| `BeforeRun` | once per run, before the first sample — **can terminate** |
+| `BeforeStep` | before every model call — **can terminate** |
+| `BeforeRequest` | after the request is assembled, before it goes on the wire — **can rewrite the request parameters** |
 | `BeforeProviderCall` | before every provider request |
 | `AfterProviderCall` | after every provider response |
-| `BeforeTool` | before each tool dispatch — **can veto** |
-| `AfterTool` | after each tool dispatch |
+| `BeforeTool` | before each tool dispatch — **can veto**, **can ask for an approval** |
+| `AfterTool` | after each tool dispatch — **can terminate** |
 | `AfterStep` | at the end of each loop iteration, after the iteration's tool results are committed — **can terminate** (`Block` is meaningless here and is treated as `Allow`) |
 | `OnCompaction` | when the context manager pruned history |
 | `OnError` | a provider or tool failure ends the run |
 | `AfterRun` | once per run, after the terminal `SessionEnded` |
 
-`HookDecision` has three arms: `Allow` (keep going), `Block { reason }`
+`HookDecision` has five arms: `Allow` (keep going), `Block { reason }`
 (the tool call is refused and `reason` becomes the model-visible result),
-and `Terminate { reason }` (end the run now with
-`SessionEndReason::Error(reason)`).
+`Ask { reason }` (the call waits for an approval — the reasons are
+collected and reported together), `ReplaceParams(RequestParams)` (the
+request's parameters are replaced; the transcript and the system prompt
+are not part of that surface), and `Terminate { reason }` (end the run now
+with `SessionEndReason::Error(reason)`).
+
+Each point accepts only the decisions that mean something there — a
+decision a point does not accept is a no-op with a diagnostic, never a
+silent allow. `HookEvent::accepts` states the table.
+
+A plugin registers into the agent's **host** instead of the steering
+bundle: `ReActAgent::with_host(host)` installs the per-agent
+`Host`, whose `observe` / `gate` / `request_transformer` /
+`result_transformer` / `prompt_section` / `tool` registrations each
+return a `Registration` — dropping it withdraws the registration.
 
 Handlers registered with `HookMap::on_with_state` additionally receive the
 run's `AgentState`, which is how a policy that depends on iteration count or
@@ -215,13 +299,13 @@ A zero-hook run allocates nothing at these dispatch sites: each site checks
 |---|---|
 | `ReActAgent::new` | The single entry point; `with_*` setters are the builder. |
 | `with_descriptor` | Supply your own descriptor / `PromptContext` / workspace root. |
-| `AgentCaps` | The capability bundle the agent owns, grouped into planes: `model` (provider, descriptor, prompt context), `tools` (registry, surface, restriction, synthetic tools), `control` (steering, iteration cap, context manager), `env` (workspace, clock, spawner, checkpointer, typed sink). Every `with_*` setter writes to exactly one plane. |
+| `AgentCaps` | The capability bundle the agent owns, grouped into planes: `model` (provider, descriptor, prompt context), `tools` (registry, surface, restriction, delegators), `control` (steering, iteration cap, context manager), `env` (workspace, clock, spawner, checkpointer, log writer). Every `with_*` setter writes to exactly one plane. |
 | `AgentRuntime` | Per-call bundle handed to the strategy: an owned `Arc<AgentCaps>` plus the run's cancel token and subagent depth. |
 | `ReasoningStrategy` | Trait every strategy implements. |
-| `SyntheticTool` | Synthetic-tool plugin (multi-agent delegation lives in `synthia-tool-task`). |
+| `DelegatingTool` | Delegating-tool plugin — sees the run's cancel token, depth, tool context and event emitter (multi-agent delegation lives in `synthia-tool-task`). |
 | `AgentRegistry` | Multi-agent registry. |
 | `Checkpointer` / `InMemoryCheckpointer` | The durability seam — `agent::checkpoint`. |
-| `LogWriter` / `Durability` | The run's log writer — stamps each row's ordinal, buffers it, and flushes at the step boundary; `with_log_writer` installs it. |
+| `LogWriter` | The session's one writer (from `synthia-session`) — stamps each row's ordinal, buffers it, and flushes at the step boundary; `with_log_writer` installs it. |
 | `HookMap` / `HookEvent` / `HookDecision` | Interception fan-out — from `synthia-steering`, `Steering::hooks`. |
 | `Guard` / `Hint` | Veto + prompt steering — from `synthia-steering`, `with_steering`. |
 | `Spawner` | Detached-work seam — `with_spawner`. |
@@ -233,7 +317,7 @@ A zero-hook run allocates nothing at these dispatch sites: each site checks
 |---|---|
 | A new model adapter | Implement `ModelProvider` (`synthia-provider`); pass it to `ReActAgent::new`. |
 | A different loop / paradigm | Implement `ReasoningStrategy`; `with_strategy(Arc::new(...))`, or resolve by name through `StrategyRegistry`. |
-| A cross-cutting synthetic tool | Implement `SyntheticTool`; `with_synthetic_tool` (install fails on a duplicate advertised name). |
+| A cross-cutting delegating tool | Implement `DelegatingTool`; `with_delegator` (install fails on a duplicate advertised name), or `host.delegator` for a reversible registration. |
 | Durable resume | Implement `Checkpointer`; `with_checkpointer` — `InMemoryCheckpointer` ships for tests. |
 | A durable run log | Build a `LogWriter` over your `SessionSink`; `with_log_writer` — the loop stamps each row, buffers it, and flushes at the step boundary. |
 | Different prompt composition | `PromptContext`; per agent via `with_descriptor`, per dispatch via `AgentInput::prompt_context`. |

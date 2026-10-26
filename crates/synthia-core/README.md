@@ -12,7 +12,9 @@ provider SDK, or the pieces above it (`synthia` → `synthia-*` →
 | `error` | the single `Error` enum every fallible API returns, plus `Result<T, E = Error>` — one domain taxonomy, one snake_case wire code (`Error::kind()`) |
 | `cancel` | the `CancelToken` trait + the std-only `AtomicCancelToken`; a `tokio-util` bridge behind the `tokio-util` feature, so a tokio caller's `CancellationToken` coerces with no adapter |
 | `spawn` | the `Spawner` trait, `BoxFuture`, and `SharedSpawner` — detached work with no runtime in the signature |
+| `blocking` | the `Blocking` trait + `ThreadBlocking` — a blocking call with no runtime in the signature, so a session's fs write does not name `tokio::task::spawn_blocking` |
 | `clock` | the `Clock` trait + `SystemClock` / `FixedClock` and the `SharedClock` handle; chrono `DateTime<Utc>` is the wall-clock vocabulary |
+| `sleeper` | the `Sleeper` trait + `ThreadSleeper` / `FixedSleeper` — a delay with no runtime in the signature, so a timeout the harness arms does not name `tokio::time::sleep` |
 | `idgen` | the `IdGen` trait + `UlidGenerator` / `SequenceGenerator` and the `SharedIdGen` handle |
 | `registry` | `Registry` / `RegistryItem` — the generic named catalog with cursor pagination that agents, tools, skills and memories all plug into |
 | `schema` | JSON-Schema-subset validation with dotted-path, all-at-once violations |
@@ -27,9 +29,10 @@ provider SDK, or the pieces above it (`synthia` → `synthia-*` →
   they live in `synthia-provider`, so a consumer that pulls
   `synthia-core` does not transitively pull a model SDK.
 - **An async runtime** — every primitive compiles with no `tokio` /
-  `async-std` / `smol` in the public API. The only async surface is the
-  cooperative-cancellation future on `CancelToken::cancelled`, which is
-  hand-written and runtime agnostic.
+  `async-std` / `smol` in the public API. The only async surfaces are
+  the cooperative-cancellation future on `CancelToken::cancelled`, the
+  delay future on `Sleeper::sleep`, and the completion future on
+  `Blocking::run`, all runtime agnostic.
 - **The agent loop, tools, steering, memory, sessions** — those are
   their own crates so each can be removed independently.
 

@@ -200,7 +200,12 @@ impl Executor for DefaultExecutor {
             if _cancel.is_cancelled() {
                 return Ok(StepOutcome::cancelled());
             }
-            let _ = sink; // Step events use Progress emission.
+            // The prompt and the plan land before this step samples.
+            sink.flush_log().await.map_err(|error| {
+                synthia_core::Error::internal(format!(
+                    "log flush failed: {error}"
+                ))
+            })?;
             let request = CompletionRequest {
                 model: runtime
                     .caps
@@ -225,6 +230,12 @@ impl Executor for DefaultExecutor {
             // emits a final answer immediately. Real implementations
             // would dispatch tools here.
             let text = content_to_text(&response);
+            // The step's answer is the model's turn of this step: one
+            // `assistant_message` row through the session's writer.
+            sink.write_assistant_turn(&[ContentPart::Text(TextContent {
+                text: text.clone(),
+                cache_control: None,
+            })]);
             return Ok(StepOutcome::completed(text));
         }
         Ok(StepOutcome::failed("executor iteration cap reached"))

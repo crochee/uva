@@ -208,6 +208,12 @@ impl SessionOpWire {
             SessionOp::Cancel { reason } => Some(Self::Cancel {
                 reason: reason.clone(),
             }),
+            // A resume reads the owner's log to validate its token,
+            // so it is owner-node only: there is no wire form.
+            SessionOp::Resume { .. } => None,
+            // The turn a `StartPending` starts is a row the owner's log
+            // already holds; a forwarder has no such slot to stir.
+            SessionOp::StartPending => None,
             SessionOp::Shutdown => None,
         }
     }

@@ -216,10 +216,13 @@ respective `config.toml` files in the workspace root.
 
 `synthia-server --config <path>` names the file that configures the
 boot: `providers` (base_url / api_key / models), `agents`
-(`max_steps`, `compaction`, `strategy`), `[tools]`, `auth`, `cors`,
-`operations`, and `mcp_servers`. The format is chosen by
-extension — `.toml`, `.yaml`, and `.yml` all work — and **the whole
-file applies**, not just its provider section.
+(`max_steps`, `compaction`, `strategy`), `[tools]`, `[plugins]`,
+`auth`, `cors`, `operations`, and `mcp_servers`. **The whole file
+applies**, not just its provider section.
+
+The parser is chosen by extension: a `.yaml` file is read as YAML,
+every other extension — `.toml` and `.yml` included — as JSON. Name
+the deployment file `.yaml`; a TOML document does not load.
 
 ```bash
 # everything from this file: providers, agents, tools, cors, mcp, …
@@ -273,6 +276,58 @@ would be wrong for a multi-replica deployment anyway) and `skills`
 (skills are discovered from `<workspace>/.agents/skills/`, which is
 also where the API and the `skill` tool read them). Both are ignored by
 `serde`, so an existing file keeps working.
+
+### `[plugins]` — runtime composition
+
+Which plugins a deployment runs comes from this section, not from
+cargo features:
+
+```yaml
+plugins:
+  - name: redactor
+    kind: remote
+    command: ["python", "-m", "redactor"]
+    transport: stdio        # accepted: stdio | http
+    capabilities: [tools]   # tools | observe | transform | gate
+    authority: reduced      # reduced | full
+    risk: unknown           # low | high | unknown
+```
+
+Defaults are `transport: stdio`, `authority: reduced`, `risk: unknown`,
+and no capabilities. The string fields are validated while parsing: an
+unknown value — or an unknown key — is a parse error naming the field
+and the values it accepts, never a silent fallback. `http` parses but
+is not implemented by the host, so selecting it skips that plugin with
+a diagnostic.
+
+A plugin is optional capability, not a boot precondition. An entry that
+cannot be installed — the process will not start, the handshake fails,
+a `full` promotion the plugin cannot serve (it announces no `gate`), a
+static install that registers nothing, or a registration the host
+refuses when its tools meet the registry — is logged and skipped, and
+the boot continues. The composition owns the handles that keep the
+installed plugins' registrations alive for the process lifetime, and
+exposes the resolved and skipped sets through `Composition::resolved`
+and `Composition::skipped`. `GET /api/v1/plugins` is their reader — it
+returns both sets (`resolved`: name, kind, authority, risk, claimed
+tool names; `skipped`: name and the reason boot recorded), so an entry
+that did not install is visible without reading the log. The web UI
+shows the same panel on a session page.
+
+The composition installs into **one** deployment host, kept on the
+server for the process lifetime. Every agent the server builds — the
+boot agent, each per-run chat agent, eval agents and dynamically
+registered agents — receives a clone of that host and binds the node's
+one tool registry, so a plugin's tools are callable from a normal
+conversation, not only from the boot agent. A host clone shares the
+registrations (no per-run plugin process), and binding an already-bound
+registry is a no-op.
+
+A `static` entry names a factory compiled into the binary (`name` plus
+`kind: static`). No in-tree crate implements the harness's `Plugin`
+trait today, so the shipped table is **empty** and a `static` entry is
+skipped with a diagnostic. A fork that links a plugin crate registers
+its factory in the server's boot path, one line per plugin.
 
 ## Probe endpoints
 

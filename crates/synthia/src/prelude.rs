@@ -12,7 +12,7 @@
 //!   [`CancelToken`]; the two concrete pieces a basic agent needs
 //!   ([`ReActAgent`], [`TruncatingContextManager`]); the registries
 //!   and containers ([`ToolRegistry`], [`Steering`],
-//!   [`TypedEventSink`], [`AtomicCancelToken`]).
+//!   [`AtomicCancelToken`]).
 //! - **The runtime-neutral time and id vocabularies**: the
 //!   [`Clock`] trait plus [`SystemClock`] (production default)
 //!   and [`FixedClock`] (tests); the [`IdGen`] trait plus
@@ -119,8 +119,6 @@ pub use crate::provider::{
     ModelProvider,
     ProviderConfig,
 };
-#[cfg(feature = "session")]
-pub use crate::session::TypedEventSink;
 #[cfg(feature = "steering")]
 pub use crate::steering::Steering;
 #[cfg(feature = "tool")]

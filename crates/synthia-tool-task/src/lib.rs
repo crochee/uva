@@ -6,10 +6,9 @@
 //!
 //! This crate is the concrete answer to "how do tools that need
 //! the loop itself plug in?": its [`TaskDelegator`] implements
-//! [`synthia_harness::SyntheticTool`], so installing it on a
-//! [`synthia_harness::ReActAgent`] gives the model a synthetic
-//! `task(agent, prompt)` tool whose calls run a registered peer
-//! as a child run:
+//! [`synthia_harness::DelegatingTool`], so installing it on a
+//! [`synthia_harness::ReActAgent`] gives the model a `task(agent,
+//! prompt)` tool whose calls run a registered peer as a child run:
 //!
 //! ```rust,no_run
 //! use std::sync::Arc;
@@ -21,8 +20,8 @@
 //! let peers = Arc::new(AgentRegistry::new());
 //! // peers.put(AgentEntry::new(/* a child agent */)).await;
 //! agent
-//!     .with_synthetic_tool(Arc::new(TaskDelegator::new(peers)))
-//!     .expect("no synthetic tool already advertises `task`")
+//!     .with_delegator(Arc::new(TaskDelegator::new(peers)))
+//!     .expect("no delegator already advertises `task`")
 //! # }
 //! ```
 //!

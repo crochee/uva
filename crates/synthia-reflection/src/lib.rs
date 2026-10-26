@@ -12,14 +12,21 @@
 //!
 //! ```rust,ignore
 //! use std::sync::Arc;
-//! use synthia_provider::AnthropicProvider;
+//!
+//! use synthia_core::SharedClock;
+//! use synthia_provider::ModelProvider;
 //! use synthia_reflection::{ReflectorConfig, ReflectionHook};
 //! use synthia_steering::Steering;
 //!
-//! let critic = Arc::new(AnthropicProvider::from_env()?);
+//! // The critic is the consumer's own provider: this crate takes the
+//! // `ModelProvider` trait, not one of `synthia-provider`'s HTTP
+//! // adapters.
+//! let critic: Arc<dyn ModelProvider> = todo!("your cheap, fast critic");
 //! let hook = Arc::new(ReflectionHook::new(
-//!     ReflectorConfig::default().critic_provider(critic).every_n_steps(3),
-//!     Arc::new(synthia_core::SystemSharedClock::system()),
+//!     ReflectorConfig::default()
+//!         .critic_provider(critic)
+//!         .every_n_steps(3),
+//!     Arc::new(SharedClock::system()),
 //! ));
 //! let steering = Steering::default_policy(root).add_hooks(hook.hook_map());
 //! ```

@@ -2829,6 +2829,8 @@ dependencies = [
  "synthia-hpc-batch",
  "synthia-macros",
  "synthia-mcp",
+ "synthia-plugin-host",
+ "synthia-plugin-protocol",
  "synthia-provider",
  "synthia-reflection",
  "synthia-resilience",
@@ -2959,9 +2961,11 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "hex",
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2",
  "synthia-context",
  "synthia-core",
  "synthia-provider",
@@ -3072,6 +3076,34 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "synthia-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "synthia-core",
+ "synthia-harness",
+ "synthia-plugin-protocol",
+ "synthia-provider",
+ "synthia-session",
+ "synthia-steering",
+ "synthia-tool",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "synthia-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3250,7 +3282,6 @@ dependencies = [
  "synthia-server",
  "tempfile",
  "tokio",
- "tokio-util",
  "toml",
  "tower",
  "tower-http 0.7.1",
@@ -3369,6 +3400,7 @@ dependencies = [
  "synthia-core",
  "synthia-harness",
  "synthia-provider",
+ "synthia-session",
  "synthia-steering",
  "synthia-tool",
  "thiserror 2.0.21",

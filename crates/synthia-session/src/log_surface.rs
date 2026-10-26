@@ -15,7 +15,7 @@
 //! - [`fold_log_surface`] walks the raw rows in order, normalises
 //!   every message-producing row (typed or legacy) to the
 //!   `synthia_provider::Message` wire shape, stamps each with its
-//!   **1-based log ordinal** as its seq, and applies the
+//!   **log ordinal** as its seq, and applies the
 //!   [`SurfaceOp::Replace`] op carried by a `compaction` row.
 //! - [`SurfaceLedger`] is the incremental twin of that projection:
 //!   the run's writer records every row it appends, and a compaction
@@ -27,12 +27,17 @@
 //!
 //! ## Provenance in the raw domain
 //!
-//! A seq is a row's 1-based position in the log. A writer that
-//! appends rows in order (the server's run log does) knows the
-//! ordinal at append time and the reader reproduces it, so a
-//! `Replace { source_event_seqs }` written by a checkpoint cites
+//! A seq is a row's ordinal in the log. A writer stamps that ordinal
+//! into the row (`seq`), and the reader reproduces it from that field,
+//! so a `Replace { source_event_seqs }` written by a checkpoint cites
 //! real earlier rows — no sequence numbers are invented on either
 //! side.
+//!
+//! One log, one numbering: a log whose every event row carries a
+//! `seq` is read by those values ([`log_is_stamped`] decides, once
+//! per log), and a log that carries none — an old one — falls back to
+//! counting rows, exactly as it did before. Deciding row by row
+//! would mix the two schemes and produce duplicate ordinals.
 //!
 //! ## Failure policy
 //!
@@ -51,6 +56,7 @@ use synthia_provider::{Content, ContentPart, Message, Role};
 
 use crate::{
     events::{ReplaceRange, SessionEvent, SurfaceOp},
+    ledger_key,
     surface::{FoldError, FoldedSurface, fold_surface, validate_replace},
 };
 
@@ -66,9 +72,9 @@ enum SurfaceKind {
 /// One raw log row projected onto the surface vocabulary.
 enum LogRow {
     /// A surface-contributing row: the normalised payload it carries,
-    /// the typed variant it projects to, its stable key (a
-    /// tool-result row's call id; `None` for every other row), and
-    /// how it joins the surface.
+    /// the typed variant it projects to, its durable key (the call it
+    /// makes or the call it answers; `None` for a row that carries
+    /// neither), and how it joins the surface.
     Surface {
         kind: SurfaceKind,
         payload: Value,
@@ -177,11 +183,11 @@ fn classify_typed_message(row: &Value) -> LogRow {
 ///
 /// Accepts the exact `Message` wire form and the looser
 /// `{"role": …, "content": [<ContentPart>, …]}` form callers write
-/// by hand; the returned key is the row's durable identity (a
-/// tool-result call id) when the payload carries one.
+/// by hand; the returned key is the row's durable identity (see
+/// [`ledger_key::key_of`]) when the payload carries one.
 fn decode_message(data: &Value) -> Option<(Message, Option<String>)> {
     if let Ok(message) = serde_json::from_value::<Message>(data.clone()) {
-        let key = message.tool_call_id.clone();
+        let key = ledger_key::key_of(&message);
         return Some((message, key));
     }
     let role = role_of(data.get("role").and_then(Value::as_str)?)?;
@@ -209,9 +215,10 @@ fn decode_message(data: &Value) -> Option<(Message, Option<String>)> {
     let message = Message {
         role,
         content: Content::parts(parts),
-        tool_call_id: key.clone(),
+        tool_call_id: key,
         ..Message::default()
     };
+    let key = ledger_key::key_of(&message);
     Some((message, key))
 }
 
@@ -243,7 +250,7 @@ fn classify_message_envelope(row: &Value) -> LogRow {
     };
     match serde_json::from_value::<Message>(data) {
         Ok(message) => {
-            let key = message.tool_call_id.clone();
+            let key = ledger_key::key_of(&message);
             let kind = kind_of(message.role);
             message_row(message, kind, key, row_op(row))
         }
@@ -303,45 +310,44 @@ fn classify_model_part(row: &Value) -> LogRow {
 
 /// Project one legacy `ContentPart` onto a message row.
 ///
-/// Tool-result rows carry the call id as their key — that is the
-/// identity the compaction manager reports, and the only thing by
-/// which a shadowed row can be located without trusting an index.
+/// Every row that can be shadowed carries a durable identity — the
+/// call it makes or the call it answers — so the compaction manager
+/// can name it without trusting an index. The identity is the
+/// message's own ([`ledger_key::key_of`]): a tool-result row carries
+/// the call id on its message, exactly as the typed row does.
 fn classify_part(part: ContentPart, op: SurfaceOp) -> LogRow {
     match part {
-        ContentPart::Text(text) => message_row(
-            Message {
+        ContentPart::Text(text) => {
+            let message = Message {
                 role: Role::Assistant,
                 content: Content::Single(ContentPart::Text(text)),
                 ..Message::default()
-            },
-            SurfaceKind::Assistant,
-            None,
-            op,
-        ),
-        ContentPart::ToolUse(tool_use) => message_row(
-            Message {
+            };
+            let key = ledger_key::key_of(&message);
+            message_row(message, SurfaceKind::Assistant, key, op)
+        }
+        ContentPart::ToolUse(tool_use) => {
+            let message = Message {
                 role: Role::Assistant,
                 content: Content::Single(ContentPart::ToolUse(tool_use)),
                 ..Message::default()
-            },
-            SurfaceKind::Assistant,
-            None,
-            op,
-        ),
+            };
+            let key = ledger_key::key_of(&message);
+            message_row(message, SurfaceKind::Assistant, key, op)
+        }
         ContentPart::ToolResult(tool_result) => {
-            let key = Some(tool_result.tool_use_id.clone());
-            message_row(
-                Message {
-                    role: Role::Tool,
-                    content: Content::Single(ContentPart::ToolResult(
-                        tool_result,
-                    )),
-                    ..Message::default()
-                },
-                SurfaceKind::Tool,
-                key,
-                op,
-            )
+            let call_id = tool_result.tool_use_id.clone();
+            let message = Message {
+                role: Role::Tool,
+                content: Content::Single(ContentPart::ToolResult(tool_result)),
+                // The row's identity travels on the message, as it
+                // does for the typed row: the call this result
+                // answers.
+                tool_call_id: Some(call_id),
+                ..Message::default()
+            };
+            let key = ledger_key::key_of(&message);
+            message_row(message, SurfaceKind::Tool, key, op)
         }
         ContentPart::Image(_)
         | ContentPart::Audio(_)
@@ -362,12 +368,11 @@ fn classify_fallback_payload(row: &Value, data: &Value) -> LogRow {
         .or_else(|| data.get("tool_call_id"))
         .and_then(Value::as_str);
     match key {
-        Some(key) => message_row(
-            Message::tool(Content::text(data.to_string()), key),
-            SurfaceKind::Tool,
-            Some(key.to_string()),
-            op,
-        ),
+        Some(key) => {
+            let message = Message::tool(Content::text(data.to_string()), key);
+            let key = ledger_key::key_of(&message);
+            message_row(message, SurfaceKind::Tool, key, op)
+        }
         None => LogRow::Ignored,
     }
 }
@@ -471,22 +476,85 @@ fn message_row(
     }
 }
 
+/// Whether every event row of this log carries a `seq` field.
+///
+/// The fold, the ledger's seed, the ledger's feed, and the writer's
+/// counter continuation all share this one judgement. Numbering one
+/// log's rows by two different schemes — some by the `seq` they
+/// carry, the rest by their position — produces duplicate ordinals,
+/// which is worse than counting positions throughout.
+///
+/// The sink's metadata header is not an event row and is skipped,
+/// exactly as the fold skips it. A log with no event rows is
+/// vacuously stamped: there is nothing to renumber.
+#[must_use]
+pub fn log_is_stamped(rows: &[Value]) -> bool {
+    rows.iter()
+        .filter(|row| !crate::jsonl::is_metadata_header_row(row))
+        .all(|row| row.get("seq").and_then(Value::as_u64).is_some())
+}
+
+/// The ordinal a row carries.
+///
+/// A stamped log's row carries the ordinal its writer reserved for
+/// it, and that is the number every reader must reproduce: the
+/// file's position stops being the ordinal as soon as two writers
+/// interleave their rows. An unstamped log — an old one, or a mixed
+/// one — falls back to the positional count.
+///
+/// Shared with the writer's ledger seed, so the ledger and the fold
+/// number a log's rows the same way.
+pub(crate) fn row_seq(row: &Value, stamped: bool, positional: u64) -> u64 {
+    if stamped {
+        row.get("seq").and_then(Value::as_u64).unwrap_or(positional)
+    } else {
+        positional
+    }
+}
+
+/// The ordinal of a log's last row.
+///
+/// The fold, the ledger and every reader that caches by log tail must
+/// number rows the same way, so this is the one implementation: a
+/// stamped log uses each row's own `seq`, an unstamped one counts
+/// event rows, and the sink's metadata header is not a row. An empty
+/// log has tail `0`.
+#[must_use]
+pub fn log_tail_seq(rows: &[Value]) -> u64 {
+    let stamped = log_is_stamped(rows);
+    let mut tail = 0;
+    let mut positional: u64 = 0;
+    for row in rows {
+        if crate::jsonl::is_metadata_header_row(row) {
+            continue;
+        }
+        positional += 1;
+        tail = row_seq(row, stamped, positional);
+    }
+    tail
+}
+
 /// Walk `rows` in order and return the folded surface, skipping any
 /// replacement that does not validate.
 fn fold_lenient(rows: &[Value]) -> FoldedSurface {
     let mut surface = FoldedSurface::empty();
     let mut max_surface_seq: u64 = 0;
-    // `seq` counts **event** rows, not slice positions: the sink's
-    // metadata header is the first line of a fresh log but is not a
-    // row, and the sink's own sequence skips it. Counting it here
-    // would put every folded seq one ahead of the `stream_index` the
-    // rest of the system speaks.
-    let mut seq: u64 = 0;
+    // One log, one numbering: a stamped log reads each row's own
+    // `seq`, an unstamped one counts positions. Deciding per row
+    // would mix the two schemes and produce duplicate ordinals.
+    let stamped = log_is_stamped(rows);
+    // The positional fallback counts **event** rows, not slice
+    // positions: the sink's metadata header is the first line of a
+    // fresh log but is not a row, and the sink's own sequence skips
+    // it. Counting it here would put every folded seq one ahead of
+    // the `stream_index` the rest of the system speaks.
+    let mut positional: u64 = 0;
     for row in rows {
         if crate::jsonl::is_metadata_header_row(row) {
             continue;
         }
-        seq += 1;
+        positional += 1;
+        let seq = row_seq(row, stamped, positional);
         let LogRow::Surface { payload, op, .. } = classify_row(row) else {
             continue;
         };
@@ -518,11 +586,14 @@ fn fold_lenient(rows: &[Value]) -> FoldedSurface {
 /// Fold a raw session log into the model-visible surface.
 ///
 /// Every message-producing row — typed or legacy — becomes one
-/// surface row; the row's seq is its 1-based position among the
-/// **event** rows. The sink's metadata header
+/// surface row; the row's seq is the ordinal the log gives it. In a
+/// stamped log — every event row carries a `seq`, which
+/// [`log_is_stamped`] decides once per log — that is the row's own
+/// `seq`; in an unstamped one it is the row's 1-based position among
+/// the **event** rows. The sink's metadata header
 /// ([`is_metadata_header_row`](crate::jsonl::is_metadata_header_row))
-/// is not a row: it is skipped and consumes no ordinal, so a folded
-/// seq always equals the `stream_index` the sink assigned that event.
+/// is not a row: it is skipped and consumes no ordinal, so the
+/// header never shifts the fold's numbering.
 /// A `compaction` row replaces the surface span it cites. A
 /// replacement that cannot be validated is skipped with a warning,
 /// so the caller always gets a usable surface.
@@ -552,10 +623,11 @@ pub fn try_fold_log_surface(
 /// [`SessionEvent::UserMessage`] / [`SessionEvent::AssistantMessage`]
 /// / [`SessionEvent::ToolResult`] carrying the normalised payload,
 /// and each `compaction` row becomes a
-/// [`SessionEvent::Compaction`]; every event is stamped with its
-/// 1-based ordinal among the **event** rows as `seq` (the sink's
-/// metadata header is skipped and consumes no ordinal, matching
-/// [`fold_log_surface`]). Feeding the result to
+/// [`SessionEvent::Compaction`]; every event is stamped with the
+/// ordinal the log gives its row as `seq` — the row's own `seq` in a
+/// stamped log, its 1-based position among the **event** rows
+/// otherwise (the sink's metadata header is skipped and consumes no
+/// ordinal, matching [`fold_log_surface`]). Feeding the result to
 /// [`fold_surface`] yields the same surface as
 /// [`fold_log_surface`], with provenance violations surfaced instead
 /// of skipped.
@@ -566,15 +638,19 @@ pub fn try_fold_log_surface(
 #[must_use]
 pub fn surface_events_from_log(rows: &[Value]) -> Vec<SessionEvent> {
     let mut events = Vec::with_capacity(rows.len());
-    // Same event-only numbering as [`fold_lenient`] so the strict and
-    // lenient folds agree on every seq (see that function for why the
-    // metadata header does not consume an ordinal).
-    let mut seq: u64 = 0;
+    // Same numbering as [`fold_lenient`] so the strict and lenient
+    // folds agree on every seq: a stamped log reads each row's own
+    // `seq`, an unstamped one counts event rows (the metadata header
+    // is skipped and consumes no ordinal — see that function for
+    // why).
+    let stamped = log_is_stamped(rows);
+    let mut positional: u64 = 0;
     for row in rows {
         if crate::jsonl::is_metadata_header_row(row) {
             continue;
         }
-        seq += 1;
+        positional += 1;
+        let seq = row_seq(row, stamped, positional);
         let ts = row
             .get("ts")
             .and_then(Value::as_str)
@@ -587,10 +663,14 @@ pub fn surface_events_from_log(rows: &[Value]) -> Vec<SessionEvent> {
             continue;
         };
         events.push(match kind {
+            // `source` is a row annotation, not part of the model
+            // surface: the fold projects what the model saw, and
+            // what the model saw is the message.
             SurfaceKind::User => SessionEvent::UserMessage {
                 seq,
                 ts,
                 data: payload,
+                source: None,
                 surface_op: Some(op),
             },
             SurfaceKind::Assistant => SessionEvent::AssistantMessage {
@@ -603,6 +683,11 @@ pub fn surface_events_from_log(rows: &[Value]) -> Vec<SessionEvent> {
                 seq,
                 ts,
                 data: payload,
+                // The fold projects the message, and the message
+                // carries no failure flag: the surface a resumed
+                // run reads back is the transcript, not the row's
+                // metadata.
+                is_error: false,
                 surface_op: Some(op),
             },
             SurfaceKind::Compaction => SessionEvent::Compaction {
@@ -834,6 +919,8 @@ mod tests {
 
     use super::{
         fold_log_surface,
+        log_is_stamped,
+        log_tail_seq,
         surface_events_from_log,
         try_fold_log_surface,
     };
@@ -953,5 +1040,118 @@ mod tests {
             "the replace leaves the user row at 1 and lands at 3",
         );
         assert_eq!(with_header.messages, bare.messages);
+    }
+
+    /// A stamped log carries each row's own ordinal, and the fold
+    /// must read it: two writers' rows can interleave in the file,
+    /// so the row's position is not its ordinal.
+    #[test]
+    fn a_stamped_log_uses_the_rows_own_ordinals() {
+        let rows = vec![
+            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
+            json!({"type": "Model", "seq": 9, "data": {"type": "text", "text": "b"}}),
+        ];
+        let folded = fold_log_surface(&rows);
+        assert_eq!(folded.surface_seqs, vec![7, 9]);
+    }
+
+    /// An old log carries no `seq` field at all: its fold stays
+    /// exactly what it was — the row's position among the event rows.
+    #[test]
+    fn an_unstamped_log_keeps_positional_ordinals() {
+        let rows = vec![
+            json!({"type": "Model", "data": {"type": "text", "text": "a"}}),
+            json!({"type": "Model", "data": {"type": "text", "text": "b"}}),
+        ];
+        let folded = fold_log_surface(&rows);
+        assert_eq!(folded.surface_seqs, vec![1, 2]);
+    }
+
+    /// A log that mixes stamped and unstamped rows falls back to
+    /// positional counting for every row: mixing the two schemes
+    /// row by row would produce duplicate ordinals.
+    #[test]
+    fn a_mixed_log_falls_back_to_positional_ordinals() {
+        let rows = vec![
+            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
+            json!({"type": "Model", "data": {"type": "text", "text": "b"}}),
+        ];
+        let folded = fold_log_surface(&rows);
+        assert_eq!(
+            folded.surface_seqs,
+            vec![1, 2],
+            "no mixing: one log, one numbering"
+        );
+    }
+
+    /// The strict fold reads the same ordinals as the lenient one: a
+    /// caller that switches between them must not see a different
+    /// sequence space.
+    #[test]
+    fn the_strict_fold_reads_the_same_ordinals() {
+        let rows = vec![
+            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
+            json!({"type": "Model", "seq": 9, "data": {"type": "text", "text": "b"}}),
+        ];
+        let strict = try_fold_log_surface(&rows).expect("the log folds");
+        assert_eq!(strict.surface_seqs, vec![7, 9]);
+        assert_eq!(strict.surface_seqs, fold_log_surface(&rows).surface_seqs);
+    }
+
+    /// The metadata header is not an event row: the stamped-log
+    /// decision skips it, so a headered stamped log is stamped and
+    /// the header consumes no ordinal.
+    #[test]
+    fn a_metadata_header_does_not_shift_a_stamped_log() {
+        let events = vec![
+            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
+            json!({"type": "Model", "seq": 9, "data": {"type": "text", "text": "b"}}),
+        ];
+        let with_header = fold_log_surface(&headered(&events));
+        assert_eq!(with_header.surface_seqs, vec![7, 9]);
+    }
+
+    /// The decision is per log, not per row — one log, one numbering.
+    #[test]
+    fn the_stamped_decision_is_per_log() {
+        let stamped = json!({
+            "type": "Model",
+            "seq": 7,
+            "data": {"type": "text", "text": "a"},
+        });
+        let unstamped = json!({
+            "type": "Model",
+            "data": {"type": "text", "text": "a"},
+        });
+
+        assert!(log_is_stamped(std::slice::from_ref(&stamped)));
+        assert!(!log_is_stamped(std::slice::from_ref(&unstamped)));
+        assert!(
+            !log_is_stamped(&[stamped.clone(), unstamped.clone()]),
+            "one unstamped row makes the whole log unstamped"
+        );
+        assert!(
+            log_is_stamped(&headered(std::slice::from_ref(&stamped))),
+            "the header is not an event row"
+        );
+        assert!(!log_is_stamped(&headered(std::slice::from_ref(&unstamped))));
+    }
+
+    #[test]
+    fn log_tail_seq_numbers_rows_like_the_fold() {
+        let first =
+            json!({"type": "UserInput", "data": {"text": "a"}, "seq": 1});
+        let second = json!({"type": "Model", "data": {"text": "b"}, "seq": 2});
+        assert_eq!(log_tail_seq(&[]), 0, "an empty log has tail 0");
+        assert_eq!(log_tail_seq(std::slice::from_ref(&first)), 1);
+        assert_eq!(log_tail_seq(&[first, second]), 2);
+        assert_eq!(
+            log_tail_seq(&headered(&[json!({
+                "type": "UserInput",
+                "data": {"text": "a"},
+            })])),
+            1,
+            "an unstamped log counts event rows and the header is not one"
+        );
     }
 }

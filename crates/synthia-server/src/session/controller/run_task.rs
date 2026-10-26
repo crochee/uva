@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use synthia::{
-    core::Clock,
     harness::AgentInput,
     provider::{Content, ContentPart, Message, Role, TextContent},
     session::{CompactionCheckpoint, SurfaceLedger},
@@ -25,25 +24,72 @@ use super::{
 
 impl ControllerInner {
     /// Start a new agent run if and only if the controller is idle
-    /// AND there is pending work — either a multimodal
-    /// `pending_multimodal` slot or at least one queued text
+    /// AND there is pending work — either a parked multimodal
+    /// prompt or at least one queued text
     pub(super) async fn maybe_start_run(
         self: &Arc<Self>,
     ) -> Option<tokio::task::JoinHandle<()>> {
+        // Run starts and manual compaction share this gate: a
+        // compaction holds it while it rewrites the surface, so no run
+        // can begin against the pre-compaction span.
+        let _start_gate = self.steer_gate.lock().await;
         if !self.is_startable() {
             return None;
         }
 
+        // A parked resume governs exactly this run: it starts even
+        // with no queued input, and it must not consume queued input
+        // (that belongs to the turn after it). The log-derived paused
+        // state refuses a *fresh* run, so a resume skips that gate.
+        let resume = self.pending_resume.lock().take();
+        if resume.is_none() {
+            match self.awaiting_approval().await {
+                // An open interrupt is a log fact: record it so
+                // `/status` and the list view report the pause without a
+                // second scan. The queued prompt stays queued.
+                Ok(true) => {
+                    self.mark_awaiting_approval();
+                    tracing::info!(
+                        target: "synthia.session",
+                        session_id = %self.session_id,
+                        "maybe_start_run: refused, the session is awaiting                          approval"
+                    );
+                    return None;
+                }
+                Ok(false) => {}
+                // The log is unreadable, so whether a turn is suspended
+                // on an approval is unknown. Starting would run straight
+                // over that pause; refusing leaves the queued work in
+                // place for the next op (which re-reads), and says why.
+                Err(error) => {
+                    tracing::error!(
+                        target: "synthia.session",
+                        session_id = %self.session_id,
+                        %error,
+                        "maybe_start_run: refused, the approval state could                          not be read"
+                    );
+                    return None;
+                }
+            }
+        }
+
         // Multimodal prompts (with optional agent override) take
-        // precedence over text-only queue entries: the per-run
-        // `pending_multimodal` slot is the only place the
-        // lossless parts (image/audio/file bytes) live.
-        let multimodal_take = self.pending_multimodal.lock().take();
-        let has_text_pending = self
-            .queue
-            .has_pending(&self.user_id, &self.session_id)
-            .await;
-        if multimodal_take.is_none() && !has_text_pending {
+        // precedence over text-only queue entries: the parked queue is
+        // the only place the lossless parts (image/audio/file bytes)
+        // live. One entry per run, so two turns queued during a run
+        // each get their own run (and their own logged prompt) instead
+        // of overwriting each other.
+        let multimodal_take = if resume.is_some() {
+            None
+        } else {
+            self.pending_multimodal.lock().pop_front()
+        };
+        let has_text_pending = resume.is_none()
+            && self
+                .queue
+                .has_pending(&self.user_id, &self.session_id)
+                .await;
+        if resume.is_none() && multimodal_take.is_none() && !has_text_pending {
             tracing::trace!(
                 target: "synthia.session",
                 session_id = %self.session_id,
@@ -68,22 +114,38 @@ impl ControllerInner {
         // exactly this run: `None` keeps the provider on the
         // dependencies, and a selection another op parked afterwards
         // belongs to *its* turn, not this one.
-        let provider = self.pending_provider.lock().take();
-        // R6-B: create the typed-event channel for this run.
-        // The sender goes to the agent loop (structural
-        // boundary events); the receiver is drained inside the
-        // spawned run task below.
-        let (typed_sink, typed_rx) =
-            synthia::session::TypedEventSink::channel(256);
+        //
+        // A resume is the exception: it continues a turn whose
+        // envelope was already sampled under the session's default
+        // provider. A selection parked during the pause belongs to the
+        // next turn, so it stays parked (exactly as a multimodal
+        // payload does) — consuming it would sample a different
+        // provider and report `ConfigDrift` against the token.
+        let provider = if resume.is_some() {
+            None
+        } else {
+            self.pending_provider.lock().take()
+        };
         // R34: the run's durable surface ledger and checkpoint. The
         // ledger is filled by the run task (it needs the log read,
         // which happens there); the checkpoint is installed on the
         // composed context manager *now* so the manager the factory
-        // builds already carries its emitters.
+        // builds already carries its emitters. The checkpoint writes
+        // through the session's one writer: its callbacks are
+        // synchronous, so they take the writer's non-waiting path
+        // and the rows wait in its spill rather than being dropped.
         let ledger = Arc::new(SurfaceLedger::new());
+        // The writer feeds the run's ledger: the rows the checkpoint
+        // writes are indexed by the run that writes them, so the
+        // ledger and the fold see the same surface rows in the same
+        // order.
+        self.writer.set_ledger(Arc::clone(&ledger));
         let compaction_configured = self.deps.lock().compaction.is_some();
         let checkpoint = compaction_configured.then(|| {
-            CompactionCheckpoint::new(typed_sink.clone(), Arc::clone(&ledger))
+            CompactionCheckpoint::new(
+                Arc::clone(&self.writer),
+                Arc::clone(&ledger),
+            )
         });
         let (mut config, overrides) = self
             .build_run_config_with_explicit_agent(
@@ -91,11 +153,30 @@ impl ControllerInner {
                 provider,
                 checkpoint.as_ref(),
             );
-        config.typed_event_sink = Some(typed_sink);
+        // The agent's structural rows (the step boundary, the usage
+        // frame) go into the session's one writer: the same writer
+        // the compaction checkpoint writes through, so the log holds
+        // one ordinal sequence.
+        config.log_writer = Some(Arc::clone(&self.writer));
+        // Delegated children write their own sessions: the run's
+        // `task` delegator resolves each child's writer through
+        // the same registry the router routes child events by.
+        if let Some(router) = self.subagent_router.as_ref() {
+            config.subagent_writers = Some(Arc::new(
+                crate::session::subagent_router::ChildSessionWriters::new(
+                    Arc::clone(router),
+                    self.user_id.clone(),
+                    self.session_id.clone(),
+                ),
+            ));
+        }
         let factory = Arc::clone(&self.run_factory);
         let inner = Arc::clone(self);
-        let pending_turn =
-            multimodal_take.map(|parked| (parked.parts, parked.rerun));
+        // The park this run starts from, if any: its id rides along so
+        // the run can spend exactly that row (see the `park_consumed`
+        // append below). A resume parks nothing and takes nothing.
+        let pending_turn = multimodal_take
+            .map(|parked| (parked.park_id, parked.parts, parked.rerun));
 
         let span = tracing::info_span!(
             target: "synthia.session",
@@ -117,9 +198,13 @@ impl ControllerInner {
             // straggler text the queue holds would conflate two
             // turns into one. The text queue's existence on the
             // controller is preserved for the plain-text path.
-            let (pending_text, multimodal_parts, rerun_turn) =
-                if let Some((parts, rerun)) = pending_turn {
-                    (Vec::new(), Some(parts), rerun)
+            let (pending_text, multimodal_parts, rerun_turn, take_park) =
+                if resume.is_some() {
+                    // A resume continues the suspended turn; nothing
+                    // queued during the pause belongs to it.
+                    (Vec::new(), None, false, None)
+                } else if let Some((park_id, parts, rerun)) = pending_turn {
+                    (Vec::new(), Some(parts), rerun, Some(park_id))
                 } else {
                     let drained = match inner
                         .queue
@@ -137,7 +222,7 @@ impl ControllerInner {
                             Vec::new()
                         }
                     };
-                    (drained, None, false)
+                    (drained, None, false, None)
                 };
             tracing::debug!(
                 target: "synthia.session",
@@ -174,20 +259,19 @@ impl ControllerInner {
             // empty history and the LLM loses all multi-turn
             // memory. The sink is the only durable source of truth
             // here — `InputQueue` is per-run and ephemeral.
-            // R34: the same read feeds the durable surface ledger, so
-            // every row already on disk is indexed with the ordinal
-            // the resume projection will give it. Rows this run
-            // appends go through `RunLog`, which keeps the ledger in
-            // step.
+            // R34: the same read seeds the run's surface ledger
+            // through the session's writer, which numbers the
+            // history exactly the way the fold does — each row's
+            // own `seq` in a stamped log, positions in an old one.
+            // Rows this run appends go through the same writer, so
+            // the ledger stays in step with the fold.
             let (mut log, sink_history, rerun_replace) = match inner
                 .session_store
                 .read()
                 .await
             {
                 Ok(events) => {
-                    for (index, row) in events.iter().enumerate() {
-                        ledger.record(index as u64 + 1, row);
-                    }
+                    inner.writer.seed_ledger(&events);
                     // A rerun shadows the turn it replaces, so
                     // the prompt row it is about to append
                     // carries replace semantics computed against
@@ -199,11 +283,7 @@ impl ControllerInner {
                         None
                     };
                     (
-                        RunLog::new(
-                            Arc::clone(&inner.session_store),
-                            Arc::clone(&ledger),
-                            inner.deps.lock().clock.clone(),
-                        ),
+                        RunLog::new(Arc::clone(&inner.writer)),
                         synthia::context::events_to_messages(&events),
                         rerun_replace,
                     )
@@ -216,11 +296,7 @@ impl ControllerInner {
                         "Failed to read session sink; starting run with empty history"
                     );
                     (
-                        RunLog::new(
-                            Arc::clone(&inner.session_store),
-                            Arc::clone(&ledger),
-                            inner.deps.lock().clock.clone(),
-                        ),
+                        RunLog::new(Arc::clone(&inner.writer)),
                         Vec::new(),
                         // No readable log ⇒ nothing to shadow ⇒
                         // the rerun degrades to a plain append.
@@ -228,96 +304,12 @@ impl ControllerInner {
                     )
                 }
             };
-            // Typed request-header epoch marker (R4 Phase C.3,
-            // dsh `EpochHeader` semantics): before the run's user
-            // prompts land in the sink, stamp the resolved
-            // request config so a later replay can tell exactly
-            // which provider/model/tool-set produced each span of
-            // the log. Re-emitted only on `initial` (first run)
-            // or `change` (config drift between runs).
-            {
-                let (provider, tool_registry) = (
-                    // The provider that *runs* this turn: the config
-                    // carries the turn's `model` selection when it had
-                    // one, so the header names what actually sampled
-                    // rather than the deployment default it was
-                    // overridden away from.
-                    std::sync::Arc::clone(&config.provider),
-                    {
-                        let deps = inner.deps.lock();
-                        std::sync::Arc::clone(&deps.tool_registry)
-                    },
-                );
-                let provider_name = provider.name().to_string();
-                let model = provider.model_config().name.clone();
-                let registry = tool_registry.read().await;
-                let mut tool_names: Vec<String> = {
-                    use synthia::core::{
-                        Registry as _,
-                        registry::RegistryItem as _,
-                    };
-                    registry
-                        .list(None)
-                        .await
-                        .map(|entries| {
-                            entries
-                                .iter()
-                                .map(|e| e.name().to_string())
-                                .collect()
-                        })
-                        .unwrap_or_default()
-                };
-                tool_names.sort();
-                let tools_hash = {
-                    use std::hash::{Hash, Hasher};
-                    let mut h =
-                        std::collections::hash_map::DefaultHasher::new();
-                    tool_names.hash(&mut h);
-                    h.finish()
-                };
-                let should_emit = {
-                    let last = inner.last_request_header.lock();
-                    *last
-                        != Some((
-                            provider_name.clone(),
-                            model.clone(),
-                            tools_hash,
-                        ))
-                };
-                if should_emit {
-                    let reason = if inner.last_request_header.lock().is_some() {
-                        "change"
-                    } else {
-                        "initial"
-                    };
-                    *inner.last_request_header.lock() = Some((
-                        provider_name.clone(),
-                        model.clone(),
-                        tools_hash,
-                    ));
-                    let header =
-                        synthia::session::SessionEvent::RequestHeader {
-                            seq: 0,
-                            ts: inner.deps.lock().clock.now().to_rfc3339(),
-                            data: serde_json::json!({
-                                "reason": reason,
-                                "provider": provider_name,
-                                "model": model,
-                                "tools_hash": format!("{tools_hash:016x}"),
-                            }),
-                        };
-                    if let Ok(v) = serde_json::to_value(&header)
-                        && let Err(e) = log.append_typed(v).await
-                    {
-                        tracing::warn!(
-                            target: "synthia.session",
-                            session_id = %inner.session_id,
-                            error = %e,
-                            "Failed to persist typed request_header"
-                        );
-                    }
-                }
-            }
+            // The run's request header is the harness's: one row
+            // per run, stamped by the sink before the first model
+            // call, naming the provider that ran and the tool set the
+            // model was offered. The server does not write a second
+            // one — two headers per run told a replay two stories
+            // about the same span of the log.
             tracing::info!(
                 target: "synthia.session",
                 session_id = %inner.session_id,
@@ -350,7 +342,7 @@ impl ControllerInner {
                     _ => continue,
                 };
                 if let Err(e) = log
-                    .append(&serde_json::json!({
+                    .append(serde_json::json!({
                         "type": "UserInput",
                         "data": { "text": text },
                     }))
@@ -363,6 +355,35 @@ impl ControllerInner {
                         "Failed to persist drained user prompt to session sink"
                     );
                 }
+            }
+            // Spend the park this run started from, by id, **before**
+            // the turn's own prompt row. The pair is the durable
+            // evidence that *this* run, not some other one, took the
+            // park: a text `Prompt` writes a `UserInput` without ever
+            // parking, so a reader pairing the two by position would
+            // spend a park whose turn never ran — and a crash then
+            // dropped a prompt whose row was intact.
+            //
+            // A failed append is logged, not fatal: the run cannot be
+            // stopped by a log write, and the park it could not spend
+            // re-runs the turn on restart rather than losing it.
+            if let Some(park_id) = take_park
+                && let Err(e) = log
+                    .append_event(
+                        &synthia::session::SessionEvent::ParkConsumed {
+                            seq: 0,
+                            ts: String::new(),
+                            park_id,
+                        },
+                    )
+                    .await
+            {
+                tracing::error!(
+                    target: "synthia.session",
+                    session_id = %inner.session_id,
+                    error = %e,
+                    "Failed to persist the park_consumed row"
+                );
             }
             // The typed text of a multimodal turn never reaches
             // `prompt`: `PromptMulti` parks the whole payload in
@@ -396,7 +417,12 @@ impl ControllerInner {
             // unchanged.
             let attachment_refs = multimodal_parts
                 .as_deref()
-                .map(attachment_refs_of_parts)
+                .map(|parts| {
+                    attachment_refs_of_parts(
+                        parts,
+                        inner.deps.lock().attachment_store.as_ref(),
+                    )
+                })
                 .unwrap_or_default();
             if !current_turn_text.is_empty() || !attachment_refs.is_empty() {
                 let mut row = serde_json::json!({
@@ -406,11 +432,9 @@ impl ControllerInner {
                 if !attachment_refs.is_empty()
                     && let Some(obj) =
                         row.get_mut("data").and_then(|d| d.as_object_mut())
+                    && let Ok(refs) = serde_json::to_value(&attachment_refs)
                 {
-                    obj.insert(
-                        "attachments".to_string(),
-                        serde_json::Value::Array(attachment_refs),
-                    );
+                    obj.insert("attachments".to_string(), refs);
                 }
                 if let (Some(op), Some(obj)) =
                     (rerun_replace.as_ref(), row.as_object_mut())
@@ -418,7 +442,7 @@ impl ControllerInner {
                 {
                     obj.insert("surface_op".to_string(), op_value);
                 }
-                if let Err(e) = log.append(&row).await {
+                if let Err(e) = log.append(row).await {
                     tracing::error!(
                         target: "synthia.session",
                         session_id = %inner.session_id,
@@ -441,7 +465,14 @@ impl ControllerInner {
             //    therefore has no access to them).
             //
             // 2. Text path: identical to before.
-            let input = if let Some(parts) = multimodal_parts {
+            let input = if let Some(pending) = resume {
+                let mut input = AgentInput::text("")
+                    .resume_decisions(pending.token, pending.decisions);
+                if pending.allow_drift {
+                    input = input.allow_drift();
+                }
+                input
+            } else if let Some(parts) = multimodal_parts {
                 if !prompt.is_empty() {
                     let text_preview = Message {
                         role: Role::User,
@@ -481,14 +512,12 @@ impl ControllerInner {
                 session_id = %inner.session_id,
                 "Agent run task: invoking factory.run_stream"
             );
-            let cancel = Arc::new(
-                inner
-                    .run_cancel
-                    .lock()
-                    .expect("run_cancel mutex poisoned")
-                    .clone()
-                    .expect("run_cancel token must be set before run starts"),
-            );
+            let cancel = inner
+                .run_cancel
+                .lock()
+                .expect("run_cancel mutex poisoned")
+                .clone()
+                .expect("run_cancel token must be set before run starts");
             let mut stream =
                 factory.run_stream(config, overrides, input, cancel);
             tracing::info!(
@@ -512,55 +541,88 @@ impl ControllerInner {
                 }
             }
             drop(stream);
-            // R6-B: the agent stream has ended, which means the
-            // agent's spawned drive task already dropped its
-            // `TypedEventSink` — every structural event it
-            // published is sitting in the channel buffer. Drain
-            // synchronously with `try_recv` (no spawned task, no
-            // await on channel closure) so the Idle transition
-            // can never deadlock. Each record is stamped with the
-            // wall clock and the row's live seq — the ordinal the
-            // reader will reproduce, which is what a compaction
-            // checkpoint's `source_event_seqs` must cite.
-            let mut typed_rx = typed_rx;
-            while let Ok(Some(record)) = typed_rx.try_recv() {
-                if let Err(e) = log.append_typed(record.as_value()).await {
-                    tracing::warn!(
-                        target: "synthia.session",
-                        session_id = %inner.session_id,
-                        error = %e,
-                        "Failed to persist typed structural event"
-                    );
+            // The settle boundary. The run's stream has ended, so no
+            // request of this run can carry a steer any more: "live"
+            // means "can still sample again". The flip happens BEFORE
+            // the flushes below, because a steer that landed during
+            // the fsync window would otherwise be answered "steer"
+            // while no request of this run carried it — the message
+            // would survive only as a stray row in the next run's
+            // transcript. A steer takes the same gate before it
+            // reads this state, so the two cannot interleave: either
+            // the steer appended its row while the run was still
+            // `Running` (and the next step boundary would have
+            // injected it) or it reads `Idle` and becomes an ordinary
+            // queued turn. One decision, one row.
+            {
+                let _settled = inner.steer_gate.lock().await;
+                let mut state =
+                    inner.state.lock().expect("state mutex poisoned");
+                if *state == SessionState::Running {
+                    // A suspended run leaves the session paused: the
+                    // log's open interrupts are the truth, and the
+                    // cached state mirrors them so the list view and
+                    // `is_startable` agree without a rescan.
+                    *state = if inner
+                        .suspended
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        SessionState::AwaitingApproval
+                    } else {
+                        SessionState::Idle
+                    };
                 }
             }
+            tracing::info!(
+                target: "synthia.session",
+                session_id = %inner.session_id,
+                "Agent run task: transitioned to Idle"
+            );
             // R34: every row this run produced is now in the log, so
             // a compaction record that could not be mapped when it
-            // was emitted gets its second chance. Records still
-            // without provable provenance are dropped (log-only) by
-            // the checkpoint; the surface stays foldable either way.
+            // was emitted gets its second chance. The checkpoint's own
+            // rows — the lifecycle triple and the record — sit in the
+            // writer's queue: the flush puts them in the log and in
+            // the ledger, so a parked record resolves against the
+            // surface the earlier compactions left behind. Records
+            // still without provable provenance are dropped
+            // (log-only) by the checkpoint; the surface stays
+            // foldable either way. The resolved record goes through
+            // the same writer the checkpoint used, so it carries the
+            // same ordinal source.
+            if let Err(e) = inner.writer.flush().await {
+                tracing::warn!(
+                    target: "synthia.session",
+                    session_id = %inner.session_id,
+                    error = %e,
+                    "Failed to flush the session writer"
+                );
+            }
             let resolved = match checkpoint.as_ref() {
                 Some(checkpoint) => checkpoint.resolve_pending(),
                 None => Vec::new(),
             };
             for event in resolved {
-                match serde_json::to_value(&event) {
-                    Ok(value) => {
-                        if let Err(e) = log.append_typed(value).await {
-                            tracing::warn!(
-                                target: "synthia.session",
-                                session_id = %inner.session_id,
-                                error = %e,
-                                "Failed to persist a resolved compaction checkpoint"
-                            );
-                        }
-                    }
-                    Err(e) => tracing::warn!(
+                if let Err(e) = inner.writer.append_event(&event).await {
+                    tracing::warn!(
                         target: "synthia.session",
                         session_id = %inner.session_id,
                         error = %e,
-                        "Failed to serialise a resolved compaction checkpoint"
-                    ),
+                        "Failed to persist a resolved compaction checkpoint"
+                    );
                 }
+            }
+            // The checkpoint's own rows — the lifecycle triple and
+            // the record — sit in the writer's queue: the flush puts
+            // them in the log, so the compaction's provenance is on
+            // disk before the run ends.
+            if let Err(e) = inner.writer.flush().await {
+                tracing::warn!(
+                    target: "synthia.session",
+                    session_id = %inner.session_id,
+                    error = %e,
+                    "Failed to flush the session writer"
+                );
             }
             tracing::info!(
                 target: "synthia.session",
@@ -568,10 +630,6 @@ impl ControllerInner {
                 event_count,
                 "Agent run task: factory stream ended"
             );
-            let mut state = inner.state.lock().expect("state mutex poisoned");
-            if *state == SessionState::Running {
-                *state = SessionState::Idle;
-            }
             // R11: publish the Completing snapshot.
             let _seq = inner.snapshot_bus.publish(
                 synthia::session::OperationSnapshot::new(
@@ -582,11 +640,6 @@ impl ControllerInner {
                     inner.deps.lock().default_max_iterations,
                     synthia::provider::TokenUsage::default(),
                 ),
-            );
-            tracing::info!(
-                target: "synthia.session",
-                session_id = %inner.session_id,
-                "Agent run task: transitioned to Idle"
             );
         }))
     }

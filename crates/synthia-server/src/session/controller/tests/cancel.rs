@@ -3,9 +3,11 @@
 //! submitted before any run has started.
 
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{Arc, atomic::AtomicUsize},
     time::Duration,
 };
+
+use parking_lot::Mutex;
 
 use super::{
     super::{RunStreamFactory, SessionOp, SessionState},
@@ -55,7 +57,7 @@ async fn test_cancel_terminates_run() {
     .await
     .unwrap();
 
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(calls.lock().len(), 1);
 }
 
 #[tokio::test]
@@ -63,7 +65,7 @@ async fn test_repeated_cancel_is_idempotent() {
     // Verify that submitting multiple `Cancel` ops in
     // quick succession does not panic, double-fire any
     // state transitions, or leave the controller in an
-    // unexpected state. `CancellationToken::cancel()` is
+    // unexpected state. `AtomicCancelToken::cancel()` is
     // documented as idempotent and the handler must
     // preserve that property.
     let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
@@ -106,7 +108,7 @@ async fn test_repeated_cancel_is_idempotent() {
 
     // Exactly one run was ever started (no spurious
     // restarts from repeated cancels re-queueing work).
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(calls.lock().len(), 1);
 }
 
 #[tokio::test]
@@ -129,5 +131,5 @@ async fn test_cancel_before_run_starts_is_safe_noop() {
     // Must remain Idle (no run to cancel).
     assert_eq!(controller.state(), SessionState::Idle);
     // No factory calls were ever made.
-    assert_eq!(calls.lock().unwrap().len(), 0);
+    assert_eq!(calls.lock().len(), 0);
 }

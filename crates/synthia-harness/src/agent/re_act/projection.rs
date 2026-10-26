@@ -32,8 +32,8 @@ fn fnv1a_u64(acc: u64, value: u64) -> u64 {
 
 pub(crate) fn tool_definitions(
     caps: &AgentCaps,
-    synthetic_defs: &[ToolDefinition],
-    synthetic_fingerprint: u64,
+    delegator_defs: &[ToolDefinition],
+    delegator_fingerprint: u64,
     projection: &mut ToolProjectionCache,
 ) -> Arc<Vec<ToolDefinition>> {
     let descriptors = caps.tools.registry.descriptors_cached();
@@ -45,8 +45,8 @@ pub(crate) fn tool_definitions(
     );
     let fp = fingerprint(
         caps.tools.registry.version(),
-        synthetic_defs,
-        synthetic_fingerprint,
+        delegator_defs,
+        delegator_fingerprint,
         projection,
     );
     // The build closure needs `projection` for the called-set
@@ -58,7 +58,7 @@ pub(crate) fn tool_definitions(
             &descriptors,
             caps.tools.surface.as_deref(),
             caps.tools.restriction.as_deref(),
-            synthetic_defs,
+            delegator_defs,
             &projection.called,
         ))
     })
@@ -67,8 +67,8 @@ pub(crate) fn tool_definitions(
 #[inline]
 fn fingerprint(
     registry_version: u64,
-    synthetic_defs: &[ToolDefinition],
-    synthetic_fingerprint: u64,
+    delegator_defs: &[ToolDefinition],
+    delegator_fingerprint: u64,
     cache: &ToolProjectionCache,
 ) -> u64 {
     let called_fp = if cache.has_deferred {
@@ -79,8 +79,28 @@ fn fingerprint(
     compute_fingerprint(
         registry_version,
         called_fp,
-        synthetic_fingerprint,
-        synthetic_defs.len(),
+        delegator_fingerprint,
+        delegator_defs.len(),
+    )
+}
+
+/// The tool definitions this run offers the model: the registry's
+/// projection — surface policy and restriction applied — plus every
+/// delegator's definitions. The request header hashes this, so the row
+/// names the tool set the model was offered rather than the registry it
+/// was drawn from. The loop passes the definitions it already built, so
+/// the header and the wire agree on the set.
+pub(crate) fn offered_tools(
+    caps: &AgentCaps,
+    delegator_defs: &[ToolDefinition],
+    delegator_fingerprint: u64,
+) -> Arc<Vec<ToolDefinition>> {
+    let mut projection = ToolProjectionCache::new();
+    tool_definitions(
+        caps,
+        delegator_defs,
+        delegator_fingerprint,
+        &mut projection,
     )
 }
 
@@ -96,14 +116,14 @@ pub(crate) fn tool_names_hash(tools: &[ToolDefinition]) -> u64 {
 pub(crate) fn compute_fingerprint(
     registry_version: u64,
     called_fingerprint: u64,
-    synthetic_fingerprint: u64,
-    synthetic_count: usize,
+    delegator_fingerprint: u64,
+    delegator_count: usize,
 ) -> u64 {
     let mut h = FNV_OFFSET;
     h = fnv1a_u64(h, registry_version);
     h = fnv1a_u64(h, called_fingerprint);
-    h = fnv1a_u64(h, synthetic_fingerprint);
-    h = fnv1a_u64(h, synthetic_count as u64);
+    h = fnv1a_u64(h, delegator_fingerprint);
+    h = fnv1a_u64(h, delegator_count as u64);
     h
 }
 
@@ -212,7 +232,7 @@ pub(crate) fn compose_tool_definitions(
     descriptors: &[synthia_tool::ToolDescriptor],
     surface: Option<&synthia_tool::ToolSurfacePolicy>,
     restriction: Option<&synthia_tool::ToolRestriction>,
-    synthetic_defs: &[synthia_provider::ToolDefinition],
+    delegator_defs: &[synthia_provider::ToolDefinition],
     called: &HashSet<String>,
 ) -> Vec<synthia_provider::ToolDefinition> {
     // The visible-name set is computed once per call and applied
@@ -236,7 +256,7 @@ pub(crate) fn compose_tool_definitions(
         called,
         visible.as_ref(),
     );
-    for def in synthetic_defs {
+    for def in delegator_defs {
         if restriction.is_none_or(|r| r.is_relevant(&def.name, false)) {
             defs.push(def.clone());
         }

@@ -21,6 +21,141 @@ fn text_of(out: &ToolOutput) -> String {
 }
 
 #[test]
+fn ls_is_low_risk_and_rm_is_high_risk() {
+    let tool = ShellTool::new();
+    for command in [
+        "ls -la",
+        "cat README.md",
+        "git status",
+        "git log --oneline -5",
+        "rg TODO crates",
+        "pwd",
+    ] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::Low,
+            "{command} is read-only"
+        );
+    }
+    for command in [
+        "rm -rf target",
+        "mv a b",
+        "echo hi > out.txt",
+        "chmod +x run.sh",
+        "sudo apt install foo",
+        "git push origin main",
+        "curl https://example.com",
+    ] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::High,
+            "{command} mutates or reaches the network"
+        );
+    }
+    assert_eq!(
+        tool.risk(&json!({ "command": "cargo build" })),
+        Risk::Unknown,
+        "an unclassified command is not assumed safe or dangerous"
+    );
+}
+
+#[test]
+fn mutating_wrappers_and_flags_are_high_risk() {
+    let tool = ShellTool::new();
+    for command in [
+        "env rm -rf target",
+        "env -i rm -rf target",
+        "awk 'BEGIN{system(\"rm -r target\")}'",
+        "gawk 'BEGIN{system(\"rm -r target\")}'",
+        "sed -Ei 's/a/b/' file",
+        "sed -ni 's/a/b/p' file",
+        "find . -fprintf out '%p'",
+        "find . -fprint out",
+        "find . -fprint0 out",
+        "find . -fls out",
+        "git log --output=file",
+    ] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::High,
+            "{command} is not read-only"
+        );
+    }
+    for command in ["env ls -la", "env -i ls -la", "sed -n 's/a/b/p' f"] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::Low,
+            "{command} is still read-only"
+        );
+    }
+}
+
+#[test]
+fn compound_shell_constructs_are_high_risk() {
+    let tool = ShellTool::new();
+    for command in [
+        "for f in target build; do rm -r \"$f\"; done",
+        "if test -f target; then rm -r x; fi",
+        "{ rm -r x; }",
+        "while true; do sleep 1; done",
+        "if ls; then cat x; fi",
+    ] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::High,
+            "{command} is a compound construct the classifier does not model"
+        );
+    }
+}
+
+#[test]
+fn transparent_wrappers_are_classified_by_the_command_they_run() {
+    let tool = ShellTool::new();
+    for command in [
+        "timeout 5 rm -r x",
+        "timeout -s KILL 5 rm -r x",
+        "nice rm -r x",
+        "nice -n 10 rm -r x",
+        "nohup rm -r x",
+        "time rm -r x",
+        "stdbuf -oL rm -r x",
+        "ionice -c3 rm -r x",
+        "chroot /tmp rm -r x",
+    ] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::High,
+            "{command} wraps a destructive command"
+        );
+    }
+    for command in [
+        "timeout 5 ls -la",
+        "nice -n 10 cat README.md",
+        "nohup git status",
+        "time ls",
+        "stdbuf -oL rg TODO crates",
+        "ionice -c3 cat f",
+        "chroot /tmp ls",
+    ] {
+        assert_eq!(
+            tool.risk(&json!({ "command": command })),
+            Risk::Low,
+            "{command} wraps a read-only command"
+        );
+    }
+}
+
+#[test]
+fn find_okdir_is_high_risk() {
+    let tool = ShellTool::new();
+    assert_eq!(
+        tool.risk(&json!({ "command": "find . -okdir rm {} \\;" })),
+        Risk::High,
+        "-okdir executes a command"
+    );
+}
+
+#[test]
 fn is_denied_blocks_rm_rf() {
     let tool = ShellTool::new();
     assert!(tool.is_denied("rm -rf /tmp/foo"));

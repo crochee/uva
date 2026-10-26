@@ -38,3 +38,7 @@ safety = []
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 chrono.workspace = true
 synthia-context.workspace = true
+# The session's writer, for the test that reads back the rows a run
+# leaves in the log. Dev-only: the production dependency graph is
+# unchanged.
+synthia-session.workspace = true

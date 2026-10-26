@@ -17,17 +17,20 @@ use tracing::{debug, info, warn};
 use super::{
     super::{panic::isolate, state::RunState},
     ReActLoop,
-    guard,
+    guard::{self, ToolOutcome},
 };
-use crate::events::{SystemEvent, WarningKind};
+use crate::{
+    agent::approval::ApprovalRequest,
+    events::{SystemEvent, WarningKind},
+};
 
 pub(super) async fn execute_tools(
     this: &ReActLoop,
     session: &mut RunState,
     calls: &[ToolUse],
-) {
+) -> Result<(), crate::events::SessionEndReason> {
     if calls.is_empty() {
-        return;
+        return Ok(());
     }
     debug!(
         tool_call_count = calls.len(),
@@ -38,40 +41,128 @@ pub(super) async fn execute_tools(
     record_tool_fingerprints(calls, &mut session.agent_state);
     let agent_state_ref: &AgentState = &session.agent_state;
 
-    // 1. Bucket by ExecutionMode.
-    let (safe_indices, unsafe_indices, concurrency) =
-        bucket_by_execution_mode(this, calls, agent_state_ref);
-    // 2+3. Run both buckets; slots stay `None` for calls that
-    // never ran (cancelled or aborted). File activity returns
-    // with each output and is committed once, below.
-    let mut outputs: Vec<Option<ToolOutput>> =
+    // 1. The batch gate phase: every call is gated before any call
+    // runs, so a high-risk sibling cannot race ahead of the approval
+    // it needs. Refused calls produce their denial now; held calls
+    // stay unexecuted.
+    let mut batch = Batch {
+        outputs: (0..calls.len()).map(|_| None).collect(),
+        touched: Vec::new(),
+        terminate: None,
+        approvals: Vec::new(),
+    };
+    let mut runnable: Vec<Option<ToolUse>> =
         (0..calls.len()).map(|_| None).collect();
-    let mut touched: Vec<TouchedPair> = Vec::new();
+    for (idx, call) in calls.iter().enumerate() {
+        match guard::gate_tool(this, call, agent_state_ref, &session.approval)
+            .await
+        {
+            guard::GateDecision::Run(effective) => {
+                runnable[idx] = Some(effective);
+            }
+            guard::GateDecision::Respond(output) => {
+                batch.outputs[idx] = Some(output);
+            }
+            guard::GateDecision::Hold(request) => {
+                batch.approvals.push(request);
+            }
+        }
+    }
+
+    // Every call not proven read-only gets an intent row before it
+    // runs (Unknown included: it may still write). The flush is
+    // fatal — a dispatch row that cannot be made durable must stop
+    // the call, not run without its crash marker.
+    let mut dispatched = false;
+    for effective in runnable.iter().flatten() {
+        if !guard::is_proven_read_only(this, effective) {
+            this.sink.append_typed(synthia_session::tool_dispatch(
+                &effective.id,
+                &effective.name,
+                &guard::arguments_hash(&effective.input),
+            ));
+            dispatched = true;
+        }
+    }
+    if dispatched {
+        this.flush_log().await?;
+    }
+
+    // 2. Bucket the runnable calls by ExecutionMode. The guarded call
+    // is what executes, so its (possibly rewritten) name decides the
+    // bucket — bucketing the raw batch would schedule a call by a name
+    // that never runs.
+    let (all_safe, all_unsafe, concurrency) =
+        bucket_by_execution_mode(this, &runnable, agent_state_ref);
+    let safe_indices: Vec<usize> = all_safe
+        .into_iter()
+        .filter(|idx| runnable[*idx].is_some())
+        .collect();
+    let unsafe_indices: Vec<usize> = all_unsafe
+        .into_iter()
+        .filter(|idx| runnable[*idx].is_some())
+        .collect();
+    // 3. Run both buckets; slots stay `None` for held calls (and for
+    // calls a cancellation or abort never reached, which
+    // `fill_unanswered` names). File activity returns with each
+    // output and is committed once, below.
     run_parallel_bucket(
         this,
-        calls,
+        &runnable,
         &safe_indices,
         concurrency,
         agent_state_ref,
-        &mut outputs,
-        &mut touched,
+        &mut batch,
     )
     .await;
     run_sequential_bucket(
         this,
         calls,
+        &runnable,
         &unsafe_indices,
         agent_state_ref,
-        &mut outputs,
-        &mut touched,
+        &mut batch,
     )
     .await;
 
+    // A held call is not an unanswered one: a sibling's cancel/abort
+    // fill must not turn it into a result row, or the model (and the
+    // repair pass) would believe the held call was answered.
+    for request in &batch.approvals {
+        if let Some(pos) =
+            calls.iter().position(|call| call.id == request.call_id)
+        {
+            batch.outputs[pos] = None;
+        }
+    }
     // 4. Commit ToolResults in LLM-call order. The function
     // re-borrows `&session.agent_state` from the `&mut session`
     // we hold; that is sound because the two access patterns
     // here are non-overlapping.
-    commit_all_results(this, session, calls, outputs, touched).await;
+    commit_all_results(this, session, calls, batch.outputs, batch.touched)
+        .await;
+    // A policy that ended the run after a tool returned: the run
+    // stops at the step boundary.
+    session.terminate = batch.terminate;
+    // The calls a gate held for an approval; see `Batch::approvals`.
+    session.pending_approvals = batch.approvals;
+    Ok(())
+}
+
+// The batch's results: one slot per call, the file activity the
+// tools touched, the reason a policy ended the run, and the calls a
+// gate held for an approval.
+struct Batch {
+    outputs: Vec<Option<ToolOutput>>,
+    touched: Vec<TouchedPair>,
+    // A policy can end the run after a tool returned; the first
+    // reason wins and the run ends at the step boundary.
+    terminate: Option<String>,
+    // The calls a gate held for an approval. `execute_tools` copies
+    // them onto `session.pending_approvals`; `Step::Suspended` then
+    // takes them from there in `suspend::boundary`, which writes their
+    // rows before the `Suspended` event goes out.
+    approvals: Vec<ApprovalRequest>,
 }
 
 /// Recorded BEFORE dispatch so loop detection sees the whole batch even
@@ -83,15 +174,17 @@ fn record_tool_fingerprints(calls: &[ToolUse], agent_state: &mut AgentState) {
     }
 }
 
-fn bucket_by_execution_mode(
+pub(in crate::agent::re_act) fn bucket_by_execution_mode(
     this: &ReActLoop,
-    calls: &[ToolUse],
+    guarded: &[Option<ToolUse>],
     agent_state_ref: &AgentState,
 ) -> (Vec<usize>, Vec<usize>, usize) {
-    let mut safe_indices: Vec<usize> = Vec::with_capacity(calls.len());
-    let mut unsafe_indices: Vec<usize> = Vec::with_capacity(calls.len());
-    for (idx, call) in calls.iter().enumerate() {
-        let mode = this.caps.tools.registry.execution_mode(&call.name);
+    let mut safe_indices: Vec<usize> = Vec::with_capacity(guarded.len());
+    let mut unsafe_indices: Vec<usize> = Vec::with_capacity(guarded.len());
+    for (idx, call) in guarded.iter().enumerate() {
+        // A held/refused call never runs; it does not occupy a bucket.
+        let Some(call) = call else { continue };
+        let mode = this.execution_mode(&call.name);
         if mode == ExecutionMode::Parallel {
             safe_indices.push(idx);
         } else {
@@ -118,7 +211,7 @@ fn bucket_by_execution_mode(
     .unwrap_or(usize::MAX);
     let concurrency = recommended.min(safe_indices.len()).max(1);
     info!(
-        tool_call_count = calls.len(),
+        tool_call_count = guarded.len(),
         parallel_count = safe_indices.len(),
         sequential_count = unsafe_indices.len(),
         concurrency,
@@ -136,21 +229,19 @@ async fn run_one_parallel(
     call: &ToolUse,
     agent_state_ref: &AgentState,
     permit: Option<OwnedSemaphorePermit>,
-) -> (usize, ToolOutput, Option<TouchedPair>) {
+) -> (usize, ToolOutcome) {
     let _permit = permit;
-    let (out, touched) =
-        guard::execute_tool_inner(this, call, agent_state_ref).await;
-    (idx, out, touched)
+    let outcome = guard::execute_gated(this, call, agent_state_ref).await;
+    (idx, outcome)
 }
 
 async fn run_parallel_bucket(
     this: &ReActLoop,
-    calls: &[ToolUse],
+    guarded: &[Option<ToolUse>],
     safe_indices: &[usize],
     concurrency: usize,
     agent_state_ref: &AgentState,
-    outputs: &mut [Option<ToolOutput>],
-    touched: &mut Vec<TouchedPair>,
+    batch: &mut Batch,
 ) {
     use synthia_core::sync::Semaphore;
 
@@ -162,13 +253,15 @@ async fn run_parallel_bucket(
     // every permit would be acquired immediately anyway.
     if concurrency >= safe_indices.len() {
         let futs = safe_indices.iter().map(|&idx| {
-            run_one_parallel(this, idx, &calls[idx], agent_state_ref, None)
+            run_one_parallel(
+                this,
+                idx,
+                guarded[idx].as_ref().expect("the gate passed this call"),
+                agent_state_ref,
+                None,
+            )
         });
-        collect_parallel(
-            futures::future::join_all(futs).await,
-            outputs,
-            touched,
-        );
+        collect_parallel(futures::future::join_all(futs).await, batch);
         return;
     }
     let semaphore = std::sync::Arc::new(Semaphore::new(concurrency));
@@ -179,25 +272,24 @@ async fn run_parallel_bucket(
             run_one_parallel(
                 this,
                 idx,
-                &calls[idx],
+                guarded[idx].as_ref().expect("the gate passed this call"),
                 agent_state_ref,
                 Some(permit),
             )
             .await
         }
     });
-    collect_parallel(futures::future::join_all(futs).await, outputs, touched);
+    collect_parallel(futures::future::join_all(futs).await, batch);
 }
 
-fn collect_parallel(
-    results: Vec<(usize, ToolOutput, Option<TouchedPair>)>,
-    outputs: &mut [Option<ToolOutput>],
-    touched: &mut Vec<TouchedPair>,
-) {
-    for (idx, out, pair) in results {
-        outputs[idx] = Some(out);
-        if let Some(pair) = pair {
-            touched.push(pair);
+fn collect_parallel(results: Vec<(usize, ToolOutcome)>, batch: &mut Batch) {
+    for (idx, outcome) in results {
+        batch.outputs[idx] = Some(outcome.output);
+        if let Some(pair) = outcome.touched {
+            batch.touched.push(pair);
+        }
+        if batch.terminate.is_none() {
+            batch.terminate = outcome.terminate;
         }
     }
 }
@@ -207,10 +299,10 @@ fn collect_parallel(
 async fn run_sequential_bucket(
     this: &ReActLoop,
     calls: &[ToolUse],
+    guarded: &[Option<ToolUse>],
     unsafe_indices: &[usize],
     agent_state_ref: &AgentState,
-    outputs: &mut [Option<ToolOutput>],
-    touched: &mut Vec<TouchedPair>,
+    batch: &mut Batch,
 ) {
     let total_sequential = unsafe_indices.len();
     let mut sequential_aborted = false;
@@ -218,11 +310,11 @@ async fn run_sequential_bucket(
         match run_one_sequential(
             this,
             calls,
+            guarded,
             idx,
             total_sequential - seq_pos,
             agent_state_ref,
-            outputs,
-            touched,
+            batch,
         )
         .await
         {
@@ -230,7 +322,7 @@ async fn run_sequential_bucket(
             SequentialStep::Cancelled => {
                 fill_unanswered(
                     calls,
-                    outputs,
+                    &mut batch.outputs,
                     "tool call cancelled before dispatch; safe to retry",
                 );
                 return;
@@ -239,7 +331,7 @@ async fn run_sequential_bucket(
                 sequential_aborted = true;
                 fill_unanswered(
                     calls,
-                    outputs,
+                    &mut batch.outputs,
                     "skipped after sibling sequential tool error; \
                      outcome unknown — verify external state before \
                      retrying",
@@ -286,11 +378,11 @@ enum SequentialStep {
 async fn run_one_sequential(
     this: &ReActLoop,
     calls: &[ToolUse],
+    guarded: &[Option<ToolUse>],
     idx: usize,
     remaining_sequential: usize,
     agent_state_ref: &AgentState,
-    outputs: &mut [Option<ToolOutput>],
-    touched: &mut Vec<TouchedPair>,
+    batch: &mut Batch,
 ) -> SequentialStep {
     // Silent mid-batch abort: the loop's cancel handling reports
     // the interruption once the iteration unwinds; a per-call
@@ -309,12 +401,15 @@ async fn run_one_sequential(
         step: 0,
         total: this.caps.control.max_iterations,
     });
-    let (out, pair) =
-        guard::execute_tool_inner(this, call, agent_state_ref).await;
-    let abort = out.is_error.unwrap_or(false);
-    outputs[idx] = Some(out);
-    if let Some(pair) = pair {
-        touched.push(pair);
+    let effective = guarded[idx].as_ref().expect("the gate passed this call");
+    let outcome = guard::execute_gated(this, effective, agent_state_ref).await;
+    let abort = outcome.output.is_error.unwrap_or(false);
+    batch.outputs[idx] = Some(outcome.output);
+    if let Some(pair) = outcome.touched {
+        batch.touched.push(pair);
+    }
+    if batch.terminate.is_none() {
+        batch.terminate = outcome.terminate;
     }
     if abort {
         warn!(

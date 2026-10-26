@@ -68,6 +68,14 @@ synthia-budget = { workspace = true, optional = true }
 # Default-NO for every one so the seven-feature MVP subset stays at zero
 # HTTP/OTel/DB dependencies (`make check-mvp-deps` is the assertion).
 synthia-hpc-batch = { workspace = true, optional = true }
+# W2: the dynamic plugin channel's wire crate. Opt-in and serde-only;
+# it does not depend on the harness, so a plugin author can take it
+# alone. `synthia-plugin-host` maps its vocabulary onto internal types.
+synthia-plugin-protocol = { workspace = true, optional = true }
+# W2: the host half of the same channel. It registers `Host` entries
+# and speaks `Tool`, so its feature pulls those modules — unlike the
+# wire crate, this one is not usable alone.
+synthia-plugin-host = { workspace = true, optional = true }
 
 async-trait.workspace = true
 
@@ -299,3 +307,21 @@ budget = ["dep:synthia-budget", "core", "provider", "tool"]
 hpc-pool = ["provider", "synthia-provider/hpc-pool"]
 hpc-simd = ["search", "synthia-search/simd"]
 hpc-batch = ["dep:synthia-hpc-batch", "core", "provider", "search"]
+
+# W2: the dynamic plugin channel. A single-crate axis, not a bundle:
+# the wire vocabulary is useful on its own (a plugin author reads it
+# without the harness), so it pulls no sibling feature.
+plugin-protocol = ["dep:synthia-plugin-protocol"]
+
+# W2: the host half. The crate's public types name `Host` and
+# `PluginHandle` (harness), `Tool` and `Risk` (tool), the wire's
+# `PluginCapabilities` (plugin-protocol), and the `Blocking` /
+# `Sleeper` seams the builders take (core) — so the feature pulls each
+# of those modules, the same way `budget` and `reflection` do.
+plugin-host = [
+  "dep:synthia-plugin-host",
+  "plugin-protocol",
+  "harness",
+  "tool",
+  "core",
+]

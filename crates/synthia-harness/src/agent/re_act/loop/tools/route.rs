@@ -1,4 +1,4 @@
-//! One tool call's dispatch route: synthetic claim, registry
+//! One tool call's dispatch route: delegator lookup, registry
 //! lookup, stream drain.
 
 use std::{
@@ -13,18 +13,18 @@ use synthia_tool::{Context, DispatchPlan, StreamOutput, ToolOutput};
 use tracing::{debug, warn};
 
 use super::super::ReActLoop;
-use crate::{agent::re_act::synthetic::SyntheticCall, events::SystemEvent};
+use crate::{agent::re_act::delegation::DelegationCall, events::SystemEvent};
 
-/// The synthetic branch reports no file activity: an intercepted name is
-/// not the registry's `read` / `write`.
+/// The delegation branch reports no file activity: a delegated name is not
+/// the registry's `read` / `write`.
 pub(crate) async fn dispatch_tool_call(
     this: &ReActLoop,
     call: &ToolUse,
     tool_name: &str,
     call_id: &str,
 ) -> (ToolOutput, Option<TouchedPair>) {
-    // Synthetic tools first.
-    if let Some(output) = try_synthetic(this, call, tool_name).await {
+    // Delegators first.
+    if let Some(output) = try_delegation(this, call, tool_name).await {
         return (output, None);
     }
 
@@ -110,34 +110,30 @@ async fn drain_one_tool(
     drain_tool_stream(this, &mut stream, tool_name, call_id).await
 }
 
-/// A synthetic tool gets the cancel token, depth, and event emitter —
-/// internals the registry path never sees.
-async fn try_synthetic(
+/// A delegator gets the cancel token, depth, tool context, and event
+/// emitter — internals the registry path never sees.
+async fn try_delegation(
     this: &ReActLoop,
     call: &ToolUse,
     tool_name: &str,
 ) -> Option<ToolOutput> {
-    let synthetic = this
-        .caps
-        .tools
-        .synthetic
-        .iter()
-        .find(|i| i.claims(tool_name))?;
+    let delegator = this.delegators.get(tool_name)?;
     let cancel = Arc::clone(&this.run.cancel);
     let depth = this.run.subagent_depth;
     let (emit_tx, mut emit_rx) = futures::channel::mpsc::unbounded();
     // Forward events from the plugin's `UnboundedSender` into
     // the run's event sink while the executor runs.
     let sink = this.sink.clone();
-    let call_input = SyntheticCall {
+    let call_input = DelegationCall {
         call,
         cancel,
         depth,
+        context: &this.ctx,
         emit: emit_tx,
+        subagent_writers: this.caps.env.subagent_writers.clone(),
     };
-    // A synthetic tool is a plugin (the delegator spawns whole
-    // subagents), so it is exactly as capable of panicking as a
-    // tool is.
+    // A delegator is a plugin (it spawns whole subagents), so it is
+    // exactly as capable of panicking as a tool is.
     //
     // The executor races the channel, never joins it: a plugin may
     // leak its `emit` sender into a task that outlives `execute`
@@ -147,7 +143,7 @@ async fn try_synthetic(
     // resolves, whatever it already buffered is drained without
     // blocking and the output returns.
     let executor = crate::agent::re_act::panic::catching_panics(
-        synthetic.execute(call_input),
+        delegator.execute(call_input),
     );
     pin_mut!(executor);
     let output = loop {
@@ -177,10 +173,10 @@ async fn try_synthetic(
             warn!(
                 tool_name = %name,
                 panic = %message,
-                "dispatch_tool_call: synthetic tool panicked; reporting \
-                 it as a tool error so the run can still end normally"
+                "dispatch_tool_call: delegator panicked; reporting it \
+                 as a tool error so the run can still end normally"
             );
-            panicked_tool_output(&name, "synthetic: ", &message)
+            panicked_tool_output(&name, "delegation: ", &message)
         }
     })
 }

@@ -7,11 +7,9 @@
 //! binary parts stay out of the sink by design — base64 image
 //! bytes would bloat the JSONL).
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
+use parking_lot::Mutex;
 use synthia::{
     harness::{SessionEndReason, SystemEvent},
     provider::{ContentPart, ImageContent, TextContent, types::ImageDetail},
@@ -78,7 +76,7 @@ async fn test_prompt_multi_round_trip_carries_parts() {
     // Wait for the run to consume the multimodal payload.
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if calls.lock().unwrap().len() == 1 {
+            if calls.lock().len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -87,7 +85,7 @@ async fn test_prompt_multi_round_trip_carries_parts() {
     .await
     .expect("multimodal run should start");
 
-    let recorded = calls.lock().unwrap();
+    let recorded = calls.lock();
     assert_eq!(recorded.len(), 1);
     let input = &recorded[0];
 
@@ -171,7 +169,7 @@ async fn test_prompt_multi_persists_its_text_as_a_user_input_row() {
     // the `AgentRunConfig` list, which this factory does not
     // populate.
     tokio::time::timeout(Duration::from_secs(2), async {
-        while calls.lock().unwrap().is_empty() {
+        while calls.lock().is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })

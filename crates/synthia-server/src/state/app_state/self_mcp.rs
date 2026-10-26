@@ -78,9 +78,9 @@ pub(crate) async fn register_self_mcp(state: &Arc<AppState>) {
         );
         return;
     }
-    let registry = state.tool_registry.read().await;
+    let registry = state.tool_registry.as_ref();
     match register_mcp_tools(
-        &registry,
+        registry,
         client,
         SELF_SERVER_NAME,
         NamingPolicy::default(),
@@ -304,7 +304,7 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
             async move {
                 match action_of(&args).as_str() {
                     "list" => {
-                        let registry = state.tool_registry.read().await;
+                        let registry = state.tool_registry.as_ref();
                         let rows: Vec<Value> = registry
                             .descriptors()
                             .iter()
@@ -321,7 +321,7 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
                     "get" => {
                         let name = str_field(&args, "name")
                             .ok_or("get requires `name`")?;
-                        let registry = state.tool_registry.read().await;
+                        let registry = state.tool_registry.as_ref();
                         let entry = registry.get(&name).ok_or_else(|| {
                             format!("tool '{name}' not found")
                         })?;
@@ -341,7 +341,7 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
                             .get("input_schema")
                             .cloned()
                             .unwrap_or_else(|| json!({"type": "object"}));
-                        let registry = state.tool_registry.read().await;
+                        let registry = state.tool_registry.as_ref();
                         if registry.get(&name).is_some() {
                             return Err(format!(
                                 "tool '{name}' already exists"
@@ -358,7 +358,7 @@ fn tools_tool(state: Arc<AppState>) -> ServerTool {
                     "unregister" => {
                         let name = str_field(&args, "name")
                             .ok_or("unregister requires `name`")?;
-                        let registry = state.tool_registry.read().await;
+                        let registry = state.tool_registry.as_ref();
                         if registry.get(&name).is_none() {
                             return Err(format!("tool '{name}' not found"));
                         }
@@ -743,6 +743,7 @@ fn evals_tool(state: Arc<AppState>) -> ServerTool {
                         let agent = super::eval_agent::HarnessEvalAgent::new(
                             Arc::clone(&state.default_provider),
                             Arc::clone(&state.tool_registry),
+                            state.plugin_host.clone(),
                             state.system_prompt.clone(),
                             state.workspace_root.clone(),
                         );

@@ -105,7 +105,7 @@ fn resolve_unknown_returns_synthia_core_error_validation() {
 
 // ===== seam level =====
 
-/// `"null"` and the model config are pinned by `runtime_derives_model_config` and `runtime_debug`.
+// `"null"` and the model config are pinned by `runtime_derives_model_config` and `runtime_debug`.
 struct NullProvider;
 
 #[async_trait]
@@ -183,7 +183,7 @@ fn a_foreign_strategy_runs_against_the_seam() {
     assert_eq!(strategy.name(), "counting");
 
     let (tx, mut rx) = mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(tx), None, None);
+    let sink = EventSink::new(Arc::new(tx), None);
     let caps = caps();
     let runtime = AgentRuntime {
         caps: Arc::new(caps),
@@ -211,7 +211,7 @@ fn a_foreign_strategy_runs_against_the_seam() {
 #[test]
 fn emit_after_the_consumer_left_is_a_no_op() {
     let (tx, rx) = mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(tx), None, None);
+    let sink = EventSink::new(Arc::new(tx), None);
     drop(rx);
     sink.emit(AgentEvent::text_delta("into the void"));
 }

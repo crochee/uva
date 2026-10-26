@@ -85,8 +85,8 @@ async fn guard_denial_surfaces_as_error_result_and_warning() {
     ));
 }
 
-/// Pins the denial wire string and the veto-epilogue order: the tracker must see
-/// the denied call before `on_error` fans out, or nothing in-tree would notice.
+// Pins the denial wire string and the veto-epilogue order: the tracker must see
+// the denied call before `on_error` fans out, or nothing in-tree would notice.
 #[tokio::test]
 async fn hook_block_surfaces_as_error_result() {
     #[derive(Default)]

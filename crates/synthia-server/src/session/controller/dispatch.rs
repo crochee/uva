@@ -9,14 +9,14 @@ use std::{
 
 use anyhow::Result;
 use serde_json::Value;
-use synthia::{core::Clock, provider::traits::ModelProvider};
+use synthia::{core::CancelToken, provider::traits::ModelProvider};
 use tokio::sync::mpsc;
 
 use super::{
     inner::{ControllerInner, ParkedPrompt},
     ops::{SessionOp, SessionState},
     pin::SubmittedOp,
-    run_log::truncate,
+    run_log::{attachment_refs_of_parts, prompt_text_of_parts, truncate},
 };
 
 pub(super) async fn run_controller_loop(
@@ -160,6 +160,24 @@ async fn handle_received_op(
         SessionOp::Cancel { reason } => {
             handle_cancel_op(inner, reason).await;
         }
+        SessionOp::Resume {
+            token,
+            decisions,
+            allow_drift,
+        } => {
+            // A resume is answered with the session's default
+            // provider: the suspended run already sampled under it,
+            // and swapping it here would be drift, not a selection.
+            handle_resume_op(inner, token, decisions, allow_drift).await;
+            start_run_if_idle(inner, run_handle).await;
+        }
+        SessionOp::StartPending => {
+            // Nothing to append and nothing to park: the work is in a
+            // slot already (a recovered park, input queued while the
+            // loop was coming up). This op only gives the loop its
+            // start.
+            start_run_if_idle(inner, run_handle).await;
+        }
         SessionOp::Shutdown => {
             handle_shutdown_op(inner, run_handle).await;
             return true;
@@ -234,6 +252,15 @@ async fn handle_prompt_op(
 /// payload over any stale text in the InputQueue — the
 /// multimodal prompt IS this turn, not an addition to the
 /// queue.
+///
+/// The park is durable: a `parked_prompt` row is appended and flushed
+/// before the op returns, so the turn survives a crash. The row carries
+/// the prompt's text and *re-readable* attachment refs (the payload
+/// bytes are stored in the attachment store first); a node that takes
+/// the session over re-parks from it. A failed append is logged and the
+/// in-memory park stands — the turn still runs on this node, and the id
+/// it was to be written under rides with it, so the run spends the row
+/// whether or not the append reported success.
 async fn handle_prompt_multi_op(
     inner: &ControllerInner,
     parts: Vec<synthia::provider::ContentPart>,
@@ -249,11 +276,68 @@ async fn handle_prompt_multi_op(
         agent_name = agent_name.as_deref().unwrap_or("-"),
         "op_rx: received PromptMulti"
     );
-    *inner.pending_multimodal.lock() = Some(ParkedPrompt {
+    let park_id = park_durably(inner, &parts, &agent_name, false).await;
+    inner.pending_multimodal.lock().push_back(ParkedPrompt {
+        park_id,
         parts,
         agent_name,
         rerun: false,
     });
+}
+
+/// Append (and flush) the durable `parked_prompt` row for a turn about
+/// to be parked in memory, returning the id the row was written under.
+///
+/// The bytes stay out of the log: [`attachment_refs_of_parts`] stores
+/// each payload in the attachment store and returns refs, so the row
+/// holds a handle a reader can resolve. Failure is logged, never
+/// propagated — the caller is mid-op and the turn still has to run.
+///
+/// The id is minted here, **before** the append, and the caller keeps
+/// it whatever the append reports: a row that landed despite the error
+/// is then still spent by the run started from this park (the run
+/// quotes the same id), so the failure can neither duplicate the turn
+/// on restart nor lose it.
+async fn park_durably(
+    inner: &ControllerInner,
+    parts: &[synthia::provider::ContentPart],
+    agent_name: &Option<String>,
+    rerun: bool,
+) -> String {
+    let store = Arc::clone(&inner.deps.lock().attachment_store);
+    let park_id = uuid::Uuid::new_v4().to_string();
+    let event = synthia::session::SessionEvent::ParkedPrompt {
+        seq: 0,
+        ts: String::new(),
+        park_id: park_id.clone(),
+        text: prompt_text_of_parts(parts),
+        attachments: attachment_refs_of_parts(parts, store.as_ref()),
+        agent_name: agent_name.clone(),
+        rerun,
+    };
+    let row = match serde_json::to_value(&event) {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::warn!(
+                target: "synthia.session",
+                session_id = %inner.session_id,
+                error = %e,
+                "Failed to serialise the parked_prompt row"
+            );
+            return park_id;
+        }
+    };
+    // The flush lands the row before the op returns: the park is the
+    // promise, and a queued-but-unflushed row does not survive a crash.
+    if let Err(e) = inner.append_durable_row(row).await {
+        tracing::warn!(
+            target: "synthia.session",
+            session_id = %inner.session_id,
+            error = %e,
+            "Failed to persist the parked_prompt row"
+        );
+    }
+    park_id
 }
 
 /// `Rerun`: log, cancel any in-flight run, then park the
@@ -279,7 +363,9 @@ async fn handle_rerun_op(
         "op_rx: received Rerun"
     );
     cancel_inflight_run(inner);
-    *inner.pending_multimodal.lock() = Some(ParkedPrompt {
+    let park_id = park_durably(inner, &parts, &agent_name, true).await;
+    inner.pending_multimodal.lock().push_back(ParkedPrompt {
+        park_id,
         parts,
         agent_name,
         rerun: true,
@@ -304,20 +390,17 @@ async fn handle_feedback_op(
         thumbs_up,
         "op_rx: received Feedback; persisting to sink"
     );
+    // The writer stamps the row's `seq` and `ts`.
     let payload = serde_json::json!({
         "kind": "feedback",
         "message_id": message_id,
         "thumbs_up": thumbs_up,
-        "ts": inner.deps.lock().clock.now().to_rfc3339(),
     });
-    // The feedback row is written straight to the sink, bypassing
-    // the run's writer — so it reserves its ordinal from the sink's
-    // counter, the same one the run's writer draws from. A local
-    // counter here would collide with the run's ordinals and make
-    // every compaction checkpoint that cites a later row
-    // unresolvable.
-    inner.session_store.alloc_seq();
-    if let Err(e) = inner.session_store.append(&payload).await {
+    // The feedback row goes through the session's one writer, so
+    // it carries the writer's ordinal — and the flush lands it
+    // before the op returns: feedback has no broadcast of its own
+    // to lean on for the flush.
+    if let Err(e) = inner.append_durable_row(payload).await {
         tracing::warn!(
             target: "synthia.session",
             session_id = %inner.session_id,
@@ -404,11 +487,21 @@ async fn drain_pending_inputs(inner: &ControllerInner) {
 }
 
 /// `Cancel`: fire the run's cancel token, drop any queued
-/// inputs (so the controller does not immediately restart
-/// the run), drop a parked multimodal payload (otherwise the
+/// inputs (so the controller does not immediately restart the
+/// run), drop a parked multimodal payload (otherwise the
 /// next run would silently re-send the same attachment the
 /// user just tried to cancel), flip the state, and publish
 /// the Cancelled snapshot (R11).
+///
+/// The whole path runs under the same `steer_gate` the steer takes
+/// before it reads the state, so a steer and a cancel cannot
+/// interleave. A steer that wins the gate appends its row while the
+/// run is still `Running`; the cancel then stops the run and the row
+/// stays in the log — the repair path closes the tool call it
+/// interrupted, and the message becomes the next turn's first user
+/// message. A cancel that wins flips the state first, so the steer
+/// behind it reads the cancelled state and takes the queued path.
+/// One message, one row, either way.
 async fn handle_cancel_op(inner: &ControllerInner, reason: Option<String>) {
     tracing::info!(
         target: "synthia.session",
@@ -417,10 +510,18 @@ async fn handle_cancel_op(inner: &ControllerInner, reason: Option<String>) {
         reason = reason.as_deref().unwrap_or("-"),
         "op_rx: received Cancel; firing cancellation token"
     );
+    let _cancelled = inner.steer_gate.lock().await;
     cancel_inflight_run(inner);
     drain_pending_inputs(inner).await;
-    *inner.pending_multimodal.lock() = None;
+    inner.pending_multimodal.lock().clear();
+    // A cancelled session must not later resume with a token parked
+    // before the cancel.
+    *inner.pending_resume.lock() = None;
     publish_cancelled_snapshot(inner, &reason);
+    // Cancelling answers every open interrupt: a settled ask is what
+    // keeps the next `maybe_start_run` from refusing forever.
+    drop(_cancelled);
+    inner.settle_open_approvals("cancelled").await;
     if let Some(reason) = reason {
         tracing::info!(
             target: "synthia.session",
@@ -429,6 +530,119 @@ async fn handle_cancel_op(inner: &ControllerInner, reason: Option<String>) {
             "Session run cancelled"
         );
     }
+}
+
+/// `Resume`: park the validated token + decisions for the next
+/// `maybe_start_run` and leave the paused state.
+///
+/// The parked resume is what makes a start legal while the log still
+/// holds the asks being answered: `maybe_start_run` consumes it and
+/// the run's input carries it to the harness, which validates it
+/// again before touching a tool.
+///
+/// A resubmission is a no-op. The token is derived from the log — the
+/// last durable seq plus the call ids still undecided — so a resume the
+/// log has already applied cannot match it any more: every call the
+/// token names has an `approval_decided` row. That is what makes the
+/// client's retry safe after a takeover, where the server deliberately
+/// remembers no decision (§5.11): the second submission has nothing to
+/// execute.
+async fn handle_resume_op(
+    inner: &ControllerInner,
+    token: synthia::harness::ResumeToken,
+    decisions: Vec<synthia::harness::ResumeDecision>,
+    allow_drift: bool,
+) {
+    tracing::info!(
+        target: "synthia.session",
+        session_id = %inner.session_id,
+        op = "Resume",
+        interrupts = decisions.len(),
+        allow_drift,
+        "op_rx: received Resume; parking it for the next run"
+    );
+    let live = *inner.state.lock().expect("state mutex poisoned");
+    if live == SessionState::Running {
+        // The route refuses this; a wire-forwarded op could still
+        // reach an owner mid-run. Parking here would attach the token
+        // to a later, unrelated run.
+        tracing::warn!(
+            target: "synthia.session",
+            session_id = %inner.session_id,
+            "Resume ignored: a run is live",
+        );
+        return;
+    }
+    if is_spent_resume(inner, &token).await {
+        tracing::debug!(
+            target: "synthia.session",
+            session_id = %inner.session_id,
+            pending = ?token.pending,
+            "Resume ignored: the log already decided every call the token names",
+        );
+        return;
+    }
+    if inner
+        .pending_resume
+        .lock()
+        .replace(super::inner::PendingResume {
+            token,
+            decisions,
+            allow_drift,
+        })
+        .is_some()
+    {
+        tracing::warn!(
+            target: "synthia.session",
+            session_id = %inner.session_id,
+            "Resume replaced an unconsumed token; last writer wins",
+        );
+    }
+    let mut state = inner.state.lock().expect("state mutex poisoned");
+    if *state == SessionState::AwaitingApproval {
+        *state = SessionState::Idle;
+    }
+}
+
+/// `true` when the log has already decided every call `token` names.
+///
+/// The log is the authority: the open set is folded from it, so a
+/// token whose calls are all decided describes a resume that already
+/// happened. A token that names no call (a `Paused` suspension) cannot
+/// be judged this way, so it is left to the harness's own validation.
+///
+/// Only a **successful** empty read means "spent". An unreadable log is
+/// not a decision — treating it as one would drop a legitimate resume
+/// the route has already answered `202` for, and the client would wait
+/// for a run that never starts. The error direction is the safe one: an
+/// unreadable log parks the resume, and the harness validates the token
+/// itself.
+async fn is_spent_resume(
+    inner: &ControllerInner,
+    token: &synthia::harness::ResumeToken,
+) -> bool {
+    if token.pending.is_empty() {
+        return false;
+    }
+    let open = match inner.try_open_interrupts().await {
+        Ok(open) => open,
+        Err(error) => {
+            tracing::warn!(
+                target: "synthia.session",
+                session_id = %inner.session_id,
+                %error,
+                "Resume: the log could not be read; parking the resume \
+                 instead of treating the token as spent"
+            );
+            return false;
+        }
+    };
+    !open.iter().any(|request| {
+        token
+            .pending
+            .iter()
+            .any(|call| *call == request.call_id || *call == request.id)
+    })
 }
 
 /// Flip the controller state to `Cancelled` and publish the

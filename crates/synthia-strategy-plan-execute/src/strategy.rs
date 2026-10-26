@@ -81,6 +81,15 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// The plan as the model wrote it: one step per line.
+fn plan_text(plan: &Plan) -> String {
+    plan.steps
+        .iter()
+        .map(|step| step.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Decision emitted by the re-planner between steps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReplanDecision {
@@ -247,6 +256,9 @@ impl ReasoningStrategy for PlanExecuteStrategy {
             sink.finish(&cancel);
             return;
         }
+        // The run's epoch marker: one header naming the request
+        // envelope this run's facts are produced under.
+        sink.stamp_request_header(&runtime.caps, &[]);
 
         // Render the user prompt from the input's content.
         let user_prompt = input
@@ -275,6 +287,12 @@ impl ReasoningStrategy for PlanExecuteStrategy {
             .clone()
             .unwrap_or_else(|| Arc::new(DefaultRePlanner));
 
+        // The prompt lands before the planner sees it.
+        if let Err(error) = sink.flush_log().await {
+            sink.fail(format!("log flush failed: {error}"));
+            sink.finish(&cancel);
+            return;
+        }
         let plan = match planner.generate(&user_prompt, &runtime).await {
             Ok(p) => p,
             Err(e) => {
@@ -283,6 +301,14 @@ impl ReasoningStrategy for PlanExecuteStrategy {
                 return;
             }
         };
+
+        // The plan is the model's first turn of the run: one
+        // `assistant_message` row through the session's writer, so a
+        // resumed session sees what the model planned.
+        sink.write_assistant_turn(&[ContentPart::Text(TextContent {
+            text: plan_text(&plan),
+            cache_control: None,
+        })]);
 
         let mut outcomes: Vec<StepOutcome> = Vec::new();
         for (idx, step) in plan.steps.iter().enumerate() {
@@ -308,6 +334,12 @@ impl ReasoningStrategy for PlanExecuteStrategy {
             };
             outcomes.push(outcome);
 
+            // The step's rows land before the re-planner samples.
+            if let Err(error) = sink.flush_log().await {
+                sink.fail(format!("log flush failed: {error}"));
+                sink.finish(&cancel);
+                return;
+            }
             let decision =
                 match re_planner.replan(&plan, &outcomes, &runtime).await {
                     Ok(d) => d,

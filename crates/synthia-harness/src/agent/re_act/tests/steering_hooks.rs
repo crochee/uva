@@ -8,15 +8,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
 use synthia_context::{AgentState, CompactionDetails, ContextManager};
-use synthia_provider::{
-    ContentPart,
-    Message,
-    SamplingResult,
-    StreamChunk,
-    TextContent,
-    TokenUsage,
-    traits::ModelProvider,
-};
+use synthia_provider::{ContentPart, Message, traits::ModelProvider};
 use synthia_test_support::FakeTool;
 use synthia_tool::ToolRegistry;
 use tokio_util::sync::CancellationToken;
@@ -113,84 +105,8 @@ async fn tool_file_activity_reaches_the_context_manager() {
     );
 }
 
-#[tokio::test]
-async fn assistant_chunks_are_persisted_in_order_and_reassemble() {
-    use synthia_session::{SessionEvent, assemble_chunks};
-
-    let deltas = ["a", "b", "c", "d", "e"];
-    let mut chunks: Vec<StreamChunk> = deltas
-        .iter()
-        .map(|d| {
-            StreamChunk::Content(ContentPart::Text(TextContent {
-                text: (*d).to_string(),
-                cache_control: None,
-            }))
-        })
-        .collect();
-    chunks.push(StreamChunk::IsDone {
-        result: Box::new(SamplingResult {
-            text: String::new(),
-            tool_calls: vec![],
-            reasoning: String::new(),
-            reasoning_signature: None,
-            usage: TokenUsage::default(),
-            stop_reason: Some("end_turn".to_string()),
-        }),
-    });
-
-    let provider: Arc<dyn ModelProvider> =
-        Arc::new(ScriptedStreamProvider::new(vec![chunks]));
-    let (sink, mut rx) = synthia_session::TypedEventSink::channel(64);
-    let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
-        .with_typed_event_sink(sink);
-
-    let mut stream = agent
-        .run(AgentInput::text("hi"), Arc::new(CancellationToken::new()))
-        .await;
-    while stream.next().await.is_some() {}
-
-    let mut events: Vec<SessionEvent> = Vec::new();
-    while let Ok(Some(record)) = rx.try_recv() {
-        events.push(record.event);
-    }
-
-    let chunk_events: Vec<&SessionEvent> = events
-        .iter()
-        .filter(|e| matches!(e, SessionEvent::AssistantChunk { .. }))
-        .collect();
-    assert_eq!(
-        chunk_events.len(),
-        deltas.len() + 1,
-        "one assistant_chunk per streamed chunk (5 text + 1 terminal); got {chunk_events:?}"
-    );
-    match chunk_events.last().expect("terminal chunk") {
-        SessionEvent::AssistantChunk {
-            finish_reason,
-            data,
-            ..
-        } => {
-            assert_eq!(
-                finish_reason.as_deref(),
-                Some("end_turn"),
-                "the terminal chunk must carry the provider stop reason"
-            );
-            assert_eq!(
-                data.get("delta").and_then(|d| d.as_str()),
-                Some(""),
-                "the terminal chunk carries no delta"
-            );
-        }
-        other => panic!("expected assistant_chunk, got {other:?}"),
-    }
-    assert_eq!(
-        assemble_chunks(&events),
-        "abcde",
-        "the fold must rebuild exactly the streamed text"
-    );
-}
-
-/// A `before_run` `Terminate` ends the run before the first sample — the
-/// turn-stopping capability the previous vocabulary lacked.
+// A `before_run` `Terminate` ends the run before the first sample — the
+// turn-stopping capability the previous vocabulary lacked.
 #[tokio::test]
 async fn terminate_before_run_ends_the_run_without_sampling() {
     use synthia_steering::{HookDecision, HookEvent, HookMap};
@@ -355,8 +271,8 @@ async fn after_step_no_hooks_run_completes_unchanged() {
     );
 }
 
-/// Pins the `[blocked by policy]` denial wire string and that the model sees
-/// the body on its next request.
+// Pins the `[blocked by policy]` denial wire string and that the model sees
+// the body on its next request.
 #[tokio::test]
 async fn block_at_before_tool_vetoes_and_reaches_the_next_request() {
     use synthia_steering::{HookDecision, HookEvent, HookMap};
@@ -438,8 +354,8 @@ async fn block_at_before_tool_vetoes_and_reaches_the_next_request() {
     );
 }
 
-/// The success path must carry the real call id — `after_tool` used
-/// to hard-code an empty one, defeating observation correlation.
+// The success path must carry the real call id — `after_tool` used
+// to hard-code an empty one, defeating observation correlation.
 #[tokio::test]
 async fn after_tool_success_carries_the_real_call_id() {
     use parking_lot::Mutex;

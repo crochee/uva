@@ -8,7 +8,7 @@
 //!
 //! | Tier | Methods | Lifetime | Backing in [`SessionMemory`] |
 //! |---|---|---|---|
-//! | **Conversation** — short-term message history | [`messages`](Memory::messages) / [`append`](Memory::append) | durable | `SessionSink` JSONL log |
+//! | **Conversation** — short-term message history | [`messages`](Memory::messages) / [`append`](Memory::append) | durable | the session's `LogWriter` |
 //! | **Working** — task-scoped key-value scratch state | [`get_context`](Memory::get_context) / [`set_context`](Memory::set_context) | process | in-proc map |
 //! | **Long-term** — semantic recall across sessions | [`recall`](Memory::recall) / [`store`](Memory::store) | durable (survives restarts) | in-proc vec, or scoped files via [`FileMemory`] |
 //!
@@ -18,7 +18,7 @@
 //! synthia-server ──▶ synthia-harness ──▶ synthia-context ──▶ synthia-provider
 //!                                          │
 //!                                          ▼ (conversation tier only)
-//!                                   synthia-session (SessionSink)
+//!                                   synthia-session (LogWriter)
 //! ```
 //!
 //! The `synthia-session` crate stays an inert leaf crate: this module is

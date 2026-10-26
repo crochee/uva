@@ -10,8 +10,9 @@
 //!    starts appending events.
 //! 2. Hands out the same `Arc<dyn SessionSink>` for repeated
 //!    lookups of the same session (cheap clones).
-//! 3. Provides a shared [`InputQueue`] for the controller's
-//!    "prompt / steer" command channel.
+//! 3. Hands out the same [`LogWriter`] for repeated lookups of the
+//!    same session: one session has one writer, so one ordinal
+//!    source and one flush cadence.
 //!
 //! `SessionRegistry` is intentionally minimal: it does NOT
 //! store state machines, budgets, approvals, or any policy
@@ -20,9 +21,13 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use parking_lot::RwLock;
-use serde_json::Value;
+use synthia_core::{
+    Clock,
+    SystemClock,
+    blocking::{Blocking, ThreadBlocking},
+};
 
-use crate::{SessionError, SessionSink, jsonl::JsonlSessionSink};
+use crate::{LogWriter, SessionError, SessionSink, jsonl::JsonlSessionSink};
 
 // ---------------------------------------------------------------------------
 // Session metadata
@@ -47,7 +52,17 @@ pub struct SessionRegistry {
     sessions_root: PathBuf,
     sessions: RwLock<HashMap<String, Session>>,
     sinks: RwLock<HashMap<String, Arc<dyn SessionSink>>>,
-    input_queue: InputQueue,
+    /// One writer per session, next to its sink: the writer stamps
+    /// the rows' ordinals and batches their flush, and a session's
+    /// rows must all go through one of them.
+    writers: RwLock<HashMap<String, Arc<LogWriter>>>,
+    /// The clock every row's timestamp comes from.
+    clock: Arc<dyn Clock>,
+    /// The blocking seam every sink this registry creates runs its fs
+    /// work on. The default is the runtime-free
+    /// [`ThreadBlocking`](synthia_core::blocking::ThreadBlocking);
+    /// [`Self::with_blocking`] installs a runtime's own adapter.
+    blocking: Arc<dyn Blocking>,
 }
 
 impl SessionRegistry {
@@ -57,8 +72,24 @@ impl SessionRegistry {
             sessions_root,
             sessions: RwLock::new(HashMap::new()),
             sinks: RwLock::new(HashMap::new()),
-            input_queue: InputQueue::default(),
+            writers: RwLock::new(HashMap::new()),
+            clock: Arc::new(SystemClock),
+            blocking: Arc::new(ThreadBlocking),
         }
+    }
+
+    /// Install the blocking seam every sink this registry creates uses.
+    ///
+    /// The registry owns the sink factory, so the seam a host installs
+    /// here is the one every session's fs work runs on: a tokio host
+    /// passes its own adapter (the server installs `ServerBlocking`,
+    /// `synthia-harness-tokio` ships `TokioBlocking`) so appends land
+    /// on the runtime's blocking pool instead of a fresh OS thread per
+    /// write.
+    #[must_use]
+    pub fn with_blocking(mut self, blocking: Arc<dyn Blocking>) -> Self {
+        self.blocking = blocking;
+        self
     }
 
     /// Path of the sessions root.
@@ -87,7 +118,34 @@ impl SessionRegistry {
             .entry(key)
             .or_insert_with(|| {
                 let dir = self.sessions_root.join(user_id).join(session_id);
-                Arc::new(JsonlSessionSink::new(session_id, dir))
+                Arc::new(
+                    JsonlSessionSink::new(session_id, dir)
+                        .with_blocking(Arc::clone(&self.blocking)),
+                )
+            })
+            .clone()
+    }
+
+    /// The session's one writer: the only thing that stamps a row's
+    /// ordinal and the only thing that flushes it.
+    ///
+    /// Cached per session, next to [`Self::sink`], and keyed the
+    /// same way: one session has one writer. Two writers over one
+    /// sink would each hold their own queue and their own flush
+    /// timing, so the rows they write could reach the log in an
+    /// order their ordinals do not match — and a compaction that
+    /// cites a row's ordinal would then cite a number the reader
+    /// cannot reproduce.
+    pub fn writer(&self, user_id: &str, session_id: &str) -> Arc<LogWriter> {
+        let key = sink_key(user_id, session_id);
+        self.writers
+            .write()
+            .entry(key)
+            .or_insert_with(|| {
+                Arc::new(LogWriter::new(
+                    self.sink(user_id, session_id),
+                    Arc::clone(&self.clock),
+                ))
             })
             .clone()
     }
@@ -121,8 +179,9 @@ impl SessionRegistry {
     /// Drop a session from the in-memory index.
     ///
     /// Returns the session that was registered, if any, and removes
-    /// both the id → [`Session`] entry and the id → sink entry, so a
-    /// later [`sink`](Self::sink) call for the same id cannot hand
+    /// the id → [`Session`] entry, the id → sink entry, and the id →
+    /// writer entry, so a later [`sink`](Self::sink) or
+    /// [`writer`](Self::writer) call for the same id cannot hand
     /// back a handle to a removed session's log.
     ///
     /// This is the registry's own bookkeeping, not deletion policy:
@@ -131,14 +190,13 @@ impl SessionRegistry {
     /// `synthia-server`'s `delete_session`).
     pub async fn remove(&self, id: &str) -> Option<Session> {
         let session = self.sessions.write().remove(id)?;
-        self.sinks.write().remove(&sink_key(&session.user_id, id));
+        let key = sink_key(&session.user_id, id);
+        // The writer first: `writer()` takes the writers lock and
+        // then the sinks lock, and the two must not be taken the
+        // other way round.
+        self.writers.write().remove(&key);
+        self.sinks.write().remove(&key);
         Some(session)
-    }
-
-    /// Shared input queue used by the controller to bridge
-    /// `submit(Prompt | Steer)` calls to the run loop.
-    pub fn input_queue(&self) -> InputQueue {
-        self.input_queue.clone()
     }
 
     /// Snapshot the in-memory index of registered sessions.
@@ -195,86 +253,6 @@ fn validate_id(id: &str, kind: &str) -> Result<(), SessionError> {
 pub const SERVER_DEFAULT_USER_ID: &str = "dev";
 
 // ---------------------------------------------------------------------------
-// InputQueue
-// ---------------------------------------------------------------------------
-
-/// In-memory per-session input queue. The steering channel is
-/// owned by the agent loop (not the sink), but the
-/// `SessionController` still needs a small queue to bridge
-/// between `submit(Prompt | Steer)` calls and the run loop.
-///
-/// Internally backed by a `tokio::sync::Mutex` so that the
-/// registry is safe to share across `.await` points without
-/// blocking the runtime worker thread.
-#[derive(Clone, Default)]
-pub struct InputQueue {
-    inner: Arc<tokio::sync::Mutex<HashMap<String, Vec<PendingEntry>>>>,
-}
-
-impl InputQueue {
-    /// Push a new pending entry onto the session's queue.
-    /// Returns the entries that were *also* queued at the
-    /// same time (an artifact of the previous
-    /// `VecDeque`-based API; preserved so the call site
-    /// keeps compiling).
-    ///
-    /// Async-friendly: awaits the lock without blocking the
-    /// runtime worker.
-    pub async fn push(
-        &self,
-        _user_id: &str,
-        session_id: &str,
-        value: Value,
-        _priority: Option<()>,
-    ) -> Result<Vec<PendingEntry>, SessionError> {
-        let entry = PendingEntry::from_value(value);
-        let mut guard = self.inner.lock().await;
-        let bucket = guard.entry(session_id.to_string()).or_default();
-        bucket.push(entry.clone());
-        Ok(vec![entry])
-    }
-
-    /// Whether the session has any pending input. The
-    /// controller uses this to decide whether to start a
-    /// run.
-    pub async fn has_pending(&self, _user_id: &str, session_id: &str) -> bool {
-        self.inner
-            .lock()
-            .await
-            .get(session_id)
-            .is_some_and(|v| !v.is_empty())
-    }
-
-    /// Drain all pending entries for the session. After the
-    /// call the queue is empty.
-    pub async fn drain_pending(
-        &self,
-        _user_id: &str,
-        session_id: &str,
-    ) -> Result<Vec<PendingEntry>, SessionError> {
-        let mut guard = self.inner.lock().await;
-        Ok(guard.remove(session_id).unwrap_or_default())
-    }
-}
-
-/// One entry in the input queue. The controller folds
-/// `content` into the next user message.
-#[derive(Clone, Debug)]
-pub struct PendingEntry {
-    pub content: String,
-}
-
-impl PendingEntry {
-    fn from_value(value: Value) -> Self {
-        let content = match value {
-            Value::String(s) => s,
-            other => other.to_string(),
-        };
-        Self { content }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -322,6 +300,59 @@ mod tests {
         let events = sink.read().await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["text"], "hi");
+    }
+
+    /// One session has one writer: the ordinal source and the flush
+    /// cadence belong to the session, not to the caller that happens
+    /// to hold a handle.
+    #[tokio::test]
+    async fn registry_yields_same_writer_for_same_session_id() {
+        let root = temp_dir();
+        let r = SessionRegistry::new(root);
+        let a = r.writer("alice", "s1");
+        let b = r.writer("alice", "s1");
+        assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[tokio::test]
+    async fn registry_yields_distinct_writers_for_distinct_sessions() {
+        let root = temp_dir();
+        let r = SessionRegistry::new(root);
+        let a = r.writer("alice", "s1");
+        let b = r.writer("alice", "s2");
+        assert!(!Arc::ptr_eq(&a, &b));
+    }
+
+    /// The writer writes to the session's own sink: the registry's
+    /// sink and its writer are two views of one log.
+    #[tokio::test]
+    async fn the_session_writer_writes_to_the_session_sink() {
+        let root = temp_dir();
+        let r = SessionRegistry::new(root);
+        let writer = r.writer("alice", "s1");
+        writer.append(json!({"type": "Model"})).await.unwrap();
+        writer.flush().await.unwrap();
+        let rows = r.sink("alice", "s1").read().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["seq"], 1, "the writer stamped the row");
+    }
+
+    /// A removed session's writer goes with it: a later lookup must
+    /// not hand back a handle to the removed session's queue.
+    #[tokio::test]
+    async fn remove_drops_the_session_writer() {
+        let root = temp_dir();
+        let r = SessionRegistry::new(root);
+        r.create_with_user("s1".into(), "alice".into())
+            .await
+            .unwrap();
+        let first = r.writer("alice", "s1");
+        r.remove("s1").await.unwrap();
+        let second = r.writer("alice", "s1");
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "the writer is dropped with the session"
+        );
     }
 
     #[tokio::test]
@@ -387,18 +418,5 @@ mod tests {
                 "expected Invalid for user_id={bad:?}; got {err:?}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn input_queue_round_trips() {
-        let q = InputQueue::default();
-        q.push("alice", "s1", Value::String("hello".into()), None)
-            .await
-            .unwrap();
-        assert!(q.has_pending("alice", "s1").await);
-        let drained = q.drain_pending("alice", "s1").await.unwrap();
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].content, "hello");
-        assert!(!q.has_pending("alice", "s1").await);
     }
 }

@@ -385,3 +385,64 @@ async fn test_agent_registration_stops_at_max_agents() {
         "the refusal must name the cap and its knob: {error}"
     );
 }
+
+/// Registration is one write guard, not a check followed by an
+/// insert: two concurrent requests for one name must not both see it
+/// free. Exactly one inserts, the other is refused.
+#[tokio::test]
+async fn test_tools_concurrent_registration_of_one_name_inserts_once() {
+    use serde_json::json as j;
+    let temp = tempfile::TempDir::new().unwrap();
+    let session_manager = synthia::session::manager::SessionRegistry::new(
+        temp.path().to_path_buf(),
+    );
+    let state =
+        AppState::for_test(session_manager, temp.path().to_path_buf()).await;
+    let app = create_router(Arc::new(state)).await;
+    let name = format!("raced_tool_{}", std::process::id());
+    let body = j!({
+        "name": name,
+        "description": "one of two racers",
+        "input_schema": {"type": "object"}
+    })
+    .to_string();
+    let request = || {
+        Request::builder()
+            .uri("/api/v1/tools")
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.clone()))
+            .unwrap()
+    };
+
+    let (first, second) = tokio::join!(
+        app.clone().oneshot(request()),
+        app.clone().oneshot(request())
+    );
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1,
+        "exactly one racer inserts: {statuses:?}"
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1,
+        "the other is refused: {statuses:?}"
+    );
+
+    // Clean up.
+    let cleanup = Request::builder()
+        .uri(format!("/api/v1/tools/{name}"))
+        .method("DELETE")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let _ = app.oneshot(cleanup).await;
+}

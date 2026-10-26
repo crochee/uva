@@ -97,6 +97,148 @@ pub fn turn_end(turn_idx: u32, reason: &str) -> SessionEvent {
     }
 }
 
+/// Build an `ApprovalAsked` row for one held call.
+#[must_use]
+pub fn approval_asked(
+    id: &str,
+    call_id: &str,
+    tool: &str,
+    arguments_hash: &str,
+    risk: &str,
+    agent: &str,
+) -> SessionEvent {
+    SessionEvent::ApprovalAsked {
+        seq: 0,
+        ts: String::new(),
+        id: id.to_string(),
+        call_id: call_id.to_string(),
+        tool: tool.to_string(),
+        arguments_hash: arguments_hash.to_string(),
+        risk: risk.to_string(),
+        agent: agent.to_string(),
+    }
+}
+
+/// Build an `ApprovalDecided` row. `payload` carries the decision's
+/// optional detail (a denial reason, a grant scope, …).
+#[must_use]
+pub fn approval_decided(
+    id: &str,
+    call_id: &str,
+    status: &str,
+    by: &str,
+    payload: Option<Value>,
+) -> SessionEvent {
+    SessionEvent::ApprovalDecided {
+        seq: 0,
+        ts: String::new(),
+        id: id.to_string(),
+        call_id: call_id.to_string(),
+        status: status.to_string(),
+        by: by.to_string(),
+        payload,
+    }
+}
+
+/// Build an `ApprovalGranted` row for a durable session grant.
+#[must_use]
+pub fn approval_granted(
+    id: &str,
+    tool: &str,
+    scope: &str,
+    workspace_hash: &str,
+) -> SessionEvent {
+    SessionEvent::ApprovalGranted {
+        seq: 0,
+        ts: String::new(),
+        id: id.to_string(),
+        tool: tool.to_string(),
+        scope: scope.to_string(),
+        workspace_hash: workspace_hash.to_string(),
+    }
+}
+
+/// Build the `ToolDispatch` intent row written before a call runs.
+#[must_use]
+pub fn tool_dispatch(
+    call_id: &str,
+    tool: &str,
+    arguments_hash: &str,
+) -> SessionEvent {
+    SessionEvent::ToolDispatch {
+        seq: 0,
+        ts: String::new(),
+        call_id: call_id.to_string(),
+        tool: tool.to_string(),
+        arguments_hash: arguments_hash.to_string(),
+    }
+}
+
+/// Build the `RequestSnapshot` row written before a model request.
+#[must_use]
+pub fn request_snapshot(
+    provider: &str,
+    model: &str,
+    params_hash: &str,
+    tools_hash: &str,
+    system_hash: &str,
+    sections: Vec<String>,
+    policy_hash: &str,
+) -> SessionEvent {
+    SessionEvent::RequestSnapshot {
+        seq: 0,
+        ts: String::new(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        params_hash: params_hash.to_string(),
+        tools_hash: tools_hash.to_string(),
+        system_hash: system_hash.to_string(),
+        sections,
+        policy_hash: policy_hash.to_string(),
+    }
+}
+
+/// Build the `Turn { suspended }` marker: the turn stopped with
+/// calls still pending, and lists them.
+#[must_use]
+pub fn turn_suspended(pending: Vec<String>) -> SessionEvent {
+    SessionEvent::Turn {
+        seq: 0,
+        ts: String::new(),
+        data: json!({
+            "phase": "suspended",
+            "status": "suspended",
+            "pending": pending,
+        }),
+    }
+}
+
+/// Build the `Step { end, status: suspended }` row.
+#[must_use]
+pub fn step_end_suspended() -> SessionEvent {
+    SessionEvent::Step {
+        seq: 0,
+        ts: String::new(),
+        data: json!({
+            "phase": "end",
+            "status": "suspended",
+        }),
+    }
+}
+
+/// Build the `Turn { end, reason: suspended }` row.
+#[must_use]
+pub fn turn_end_suspended() -> SessionEvent {
+    SessionEvent::Turn {
+        seq: 0,
+        ts: String::new(),
+        data: json!({
+            "phase": "end",
+            "reason": "suspended",
+        }),
+    }
+}
+
 /// Build an `Iteration { start }` event. R6-2 keeps this
 /// distinct from `step` to mirror dsh's
 /// `iteration/start|end` semantics: an iteration wraps one
@@ -254,6 +396,28 @@ pub fn sandbox_mode(mode: &str) -> SessionEvent {
         seq: 0,
         ts: String::new(),
         mode: mode.to_string(),
+    }
+}
+
+/// Build a `UserMessage { data, source }` event.
+///
+/// `data` is a [`synthia_provider::Message`] serialised with the
+/// crate's wire (`{"role": "user", "content": …}`); `source` names
+/// where the turn came from when it is not the ordinary turn
+/// boundary. Today the one non-ordinary source is `"steer"`: a
+/// message the controller appends through the session's writer
+/// while a run is live, so the loop's next step boundary — not a
+/// second queue — carries it into the model's next request.
+///
+/// `None` is the ordinary path, and the wire omits the field.
+#[must_use]
+pub fn user_message(data: Value, source: Option<&str>) -> SessionEvent {
+    SessionEvent::UserMessage {
+        seq: 0,
+        ts: String::new(),
+        data,
+        source: source.map(str::to_string),
+        surface_op: None,
     }
 }
 
@@ -437,6 +601,36 @@ mod tests {
         // Non-structural events return None.
         let non_structural = usage(1, 1, 2, None, None, None);
         assert_eq!(structural_kind(&non_structural), None);
+    }
+
+    #[test]
+    fn user_message_carries_its_source_only_when_it_has_one() {
+        let steer = user_message(
+            json!({"role": "user", "content": "focus"}),
+            Some("steer"),
+        );
+        let value = serde_json::to_value(&steer).unwrap();
+        assert_eq!(value["type"], "user_message");
+        assert_eq!(value["source"], "steer");
+        assert_eq!(value["seq"], 0, "the writer stamps the ordinal");
+        let restored = round_trip(&steer).expect("round-trips");
+        let source = match &restored {
+            SessionEvent::UserMessage { source, .. } => source.clone(),
+            other => panic!("expected a user_message row, got {other:?}"),
+        };
+        assert_eq!(
+            source.as_deref(),
+            Some("steer"),
+            "the source survives the log"
+        );
+
+        let ordinary =
+            user_message(json!({"role": "user", "content": "hi"}), None);
+        let value = serde_json::to_value(&ordinary).unwrap();
+        assert!(
+            value.get("source").is_none(),
+            "an ordinary turn keeps its shape: {value}"
+        );
     }
 
     #[test]

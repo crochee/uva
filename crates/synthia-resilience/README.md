@@ -15,10 +15,13 @@ the user-visible surface — per-target, hot-reloadable, runtime-neutral.
 - `BreakerConfig { failure_threshold, half_open_after,
   success_threshold_in_half_open }`.
 - `ResilientProvider { inner: Arc<dyn ModelProvider>, policy: Arc<RwLock<
-  ResiliencePolicy>>, breaker: Arc<Mutex<BreakerState>>, clock }`.
+  ResiliencePolicy>>, breaker: Arc<Mutex<BreakerState>>, clock, sleeper }`.
 - `ResilientTool` mirrors the wrap for `Arc<dyn Tool>`.
 - `BreakerState` lives in `synthia-core::breaker` (≤120 LOC, runtime
   -neutral).
+- The retry backoff waits through `synthia-core`'s `Sleeper` seam
+  (`with_sleeper`); the default waits on a std thread, so the crate
+  names no runtime.
 - Default classifier maps `ProviderError::RateLimited` /
   `Overloaded` / `Http(5xx)` → `Retry`, `ProviderError::Auth` →
   `GiveUp`.
@@ -39,11 +42,16 @@ let resilient = ResilientProvider::new(
     provider,
     ResiliencePolicy::default()
         .max_attempts(5)
-        .breaker(BreakerConfig::default()
-            .failure_threshold(5)
-            .half_open_after(Duration::from_secs(15))),
+        .breaker(BreakerConfig {
+            failure_threshold: 5,
+            half_open_after: Duration::from_secs(15),
+            ..Default::default()
+        }),
     Arc::new(synthia_core::SystemClock),
 );
+// On a tokio host, install that runtime's sleeper instead of the
+// default std-thread wait:
+//   .with_sleeper(Arc::new(synthia_harness_tokio::TokioSleeper))
 ```
 
 ## Demo
@@ -60,8 +68,9 @@ Expected tail: `OK: recovered after 5 retries`.
   breaker sees real failures, not cache hits.
 - Per-tool breaker state keyed by tool name — different tools do not
   share state.
-- `Spawner::spawn` (or a default sync fallback when no spawner is
-  injected) drives the half-open probe asynchronously.
+- The retry delay goes through `synthia-core`'s `Sleeper` seam: the
+  default waits on a std thread, so the crate works under any
+  executor; a host on tokio installs `TokioSleeper`.
 - `RwLock<ResiliencePolicy>` for hot-reload; the next call observes
   the new limits.
 - `FixedClock` for tests.

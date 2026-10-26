@@ -92,6 +92,7 @@ pub async fn run_eval(
     let agent = crate::state::HarnessEvalAgent::new(
         Arc::clone(&state.default_provider),
         Arc::clone(&state.tool_registry),
+        state.plugin_host.clone(),
         state.system_prompt.clone(),
         state.workspace_root.clone(),
     );

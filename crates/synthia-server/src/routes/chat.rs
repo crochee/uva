@@ -16,17 +16,22 @@
 //!     a default via `AppState::resolve_agent_name`.
 //!
 //! - `POST /api/v1/chat/sessions/{id}/messages`
-//!   Body: `{ "text": string, "attachments": [...], "agent_name"?: string }`
-//!   Response: `200 { "message_id": string, "queued": true }`
-//!   - Queues a turn. The body is streamed back via SSE on the
-//!     `/messages/stream` endpoint below.
-//!
-//! - `GET /api/v1/chat/sessions/{id}/messages/stream`
-//!   Response: `text/event-stream` carrying `data: <json>` frames.
-//!   Each frame is an `AgentEvent` serialised with the same shape
-//!   `AgentEvent::Model(ContentPart)` already uses (serde internally
-//!   tagged). The final frame is `{ "type": "System", "data":
-//!   { "kind": "End" } }`; clients should close on receipt.
+//!   Body: `{ "text": string, "attachments": [...], "agent_name"?: string,
+//!            "model"?: string, "delivery"?: "queue" | "steer" }`
+//!   Response: `200 { "message_id": string, "queued": bool,
+//!                    "delivery": "queue" | "steer" }`
+//!   - Queues a turn. There is no SSE reply on this surface: the
+//!     transcript — durable rows and the in-progress turn's live
+//!     projection — is read from `GET /api/v1/sessions/{id}/follow`
+//!     (`routes::follow`), which one connection serves for the
+//!     session's whole life.
+//!   - `delivery: "steer"` (text only) injects the message into the
+//!     run that is live **now**: the handler appends a durable
+//!     `user_message` row with `source: "steer"` and flushes it
+//!     before answering, and the loop's next step boundary carries
+//!     it into the model's next request. When no run is live the
+//!     message becomes an ordinary queued turn instead, and the
+//!     response reports `"delivery": "queue"`.
 //!
 //! - `POST /api/v1/chat/sessions/{id}/cancel`
 //!   Body: empty. Response: `204 No Content`.
@@ -59,25 +64,14 @@
 //! All handlers fail with the unified error envelope emitted by
 //! [`crate::api::AppError`] (`{ "error": { "code", "message" } }`).
 
-use std::{convert::Infallible, sync::Arc};
+use std::sync::Arc;
 
-use axum::{
-    Json,
-    extract::State,
-    http::StatusCode,
-    response::{
-        IntoResponse,
-        Response,
-        sse::{Event, KeepAlive, Sse},
-    },
-};
+use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine as _;
-use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use synthia::{
     core::Error,
-    harness::AgentEvent,
     provider::{ContentPart, Message, Role, traits::ModelProvider},
     session::manager::SessionRegistry,
 };
@@ -88,11 +82,10 @@ use crate::{
         AppError,
         AppJson,
         AppPath,
-        AppQuery,
         OperationRequest,
         validate_resource_name,
     },
-    session::controller::{PinnedProvider, SessionOp},
+    session::controller::{PinnedProvider, SessionOp, SteerDelivery},
     state::{AppState, ModelSelectionError},
 };
 
@@ -116,10 +109,31 @@ pub struct CreateSessionResponse {
     pub agent_name: Option<String>,
 }
 
+/// How a submitted message should reach its run.
+///
+/// `Queue` is the ordinary path: the turn waits for the session and
+/// the run that starts it logs the user row. `Steer` asks for the
+/// message to be injected into the run that is live *now*, through
+/// the session log — and reports `queue` back when no run was live
+/// to receive it.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Delivery {
+    /// An ordinary turn: queued, and run when the session is free.
+    #[default]
+    Queue,
+    /// Injected into the live run; it reaches the model at that run's
+    /// next step boundary and never rewrites the request in flight.
+    Steer,
+}
+
 #[derive(Debug, Default, Deserialize, validator::Validate)]
 pub struct SendMessageRequest {
+    /// The prompt text. Empty is allowed when attachments carry the
+    /// turn; `send_message` rejects a request with neither.
     #[serde(default)]
-    #[validate(length(min = 1, message = "must not be empty"))]
     pub text: String,
     #[serde(default)]
     pub attachments: Vec<WireAttachment>,
@@ -132,6 +146,13 @@ pub struct SendMessageRequest {
     #[serde(default)]
     #[validate(length(min = 1, message = "must not be empty"))]
     pub model: Option<String>,
+    /// `"queue"` (default) or `"steer"`.
+    ///
+    /// A steer is text-only: the log is its only carrier, so a
+    /// request that also carries attachment bytes is rejected rather
+    /// than silently dropped.
+    #[serde(default)]
+    pub delivery: Delivery,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, validator::Validate)]
@@ -162,6 +183,9 @@ pub struct WireAttachment {
 pub struct SendMessageResponse {
     pub message_id: String,
     pub queued: bool,
+    /// The delivery that actually happened: `"queue"` when no run was
+    /// live to steer, `"steer"` when the message was injected.
+    pub delivery: Delivery,
 }
 
 #[derive(Debug, Deserialize, Default, validator::Validate)]
@@ -184,13 +208,6 @@ pub struct UsageResponse {
     pub tokens_out: u64,
     pub turns: u64,
     pub sessions_total: usize,
-}
-
-/// Optional resume cursor for the SSE stream. `from = None` and
-#[derive(Debug, Default, Deserialize, validator::Validate)]
-pub struct StreamQuery {
-    #[serde(default)]
-    pub from: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,12 +260,57 @@ pub async fn send_message(
         ),
         None => None,
     };
+    let priority = 1u8;
+    if req.text.trim().is_empty() && req.attachments.is_empty() {
+        let message =
+            "a message needs text or at least one attachment".to_string();
+        return Err(AppError::new(
+            StatusCode::BAD_REQUEST,
+            Error::validation(message.clone()),
+        )
+        .with_code("empty_message")
+        .with_message(message));
+    }
+    if req.delivery == Delivery::Steer {
+        // The log is a steer's only carrier, so a payload it cannot
+        // hold is the caller's mistake to see — not a steer that
+        // silently loses its image. The check reads the request
+        // itself and comes BEFORE the parts are built, so the
+        // attachment bytes of a request that cannot carry them are
+        // never decoded.
+        if !req.attachments.is_empty() {
+            let message = "a steer carries text only; attachments cannot \
+                           be injected into a live run"
+                .to_string();
+            return Err(AppError::new(
+                StatusCode::BAD_REQUEST,
+                Error::validation(message.clone()),
+            )
+            .with_code("invalid_steer")
+            .with_message(message));
+        }
+        return steer_session_op(&state, &session_id, req.text, pinned).await;
+    }
     let parts = build_parts(&req, Some(&state.attachment_store));
+    // `resolve_agent_name_for(None)` answers the deployment default, so
+    // the "was an agent named?" question must come from the request
+    // itself. Treating the resolved default as explicit routed every
+    // plain-text turn through `PromptMulti`, whose multimodal payload
+    // has a single parked slot: two queued turns overwrote each other
+    // and the first was never logged. `PromptMulti` is therefore
+    // reserved for a request that actually carries attachments or an
+    // explicit agent override; everything else uses the accumulator
+    // queue.
+    let explicit_agent = req.agent_name.is_some();
     let explicit_agent_name =
         state.resolve_agent_name_for(req.agent_name.as_deref());
-    let priority = 1u8;
+    // A named agent rides the multimodal op because that is the only
+    // prompt variant that carries one; a plain `Prompt` would silently
+    // run the session's configured default instead of the selection
+    // the composer shows.
     let op = if parts.len() > 1
         || parts.iter().any(|p| !matches!(p, ContentPart::Text(_)))
+        || explicit_agent
     {
         SessionOp::PromptMulti {
             parts,
@@ -267,6 +329,42 @@ pub async fn send_message(
         }
     };
     submit_session_op(&state, &session_id, op, pinned).await
+}
+
+/// Deliver a text message to the session as a steer, reporting the
+/// delivery that actually happened.
+///
+/// The controller owns the check-and-append: a live run receives a
+/// durable `user_message` row before this returns, and a settled one
+/// receives an ordinary queued turn with no row of its own (the run
+/// logs it on start). Either way the caller learns which, because an
+/// answer that promised an injection it did not make would be a lie.
+///
+/// The route answers `200` for both deliveries: the durability
+/// promise is the flush that already happened, not the status code.
+async fn steer_session_op(
+    state: &Arc<AppState>,
+    session_id: &str,
+    content: String,
+    provider: Option<Arc<dyn ModelProvider>>,
+) -> Result<Json<SendMessageResponse>, AppError> {
+    validate_resource_name(session_id)?;
+    let user_id = resolve_user_id(state);
+    let controller = state
+        .get_or_create_session_controller(&user_id, session_id)
+        .await?;
+    let delivery = controller
+        .steer(content, provider.map(PinnedProvider::new))
+        .await
+        .map_err(|e| Error::internal(format!("{e}")))?;
+    Ok(Json(SendMessageResponse {
+        message_id: Uuid::new_v4().to_string(),
+        queued: delivery == SteerDelivery::Queue,
+        delivery: match delivery {
+            SteerDelivery::Steer => Delivery::Steer,
+            SteerDelivery::Queue => Delivery::Queue,
+        },
+    }))
 }
 
 /// Map a failed `model` resolution onto the unified error envelope.
@@ -309,6 +407,7 @@ async fn submit_session_op(
     Ok(Json(SendMessageResponse {
         message_id: Uuid::new_v4().to_string(),
         queued: true,
+        delivery: Delivery::Queue,
     }))
 }
 
@@ -358,251 +457,6 @@ pub async fn operation(
 }
 
 // ---------------------------------------------------------------------------
-pub async fn stream_messages(
-    State(state): State<Arc<AppState>>,
-    AppPath(session_id): AppPath<String>,
-    AppQuery(query): AppQuery<StreamQuery>,
-) -> Result<Response, AppError> {
-    validate_resource_name(&session_id)?;
-    let user_id = resolve_user_id(&state);
-    let controller = state
-        .get_or_create_session_controller(&user_id, &session_id)
-        .await?;
-    // `from` is `None` or empty → today's behaviour
-    // (byte-identical to the pre-resume wire shape). Any
-    // other value must parse as `u64`; the handler rejects
-    // an unparseable cursor with `400 Bad Request` so the
-    // client never silently subscribes to a wrong window.
-    let from = parse_resume_cursor(query.from.as_deref())?;
-    // `from = None` and `from = 0` both take the resume
-    // path: a fresh client (no cursor known) needs the
-    // snapshot + cursor frames to learn the current
-    // position before the live tail starts. The legacy
-    // `receiver_to_sse` path was removed when the
-    // stream-index protocol landed
-    // (`2026-09-24-stream-index.md` §4.4): a client that
-    // did not see a cursor could not resume a working
-    // session because the only way to learn the cursor
-    // was to send a new turn.
-    let from = from.unwrap_or(0);
-    let rx = controller.subscribe();
-    let sink = state.session_manager.sink(&user_id, &session_id);
-    let snapshot = sink
-        .snapshot()
-        .await
-        .map_err(|e| Error::session(format!("snapshot sink: {e}")))?;
-    // Stale-cursor detection: only fires when the caller
-    // explicitly passed a `from` past the sink tail. A
-    // missing or zero `from` is treated as "from the
-    // start" — replay starts at index 1, the snapshot
-    // frame carries the current `last_stream_index`,
-    // and the cursor frame that follows carries the same.
-    if from > 0 && from > snapshot.last_stream_index {
-        return Ok(resume_cursor_truncated_response(
-            from,
-            snapshot.last_event_seq,
-            snapshot.last_stream_index,
-        ));
-    }
-    let replay = sink
-        .read_from_index(from)
-        .await
-        .map_err(|e| Error::session(format!("read sink: {e}")))?;
-    let stream = resume_stream_to_sse(
-        rx,
-        Arc::clone(&sink),
-        snapshot.last_event_seq,
-        snapshot.last_stream_index,
-        replay,
-    );
-    Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
-
-fn parse_resume_cursor(raw: Option<&str>) -> Result<Option<u64>, AppError> {
-    let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(None);
-    };
-    raw.parse::<u64>().map(Some).map_err(|_| {
-        AppError::new(
-            StatusCode::BAD_REQUEST,
-            Error::invalid_item(format!(
-                "query parameter `from` must be an unsigned integer (got `{raw}`)"
-            )),
-        )
-        .with_code("invalid_resume_cursor")
-        .with_message(format!(
-            "from must be an unsigned integer; got `{raw}`"
-        ))
-    })
-}
-
-/// Build the `410 Gone` response carrying the current
-/// `last_event_seq` so the client can restart. Returns a
-/// real `Response` (not an `AppError`) because the unified
-/// error envelope does not surface per-field payloads and
-/// the spec requires the cursor on the wire.
-fn resume_cursor_truncated_response(
-    from: u64,
-    current_last_event_seq: u64,
-    current_stream_index: u64,
-) -> Response {
-    use axum::Json;
-    use serde_json::json;
-    let body = json!({
-        "code": "resume_cursor_truncated",
-        "message": format!(
-            "resume cursor {from} is past the current stream_index ({current_stream_index}); restart the stream"
-        ),
-        "current_last_event_seq": current_last_event_seq,
-        "current_stream_index": current_stream_index,
-    });
-    (StatusCode::GONE, Json(body)).into_response()
-}
-
-/// `is_terminal` — true for events that close a stream
-/// (the controller loop's terminal `System::SessionEnded`
-/// frame). Resume-aware SSE streams emit a cursor frame
-/// after the terminal message so the client observes the
-/// close.
-fn is_terminal(event: &AgentEvent) -> bool {
-    matches!(
-        event,
-        AgentEvent::System(synthia::harness::SystemEvent::SessionEnded { .. })
-    )
-}
-
-/// Resume-aware SSE stream.
-///
-/// Wire shape (all frames are SSE `event: <name>` with `data:
-/// <json>`; `\n\n` is implicit at the end of each frame):
-///
-/// ```text
-/// event: snapshot
-/// data: {"last_event_seq": <u64>}
-///
-/// event: message
-/// data: <replay event 1>
-///
-/// event: message
-/// data: <replay event 2>
-///
-/// ... (one frame per replayed event, in chronological order)
-///
-/// event: cursor
-/// data: {"last_event_seq": <u64>}
-///
-/// event: message
-/// data: <live event>
-///
-/// ... (live tail continues until SessionEnded)
-/// ```
-///
-/// The first `snapshot` frame carries the `last_event_seq`
-/// captured before the replay so the client knows exactly
-/// which cursor the prefix covers. The first `cursor` frame
-/// is emitted unconditionally after the replay — even when
-/// the replay is empty — so a client receiving a successful
-/// `200` can always learn the current cursor without waiting
-/// for a live event.
-///
-/// On the live tail, a `cursor` frame is also emitted every
-/// `RESUME_CURSOR_BATCH` messages so a long-running run does
-/// not strand a reconnecting client on a stale cursor.
-const RESUME_CURSOR_BATCH: usize = 50;
-
-/// Shared cursor frame builder.
-fn cursor_frame(last_event_seq: u64, stream_index: u64) -> Event {
-    let json = serde_json::json!({
-        "last_event_seq": last_event_seq,
-        "stream_index": stream_index,
-    })
-    .to_string();
-    Event::default().event("cursor").data(json)
-}
-
-/// Snapshot frame builder (used once, at the head of the
-/// replay). Mirrors `cursor_frame` today but the named
-/// distinction lets the client tell the two apart.
-fn snapshot_frame(last_event_seq: u64, stream_index: u64) -> Event {
-    let json = serde_json::json!({
-        "last_event_seq": last_event_seq,
-        "stream_index": stream_index,
-    })
-    .to_string();
-    Event::default().event("snapshot").data(json)
-}
-
-fn resume_stream_to_sse(
-    rx: tokio::sync::broadcast::Receiver<AgentEvent>,
-    sink: Arc<dyn synthia::session::SessionSink>,
-    last_event_seq: u64,
-    stream_index: u64,
-    replay: Vec<Value>,
-) -> impl Stream<Item = Result<Event, Infallible>> {
-    async_stream::stream! {
-        // 1. Initial `snapshot` frame — carries the
-        // `last_event_seq` the replay was carved from. A
-        // client reconnecting with a cursor it had
-        // previously observed can detect truncation by
-        // comparing this with its own cursor.
-        yield Ok(snapshot_frame(last_event_seq, stream_index));
-        // 2. Replayed events, each as a `message` frame.
-        // The JSON values stored in the sink are the same
-        // `serde_json::Value` the live tail re-serialises,
-        // so the bytes are byte-identical to what a
-        // client observed from the original `append`.
-        for value in replay {
-            let json = serde_json::to_string(&value)
-                .unwrap_or_else(|_| "{}".to_string());
-            yield Ok(Event::default()
-                .event("message")
-                .data(json));
-        }
-        // 3. Post-replay cursor — guaranteed even when the
-        // replay was empty so a "nothing to replay"
-        // connection still learns the current cursor.
-        yield Ok(cursor_frame(last_event_seq, stream_index));
-        // 4. Live tail — broadcast events forwarded as
-        // `message` frames. The cursor is re-published
-        // every `RESUME_CURSOR_BATCH` messages so a
-        // reconnecting client never has to wait for the
-        // next batch boundary to learn its position.
-        // Each cursor is refreshed against the live
-        // `sink.snapshot()` so the seq reflects the latest
-        // durable event, not a stale replay-time number.
-        let mut rx = rx;
-        let mut since_cursor = 0usize;
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    let terminal = is_terminal(&event);
-                    let json = serde_json::to_string(&event)
-                        .unwrap_or_else(|_| "{}".to_string());
-                    yield Ok(Event::default()
-                        .event("message")
-                        .data(json));
-                    since_cursor += 1;
-                    if since_cursor >= RESUME_CURSOR_BATCH {
-                        since_cursor = 0;
-                        let live_seq = match sink.snapshot().await {
-                            Ok(snap) => snap.last_event_seq,
-                            Err(_) => last_event_seq,
-                        };
-                        yield Ok(cursor_frame(live_seq, live_seq));
-                    }
-                    if terminal {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    }
-}
-
 // POST /api/v1/chat/sessions/{id}/cancel
 // ---------------------------------------------------------------------------
 
@@ -718,7 +572,7 @@ pub async fn usage(State(state): State<Arc<AppState>>) -> Json<UsageResponse> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_user_id(state: &AppState) -> String {
+pub(crate) fn resolve_user_id(state: &AppState) -> String {
     // The legacy single-tenant deployments use the constant
     // `SERVER_DEFAULT_USER_ID`. A real auth middleware would
     // thread the resolved user_id through the request headers.
@@ -1086,6 +940,7 @@ mod tests {
             attachments: vec![],
             agent_name: None,
             model: None,
+            delivery: Delivery::Queue,
         };
         let parts = build_parts(&req, None);
         assert_eq!(parts.len(), 1);
@@ -1105,6 +960,7 @@ mod tests {
             }],
             agent_name: None,
             model: None,
+            delivery: Delivery::Queue,
         };
         let parts = build_parts(&req, None);
         assert!(parts.iter().any(|p| !matches!(p, ContentPart::Text(_))));
@@ -1186,6 +1042,7 @@ mod tests {
     }
 
     /// R13-1: an unresolvable hash (never uploaded) is skipped —
+    //—
     /// the text part still ships so the turn isn't lost.
     #[test]
     fn attachment_ref_unknown_hash_skips_not_fails() {

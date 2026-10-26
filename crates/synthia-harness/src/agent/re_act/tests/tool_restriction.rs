@@ -1,5 +1,5 @@
 //! Per-agent tool restriction: `denied_tools`, `allow_list`,
-//! and the synthetic tool seam. Drives one loop per scenario and
+//! and the delegation seam. Drives one loop per scenario and
 //! asserts the advertised tool list + the post-call result.
 
 use std::sync::Arc;
@@ -151,8 +151,8 @@ async fn allow_list_narrows_the_advertised_set() {
 }
 
 #[tokio::test]
-async fn restriction_without_the_synthetic_tool_hides_it() {
-    use crate::agent::re_act::synthetic::tests::EchoInterceptor;
+async fn restriction_without_the_delegator_hides_it() {
+    use crate::agent::re_act::delegation::tests::EchoInterceptor;
 
     let provider = Arc::new(CapturingProvider::new(vec![empty_response()]));
     let registry = Arc::new(ToolRegistry::new());
@@ -163,9 +163,7 @@ async fn restriction_without_the_synthetic_tool_hides_it() {
     ));
 
     let agent = ReActAgent::new(provider.clone(), registry)
-        .with_synthetic_tool(Arc::new(EchoInterceptor {
-            name: "intercepted_tool",
-        }))
+        .with_delegator(Arc::new(EchoInterceptor::new("intercepted_tool")))
         .expect("first install must succeed")
         .with_tool_restriction(synthia_tool::ToolRestriction::allow(["read"]));
     let mut stream = agent
@@ -178,7 +176,7 @@ async fn restriction_without_the_synthetic_tool_hides_it() {
         captured[0].iter().map(|d| d.name.as_str()).collect();
     assert!(
         !names.contains(&"intercepted_tool"),
-        "the synthetic tool is not in the allow-list, so its tool must not be \
+        "the delegator is not in the allow-list, so its tool must not be \
          advertised: {names:?}"
     );
     assert!(
@@ -188,8 +186,8 @@ async fn restriction_without_the_synthetic_tool_hides_it() {
 }
 
 #[tokio::test]
-async fn synthetic_tool_definition_advertised_and_call_routed() {
-    use crate::agent::re_act::synthetic::tests::EchoInterceptor;
+async fn delegator_definition_advertised_and_call_routed() {
+    use crate::agent::re_act::delegation::tests::EchoInterceptor;
 
     let provider = Arc::new(CapturingProvider::new(vec![
         vec![StreamChunk::IsDone {
@@ -220,9 +218,7 @@ async fn synthetic_tool_definition_advertised_and_call_routed() {
     let registry = echo_registry().0;
 
     let agent = ReActAgent::new(provider.clone(), registry)
-        .with_synthetic_tool(Arc::new(EchoInterceptor {
-            name: "intercepted_tool",
-        }))
+        .with_delegator(Arc::new(EchoInterceptor::new("intercepted_tool")))
         .expect("first install must succeed");
     let mut events = Vec::new();
     let mut stream = agent
@@ -238,7 +234,7 @@ async fn synthetic_tool_definition_advertised_and_call_routed() {
         captured[0].iter().map(|d| d.name.as_str()).collect();
     assert!(
         names.contains(&"intercepted_tool"),
-        "synthetic tool definition rides the tool list: {names:?}"
+        "delegator definition rides the tool list: {names:?}"
     );
     drop(captured);
 
@@ -252,28 +248,25 @@ async fn synthetic_tool_definition_advertised_and_call_routed() {
     });
     assert!(
         intercepted_result,
-        "the claimed call must be answered by the synthetic tool: {events:?}"
+        "the advertised call must be answered by the delegator: {events:?}"
     );
 }
 
 #[test]
-fn with_synthetic_tool_rejects_duplicate_name() {
-    use crate::agent::re_act::synthetic::tests::EchoInterceptor;
+fn with_delegator_rejects_duplicate_name() {
+    use crate::agent::re_act::delegation::tests::EchoInterceptor;
 
     let agent = ReActAgent::new(
         Arc::new(CapturingProvider::new(vec![])),
         echo_registry().0,
     )
-    .with_synthetic_tool(Arc::new(EchoInterceptor {
-        name: "shared_tool",
-    }))
+    .with_delegator(Arc::new(EchoInterceptor::new("shared_tool")))
     .expect("first install must succeed");
 
-    let result = agent.with_synthetic_tool(Arc::new(EchoInterceptor {
-        name: "shared_tool",
-    }));
+    let result =
+        agent.with_delegator(Arc::new(EchoInterceptor::new("shared_tool")));
     let err = match result {
-        Ok(_) => panic!("duplicate synthetic-tool name must surface as Err"),
+        Ok(_) => panic!("duplicate delegator name must surface as Err"),
         Err(name) => name,
     };
     assert_eq!(err, "shared_tool");

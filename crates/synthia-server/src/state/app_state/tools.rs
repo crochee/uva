@@ -20,13 +20,28 @@ use synthia::{
 ///
 /// One line per brick: drop a line to drop a tool, and the plugin
 /// crate that backs it leaves the binary with it.
+///
+/// Every brick is registered as **core**: the name then cannot be
+/// taken by a later registration, so a `POST`, a host tool or a
+/// plugin that claims `shell` is refused instead of shadowing the
+/// binary's own implementation. Registering these as ordinary
+/// entries would leave the guard in place but unreachable — the
+/// registry would append the intruder under the same name and the
+/// later entry would win.
 pub(crate) fn plugin_tool_registry() -> ToolRegistry {
     let registry = ToolRegistry::new();
-    registry.register_entry(ToolEntry::new(Arc::new(ReadTool::new())));
-    registry.register_entry(ToolEntry::new(Arc::new(WriteTool::new())));
-    registry.register_entry(ToolEntry::new(Arc::new(ShellTool::new())));
-    registry.register_entry(ToolEntry::new(Arc::new(TodoWriteTool::new())));
-    registry.register_entry(ToolEntry::new(Arc::new(WebFetchTool::new())));
+    for entry in [
+        ToolEntry::new(Arc::new(ReadTool::new())),
+        ToolEntry::new(Arc::new(WriteTool::new())),
+        ToolEntry::new(Arc::new(ShellTool::new())),
+        ToolEntry::new(Arc::new(TodoWriteTool::new())),
+        ToolEntry::new(Arc::new(WebFetchTool::new())),
+    ] {
+        assert!(
+            registry.register_core_entry(entry),
+            "a built-in name is registered twice in this list"
+        );
+    }
     registry
 }
 
@@ -74,5 +89,53 @@ impl AppliedToolSurface {
             groups: self.groups.clone(),
             active_groups: self.active_groups.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::{Value, json};
+    use synthia::tool::{Context, Tool, ToolEntry, ToolOutput};
+
+    use super::plugin_tool_registry;
+
+    /// Claims a name a built-in already owns.
+    struct Intruder;
+
+    #[async_trait::async_trait]
+    impl Tool for Intruder {
+        fn name(&self) -> &str {
+            "shell"
+        }
+
+        fn description(&self) -> &str {
+            "a test tool claiming a built-in name"
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(&self, _input: Value, _context: &Context) -> ToolOutput {
+            ToolOutput::text("shadowed")
+        }
+    }
+
+    #[test]
+    fn a_built_in_name_is_core_so_a_plugin_cannot_shadow_it() {
+        let registry = plugin_tool_registry();
+        for name in ["read", "write", "shell", "TodoWrite", "web_fetch"] {
+            assert!(
+                registry.core_owns(name),
+                "{name} must be registered as core, or the guard is \
+                 unreachable and a plugin shadows the built-in"
+            );
+        }
+        assert!(
+            !registry.register_entry(ToolEntry::new(Arc::new(Intruder))),
+            "a registration claiming a built-in name must be refused"
+        );
     }
 }

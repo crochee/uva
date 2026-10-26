@@ -8,7 +8,7 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use parking_lot::Mutex;
-use synthia_core::Error as CoreError;
+use synthia_core::{Error as CoreError, SystemClock};
 use synthia_harness::{
     AgentCaps,
     AgentEvent,
@@ -27,6 +27,12 @@ use synthia_provider::{
     Content,
     ModelConfig,
     ProviderConfig,
+};
+use synthia_session::{
+    LogWriter,
+    SessionEvent,
+    SessionSink,
+    in_memory::InMemorySessionSink,
 };
 
 use super::{BestOfNStrategy, DEFAULT_CANDIDATES, LongestAnswer};
@@ -148,7 +154,7 @@ fn runtime(
 
 fn drive(strategy: &BestOfNStrategy, runtime: AgentRuntime) -> Vec<AgentEvent> {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
-    let sink = synthia_harness::EventSink::new(Arc::new(tx), None, None);
+    let sink = synthia_harness::EventSink::new(Arc::new(tx), None);
     futures::executor::block_on(strategy.run(
         runtime,
         AgentInput::text("answer me"),
@@ -187,6 +193,133 @@ fn progress_count(events: &[AgentEvent]) -> usize {
             matches!(event, AgentEvent::System(SystemEvent::Progress { .. }))
         })
         .count()
+}
+
+/// A context manager that parks inside `prepare` — the seam a
+/// summarising manager calls the provider from, before the strategy
+/// samples.
+struct ParkManager {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl synthia_context::ContextManager for ParkManager {
+    async fn prepare(
+        &self,
+        _messages: &mut Vec<synthia_provider::Message>,
+        _state: &mut synthia_context::AgentState,
+    ) {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The prompt is on disk before the context manager's summariser runs —
+/// the summariser is a provider call, and it runs while the request is
+/// being prepared, before any candidate samples. The summariser parks,
+/// so no later flush could have written the row instead.
+#[tokio::test]
+async fn a_queued_row_is_on_disk_before_the_summariser_runs() {
+    let log = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(log.clone(), Arc::new(SystemClock)));
+    // The host's row, queued before the agent ran and never flushed by
+    // the host.
+    writer.append_event_nowait(&synthia_session::step_start(0, 0));
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let run = {
+        let entered = Arc::clone(&entered);
+        let writer = Arc::clone(&writer);
+        tokio::spawn(async move {
+            let (tx, _rx) = futures::channel::mpsc::unbounded();
+            let sink = synthia_harness::EventSink::new(
+                Arc::new(tx),
+                Some(Arc::clone(&writer)),
+            );
+            BestOfNStrategy::new(2, Arc::new(LongestAnswer))
+                .run(
+                    // The provider is never reached: the summariser
+                    // parks first.
+                    AgentRuntime {
+                        caps: {
+                            let mut caps = AgentCaps::for_provider(
+                                ScriptedProvider::new(&["a", "b"]),
+                            );
+                            caps.control.context_manager =
+                                Arc::new(ParkManager { entered });
+                            Arc::new(caps)
+                        },
+                        cancel: synthia_core::AtomicCancelToken::shared(),
+                        subagent_depth: 0,
+                    },
+                    AgentInput::text("answer me"),
+                    &sink,
+                )
+                .await;
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the context manager was entered");
+
+    let rows = log.read().await.expect("read");
+    assert!(
+        rows.iter().any(|row| row["type"] == "step"),
+        "the queued row must be on disk while the summariser is still \
+         blocked; got {rows:?}"
+    );
+    run.abort();
+}
+
+/// The winner is the run's durable fact: one `assistant_message` row,
+/// holding the answer the run published.
+#[test]
+fn the_winner_is_one_durable_row() {
+    let provider = ScriptedProvider::new(&["short", "the longest answer"]);
+    let log = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(log.clone(), Arc::new(SystemClock)));
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let sink = synthia_harness::EventSink::new(
+        Arc::new(tx),
+        Some(Arc::clone(&writer)),
+    );
+    futures::executor::block_on(
+        BestOfNStrategy::new(2, Arc::new(LongestAnswer)).run(
+            runtime(
+                provider,
+                Arc::new(InlineSpawner {
+                    spawns: Arc::new(AtomicUsize::new(0)),
+                }),
+                synthia_core::AtomicCancelToken::shared(),
+            ),
+            AgentInput::text("answer me"),
+            &sink,
+        ),
+    );
+    drop(sink);
+    futures::executor::block_on(async { while rx.next().await.is_some() {} });
+    futures::executor::block_on(writer.flush()).expect("flush");
+    let rows = futures::executor::block_on(log.read()).expect("read");
+    let events: Vec<SessionEvent> =
+        rows.iter().filter_map(SessionEvent::from_value).collect();
+    let assistant: Vec<&SessionEvent> = events
+        .iter()
+        .filter(|event| event.type_tag() == "assistant_message")
+        .collect();
+    assert_eq!(
+        assistant.len(),
+        1,
+        "the winner is one row; got {} rows",
+        rows.len()
+    );
+    let SessionEvent::AssistantMessage { data, .. } = assistant[0] else {
+        panic!("the row is the assistant turn");
+    };
+    assert!(
+        data.to_string().contains("the longest answer"),
+        "the row holds the winner; got {data}"
+    );
 }
 
 #[test]

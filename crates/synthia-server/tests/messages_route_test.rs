@@ -389,9 +389,14 @@ async fn x_api_key_request_succeeds_when_auth_is_unconfigured() {
     assert_eq!(body["type"], "message");
 }
 
-/// The chat surface's SSE route and the compatibility route coexist.
+/// The legacy chat SSE route is gone, not aliased.
+///
+/// The transcript moved to `GET /api/v1/sessions/{id}/follow` in the
+/// same change that cut the web client over; leaving the old replay
+/// path mounted would keep a second reader of the same log alive and
+/// invite a client to tail two different wire shapes.
 #[tokio::test]
-async fn chat_stream_route_still_resolves() {
+async fn the_legacy_stream_route_is_gone() {
     let fix = make_fixture().await;
     let response = fix
         .app
@@ -404,12 +409,10 @@ async fn chat_stream_route_still_resolves() {
         )
         .await
         .unwrap();
-    // Any status but 404 proves the route is mounted; the resume cursor
-    // semantics are pinned by `stream_resume_test`.
-    assert_ne!(
+    assert_eq!(
         response.status(),
         StatusCode::NOT_FOUND,
-        "the chat SSE route must stay mounted"
+        "the retired SSE route must not resolve"
     );
 }
 

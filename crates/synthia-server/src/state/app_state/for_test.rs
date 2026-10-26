@@ -9,11 +9,14 @@ use synthia::{
     core::registry::Registry,
     harness::{AgentEntry, AgentRegistry},
     provider::{config::WorkspaceConfig, traits::ModelProvider},
-    session::{jsonl_session_search, manager::SessionRegistry},
+    session::{
+        JsonlSessionSearch,
+        SharedSessionSearch,
+        manager::SessionRegistry,
+    },
     skill::register_skill_tool,
     tool::ToolRegistry,
 };
-use tokio::sync::RwLock;
 
 use super::{
     AppState,
@@ -64,7 +67,17 @@ impl AppState {
         // Mirror the production wiring: the skill tool is part
         // of the default tool surface, not an opt-in extension.
         register_skill_tool(&tool_registry_built);
-        let tool_registry = Arc::new(RwLock::new(tool_registry_built));
+        let tool_registry = Arc::new(tool_registry_built);
+        // The fixture composes no plugins, but the host exists and
+        // is bound to the shared registry so every agent built from
+        // this state has one place for plugin registrations — the
+        // same shape the production boot installs.
+        let plugin_host = synthia::harness::Host::new();
+        let refused = plugin_host.bind(Arc::clone(&tool_registry));
+        assert!(
+            refused.is_empty(),
+            "the fixture's fresh host binds its own registry: {refused:?}"
+        );
 
         // Same resolution as `new()`, without an explicit path: a test
         // that writes `config.toml` into its tempdir observes the same
@@ -109,8 +122,12 @@ impl AppState {
         );
 
         let clock = synthia::core::SharedClock::system();
-        let session_search =
-            jsonl_session_search(workspace_root.join("sessions"));
+        // Same seams the production boot installs: the tests drive a
+        // tokio runtime, so the fs work belongs on its blocking pool.
+        let session_search: SharedSessionSearch = Arc::new(
+            JsonlSessionSearch::new(workspace_root.join("sessions"))
+                .with_blocking(crate::spawner::server_blocking()),
+        );
         // Mirror the production wiring: an in-memory long-term
         // tier (tests seed entries through `Memory::store`) and
         // the cross-domain search service over it.
@@ -126,8 +143,10 @@ impl AppState {
                 clock: clock.clone(),
             });
         {
-            let g = tool_registry.read().await;
-            synthia::tool_search::register_search_tool(&g, search.registry());
+            synthia::tool_search::register_search_tool(
+                &tool_registry,
+                search.registry(),
+            );
         }
 
         // The three management subsystems under test. Schedules,
@@ -138,7 +157,9 @@ impl AppState {
         let workflows = WorkflowsState::build(&workspace_root);
         let evals = EvalsState::build(&workspace_root);
 
-        let session_manager = Arc::new(session_manager);
+        let session_manager = Arc::new(
+            session_manager.with_blocking(crate::spawner::server_blocking()),
+        );
         let active_sessions: Arc<
             DashMap<(String, String), Arc<SessionController>>,
         > = Arc::new(DashMap::new());
@@ -146,7 +167,6 @@ impl AppState {
             Arc::new(crate::session::subagent_router::SubagentRouter::new(
                 Arc::clone(&session_manager),
                 Arc::clone(&active_sessions),
-                clock.clone(),
             ));
 
         // Workflow bridge over the same registry the fixture
@@ -164,6 +184,7 @@ impl AppState {
             agent_registry,
             session_search,
             session_manager,
+            input_queue: crate::session::input_queue::InputQueue::default(),
             workspace_root: workspace_root.clone(),
             default_model,
             workspace_config,
@@ -186,7 +207,13 @@ impl AppState {
             tool_defs_cache: parking_lot::RwLock::new(None),
             mcp_clients: Vec::new(),
             mcp_health: Vec::new(),
+            // The fixture composes no plugins; its host is empty
+            // and already bound above.
+            plugin_host,
+            plugins: crate::composition::Composition::empty(),
             active_sessions,
+            spawn_gates: Arc::new(DashMap::new()),
+            spawn_gate_timeout: super::sessions::COLD_OPEN_GATE_TIMEOUT,
             subagent_router,
             default_agent_name: parking_lot::RwLock::new(None),
             usage_metrics: Arc::new(UsageMetrics::default()),

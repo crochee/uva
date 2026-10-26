@@ -20,7 +20,7 @@ use crate::{
     },
     hint::{ContextBudgetHint, Hint, IterationReminderHint, TruncationHint},
     hook::LoggingHook,
-    hook_map::HookMap,
+    hook_map::{HookDecision, HookEvent, HookMap},
     output_transformer::{NoopOutputTransformer, OutputTransformer},
     tracker::{AdaptiveTracker, NoopTracker, Tracker},
 };
@@ -124,6 +124,16 @@ impl Steering {
     /// dead work on the hot path.
     pub fn is_inert(&self) -> bool {
         self.guards.is_empty() && self.hooks.is_empty() && self.hints.is_empty()
+    }
+
+    /// Fire one event at the bundle's hook map and return the
+    /// decision the handlers made.
+    ///
+    /// `Ask` does not short-circuit inside the map: the reasons are
+    /// collected and returned as one `Ask` decision, so the caller
+    /// can report every reason the run collected in one place.
+    pub async fn dispatch(&self, event: &HookEvent) -> HookDecision {
+        self.hooks.dispatch(event).await
     }
 }
 

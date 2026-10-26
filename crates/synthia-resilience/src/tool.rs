@@ -7,6 +7,7 @@ use parking_lot::Mutex;
 use synthia_core::{
     Clock,
     breaker::{BreakerConfig, BreakerState, Outcome},
+    sleeper::{Sleeper, ThreadSleeper},
 };
 use synthia_tool::{
     Context,
@@ -34,6 +35,10 @@ pub struct ResilientTool {
     /// breaker independent. Tests can inspect via [`ResilientTool::breaker_state`].
     breakers: Mutex<std::collections::HashMap<String, BreakerState>>,
     clock: Arc<dyn Clock>,
+    /// The delay the retry backoff waits through. The crate names no
+    /// runtime: the default waits on a std thread, and a host on a
+    /// real runtime installs that runtime's sleeper.
+    sleeper: Arc<dyn Sleeper>,
 }
 
 impl ResilientTool {
@@ -47,7 +52,20 @@ impl ResilientTool {
             policy: parking_lot::RwLock::new(policy),
             breakers: Mutex::new(std::collections::HashMap::new()),
             clock,
+            sleeper: Arc::new(ThreadSleeper),
         }
+    }
+
+    /// Install the delay the retry backoff waits through.
+    ///
+    /// The default, [`ThreadSleeper`], waits on a std thread — it
+    /// needs no reactor, at the cost of one thread per retry. A host
+    /// on a real runtime installs that runtime's sleeper instead
+    /// (the tokio one lives in `synthia-harness-tokio`).
+    #[must_use]
+    pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self {
+        self.sleeper = sleeper;
+        self
     }
 
     /// Snapshot of the per-tool breaker state (cloned).
@@ -166,7 +184,7 @@ impl Tool for ResilientTool {
                         return output;
                     }
                     let backoff = compute_backoff(&policy, attempt);
-                    crate::provider::runtime::sleep(backoff).await;
+                    self.sleeper.sleep(backoff).await;
                 }
             }
         }

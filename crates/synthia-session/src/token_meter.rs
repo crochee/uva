@@ -563,6 +563,7 @@ mod tests {
             seq,
             ts: "2026-09-12T00:00:00Z".to_string(),
             data,
+            source: None,
             surface_op: Some(SurfaceOp::append()),
         }
     }

@@ -58,6 +58,7 @@ pub mod agent_run_config_types;
 pub mod api;
 pub mod build_info;
 pub mod cluster;
+pub mod composition;
 pub mod config;
 pub mod event_stream;
 pub mod middleware;

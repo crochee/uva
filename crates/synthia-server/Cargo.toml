@@ -1,6 +1,10 @@
 [package]
 name = "synthia-server"
 description = "Reference HTTP / SSE / WebSocket server for synthia: axum router, config loader, agent / tool / skill / memory surfaces, OTel + Prometheus observability"
+# Application crate, not a library: it is the wiring showcase, and the
+# 40k lines behind it are not a crates.io contract. `synthia` (the
+# facade) stays publishable — it is the documented consumer entry point.
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -68,6 +72,7 @@ synthia = { workspace = true, features = [
   "skill",
   "attachment",
   "mcp",
+  "plugin-host",
   "telemetry",
   "search",
   "scheduler",
@@ -112,7 +117,6 @@ toml.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 futures.workspace = true
-tokio-util.workspace = true
 async-stream.workspace = true
 dashmap.workspace = true
 parking_lot.workspace = true

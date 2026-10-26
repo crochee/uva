@@ -12,7 +12,6 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -20,7 +19,9 @@ use std::{
 
 use anyhow::Result;
 use futures::{Stream, StreamExt};
+use parking_lot::Mutex;
 use synthia::{
+    core::{AtomicCancelToken, CancelToken},
     harness::{AgentEvent, AgentInput, SessionEndReason, SystemEvent},
     provider::{
         Content,
@@ -29,16 +30,63 @@ use synthia::{
         TextContent,
         traits::ModelProvider,
     },
-    session::manager::{InputQueue as SessionInputQueue, SessionRegistry},
+    session::{LogWriter, SessionEvent, manager::SessionRegistry},
     tool::registry::ToolRegistry,
 };
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     agent_run_config::{AgentRunConfig, RunOverrides},
-    session::controller::{RunStreamFactory, SessionController},
+    session::{
+        controller::{RunStreamFactory, SessionController},
+        input_queue::InputQueue as SessionInputQueue,
+    },
 };
+
+/// Persist the model-visible facts of `events` through the
+/// session's writer, the way the real harness does since the
+/// writer unification: one `assistant_message` row per text
+/// turn, one `tool_result` row per tool result. `Model` events
+/// alone are no longer durable, so a fake factory that wants
+/// its turns in the log writes the rows itself. Rows are
+/// queued, not flushed — the run task's tail flush lands them,
+/// exactly like the harness's step-boundary flush.
+pub(super) fn persist_model_facts(
+    writer: &Arc<LogWriter>,
+    events: &[AgentEvent],
+) {
+    for event in events {
+        let row = match event {
+            AgentEvent::Model(ContentPart::Text(text)) => {
+                SessionEvent::AssistantMessage {
+                    seq: 0,
+                    ts: String::new(),
+                    data: serde_json::to_value(Message::assistant(
+                        text.text.clone(),
+                    ))
+                    .expect("assistant message serializes"),
+                    surface_op: None,
+                }
+            }
+            AgentEvent::Model(ContentPart::ToolResult(result)) => {
+                SessionEvent::ToolResult {
+                    seq: 0,
+                    ts: String::new(),
+                    data: serde_json::to_value(Message::tool(
+                        Content::Single(ContentPart::ToolResult(
+                            result.clone(),
+                        )),
+                        result.tool_use_id.clone(),
+                    ))
+                    .expect("tool result serializes"),
+                    is_error: result.is_error.unwrap_or(false),
+                    surface_op: None,
+                }
+            }
+            _ => continue,
+        };
+        writer.append_event_nowait(&row);
+    }
+}
 
 /// Build a [`RunDependencies`] with no capabilities wired — every
 /// test that needs a fresh baseline calls this. Returns the
@@ -48,10 +96,51 @@ use crate::{
 pub(super) fn test_deps() -> crate::session::controller::RunDependencies {
     crate::session::controller::RunDependencies::new(
         Arc::new(synthia::test_support::FakeProvider::new(vec![])),
-        Arc::new(RwLock::new(ToolRegistry::new())),
+        Arc::new(ToolRegistry::new()),
         std::path::PathBuf::from("/tmp"),
         synthia::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
     )
+}
+
+/// The registry a controller fixture hands back.
+///
+/// `synthia-session` is runtime-free, so the input queue is the
+/// server's own type and no longer hangs off
+/// [`SessionRegistry`]. A test that wants to observe (or drain) the
+/// queue the controller drains needs the same handle the controller
+/// holds, so the fixture returns both behind one name: `Deref` keeps
+/// every `manager.sink(…)` / `manager.writer(…)` call site as it was,
+/// and [`Self::input_queue`] returns the queue the controller was
+/// spawned with.
+pub(super) struct FixtureRegistry {
+    registry: SessionRegistry,
+    queue: SessionInputQueue,
+}
+
+impl FixtureRegistry {
+    /// A registry rooted at `root` with its own input queue — for a test
+    /// that drives a controller over a sink of its own choosing rather
+    /// than the registry's.
+    pub(super) fn new(root: std::path::PathBuf) -> Self {
+        Self {
+            // Same seam the production boot installs.
+            registry: SessionRegistry::new(root)
+                .with_blocking(crate::spawner::server_blocking()),
+            queue: SessionInputQueue::default(),
+        }
+    }
+
+    pub(super) fn input_queue(&self) -> SessionInputQueue {
+        self.queue.clone()
+    }
+}
+
+impl std::ops::Deref for FixtureRegistry {
+    type Target = SessionRegistry;
+
+    fn deref(&self) -> &SessionRegistry {
+        &self.registry
+    }
 }
 
 /// Spawn a fresh controller wired to a temp-dir session
@@ -61,7 +150,7 @@ pub(super) fn test_deps() -> crate::session::controller::RunDependencies {
 pub(super) async fn make_manager_and_controller(
     idle_timeout: Duration,
     run_factory: Arc<dyn RunStreamFactory>,
-) -> (Arc<SessionController>, SessionRegistry, tempfile::TempDir) {
+) -> (Arc<SessionController>, FixtureRegistry, tempfile::TempDir) {
     make_manager_and_controller_with_deps(
         idle_timeout,
         run_factory,
@@ -79,9 +168,9 @@ pub(super) async fn make_manager_and_controller_with_deps(
     idle_timeout: Duration,
     run_factory: Arc<dyn RunStreamFactory>,
     deps: crate::session::controller::RunDependencies,
-) -> (Arc<SessionController>, SessionRegistry, tempfile::TempDir) {
+) -> (Arc<SessionController>, FixtureRegistry, tempfile::TempDir) {
     let temp = tempfile::TempDir::new().unwrap();
-    let manager = SessionRegistry::new(temp.path().to_path_buf());
+    let manager = FixtureRegistry::new(temp.path().to_path_buf());
     manager
         .create_with_user("s1".to_string(), "alice".to_string())
         .await
@@ -93,6 +182,7 @@ pub(super) async fn make_manager_and_controller_with_deps(
         "s1",
         manager.input_queue(),
         session_sink,
+        manager.writer("alice", "s1"),
         deps,
         idle_timeout,
         run_factory,
@@ -117,7 +207,7 @@ pub(super) async fn wait_for_runs(
     n: usize,
 ) {
     tokio::time::timeout(Duration::from_secs(2), async {
-        while calls.lock().unwrap().len() < n {
+        while calls.lock().len() < n {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -175,6 +265,36 @@ pub(super) fn find_events_jsonl(
     None
 }
 
+/// Every `events.jsonl` under `root`, in a deterministic order.
+///
+/// `find_events_jsonl` returns the first one its walk meets, and the
+/// walk follows the filesystem's readdir order — which differs per
+/// machine. A test that has to *identify* one session's log among
+/// several sorts this list first.
+pub(super) fn find_all_events_jsonl(
+    root: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().and_then(|n| n.to_str())
+                == Some("events.jsonl")
+            {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// A factory that emits a fixed list of events and drains the
 /// session input queue, useful for persistence and broadcast tests.
 pub(super) struct VecFactory {
@@ -210,9 +330,9 @@ impl RunStreamFactory for VecFactory {
         config: AgentRunConfig,
         overrides: RunOverrides,
         input: AgentInput,
-        cancel: Arc<CancellationToken>,
+        cancel: Arc<AtomicCancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
-        self.calls.lock().unwrap().push(RecordedCall {
+        self.calls.lock().push(RecordedCall {
             config: config.clone(),
             overrides,
             input,
@@ -220,6 +340,9 @@ impl RunStreamFactory for VecFactory {
 
         let events = self.events.clone();
         let _queue = self.queue.clone();
+        if let Some(writer) = &config.log_writer {
+            persist_model_facts(writer, &events);
+        }
 
         let stream = futures::stream::iter(events).take_while(move |_| {
             futures::future::ready(!cancel.is_cancelled())
@@ -241,9 +364,9 @@ impl RunStreamFactory for BlockingFactory {
         config: AgentRunConfig,
         overrides: RunOverrides,
         input: AgentInput,
-        cancel: Arc<CancellationToken>,
+        cancel: Arc<AtomicCancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
-        self.calls.lock().unwrap().push(RecordedCall {
+        self.calls.lock().push(RecordedCall {
             config: config.clone(),
             overrides,
             input,
@@ -295,18 +418,21 @@ impl RecordingFactory {
 impl RunStreamFactory for RecordingFactory {
     fn run_stream(
         &self,
-        _config: AgentRunConfig,
+        config: AgentRunConfig,
         _overrides: RunOverrides,
         input: AgentInput,
-        cancel: Arc<CancellationToken>,
+        cancel: Arc<AtomicCancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
-        self.calls.lock().unwrap().push(input);
-        let run_index = self.calls.lock().unwrap().len() - 1;
+        self.calls.lock().push(input);
+        let run_index = self.calls.lock().len() - 1;
         let events = if run_index == 0 {
             self.first_run_events.clone()
         } else {
             self.second_run_events.clone()
         };
+        if let Some(writer) = &config.log_writer {
+            persist_model_facts(writer, &events);
+        }
         let stream = futures::stream::iter(events).take_while(move |_| {
             futures::future::ready(!cancel.is_cancelled())
         });
@@ -380,6 +506,96 @@ impl ModelProvider for ToolCapturingProvider {
             cached: false,
             replay_state: None,
             stop_reason: Some("end_turn".to_string()),
+        })
+    }
+}
+
+/// Test provider that replays a scripted `StreamChunk` sequence
+/// per `complete_with_stream` call, so a controller test can
+/// drive the real agent through tool calls and turns.
+pub(super) struct ScriptedStreamProvider {
+    scripted: parking_lot::Mutex<Vec<Vec<synthia::provider::StreamChunk>>>,
+}
+
+impl ScriptedStreamProvider {
+    pub(super) fn new(
+        scripted: Vec<Vec<synthia::provider::StreamChunk>>,
+    ) -> Self {
+        Self {
+            scripted: parking_lot::Mutex::new(scripted),
+        }
+    }
+
+    fn take_next(&self) -> Vec<synthia::provider::StreamChunk> {
+        let mut guard = self.scripted.lock();
+        if guard.is_empty() {
+            return vec![synthia::provider::StreamChunk::IsDone {
+                result: Box::default(),
+            }];
+        }
+        guard.remove(0)
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for ScriptedStreamProvider {
+    async fn initialize(
+        &mut self,
+        _config: synthia::provider::ProviderConfig,
+    ) -> Result<(), synthia::core::Error> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "scripted-stream"
+    }
+
+    fn model_config(&self) -> synthia::provider::types::ModelConfig {
+        synthia::provider::types::ModelConfig {
+            name: "fake".to_string(),
+            provider: "scripted".to_string(),
+            context_window: 128_000,
+            max_output_tokens: 4096,
+            supports_tools: true,
+            supports_streaming: true,
+            supports_reasoning: true,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: synthia::provider::CompletionRequest,
+    ) -> Result<synthia::provider::CompletionResponse, synthia::core::Error>
+    {
+        unreachable!("streaming path should not call complete()")
+    }
+
+    async fn complete_with_stream(
+        &self,
+        _request: synthia::provider::CompletionRequest,
+        _cancel_token: Option<Arc<dyn synthia::core::CancelToken>>,
+        mut on_delta: Box<dyn FnMut(synthia::provider::StreamChunk) + Send>,
+    ) -> Result<synthia::provider::CompletionResponse, synthia::core::Error>
+    {
+        let chunks = self.take_next();
+        let mut sampling = synthia::provider::SamplingResult::default();
+        for chunk in chunks {
+            if let synthia::provider::StreamChunk::IsDone { result } = &chunk {
+                sampling = (**result).clone();
+            }
+            on_delta(chunk);
+        }
+        Ok(synthia::provider::CompletionResponse {
+            id: "resp-1".to_string(),
+            model: "fake".to_string(),
+            content: Content::Single(ContentPart::Text(TextContent {
+                text: sampling.text.clone(),
+                cache_control: None,
+            })),
+            usage: sampling.usage.clone(),
+            cached: false,
+            replay_state: None,
+            stop_reason: sampling.stop_reason.clone(),
         })
     }
 }

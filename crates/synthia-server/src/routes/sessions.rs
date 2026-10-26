@@ -206,6 +206,24 @@ fn live_session_state(
         .map(|ctrl| ctrl.state())
 }
 
+/// The live state a status surface should report, given the rows it
+/// already read.
+///
+/// A controller's in-memory state can say `idle` for a session whose
+/// log holds an undecided interrupt — the pause is a log fact. The
+/// status surface therefore lets the rows win, using the same
+/// derivation the follow baseline and the resume validator use.
+fn derived_live_state(
+    live: Option<SessionState>,
+    rows: &[Value],
+) -> Option<SessionState> {
+    if synthia::harness::open_requests(rows).is_empty() {
+        live
+    } else {
+        Some(SessionState::AwaitingApproval)
+    }
+}
+
 /// Inferred session status.
 ///
 /// A session is "working" iff a live controller exists for it and
@@ -221,22 +239,19 @@ fn live_session_state(
 /// sink has finished at least one run, so "completed" (or
 /// "canceled" when the controller's last run was cancelled).
 ///
-/// Also returns the sink's **last** event timestamp, which is the
+/// Also returns the transcript's **last** event timestamp, which is the
 /// listing's historical `created_at` for a session this process has
-/// opened.
-async fn infer_status(
+/// opened. The rows are passed in: every caller has already read them,
+/// and a status surface must not open a session's log twice.
+fn infer_status(
     live_state: Option<SessionState>,
-    sink: &dyn synthia::session::SessionSink,
+    rows: &[Value],
 ) -> (&'static str, Option<DateTime<Utc>>) {
-    let events = match sink.read().await {
-        Ok(events) => events,
-        Err(_) => return ("unspecified", None),
-    };
-    let ts = events
+    let ts = rows
         .iter()
         .rev()
-        .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(|t| t.as_str())));
-    (infer_status_from_parts(live_state, !events.is_empty()), ts)
+        .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
+    (infer_status_from_parts(live_state, !rows.is_empty()), ts)
 }
 
 /// The status rules of [`infer_status`], over the facts a caller has
@@ -256,6 +271,7 @@ fn infer_status_from_parts(
         return "unspecified";
     }
     match live_state {
+        Some(SessionState::AwaitingApproval) => "input_required",
         Some(SessionState::Cancelled) => "canceled",
         _ => "completed",
     }
@@ -298,7 +314,7 @@ fn subagent_attribution(events: &[Value]) -> (Option<String>, Option<String>) {
 /// `session_id` must match the resource-name regex the route path
 /// parameter is already validated against (no `.`, `..`, `/` or `\`),
 /// and `user_id` must be one path component.
-fn transcript_path(
+pub(crate) fn transcript_path(
     sessions_root: &Path,
     user_id: &str,
     session_id: &str,
@@ -345,7 +361,9 @@ fn is_path_component(name: &str) -> bool {
 ///
 /// Blocking `std::fs` IO: callers on the async runtime route this
 /// through `spawn_blocking`.
-fn transcript_events(path: &Path) -> Box<dyn Iterator<Item = Value>> {
+pub(crate) fn transcript_events(
+    path: &Path,
+) -> Box<dyn Iterator<Item = Value>> {
     let Ok(file) = std::fs::File::open(path) else {
         return Box::new(std::iter::empty());
     };
@@ -394,6 +412,11 @@ struct ScannedSession {
     created_at: Option<DateTime<Utc>>,
     parent_session_id: Option<String>,
     agent_name: Option<String>,
+    /// The transcript holds an undecided interrupt. The scan already
+    /// reads the file, so the paused state costs no extra I/O here —
+    /// which matters because this is the only source for a session the
+    /// process has not opened since it restarted.
+    awaiting_approval: bool,
 }
 
 fn scan_unregistered_transcripts(
@@ -420,19 +443,23 @@ fn scan_unregistered_transcripts(
         else {
             continue;
         };
-        let Some(first) = transcript_events(&path).next() else {
+        let rows: Vec<Value> = transcript_events(&path).collect();
+        let Some(first) = rows.first() else {
             continue;
         };
         // The first event's timestamp, never `now()`: a legacy log
         // that carries no timestamp reports an unknown creation time.
         let created_at = parse_rfc3339(first.get("ts").and_then(Value::as_str));
         let (parent_session_id, agent_name) =
-            subagent_attribution(std::slice::from_ref(&first));
+            subagent_attribution(std::slice::from_ref(first));
+        let awaiting_approval =
+            !synthia::harness::open_requests(&rows).is_empty();
         found.push(ScannedSession {
             id: session_id,
             created_at,
             parent_session_id,
             agent_name,
+            awaiting_approval,
         });
     }
     found
@@ -493,12 +520,14 @@ pub async fn list_sessions(
             continue;
         }
         let sink = state.session_manager.sink(&user_id, &session.id);
-        let live =
-            live_session_state(&state.active_sessions, &user_id, &session.id);
         // One read serves status, timestamps, and sub-agent
         // attribution — the listing must not open a session's log
         // twice per request.
         let events = sink.read().await.unwrap_or_default();
+        let live = derived_live_state(
+            live_session_state(&state.active_sessions, &user_id, &session.id),
+            &events,
+        );
         let status = infer_status_from_parts(live, !events.is_empty());
         let created_at = events
             .iter()
@@ -522,10 +551,15 @@ pub async fn list_sessions(
     // event's timestamp; a session whose transcript is unreadable or
     // empty never reaches this loop, and neither does an ephemeral one
     // — the scan already dropped that namespace before opening its
-    // logs.
+    // logs. The paused state is the one status a transcript can carry
+    // that the in-memory state cannot after a restart, so the scan
+    // reports it and this loop trusts it.
     for scanned in durable {
-        let live =
-            live_session_state(&state.active_sessions, &user_id, &scanned.id);
+        let live = if scanned.awaiting_approval {
+            Some(SessionState::AwaitingApproval)
+        } else {
+            live_session_state(&state.active_sessions, &user_id, &scanned.id)
+        };
         let status = infer_status_from_parts(live, true);
         if !selected(&scanned.id, status, status_filter, context_id_filter) {
             continue;
@@ -588,7 +622,15 @@ pub async fn get_session(
             .await
             .map_err(|e| Error::session(format!("{e}")))?;
         let live = live_session_state(&state.active_sessions, &user_id, &id);
-        let (status, ts) = infer_status(live, &*sink).await;
+        // The status surface answers from the transcript it is about
+        // to serve, so a suspended session reads as `input_required`
+        // even when the controller no longer remembers the pause.
+        let live = derived_live_state(live, &history);
+        let status = infer_status_from_parts(live, !history.is_empty());
+        let ts = history
+            .iter()
+            .rev()
+            .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
         let (parent_session_id, agent_name) = subagent_attribution(&history);
         return Ok(Json(SessionDetail {
             id: id.clone(),
@@ -634,12 +676,17 @@ pub async fn get_session(
         .rev()
         .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
     let (parent_session_id, agent_name) = subagent_attribution(&history);
+    // Disk-only means no controller and no in-memory state: the
+    // transcript is the only place the paused state can come from, and
+    // it is exactly the post-restart case.
+    let live = derived_live_state(
+        live_session_state(&state.active_sessions, &user_id, &id),
+        &history,
+    );
+    let (status, _ts) = infer_status(live, &history);
     Ok(Json(SessionDetail {
         id: id.clone(),
-        status: infer_status_from_parts(
-            live_session_state(&state.active_sessions, &user_id, &id),
-            true,
-        ),
+        status,
         context_id: id,
         // No registry record, so the creation time comes from the
         // transcript's first event — never from `now()`.
@@ -794,7 +841,12 @@ pub async fn delete_session(
             .close()
             .await
             .map_err(|e| Error::session(format!("close session: {e}")))?;
-        state.active_sessions.remove(&key);
+        // The controller and its cold-open gate leave together: the
+        // gate belongs to the controller, so a re-created session of
+        // the same name must not queue behind the deleted one's gate,
+        // and the map must not keep one entry per session this process
+        // ever opened.
+        state.forget_session(&key);
     }
 
     let registered = state.session_manager.remove(&id).await.is_some();
@@ -926,20 +978,20 @@ pub struct ForkSessionResponse {
 /// the "branch" half of pi's `Navigation` operation; *rewind*
 /// (rewriting the parent's own log in place) is a different, more
 /// destructive operation and is not part of this route.
-///
-/// Rows are copied **through the child's sink**, not by writing the
-/// child's file behind it: the sink is the trait's only durable write
-/// path, and a fork that wrote the file directly would be relying on
-/// one backend's layout (the JSONL backend happens to derive its
-/// counters from the file it opens; the in-memory one has no file at
-/// all).
-///
-/// The cost of that choice is one durable append per row — each
-/// `SessionSink::append` fsyncs — so a fork is O(rows) in fsyncs:
-/// measured 63.8 s for a 27 086-row parent. A batch-append method on
-/// the sink is the clean way to make it fast, and adding one is a
-/// `synthia-session` decision (the trait's five methods are a
-/// deliberate ceiling), not something this route should route around.
+/// Rows are copied **through the child's writer** in one durable
+/// batch: the writer is the session's only durable write path, it
+/// re-stamps every inherited row with the ordinal the **child's**
+/// counter hands out (the parent's numbers never cross into the
+/// child's log), it keeps each row's `ts` (a fork's `created_at` is
+/// the conversation's first event, not the fork), and it remaps the
+/// `surface_op` ordinals a copied compaction cites so the citations
+/// keep naming the rows they shadow. The copy is one durable barrier:
+/// the sink writes the batch or reports the failure, and a refused
+/// batch goes back to the writer's spill under the same ordinals. (A
+/// backend whose `fsync` fails after its bytes were written can leave
+/// them on disk, so the retry may write a row twice.) One barrier for
+/// a 27 086-row parent completes in well under a second, where the
+/// per-row `fsync` path took 63.8 s.
 ///
 /// The provenance is this response: the child's log is a copy, not a
 /// reference, so nothing in it names the parent. A durable
@@ -974,37 +1026,33 @@ pub async fn fork_session(
     }
     let inherited = inherited_rows(&lines, req.from_stream_index);
 
+    let inherited_count = inherited.len();
+
     let child_id = Uuid::new_v4().to_string();
     state
         .get_or_create_session_controller(&user_id, &child_id)
         .await?;
-    let child = state.session_manager.sink(&user_id, &child_id);
-    // One `fsync` at the tail instead of one per row — a
-    // 27 k-row parent used to take 63.8 s of fsync serialisation;
-    // the batched path completes in well under a second on the
-    // same disk. The fork's durability contract is "atomic":
-    // either every inherited row lands or none do, so the
-    // controller's resume against the child sees the full
-    // transcript immediately.
-    // The child's ordinal counter has to cover the inherited rows:
-    // they are the child's first rows, and every later row the
-    // child writes takes the next ordinal. The rows themselves keep
-    // the parent's `seq` stamps — the counter only decides what
-    // comes after them.
-    for _ in &inherited {
-        child.alloc_seq();
+    let child = state.session_manager.writer(&user_id, &child_id);
+    if let Err(e) = child.append_copied(inherited).await {
+        // Nothing landed — the batch is all-or-nothing — so the
+        // child is not a session: undo the registration the
+        // controller path made rather than leave it pointing at an
+        // empty log.
+        state
+            .active_sessions
+            .remove(&(user_id.clone(), child_id.clone()));
+        let _ = state.session_manager.remove(&child_id).await;
+        return Err(AppError::from(Error::session(format!(
+            "fork append: {e}"
+        ))));
     }
-    child
-        .append_many(&inherited)
-        .await
-        .map_err(|e| Error::session(format!("fork append_many: {e}")))?;
 
     Ok((
         StatusCode::CREATED,
         Json(ForkSessionResponse {
             session_id: child_id,
             forked_from: id,
-            rows: inherited.len(),
+            rows: inherited_count,
         }),
     ))
 }
@@ -1053,9 +1101,21 @@ fn inherited_rows(lines: &[String], from: Option<u64>) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
-    use synthia::session::{SessionSink as _, manager::SERVER_DEFAULT_USER_ID};
+    use synthia::session::{SessionSink, manager::SERVER_DEFAULT_USER_ID};
 
     use super::*;
+
+    /// Seed one row through a writer — the way every row reaches a
+    /// session's log. The writer stamps the row's `seq` and `ts`,
+    /// and the flush lands it.
+    async fn seed_row(sink: &Arc<dyn SessionSink>, row: Value) {
+        let writer = synthia::session::LogWriter::new(
+            Arc::clone(sink),
+            Arc::new(synthia::core::SystemClock),
+        );
+        writer.append(row).await.expect("seed append");
+        writer.flush().await.expect("seed flush");
+    }
 
     #[test]
     fn parse_status_filter_accepts_all_known_labels() {
@@ -1123,16 +1183,19 @@ mod tests {
     /// reaches the JSONL sink.
     #[tokio::test]
     async fn infer_status_reports_completed_without_live_controller() {
-        let sink = synthia::session::in_memory::InMemorySessionSink::new("s1");
-        sink.alloc_seq();
-        sink.append(&serde_json::json!({
-            "type": "Model",
-            "data": {"text": "hi"},
-            "ts": "2026-08-22T10:00:00+00:00",
-        }))
-        .await
-        .expect("append");
-        let (status, ts) = infer_status(None, &sink).await;
+        let sink: Arc<dyn SessionSink> = Arc::new(
+            synthia::session::in_memory::InMemorySessionSink::new("s1"),
+        );
+        seed_row(
+            &sink,
+            serde_json::json!({
+                "type": "Model",
+                "data": {"text": "hi"},
+            }),
+        )
+        .await;
+        let rows = sink.read().await.expect("rows");
+        let (status, ts) = infer_status(None, &rows);
         assert_eq!(status, "completed");
         assert!(ts.is_some(), "ts must come from the last event");
     }
@@ -1142,8 +1205,8 @@ mod tests {
     #[tokio::test]
     async fn infer_status_reports_working_for_running_controller() {
         let sink = synthia::session::in_memory::InMemorySessionSink::new("s1");
-        let (status, _) =
-            infer_status(Some(SessionState::Running), &sink).await;
+        let rows = sink.read().await.expect("rows");
+        let (status, _) = infer_status(Some(SessionState::Running), &rows);
         assert_eq!(status, "working");
     }
 
@@ -1151,7 +1214,8 @@ mod tests {
     #[tokio::test]
     async fn infer_status_reports_unspecified_for_untouched_session() {
         let sink = synthia::session::in_memory::InMemorySessionSink::new("s1");
-        let (status, ts) = infer_status(None, &sink).await;
+        let rows = sink.read().await.expect("rows");
+        let (status, ts) = infer_status(None, &rows);
         assert_eq!(status, "unspecified");
         assert!(ts.is_none());
     }
@@ -1159,16 +1223,19 @@ mod tests {
     /// A cancelled controller with durable history ⇒ "canceled".
     #[tokio::test]
     async fn infer_status_reports_canceled_for_cancelled_controller() {
-        let sink = synthia::session::in_memory::InMemorySessionSink::new("s1");
-        sink.alloc_seq();
-        sink.append(&serde_json::json!({
-            "type": "UserInput",
-            "data": {"text": "go"},
-        }))
-        .await
-        .expect("append");
-        let (status, _) =
-            infer_status(Some(SessionState::Cancelled), &sink).await;
+        let sink: Arc<dyn SessionSink> = Arc::new(
+            synthia::session::in_memory::InMemorySessionSink::new("s1"),
+        );
+        seed_row(
+            &sink,
+            serde_json::json!({
+                "type": "UserInput",
+                "data": {"text": "go"},
+            }),
+        )
+        .await;
+        let rows = sink.read().await.expect("rows");
+        let (status, _) = infer_status(Some(SessionState::Cancelled), &rows);
         assert_eq!(status, "canceled");
     }
 
@@ -1312,6 +1379,56 @@ mod tests {
         assert!(
             !list.data.iter().any(|row| row.id == "doomed"),
             "a deleted session must not stay in the listing",
+        );
+    }
+
+    /// `DELETE` evicts the session's controller *and* its cold-open
+    /// gate.
+    ///
+    /// The gate belongs to the controller, so it leaves with the
+    /// controller — through this path or through any other that drops
+    /// it. A map that only one eviction path cleaned would keep one
+    /// entry per session this process opened, and a re-created session
+    /// of the same name would queue behind a gate nobody holds.
+    #[tokio::test]
+    async fn deleting_a_session_evicts_its_cold_open_gate() {
+        let (state, dir) = durable_state().await;
+        let user = state.default_user_id().to_string();
+        write_transcript(
+            dir.path(),
+            "gated",
+            &[serde_json::json!({
+                "type": "UserInput",
+                "ts": "2026-09-25T08:00:00+00:00",
+                "data": {"text": "hello"},
+            })],
+        );
+        let controller = state
+            .get_or_create_session_controller(&user, "gated")
+            .await
+            .expect("the session opens");
+        let key = (user, "gated".to_string());
+        assert!(state.has_spawn_gate(&key), "the open created a gate");
+        assert!(state.active_sessions.get(&key).is_some());
+
+        let status = delete_session(
+            State(Arc::clone(&state)),
+            AppPath("gated".to_string()),
+        )
+        .await
+        .expect("delete");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(
+            state.active_sessions.get(&key).is_none(),
+            "and so must the controller"
+        );
+        // The handle the caller held is closed, not merely unreferenced
+        // — and it is the last one to the controller, so the gate
+        // leaves with it.
+        drop(controller);
+        assert!(
+            !state.has_spawn_gate(&key),
+            "the gate must leave with the controller"
         );
     }
 
@@ -1486,37 +1603,41 @@ mod tests {
         assert_eq!(parent.history.len(), 2, "the parent is untouched");
     }
 
-    /// A parent written **through the sink** carries a schema-version
-    /// metadata header on its first line. The fork must copy the
-    /// parent's events, not that header: a copied header would land
-    /// mid-log in the child, where `read_filtered` (which strips only
-    /// the first line) parses it as a phantom event and inflates
-    /// `last_event_seq`. The headerless `write_transcript` fixture
-    /// above cannot exercise this path, so this test seeds the parent
-    /// via `SessionSink::append`.
+    /// A parent written **through the session's writer** carries a
+    /// schema-version metadata header on its first line. The fork
+    /// must copy the parent's events, not that header: a copied
+    /// header would land mid-log in the child, where `read_filtered`
+    /// (which strips only the first line) parses it as a phantom
+    /// event and inflates `last_event_seq`. The headerless
+    /// `write_transcript` fixture above cannot exercise this path,
+    /// so this test seeds the parent through the registry's writer.
     #[tokio::test]
     async fn fork_session_drops_the_parent_metadata_header() {
         let (state, _dir) = durable_state().await;
         let parent = state
             .session_manager
-            .sink(SERVER_DEFAULT_USER_ID, "meta-origin");
-        parent.alloc_seq();
+            .writer(SERVER_DEFAULT_USER_ID, "meta-origin");
         parent
-            .append(&serde_json::json!({
+            .append(serde_json::json!({
                 "type": "UserInput",
                 "data": {"text": "hello"},
             }))
             .await
             .expect("seed parent row 1");
-        parent.alloc_seq();
         parent
-            .append(&serde_json::json!({
+            .append(serde_json::json!({
                 "type": "Model",
                 "data": {"text": "hi"},
             }))
             .await
             .expect("seed parent row 2");
-        let parent_seq = parent.snapshot().await.expect("parent snapshot");
+        parent.flush().await.expect("seed parent flush");
+        let parent_seq = state
+            .session_manager
+            .sink(SERVER_DEFAULT_USER_ID, "meta-origin")
+            .snapshot()
+            .await
+            .expect("parent snapshot");
         assert_eq!(
             parent_seq.last_event_seq, 2,
             "the parent's header must not count as an event",
@@ -1610,9 +1731,10 @@ mod tests {
         assert_eq!(child.history[1]["data"]["text"], "b");
     }
 
-    /// The child's future is its own: an append after the fork lands in
-    /// the child's log only, at the ordinal *after* the inherited rows —
-    /// the sink owns that counter, which is why the copy goes through it.
+    /// The child's future is its own: a row appended after the fork
+    /// lands in the child's log only, at the ordinal *after* the
+    /// re-stamped inherited rows — the child's counter follows the
+    /// child's own sequence.
     #[tokio::test]
     async fn fork_session_gives_the_child_an_independent_future() {
         let (state, dir) = durable_state().await;
@@ -1643,19 +1765,23 @@ mod tests {
         .await
         .expect("fork");
 
-        let child_sink = state
+        let child_writer = state
             .session_manager
-            .sink(SERVER_DEFAULT_USER_ID, &forked.session_id);
-        child_sink.alloc_seq();
-        child_sink
-            .append(&serde_json::json!({
+            .writer(SERVER_DEFAULT_USER_ID, &forked.session_id);
+        child_writer
+            .append(serde_json::json!({
                 "type": "UserInput",
-                "ts": "2026-09-25T09:00:00+00:00",
                 "data": {"text": "gamma"},
             }))
             .await
             .expect("append to the child");
-        let snapshot = child_sink.snapshot().await.expect("snapshot");
+        child_writer.flush().await.expect("child flush");
+        let snapshot = state
+            .session_manager
+            .sink(SERVER_DEFAULT_USER_ID, &forked.session_id)
+            .snapshot()
+            .await
+            .expect("snapshot");
         assert_eq!(
             snapshot.last_event_seq, 3,
             "the inherited rows occupy 1..=2"
@@ -1800,39 +1926,44 @@ mod tests {
         );
     }
 
-    /// A disk-only transcript written **through the sink** opens with
-    /// the sink's schema-version metadata header. Both consumers of
-    /// `transcript_events` must project events only: the listing reads
-    /// the session's `created_at` off its first row, and `get_session`
-    /// folds the rows into `history`. A header left in would report no
-    /// creation time, no subagent attribution, and a phantom first
-    /// history entry. `write_transcript` writes headerless fixtures,
-    /// so the neighbouring test cannot catch this.
+    /// A disk-only transcript written **through the session's
+    /// writer** opens with the sink's schema-version metadata
+    /// header. Both consumers of `transcript_events` must project
+    /// events only: the listing reads the session's `created_at` off
+    /// its first row, and `get_session` folds the rows into
+    /// `history`. A header left in would report no creation time, no
+    /// subagent attribution, and a phantom first history entry.
+    /// `write_transcript` writes headerless fixtures, so the
+    /// neighbouring test cannot catch this.
     #[tokio::test]
     async fn disk_only_projections_skip_the_metadata_header() {
         let (state, _dir) = durable_state().await;
-        // A sink writes the header; it does NOT register the session
-        // in `SessionRegistry::sessions`, so this stays disk-only —
-        // the exact shape the restart path produces.
-        let sink = state
+        // The writer writes the header on the first batch; the sink
+        // alone does NOT register the session in
+        // `SessionRegistry::sessions`, so this stays disk-only — the
+        // exact shape the restart path produces. The rows go in as a
+        // copy so their `ts` — what the projections read — is the
+        // fixture's, not the writer's clock.
+        let writer = state
             .session_manager
-            .sink(SERVER_DEFAULT_USER_ID, "pre-restart");
-        sink.alloc_seq();
-        sink.append(&serde_json::json!({
-            "type": "UserInput",
-            "ts": "2026-09-19T08:00:00+00:00",
-            "data": {"text": "hello"},
-        }))
-        .await
-        .expect("seed row 1");
-        sink.alloc_seq();
-        sink.append(&serde_json::json!({
-            "type": "Model",
-            "ts": "2026-09-19T08:00:05+00:00",
-            "data": {"text": "hi"},
-        }))
-        .await
-        .expect("seed row 2");
+            .writer(SERVER_DEFAULT_USER_ID, "pre-restart");
+        writer
+            .append_copied(vec![
+                serde_json::json!({
+                    "seq": 1,
+                    "type": "UserInput",
+                    "ts": "2026-09-19T08:00:00+00:00",
+                    "data": {"text": "hello"},
+                }),
+                serde_json::json!({
+                    "seq": 2,
+                    "type": "Model",
+                    "ts": "2026-09-19T08:00:05+00:00",
+                    "data": {"text": "hi"},
+                }),
+            ])
+            .await
+            .expect("seed the pre-restart transcript");
 
         let Json(list) = list_sessions(
             State(Arc::clone(&state)),

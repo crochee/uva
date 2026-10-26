@@ -1,0 +1,101 @@
+/**
+ * Deployment plugins panel.
+ *
+ * Rows follow the pill vocabulary the rest of the detail pages use
+ * (`styles/page-visual.css`); this file only adds the row layout the
+ * panel needs and the skipped block's emphasis. The skipped block is
+ * louder on purpose — it is the only surface that reports a plugin the
+ * deployment believes it configured.
+ */
+
+.nt-plugins__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nt-plugins__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.nt-plugins__row--skipped {
+  border-color: var(--accent-red);
+  background: var(--bg-tertiary);
+}
+
+.nt-plugins__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.nt-plugins__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--text-primary);
+}
+
+.nt-plugins__tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.nt-plugins__label {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.nt-plugins__tool {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.nt-plugins__skipped {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  margin-top: var(--spacing-md);
+}
+
+.nt-plugins__subtitle {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--accent-red);
+}
+
+.nt-plugins__hint {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.nt-plugins__reason {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+
+.nt-plugins__error {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--accent-red);
+}

@@ -100,6 +100,65 @@ fn unregister_by_name_returns_true_on_remove_false_on_unknown() {
     );
 }
 
+/// `register_entry_with_token` hands back the token that identifies
+/// the entry, and `unregister_by_token` takes exactly that entry
+/// away: another entry filed under the same name stays put.
+#[test]
+fn unregister_by_token_takes_only_its_own_entry() {
+    let registry = ToolRegistry::new();
+    // Another entry under the same name, filed first.
+    registry.register_entry(ToolEntry::new(Arc::new(NamedTool("shared"))));
+    let token = registry
+        .register_entry_with_token(ToolEntry::new(Arc::new(NamedTool(
+            "shared",
+        ))))
+        .expect("a dynamic name must be accepted");
+
+    registry.unregister_by_token(token);
+
+    assert!(
+        registry.contains("shared"),
+        "the other entry under the name must survive the withdrawal"
+    );
+    let surviving = registry
+        .get("shared")
+        .expect("the surviving entry must still resolve");
+    assert_eq!(
+        surviving.tool_instance().name(),
+        "shared",
+        "the surviving entry must still resolve"
+    );
+}
+
+/// A core tool's name is refused by the token-returning
+/// registration too: the token is `None`, so the caller knows the
+/// tool never reached the registry.
+#[test]
+fn register_entry_with_token_refuses_a_core_name() {
+    let registry = ToolRegistry::new();
+    {
+        let mut inner = registry.inner.write();
+        let name = "core_name".to_string();
+        let token = RegistrationToken(inner.next_registration);
+        inner.next_registration += 1;
+        let provider_entry = ProviderEntry {
+            provider_token: token,
+            provenance: ToolProvenance::Core,
+            is_hidden: false,
+            exposure: ToolExposure::Direct,
+            tool: Arc::new(ShadowTool),
+        };
+        inner.tools.entry(name).or_default().push(provider_entry);
+    }
+
+    let token = registry
+        .register_entry_with_token(ToolEntry::new(Arc::new(ShadowTool)));
+    assert!(
+        token.is_none(),
+        "a core name must be refused; got {token:?}"
+    );
+}
+
 /// `descriptors_cached` is a memo, not a projection: a tool
 /// registered (or unregistered) *after* a cached read must appear
 /// (or disappear) on the very next call, or the model would be
@@ -650,4 +709,89 @@ async fn test_registry_trait_contains_and_len() {
         registry.snapshot().iter().all(|s| s.name != "nonexistent"),
         "expected `nonexistent` to be absent"
     );
+}
+
+/// The check and the insert share one write guard: two racers for one
+/// name must not both see it free. `get`-then-`register_entry` is the
+/// same decision without the atomicity, and lets the second caller
+/// shadow the first.
+#[test]
+fn register_entry_if_absent_inserts_exactly_one_of_two_racers() {
+    let registry = Arc::new(ToolRegistry::new());
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let racers: Vec<_> = (0..2)
+        .map(|_| {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                registry.register_entry_if_absent(ToolEntry::new(Arc::new(
+                    NamedTool("contended"),
+                )))
+            })
+        })
+        .collect();
+    let accepted = racers
+        .into_iter()
+        .map(|racer| racer.join().expect("the racer must not panic"))
+        .filter(|accepted| *accepted)
+        .count();
+
+    assert_eq!(accepted, 1, "exactly one racer wins the name");
+    assert_eq!(registry.tool_count(), 1, "one entry, not a stack");
+    let top = registry
+        .get("contended")
+        .map(|entry| entry.name().to_string());
+    assert_eq!(top.as_deref(), Some("contended"));
+}
+
+/// A name already taken is refused without touching the registry —
+/// including a hidden entry, which `get` still resolves.
+#[test]
+fn register_entry_if_absent_refuses_an_existing_name() {
+    let registry = ToolRegistry::new();
+    assert!(registry.register_entry_if_absent(ToolEntry::new(Arc::new(
+        NamedTool("taken"),
+    ))));
+    assert!(registry.set_hidden("taken", true));
+    assert!(
+        !registry.register_entry_if_absent(ToolEntry::new(Arc::new(
+            NamedTool("taken"),
+        ))),
+        "the hidden entry still occupies the name"
+    );
+    assert_eq!(registry.tool_count(), 1);
+}
+
+/// A core tool owns its name: `core_owns` reports it, and a dynamic
+/// registration of that name is refused rather than stacked on top.
+#[test]
+fn a_core_entry_owns_its_name() {
+    let registry = ToolRegistry::new();
+    assert!(
+        registry.register_core_entry(ToolEntry::new(Arc::new(NamedTool(
+            "builtin"
+        ),)))
+    );
+    assert!(registry.core_owns("builtin"));
+    assert!(!registry.core_owns("free"));
+    assert!(
+        !registry.register_core_entry(ToolEntry::new(Arc::new(NamedTool(
+            "builtin"
+        )))),
+        "a second core registration under a core-owned name is refused"
+    );
+    assert!(
+        !registry
+            .register_entry(ToolEntry::new(Arc::new(NamedTool("builtin")))),
+        "a dynamic tool must not shadow it"
+    );
+    assert!(
+        !registry.register_entry_if_absent(ToolEntry::new(Arc::new(
+            NamedTool("builtin")
+        ))),
+        "the conditional insert refuses it too"
+    );
+    let entry = registry.get("builtin").expect("the core tool survives");
+    assert_eq!(entry.name(), "builtin");
 }

@@ -234,30 +234,32 @@ pub(super) async fn panicking_tool_still_reports_session_end() {
     );
 }
 
-/// The same guarantee for the *synthetic tool* seam: a plugin that panics
-/// must not take the run's error reporting with it. The synthetic tool path
+/// The same guarantee for the *delegation* seam: a plugin that panics
+/// must not take the run's error reporting with it. The delegation path
 /// returns before the registry path is entered, so it needs its own
 /// guard—a delegator that spawns subagents is exactly the kind of
 /// third-party code that can panic.
-pub(super) async fn panicking_synthetic_tool_still_reports_session_end() {
-    use crate::agent::{SyntheticCall, SyntheticTool};
+pub(super) async fn panicking_delegator_still_reports_session_end() {
+    use crate::agent::{DelegatingTool, DelegationCall};
 
     struct BoomInterceptor;
 
-    impl SyntheticTool for BoomInterceptor {
+    impl DelegatingTool for BoomInterceptor {
         fn definitions(&self) -> Vec<synthia_provider::ToolDefinition> {
-            Vec::new()
-        }
-
-        fn claims(&self, name: &str) -> bool {
-            name == "boom"
+            vec![synthia_provider::ToolDefinition {
+                name: "boom".to_string(),
+                description: "panics".to_string(),
+                input_schema: json!({"type": "object"}),
+                cache_control: None,
+                annotations: None,
+            }]
         }
 
         fn execute(
             &self,
-            _call: SyntheticCall<'_>,
+            _call: DelegationCall<'_>,
         ) -> futures::future::BoxFuture<'static, ToolOutput> {
-            Box::pin(async { panic!("synthetic tool blew up") })
+            Box::pin(async { panic!("delegator blew up") })
         }
     }
 
@@ -271,7 +273,7 @@ pub(super) async fn panicking_synthetic_tool_still_reports_session_end() {
     ]));
 
     let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
-        .with_synthetic_tool(Arc::new(BoomInterceptor))
+        .with_delegator(Arc::new(BoomInterceptor))
         .expect("first install must succeed");
     let mut stream = agent
         .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
@@ -286,7 +288,7 @@ pub(super) async fn panicking_synthetic_tool_still_reports_session_end() {
             e,
             AgentEvent::System(SystemEvent::SessionEnded { .. })
         )),
-        "a panicking synthetic tool must not swallow the terminal event; \
+        "a panicking delegator must not swallow the terminal event; \
          got {:?}",
         events.iter().map(|e| e.kind()).collect::<Vec<_>>()
     );
@@ -300,8 +302,8 @@ pub(super) async fn panicking_synthetic_tool_still_reports_session_end() {
     assert_eq!(result.is_error, Some(true));
     let body = serde_json::to_string(&result.content).unwrap();
     assert!(
-        body.contains("synthetic tool blew up"),
-        "the synthetic tool's panic message must reach the model: {body}"
+        body.contains("delegator blew up"),
+        "the delegator's panic message must reach the model: {body}"
     );
 }
 

@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use synthia_core::{
     Clock,
     breaker::{BreakerConfig, BreakerState, Outcome},
+    sleeper::{Sleeper, ThreadSleeper},
 };
 use synthia_provider::{
     CompletionRequest,
@@ -134,6 +135,10 @@ pub struct ResilientProvider {
     policy: parking_lot::RwLock<ResiliencePolicy>,
     breaker: Mutex<BreakerState>,
     clock: Arc<dyn Clock>,
+    /// The delay the retry backoff waits through. The crate names no
+    /// runtime: the default waits on a std thread, and a host on a
+    /// real runtime installs that runtime's sleeper.
+    sleeper: Arc<dyn Sleeper>,
     /// Counters for observability.
     pub(crate) attempts: parking_lot::Mutex<u64>,
     pub(crate) retries: parking_lot::Mutex<u64>,
@@ -151,10 +156,23 @@ impl ResilientProvider {
             policy: parking_lot::RwLock::new(policy),
             breaker: Mutex::new(BreakerState::default()),
             clock,
+            sleeper: Arc::new(ThreadSleeper),
             attempts: parking_lot::Mutex::new(0),
             retries: parking_lot::Mutex::new(0),
             rejections: parking_lot::Mutex::new(0),
         }
+    }
+
+    /// Install the delay the retry backoff waits through.
+    ///
+    /// The default, [`ThreadSleeper`], waits on a std thread — it
+    /// needs no reactor, at the cost of one thread per retry. A host
+    /// on a real runtime installs that runtime's sleeper instead
+    /// (the tokio one lives in `synthia-harness-tokio`).
+    #[must_use]
+    pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self {
+        self.sleeper = sleeper;
+        self
     }
 
     /// Snapshot of the live policy.
@@ -290,7 +308,7 @@ impl ModelProvider for ResilientProvider {
                             last_err = Some(err);
                             if attempt + 1 < max_attempts {
                                 let backoff = compute_backoff(&policy, attempt);
-                                runtime::sleep(backoff).await;
+                                self.sleeper.sleep(backoff).await;
                                 *self.retries.lock() += 1;
                             }
                         }
@@ -370,7 +388,8 @@ pub fn compute_backoff(policy: &ResiliencePolicy, attempt: u32) -> Duration {
 }
 
 /// Drive `compute_backoff` in a loop, returning the elapsed
-/// duration. Public for tests; production code uses `tokio::time::sleep`.
+/// duration. Public for tests; the production retry waits through
+/// the [`Sleeper`] seam instead.
 pub async fn retry_with_backoff(
     policy: &ResiliencePolicy,
     attempts: u32,
@@ -380,23 +399,6 @@ pub async fn retry_with_backoff(
         elapsed += compute_backoff(policy, a);
     }
     elapsed
-}
-
-pub mod runtime {
-    /// Runtime-neutral sleep shim. When running under
-    /// `#[tokio::test]` (the only caller in this crate's tests),
-    /// `tokio::time::sleep` is in scope; production callers go
-    /// through their own executor.
-    pub(crate) async fn sleep(d: std::time::Duration) {
-        #[cfg(test)]
-        {
-            ::tokio::time::sleep(d).await;
-        }
-        #[cfg(not(test))]
-        {
-            let _ = d;
-        }
-    }
 }
 
 #[cfg(test)]

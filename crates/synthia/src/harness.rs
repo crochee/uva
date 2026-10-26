@@ -8,7 +8,7 @@
 //! [`ReasoningStrategy`] seam with the three strategies this workspace
 //! [`Agent::run`] as the single entry point that streams a
 //! session's [`AgentEvent`]s, and the
-//! [`SyntheticTool`] seam a delegation plugin installs through.
+//! [`DelegatingTool`] seam a delegation plugin installs through.
 //!
 //! Sub-agent delegation itself is **not** here: the `task` tool, its
 //! gates, worktree isolation and routing live in

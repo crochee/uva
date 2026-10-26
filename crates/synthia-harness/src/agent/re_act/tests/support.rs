@@ -221,8 +221,15 @@ pub(super) struct CapturingProvider {
     pub(super) captured:
         Arc<TokioMutex<Vec<Arc<Vec<synthia_provider::Message>>>>>,
     pub(super) captured_tools: Arc<TokioMutex<Vec<Arc<Vec<ToolDefinition>>>>>,
+    // The model of every request, so a test can pin what the loop
+    // asked the provider for.
+    pub(super) captured_models: Arc<TokioMutex<Vec<String>>>,
     scripted: Arc<TokioMutex<Vec<Vec<StreamChunk>>>>,
     pub(super) call_count: AtomicUsize,
+    // The window the provider reports, so a test can put the loop's
+    // context manager into the overflow path without a second
+    // provider type.
+    context_window: usize,
 }
 
 impl CapturingProvider {
@@ -230,9 +237,18 @@ impl CapturingProvider {
         Self {
             captured: Arc::new(TokioMutex::new(Vec::new())),
             captured_tools: Arc::new(TokioMutex::new(Vec::new())),
+            captured_models: Arc::new(TokioMutex::new(Vec::new())),
             scripted: Arc::new(TokioMutex::new(scripted)),
             call_count: AtomicUsize::new(0),
+            context_window: 128_000,
         }
+    }
+
+    /// Report a context window small enough to make the loop's
+    /// context manager prune the transcript.
+    pub(super) fn with_context_window(mut self, window: usize) -> Self {
+        self.context_window = window;
+        self
     }
 }
 
@@ -253,7 +269,7 @@ impl ModelProvider for CapturingProvider {
         ModelConfig {
             name: "capturing".into(),
             provider: "test".into(),
-            context_window: 128_000,
+            context_window: self.context_window,
             max_output_tokens: 4096,
             supports_tools: true,
             supports_streaming: true,
@@ -276,6 +292,10 @@ impl ModelProvider for CapturingProvider {
     ) -> Result<CompletionResponse, Error> {
         self.captured.lock().await.push(request.messages.clone());
         self.captured_tools.lock().await.push(request.tools.clone());
+        self.captured_models
+            .lock()
+            .await
+            .push(request.model.clone());
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let chunks = {
             let mut g = self.scripted.lock().await;

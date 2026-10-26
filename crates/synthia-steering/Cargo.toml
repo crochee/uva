@@ -17,7 +17,7 @@ async-trait.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 synthia-context.workspace = true
-synthia-core = { workspace = true, features = ["tokio-util"] }
+synthia-core.workspace = true
 synthia-provider.workspace = true
 # R-OPT-1: typed `SpanKind::Guardrail` span + OTel metric
 # (`record_guardrail`) emitted from `run_guards`. The crate
@@ -29,7 +29,6 @@ synthia-provider.workspace = true
 synthia-telemetry = { workspace = true, default-features = false }
 regex.workspace = true
 serde_json.workspace = true
-tokio-util.workspace = true
 tracing.workspace = true
 
 [features]
@@ -41,5 +40,9 @@ tracing.workspace = true
 otel = ["synthia-telemetry/otlp"]
 
 [dev-dependencies]
+# Tests drive `tokio_util::sync::CancellationToken` through the
+# `CancelToken` trait, so the bridge impl lives behind this feature.
+synthia-core = { workspace = true, features = ["tokio-util"] }
+tokio-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tracing-subscriber = { workspace = true }

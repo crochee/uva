@@ -18,6 +18,8 @@ pub use server::{
     DEFAULT_VERSION,
     McpServerConfig,
     OperationEndpointConfig,
+    PluginEntry,
+    PluginsConfig,
     ServerConfig,
     ToolsConfig,
 };
@@ -49,12 +51,14 @@ pub const CONFIG_CONTENT_ENV: &str = "SYNTHIA_CONFIG_CONTENT";
 /// env overlay is logged and the next layer wins, matching the
 /// existing fail-soft contract for file candidates.
 ///
-/// [`ServerConfig::load`] picks the format by extension, so the named
-/// file may be `.toml`, `.yaml`, or `.yml`. A candidate that exists but
-/// does not parse is logged and skipped — the next candidate is tried,
-/// and when none is left the callers get `None` and apply their own
-/// defaults, so a config typo never blocks boot (the same fail-soft
-/// contract `[tools]`, `[mcp_servers]` and the provider bridge follow).
+/// [`ServerConfig::load`] reads a `.yaml` file as YAML and every
+/// other extension as JSON, so a deployment document should be named
+/// `.yaml`; a `.toml` candidate is attempted as JSON and skipped. A
+/// candidate that exists but does not parse is logged and skipped —
+/// the next candidate is tried, and when none is left the callers
+/// get `None` and apply their own defaults, so a config typo never
+/// blocks boot (the same fail-soft contract `[tools]`,
+/// `[mcp_servers]` and the provider bridge follow).
 pub fn resolve_server_config(
     workspace_root: &std::path::Path,
     config_path: Option<&std::path::PathBuf>,
@@ -400,6 +404,7 @@ mod tests {
                 active_groups: vec!["files".to_string()],
                 max_visible: Some(12),
             },
+            plugins: Default::default(),
             cache: crate::config::server::SemanticCacheConfig::default(),
             resilience: crate::config::server::ResilienceConfig::default(),
             budget: crate::config::server::BudgetConfig::default(),

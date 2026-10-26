@@ -43,7 +43,7 @@ fn default_set_modules_are_reachable() {
         harness::ReActAgent as _,
         macros::Tool as _,
         provider::ModelProvider as _,
-        session::TypedEventSink as _,
+        session::LogWriter as _,
         steering::Steering as _,
         tool::ToolRegistry as _,
     };
@@ -90,7 +90,6 @@ fn prelude_exposes_the_assembly_surface() {
         ToolOutput as _,
         ToolRegistry as _,
         TruncatingContextManager as _,
-        TypedEventSink as _,
         async_trait as _,
     };
 }

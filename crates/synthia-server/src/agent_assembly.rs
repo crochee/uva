@@ -6,7 +6,7 @@
 //! setter had to be installed in all four — and the four could
 //! drift. [`AgentAssembly`] collects the pieces a caller has and
 //! [`AgentAssembly::build`] is the one place the builder chain
-//! (and the synthetic-tool install `expect`) lives.
+//! (and the delegator install `expect`) lives.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -14,13 +14,13 @@ use synthia::{
     context::ContextManager,
     harness::{
         AgentDescriptor,
+        DelegatingTool,
         PromptContext,
         ReActAgent,
         ReasoningStrategy,
-        SyntheticTool,
     },
     provider::traits::ModelProvider,
-    session::TypedEventSink,
+    session::LogWriter,
     steering::Steering,
     tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy},
 };
@@ -37,19 +37,34 @@ pub(crate) struct AgentAssembly {
     pub prompt_context: Arc<PromptContext>,
     pub steering: Arc<Steering>,
     pub max_iterations: usize,
-    /// Synthetic-tool plugins (the `task` delegator); installed in
-    /// order, and a name clash is a programming error (`.expect`).
-    pub synthetic: Vec<Arc<dyn SyntheticTool>>,
+    /// Delegating tools (the `task` delegator); installed in order,
+    /// and a name clash is a programming error (`.expect`).
+    pub delegators: Vec<Arc<dyn DelegatingTool>>,
     /// Deployment `[tools]` surface policy.
     pub tool_surface: Option<ToolSurfacePolicy>,
     /// Deployment reasoning loop.
     pub strategy: Option<Arc<dyn ReasoningStrategy>>,
     /// Deployment allow/deny list.
     pub tool_restriction: Option<Arc<ToolRestriction>>,
-    /// Typed-event sink for structural boundary events.
-    pub typed_event_sink: Option<TypedEventSink>,
+    /// The session's one writer: the agent's structural boundary
+    /// events go into it.
+    pub log_writer: Option<Arc<LogWriter>>,
+    /// Writer source resolving the sessions this agent's
+    /// delegated children run in; installed so the `task`
+    /// delegator can hand each child its own writer.
+    pub subagent_writers: Option<Arc<dyn synthia::harness::SubagentWriters>>,
     /// Caller-composed context manager.
     pub context_manager: Option<Arc<dyn ContextManager>>,
+    /// The deployment's plugin host.
+    ///
+    /// One host is built at boot: the composition installs every
+    /// configured plugin into it, [`AppState`](crate::state::AppState)
+    /// keeps it for the process lifetime, and every agent this server
+    /// builds gets a clone. A clone shares the host's registrations
+    /// (it is one policy, not a copy), so a plugin installed once is
+    /// visible to every agent — and the per-run agents that serve
+    /// chat are no exception.
+    pub host: Option<synthia::harness::Host>,
 }
 
 impl AgentAssembly {
@@ -64,10 +79,10 @@ impl AgentAssembly {
             self.prompt_context,
         )
         .with_spawner(crate::spawner::server_spawner());
-        for tool in self.synthetic {
+        for tool in self.delegators {
             agent = agent
-                .with_synthetic_tool(tool)
-                .expect("synthetic tool install must succeed");
+                .with_delegator(tool)
+                .expect("delegator install must succeed");
         }
         agent = agent
             .with_steering(self.steering)
@@ -81,11 +96,17 @@ impl AgentAssembly {
         if let Some(restriction) = self.tool_restriction {
             agent = agent.with_tool_restriction((*restriction).clone());
         }
-        if let Some(sink) = self.typed_event_sink {
-            agent = agent.with_typed_event_sink(sink);
+        if let Some(writer) = self.log_writer {
+            agent = agent.with_log_writer(writer);
+        }
+        if let Some(writers) = self.subagent_writers {
+            agent = agent.with_subagent_writers(writers);
         }
         if let Some(manager) = self.context_manager {
             agent = agent.with_context_manager(manager);
+        }
+        if let Some(host) = self.host {
+            agent = agent.with_host(host);
         }
         agent
     }

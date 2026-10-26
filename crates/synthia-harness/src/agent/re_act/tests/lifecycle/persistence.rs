@@ -1,18 +1,64 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
+use parking_lot::Mutex;
 use synthia_tool::ToolRegistry;
 use tokio_util::sync::CancellationToken;
 
 use super::super::{support::*, *};
 use crate::agent::checkpoint::{
+    CheckpointError,
     CheckpointSnapshot,
     Checkpointer,
     InMemoryCheckpointer,
 };
 
+// Delegates to `InMemoryCheckpointer` and records the keys every
+// `save` / `delete` touched. The resume-key contract — one save on
+// a non-Completed end, one delete on Completed — is asserted from
+// those records, so the store itself stays opaque.
+#[derive(Default)]
+struct RecordingCheckpointer {
+    inner: InMemoryCheckpointer,
+    saved: Mutex<Vec<String>>,
+    deleted: Mutex<Vec<String>>,
+}
+
+impl RecordingCheckpointer {
+    fn saved(&self) -> Vec<String> {
+        self.saved.lock().clone()
+    }
+
+    fn deleted(&self) -> Vec<String> {
+        self.deleted.lock().clone()
+    }
+}
+
+impl Checkpointer for RecordingCheckpointer {
+    fn save(
+        &self,
+        key: &str,
+        snapshot: &CheckpointSnapshot,
+    ) -> Result<(), CheckpointError> {
+        self.saved.lock().push(key.to_string());
+        self.inner.save(key, snapshot)
+    }
+
+    fn load(
+        &self,
+        key: &str,
+    ) -> Result<Option<CheckpointSnapshot>, CheckpointError> {
+        self.inner.load(key)
+    }
+
+    fn delete(&self, key: &str) -> Result<(), CheckpointError> {
+        self.deleted.lock().push(key.to_string());
+        self.inner.delete(key)
+    }
+}
+
 pub(super) async fn run_persists_checkpoint_on_cancel() {
-    let cp = Arc::new(InMemoryCheckpointer::default());
+    let cp = Arc::new(RecordingCheckpointer::default());
     // Cancel during the run, not before it: a token that already
     // fired ends the session at setup, before the resume key
     // exists and there is nothing worth resuming. Cancelling at the
@@ -35,7 +81,7 @@ pub(super) async fn run_persists_checkpoint_on_cancel() {
     }
 
     // The default descriptor's agent name is the key's tail.
-    let keys = cp.list_keys();
+    let keys = cp.saved();
     assert_eq!(keys.len(), 1, "expected exactly one saved key: {keys:?}");
     assert!(
         keys[0].starts_with("thread-1:"),
@@ -61,8 +107,13 @@ pub(super) async fn run_persists_checkpoint_on_cancel() {
     while let Some(ev) = stream.next().await {
         let _ = ev;
     }
+    assert_eq!(
+        cp.deleted(),
+        keys,
+        "Completed run must delete the resume key it saved"
+    );
     assert!(
-        cp.list_keys().is_empty(),
+        cp.load(&keys[0]).unwrap().is_none(),
         "Completed run must delete its resume key"
     );
 }
@@ -147,7 +198,7 @@ pub(super) async fn cancelled_before_tool_persists_checkpoint() {
     use synthia_provider::ToolUse;
     use synthia_steering::HookEvent;
 
-    /// Cancels mid-stream so the tool batch never runs.
+    // Cancels mid-stream so the tool batch never runs.
     fn cancel_after_provider(
         cancel: CancellationToken,
     ) -> synthia_steering::HookMap {
@@ -176,7 +227,7 @@ pub(super) async fn cancelled_before_tool_persists_checkpoint() {
         hooks: cancel_after_provider(cancel.clone()),
         ..synthia_steering::Steering::noop()
     });
-    let cp = Arc::new(InMemoryCheckpointer::default());
+    let cp = Arc::new(RecordingCheckpointer::default());
     let agent = ReActAgent::new(provider, registry)
         .with_steering(steering)
         .with_checkpointer(Arc::clone(&cp) as Arc<dyn Checkpointer>);
@@ -205,7 +256,7 @@ pub(super) async fn cancelled_before_tool_persists_checkpoint() {
         "run must end Cancelled; got {:?}",
         events.iter().map(|e| e.kind()).collect::<Vec<_>>()
     );
-    let keys = cp.list_keys();
+    let keys = cp.saved();
     assert_eq!(
         keys.len(),
         1,

@@ -8,7 +8,7 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use synthia_context::{AgentState, ContextManager, TruncatingContextManager};
-use synthia_core::Error as CoreError;
+use synthia_core::{Error as CoreError, SystemClock};
 use synthia_harness::{
     AgentCaps,
     AgentEvent,
@@ -27,6 +27,12 @@ use synthia_provider::{
     ModelConfig,
     TokenUsage,
     ToolChoice,
+};
+use synthia_session::{
+    LogWriter,
+    SessionEvent,
+    SessionSink,
+    in_memory::InMemorySessionSink,
 };
 
 use super::{ChainOfThoughtStrategy, DEFAULT_COT_STEPS};
@@ -140,7 +146,7 @@ fn drive(
     runtime: StrategyAgentRuntime,
 ) -> Vec<AgentEvent> {
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(tx), None, None);
+    let sink = EventSink::new(Arc::new(tx), None);
     futures::executor::block_on(strategy.run(
         runtime,
         AgentInput::text("What is 2 + 2?"),
@@ -163,6 +169,236 @@ fn reason_of(events: &[AgentEvent]) -> Option<SessionEndReason> {
         }
         _ => None,
     })
+}
+
+/// Drive the strategy with a session writer installed and return the
+/// rows the run left in the log.
+fn drive_logged(
+    strategy: &ChainOfThoughtStrategy,
+    runtime: StrategyAgentRuntime,
+) -> Vec<SessionEvent> {
+    let log = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(log.clone(), Arc::new(SystemClock)));
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let event_sink = EventSink::new(Arc::new(tx), Some(Arc::clone(&writer)));
+    futures::executor::block_on(strategy.run(
+        runtime,
+        AgentInput::text("What is 2 + 2?"),
+        &event_sink,
+    ));
+    drop(event_sink);
+    futures::executor::block_on(async { while rx.next().await.is_some() {} });
+    futures::executor::block_on(writer.flush()).expect("flush");
+    let rows = futures::executor::block_on(log.read()).expect("read");
+    rows.iter().filter_map(SessionEvent::from_value).collect()
+}
+
+/// A provider that parks inside its call: the run never finishes, so
+/// no later flush could have written the queued row instead.
+struct ParkProvider {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl synthia_provider::ModelProvider for ParkProvider {
+    async fn initialize(
+        &mut self,
+        _config: synthia_provider::ProviderConfig,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "park"
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        ModelConfig {
+            name: "scripted-1".into(),
+            provider: "park".into(),
+            context_window: 8_192,
+            max_output_tokens: 1_024,
+            supports_tools: false,
+            supports_streaming: true,
+            supports_reasoning: false,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, CoreError> {
+        unreachable!("streaming path should not call complete()")
+    }
+
+    async fn complete_with_stream(
+        &self,
+        _request: CompletionRequest,
+        _cancel_token: Option<Arc<dyn synthia_core::CancelToken>>,
+        _on_delta: Box<dyn FnMut(synthia_provider::StreamChunk) + Send>,
+    ) -> Result<CompletionResponse, CoreError> {
+        // The model is being asked. Everything it is about to see is
+        // already on disk.
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+        unreachable!("pending never resolves")
+    }
+}
+
+/// A context manager that parks inside `prepare` — the seam a
+/// summarising manager calls the provider from, and it runs before the
+/// strategy samples.
+struct ParkManager {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl ContextManager for ParkManager {
+    async fn prepare(
+        &self,
+        _messages: &mut Vec<synthia_provider::Message>,
+        _state: &mut AgentState,
+    ) {
+        self.entered.notify_one();
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The prompt is on disk before the context manager's summariser runs.
+/// The summariser is a provider call, and it happens while the run's
+/// request is being built — before the sample — so the flush that
+/// covers the sample is too late for it. The summariser parks, so no
+/// later flush could have written the row instead.
+#[tokio::test]
+async fn a_queued_row_is_on_disk_before_the_summariser_runs() {
+    let log = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(log.clone(), Arc::new(SystemClock)));
+    // The host's row, queued before the agent ran and never flushed by
+    // the host.
+    writer.append_event_nowait(&synthia_session::step_start(0, 0));
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let run = {
+        let entered = Arc::clone(&entered);
+        let writer = Arc::clone(&writer);
+        tokio::spawn(async move {
+            let (tx, _rx) = futures::channel::mpsc::unbounded();
+            let sink = EventSink::new(Arc::new(tx), Some(Arc::clone(&writer)));
+            ChainOfThoughtStrategy::default()
+                .run(
+                    // The provider is never reached: the summariser
+                    // parks first.
+                    runtime(
+                        ScriptedProvider::new("unused"),
+                        Arc::new(ParkManager { entered }),
+                        synthia_core::AtomicCancelToken::shared(),
+                    ),
+                    AgentInput::text("What is 2 + 2?"),
+                    &sink,
+                )
+                .await;
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the context manager was entered");
+
+    let rows = log.read().await.expect("read");
+    assert!(
+        rows.iter().any(|row| row["type"] == "step"),
+        "the queued row must be on disk while the summariser is still \
+         blocked; got {rows:?}"
+    );
+    run.abort();
+}
+
+/// The strategy flushes the session's writer before its provider call:
+/// the row the host queued before it invoked the agent is on disk by
+/// the time the model is asked, so a crash between the prompt and the
+/// answer keeps the prompt. The provider parks inside that call, so no
+/// later flush could have written the row instead.
+///
+/// This crate has no JSON dependency, so the queued row is a
+/// structural one; what the test pins is the boundary — a row queued
+/// before the run is durable when the provider is entered — not the
+/// row's type.
+#[tokio::test]
+async fn a_queued_row_is_on_disk_before_the_model_call() {
+    let log = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(log.clone(), Arc::new(SystemClock)));
+    // The host's row, queued before the agent ran — the prompt's place
+    // in the log — and never flushed by the host.
+    writer.append_event_nowait(&synthia_session::step_start(0, 0));
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let run = {
+        let entered = Arc::clone(&entered);
+        let writer = Arc::clone(&writer);
+        tokio::spawn(async move {
+            let (tx, _rx) = futures::channel::mpsc::unbounded();
+            let sink = EventSink::new(Arc::new(tx), Some(Arc::clone(&writer)));
+            ChainOfThoughtStrategy::default()
+                .run(
+                    runtime(
+                        Arc::new(ParkProvider { entered }),
+                        Arc::new(TruncatingContextManager),
+                        synthia_core::AtomicCancelToken::shared(),
+                    ),
+                    AgentInput::text("What is 2 + 2?"),
+                    &sink,
+                )
+                .await;
+        })
+    };
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified())
+        .await
+        .expect("the provider was called");
+
+    let rows = log.read().await.expect("read");
+    assert!(
+        rows.iter().any(|row| row["type"] == "step"),
+        "the queued row must be on disk while the model is still \
+         blocked; got {rows:?}"
+    );
+    run.abort();
+}
+
+/// The model's answer is the run's durable fact: one
+/// `assistant_message` row, holding the answer the model gave.
+#[test]
+fn the_models_answer_is_one_durable_row() {
+    let provider = ScriptedProvider::new("Step 1: 2 + 2 = 4\nAnswer: 4");
+    let rows = drive_logged(
+        &ChainOfThoughtStrategy::new(3),
+        runtime(
+            provider,
+            Arc::new(TruncatingContextManager),
+            synthia_core::AtomicCancelToken::shared(),
+        ),
+    );
+
+    let assistant: Vec<&SessionEvent> = rows
+        .iter()
+        .filter(|event| event.type_tag() == "assistant_message")
+        .collect();
+    assert_eq!(
+        assistant.len(),
+        1,
+        "the run's answer is one row; got {:?}",
+        rows.iter()
+            .map(|event| event.type_tag())
+            .collect::<Vec<_>>()
+    );
+    let SessionEvent::AssistantMessage { data, .. } = assistant[0] else {
+        panic!("the row is the assistant turn");
+    };
+    let text = data.to_string();
+    assert!(
+        text.contains("Answer: 4"),
+        "the row holds the answer; got {text}"
+    );
 }
 
 #[test]

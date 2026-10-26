@@ -296,12 +296,6 @@ impl WorkspaceConfig {
         }
     }
 
-    pub fn create_default_provider(
-        &self,
-    ) -> Result<Box<dyn ModelProvider>, Error> {
-        self.create_provider(&self.default_provider)
-    }
-
     pub fn available_providers(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
     }

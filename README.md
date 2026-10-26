@@ -49,7 +49,7 @@ Synthia is a modular, high-performance AI Agent framework written in Rust. It im
                                        ▼
                 ┌────────────────────────────────────────┐
                 │     synthia-harness: ReAct loop        │
-                │  (Agent + SyntheticTool + strategy)  │
+                │  (Agent + DelegatingTool + strategy) │
                 └─────────────────────┬──────────────────┘
                                       ▼
                 ┌────────────────────────────────────────┐
@@ -79,7 +79,7 @@ cd docs/examples/minimal-consumer && cargo run
 ```
 
 整条链路（scripted provider → tool registry → steering → ReAct
-loop → typed sink）在这一份代码里真实跑一遍，并断言工具确实被
+loop → session writer）在这一份代码里真实跑一遍，并断言工具确实被
 调用了一次。完整阅读路径见 [`docs/examples/README.md`](docs/examples/README.md)，
 跨 41 个可运行示例与两个独立 consumer crate。
 
@@ -119,7 +119,7 @@ The framework is organized as a Rust workspace with **25 members**, all under `c
 | [synthia-tool](crates/synthia-tool/) | Tool paradigm: `Tool` trait, registry, exposure projection, `workspace` path confinement, and the two synthetic contracts (`__get_full_output`, `structured_output`) — **no agent-facing tool set** |
 | [synthia-tool-read](crates/synthia-tool-read/) · [-write](crates/synthia-tool-write/) · [-shell](crates/synthia-tool-shell/) · [-todo](crates/synthia-tool-todo/) · [-web](crates/synthia-tool-web/) · [-task](crates/synthia-tool-task/) · [-scheduler](crates/synthia-tool-scheduler/) · [-search](crates/synthia-tool-search/) | The tool plugins, one brick each (the shell owns its OS execution policy; `-task` is the multi-agent `task` tool; `-scheduler` is the `schedule` tool over `synthia-scheduler`; `-search` is the cross-domain `search` tool over a host-built `synthia-search` registry) |
 | [synthia-session](crates/synthia-session/) | Session lifecycle and state management |
-| [synthia-harness](crates/synthia-harness/README.md) | The harness: core ReAct loop, `Agent` / `SyntheticTool` / strategy seams, `AgentRegistry`, type definitions |
+| [synthia-harness](crates/synthia-harness/README.md) | The harness: core ReAct loop, `Agent` / `DelegatingTool` / strategy seams, `AgentRegistry`, type definitions |
 | [synthia-steering](crates/synthia-steering/) | Steering layer: guards / hooks / hints / tracker / output transformer + `HookMap` typed registry |
 | [synthia-telemetry](crates/synthia-telemetry/) | Observability in two switchable halves: console/file logging always, Prometheus (`metrics`) and OTLP export (`otlp`) as features |
 | [synthia-attachment](crates/synthia-attachment/) | Multimodal attachment store (image / audio / file bytes) with filesystem + in-memory backends |
@@ -254,8 +254,8 @@ Sketch of the same assembly:
 ```rust,ignore
 use std::sync::Arc;
 use synthia_harness::{Agent, AgentInput, ReActAgent};
-use synthia_core::{AtomicCancelToken, CancelToken};
-use synthia_session::TypedEventSink;
+use synthia_core::{AtomicCancelToken, CancelToken, SystemClock};
+use synthia_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use synthia_steering::Steering;
 use synthia_tool::{ToolEntry, ToolRegistry};
 use synthia_tool_read::ReadTool;   // tool implementations are plugins:
@@ -267,16 +267,17 @@ registry.register_entry(ToolEntry::new(Arc::new(ReadTool::new())));
 registry.register_entry(ToolEntry::new(Arc::new(ShellTool::new())));
 let registry = Arc::new(registry);
 let steering = Arc::new(Steering::default_policy("."));    // 3. guards/hooks/hints
-let (typed_sink, mut typed_rx) = TypedEventSink::channel(64); // 5. durable events
+let sink = Arc::new(InMemorySessionSink::new("demo"));     // 5. the durable log
+let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
 let cancel: Arc<dyn CancelToken> = AtomicCancelToken::shared(); // 6. runtime-free
 
 let agent = ReActAgent::new(provider, registry)            // 7. the loop
     .with_steering(steering)
-    .with_typed_event_sink(typed_sink);
+    .with_log_writer(writer);
 
 let mut stream = agent.run(AgentInput::text("hi"), cancel).await;
 while let Some(event) = stream.next().await { /* SSE-style events */ }
-while let Ok(Some(rec)) = typed_rx.try_recv() { /* request_header / step / … */ }
+let rows = sink.read().await.unwrap();       /* request_header / step / … */
 
 Per-crate responsibilities and the composition contracts are
 documented in each crate's `lib.rs` and `README.md`. The
@@ -350,7 +351,7 @@ Later rounds kept growing the same lego axes:
 | 53 | the `synthia` facade: `prelude` + one feature per piece | `synthia` (new) | One dependency instead of nine: `synthia::agent`, `synthia::tool`, … are feature-gated re-exports, and `synthia::prelude::*` is a 27-name curated subset with every collision decided and documented (`Result`, `Tool`, `Context`, and the deliberately excluded `SessionEndReason`). The crate docs are the assembly tutorial; 11 `compile_fail` doc tests pin the feature gating |
 | 54 | `ToolSurfacePolicy` + `SurfacePolicyError` + `ToolRegistry::{set_exposure, set_hidden, exposure}` + `[tools]` server config | `synthia-tool`, `synthia-harness`, `synthia-server` | The R33 tool surface, reachable from a deployment: groups and an active-group set (a member of an inactive group is simply not advertised), `max_visible` cap, deferred advertisement — validated with typed errors before any write, applied at boot from `[tools]`, and an unknown tool name is a warning rather than a startup failure. A tool nobody advertises still executes |
 | 55 | `WorkflowHost::select_candidate` + `SelectionRequest` / `SelectionCandidate` / `CandidateOutcome` / `GateVerdict` + `JournalEntry.winner` | `synthia-workflow` | The host may judge candidates (a rubric, an LLM, the longest answer) instead of taking the first passing gate; the default implementation keeps R33's rule, the choice is **recorded** so a replay never re-asks the host, and naming a candidate that did not succeed is a typed error rather than a plausible-looking wrong winner |
-| 56 | `CompactionCheckpoint` + `SurfaceLedger` + `fold_log_surface` / `try_fold_log_surface` | `synthia-session`, `synthia-context`, `synthia-harness`, `synthia-server` | Durable compaction checkpoints, end to end: provenance is resolved through the log (the manager's in-memory indices cannot address the surface), the lifecycle pair is written immediately so a crash mid-compaction stays detectable, and a record whose span cannot be proven is dropped with a warning instead of writing a checkpoint with wrong provenance. The production resume projection folds the log, so a resumed session rebuilds the compacted surface instead of replaying (and re-paying for) the pre-compaction history |
+| 56 | `CompactionCheckpoint` + `SurfaceLedger` + `fold_log_surface` / `try_fold_log_surface` | `synthia-session`, `synthia-context`, `synthia-harness`, `synthia-server` | Durable compaction checkpoints, end to end: provenance is resolved through the log (the manager's in-memory indices cannot address the surface), the lifecycle pair is handed to the session's writer as soon as it fires and reaches the log at the writer's next flush, and a record whose span cannot be proven is dropped with a warning instead of writing a checkpoint with wrong provenance. The production resume projection folds the log, so a resumed session rebuilds the compacted surface instead of replaying (and re-paying for) the pre-compaction history |
 
 | 57 | `Spawner` + `SharedSpawner` + `ReActAgent::with_spawner` | `synthia-core`, `synthia-harness` | The one operation that used to hard-code tokio — detached work — behind a trait with no runtime in its signature. The loop still detaches one task per run (a caller that stops polling must not cancel the run), but *where* that task goes is the consumer's choice: `cargo run --example runtime_agnostic -p synthia-harness` runs a full turn on `std::thread` + `futures::executor::block_on`. Tool dispatch is spawn-free entirely (`run_stream` drives every call from the caller's poll); the tool plugin crates, the provider HTTP adapters and the JSONL sink remain tokio-bound plugins, and the crate docs say so |
 | 58 | Per-crate features: tool plugins (`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-web` / `-task` / `-scheduler` / `-search`, one tool each) + `synthia-telemetry` (`metrics`, `otlp`), `synthia-provider` (`anthropic`, `openai`), facade features (`provider-anthropic`, `provider-openai`, `tool-*`) + `make check-mvp-deps` | workspace-wide | Transport and tools are opt-in and *separable*: the seven-feature MVP subset compiles the `Tool` paradigm and **no agent-facing tool** (no HTTP client at all — `reqwest` / `hyper` / `rustls` / `h2` / `tower` absent), each tool plugin is a crate you either depend on or don't, the OTel exporter arrives only with `otlp`, and the gate asserts both the MVP subset and the seven offline tool crates stay clean |
@@ -415,7 +416,7 @@ cargo run --example replay_provider                -p synthia-test-support
 
 The `assemble_with_builder` example is the recommended starting
 point: it wires the tier-aware steering, structured output,
-LLM compaction, typed event sink, and the `@agent` router in a
+LLM compaction, the session's log writer, and the `@agent` router in a
 single chained expression and runs end-to-end with no network.
 
 ### Consume synthia from your own crate (no workspace needed)
@@ -424,7 +425,7 @@ single chained expression and runs end-to-end with no network.
 **not** a workspace member — it depends on the synthia crates by
 relative path, exactly as an external library consumer does. It
 assembles a complete agent (provider + tier steering + structured
-output + LLM compaction + typed sink + attachment store +
+output + LLM compaction + session writer + attachment store +
 runtime-neutral cancel) and runs a turn:
 
 ```bash
@@ -602,6 +603,7 @@ Run `make help` for the full list of targets.
 | 4 步 MVP guide | [`MINIMAL.md`](MINIMAL.md) |
 | 7 大可替换组件 | [`SEAMS.md`](SEAMS.md) |
 | 可运行示例（41 个 + 2 个独立 consumer） | [`docs/examples/README.md`](docs/examples/README.md) |
+| 完整 agent 对话教程（server + web，含 A–G 验收） | [`docs/tutorial/complete-agent.md`](docs/tutorial/complete-agent.md) |
 | 顶层文档导航 | [`docs/INDEX.md`](docs/INDEX.md) |
 | 历史 / 冻结的 spec 与优化报告 | [`docs/ARCHIVE.md`](docs/ARCHIVE.md) |
 | 当前路线 | [`docs/ROADMAP.md`](docs/ROADMAP.md) |

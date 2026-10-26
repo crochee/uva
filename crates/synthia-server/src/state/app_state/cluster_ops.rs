@@ -96,7 +96,7 @@ async fn forward_op(
 }
 
 async fn apply_tool_mutation(state: &Arc<AppState>, mutation: ToolMutation) {
-    let registry = state.tool_registry.write().await;
+    let registry = state.tool_registry.as_ref();
     match mutation {
         ToolMutation::RegisterDynamic {
             name,

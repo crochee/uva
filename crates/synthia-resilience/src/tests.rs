@@ -9,7 +9,7 @@ use std::{
 };
 
 use chrono::TimeZone;
-use synthia_core::Clock;
+use synthia_core::{Clock, sleeper::Sleeper};
 use synthia_provider::{
     CompletionRequest,
     CompletionResponse,
@@ -264,4 +264,151 @@ async fn per_tool_breaker_is_isolated() {
         wrapped.breaker_state().phase,
         synthia_core::BreakerPhase::Open
     );
+}
+
+/// The retry path names no runtime: driving it under a plain
+/// `futures` executor — no tokio reactor anywhere — must work.
+///
+/// The crate is documented as runtime-neutral, and a retry that
+/// waits on `tokio::time::sleep` is tokio-only by construction: the
+/// timer panics the moment it is polled outside a tokio runtime.
+#[test]
+fn retry_path_needs_no_tokio_reactor() {
+    let inner = Arc::new(CountingProvider {
+        calls: AtomicU64::new(0),
+        fail_until: 1,
+    });
+    let resilient = ResilientProvider::new(
+        inner.clone(),
+        ResiliencePolicy::default()
+            .max_attempts(3)
+            .initial_backoff(Duration::from_millis(1)),
+        clock(),
+    );
+    let result =
+        futures::executor::block_on(resilient.complete(make_request()));
+    assert!(result.is_ok(), "the retry must not need a runtime");
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
+}
+
+/// A sleeper that counts the waits and resolves immediately.
+#[derive(Default)]
+struct CountingSleeper {
+    waits: AtomicU64,
+}
+
+impl CountingSleeper {
+    fn waits(&self) -> u64 {
+        self.waits.load(Ordering::SeqCst)
+    }
+}
+
+impl Sleeper for CountingSleeper {
+    fn sleep(
+        &self,
+        _duration: Duration,
+    ) -> futures::future::BoxFuture<'static, ()> {
+        self.waits.fetch_add(1, Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+/// The retry backoff waits through the delay seam the caller
+/// installed — one wait per retry, and no other.
+#[tokio::test]
+async fn retry_backoff_waits_through_the_sleeper() {
+    let inner = Arc::new(CountingProvider {
+        calls: AtomicU64::new(0),
+        fail_until: 2,
+    });
+    let sleeper = Arc::new(CountingSleeper::default());
+    let resilient = ResilientProvider::new(
+        inner.clone(),
+        ResiliencePolicy::default()
+            .max_attempts(5)
+            .initial_backoff(Duration::from_millis(1)),
+        clock(),
+    )
+    .with_sleeper(sleeper.clone());
+    let _ = resilient.complete(make_request()).await;
+    assert_eq!(sleeper.waits(), 2, "one wait per retry");
+}
+
+/// The default sleeper is a real wait: the backoff is a delay, not a
+/// no-op the retry loop skips.
+#[tokio::test]
+async fn default_sleeper_waits_the_backoff() {
+    let inner = Arc::new(CountingProvider {
+        calls: AtomicU64::new(0),
+        fail_until: 1,
+    });
+    let resilient = ResilientProvider::new(
+        inner.clone(),
+        ResiliencePolicy::default()
+            .max_attempts(3)
+            .initial_backoff(Duration::from_millis(60)),
+        clock(),
+    );
+    let start = std::time::Instant::now();
+    let _ = resilient.complete(make_request()).await;
+    assert!(
+        start.elapsed() >= Duration::from_millis(50),
+        "the retry must wait the backoff, not skip it"
+    );
+}
+
+/// A tool that fails twice, then succeeds.
+struct FlakyTool {
+    calls: AtomicU64,
+}
+
+#[async_trait::async_trait]
+impl Tool for FlakyTool {
+    fn name(&self) -> &str {
+        "flaky"
+    }
+
+    fn description(&self) -> &str {
+        "flaky"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _context: &Context,
+    ) -> ToolOutput {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst);
+        if n < 2 {
+            ToolOutput::error("transient".to_string())
+        } else {
+            ToolOutput::text("ok")
+        }
+    }
+}
+
+/// The tool wrapper waits through the same seam as the provider
+/// wrapper.
+#[tokio::test]
+async fn tool_retry_waits_through_the_sleeper() {
+    let inner: Arc<dyn Tool> = Arc::new(FlakyTool {
+        calls: AtomicU64::new(0),
+    });
+    let sleeper = Arc::new(CountingSleeper::default());
+    let resilient = ResilientTool::new(
+        inner,
+        ResiliencePolicy::default()
+            .max_attempts(5)
+            .initial_backoff(Duration::from_millis(1)),
+        clock(),
+    )
+    .with_sleeper(sleeper.clone());
+    let output = resilient
+        .call(serde_json::json!({}), &Context::default())
+        .await;
+    assert!(!output.is_error.unwrap_or(false));
+    assert_eq!(sleeper.waits(), 2, "one wait per retry");
 }

@@ -11,24 +11,28 @@
 //! ```
 //! use std::sync::Arc;
 //!
-//! use synthia_provider::AnthropicProvider;
+//! use synthia_provider::traits_stub::ModelProviderStub;
 //! use synthia_search::{CjkTokenizer, Embedder, HashingEmbedder};
 //! use synthia_semantic_cache::{
 //!     InMemorySemanticCache,
 //!     SemanticCacheConfig,
 //!     SemanticCacheProvider,
+//!     SharedClock,
 //! };
 //!
-//! let provider = Arc::new(AnthropicProvider::from_env()?);
+//! // A test double so the example runs without an HTTP adapter;
+//! // wire your own provider here.
+//! let provider: Arc<dyn synthia_provider::ModelProvider> =
+//!     Arc::new(ModelProviderStub::default());
 //! let embedder: Arc<dyn Embedder> =
 //!     Arc::new(HashingEmbedder::new(64, Arc::new(CjkTokenizer)));
-//! let cached = SemanticCacheProvider::new(
+//! let _ = SemanticCacheProvider::new(
 //!     provider,
 //!     Arc::new(InMemorySemanticCache::default()),
 //!     embedder,
 //!     SemanticCacheConfig::default(),
+//!     Arc::new(SharedClock::system()),
 //! );
-//! # Ok::<(), synthia_core::Error>(())
 //! ```
 //!
 //! ## Layering
@@ -85,6 +89,15 @@ pub use store::{
 pub use synthia_core::{Clock, FixedClock, SharedClock, SystemClock};
 use thiserror::Error;
 pub use wrapper::{SemanticCacheConfig, SemanticCacheProvider};
+
+/// The README, **compiled**.
+///
+/// The `rust` fences in [`README.md`](../README.md) are doctests,
+/// so a wiring recipe that stops compiling fails
+/// `cargo test -p synthia-semantic-cache`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct Readme;
 
 /// Errors surfaced by the cache wrapper.
 ///

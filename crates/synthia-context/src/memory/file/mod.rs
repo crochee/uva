@@ -110,8 +110,9 @@ mod tests {
     use std::{fs, os::unix::fs::symlink, path::Path, sync::Arc};
 
     use serde_json::json;
+    use synthia_core::SystemClock;
     use synthia_provider::Message;
-    use synthia_session::in_memory::InMemorySessionSink;
+    use synthia_session::{LogWriter, in_memory::InMemorySessionSink};
     use tempfile::TempDir;
     use ulid::Ulid;
 
@@ -645,8 +646,9 @@ mod tests {
         let root = temp();
         let home = temp();
         let sink = Arc::new(InMemorySessionSink::new("s1"));
+        let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
         let inner: Arc<dyn Memory> =
-            Arc::new(super::super::SessionMemory::new(sink));
+            Arc::new(super::super::SessionMemory::new(writer));
         let mem =
             FileMemory::with_inner(config(root.path(), home.path()), inner)
                 .expect("file memory");

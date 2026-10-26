@@ -30,16 +30,20 @@ consumers). It stays in the offline tier — no HTTP, no DB, no OTel
 ```rust
 use std::sync::Arc;
 
-use synthia_provider::AnthropicProvider;
-use synthia_steering::Steering;
+use synthia_core::SharedClock;
+use synthia_provider::ModelProvider;
 use synthia_reflection::{ReflectorConfig, ReflectionHook};
+use synthia_steering::Steering;
 
-let critic = Arc::new(AnthropicProvider::from_env()?);
+// The critic is the consumer's own provider: this crate takes the
+// `ModelProvider` trait (`synthia-provider` with
+// `default-features = false`), not one of its HTTP adapters.
+let critic: Arc<dyn ModelProvider> = /* your cheap, fast critic model */;
 let hook = Arc::new(ReflectionHook::new(
     ReflectorConfig::default()
         .critic_provider(critic)
         .every_n_steps(3),
-    Arc::new(SystemSharedClock::system()),
+    Arc::new(SharedClock::system()),
 ));
 let steering = Steering::default_policy(root)
     .add_hooks(hook.hook_map());
@@ -47,7 +51,7 @@ let steering = Steering::default_policy(root)
 
 ## Demo
 
-```
+```bash
 cargo run --example reflection_demo -p synthia-reflection
 ```
 

@@ -42,7 +42,7 @@ pub struct CompletionRequest {
     pub replay_state: Option<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub enum ToolChoice {
     #[default]
     Auto,

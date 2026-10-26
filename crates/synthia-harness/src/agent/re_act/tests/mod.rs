@@ -20,7 +20,7 @@
 //! | [`parallel_safe`]          | Safe (concurrent) tool execution                            |
 //! | [`parallel_unsafe`]        | Sequential bucket for unsafe tools                          |
 //! | [`tool_projection_memo`]   | Tool projection memoization across iterations               |
-//! | [`tool_restriction`]       | Per-agent `denied_tools` / `allow_list` + synthetic tools   |
+//! | [`tool_restriction`]       | Per-agent `denied_tools` / `allow_list` + delegators        |
 //! | [`compaction_wiring`]      | Which context manager a run uses (policy vs caller's)       |
 //! | [`steering_guards`]        | Steering guard pipeline + rewrites                         |
 //! | [`steering_hints`]         | Steering hints                                              |
@@ -28,6 +28,8 @@
 //! | [`steering_tracker_panic`] | Panic isolation of the steering tracker                     |
 //! | [`steering_transformers`]  | Steering transformers                                       |
 //! | [`hot_path_costs`]         | Hot-path cost budget assertions                             |
+//! | [`delegation_routing`]     | Name-keyed dispatch of a delegated tool call                |
+//! | [`delegation_scheduling`]  | A delegator's `mode()` decides its batch bucket              |
 //! | [`support`]                | Shared fixtures                                             |
 
 use std::path::PathBuf;
@@ -44,9 +46,14 @@ use crate::{
 };
 
 mod agent_smoke;
+mod compaction;
 mod compaction_wiring;
 mod compose_pipeline_tests;
+mod delegation_emit_leak;
+mod delegation_routing;
+mod delegation_scheduling;
 mod end_to_end_runtime;
+mod host_wiring;
 mod hot_path_costs;
 mod multi_agent_panel;
 mod parallel_cancel;
@@ -59,7 +66,6 @@ mod steering_hints;
 mod steering_hooks;
 mod steering_tracker_panic;
 mod steering_transformers;
-mod synthetic_emit_leak;
 
 mod lifecycle;
 pub(crate) mod support;

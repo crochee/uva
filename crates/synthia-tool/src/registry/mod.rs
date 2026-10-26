@@ -298,6 +298,71 @@ impl ToolRegistry {
         inserted
     }
 
+    /// Register `entry` only if no tool of that name is registered.
+    ///
+    /// The existence check and the insert share one write guard, so
+    /// two callers racing for the same name cannot both see it free
+    /// and then both insert: exactly one wins and the loser leaves
+    /// the registry untouched. [`Self::get`] followed by
+    /// [`Self::register_entry`] is the same decision without that
+    /// atomicity, and lets the second caller shadow the first.
+    ///
+    /// Returns `true` if the tool was inserted; `false` if the name
+    /// was already taken, by a Core tool or by a dynamic one.
+    pub fn register_entry_if_absent(&self, entry: ToolEntry) -> bool {
+        let mut inner = self.inner.write();
+        let name = synthia_core::RegistryItem::name(&entry).to_string();
+        if inner.tools.contains_key(&name) {
+            return false;
+        }
+        let inserted = self.register_entry_inner(&mut inner, entry).is_some();
+        if inserted {
+            self.version
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        inserted
+    }
+
+    /// Register a tool the binary itself ships, marking it
+    /// [`ToolProvenance::Core`]: the name then cannot be taken by a
+    /// later registration, so a runtime `POST`, a host tool or a
+    /// plugin tool is refused instead of shadowing it. A second core
+    /// registration under a core-owned name is refused too.
+    ///
+    /// Returns `true` if the tool was inserted.
+    pub fn register_core_entry(&self, entry: ToolEntry) -> bool {
+        let name = synthia_core::RegistryItem::name(&entry).to_string();
+        let mut inner = self.inner.write();
+        if core_occupies(&inner, &name) {
+            return false;
+        }
+        let token = RegistrationToken(inner.next_registration);
+        inner.next_registration += 1;
+        inner.tools.entry(name).or_default().push(ProviderEntry {
+            provider_token: token,
+            provenance: ToolProvenance::Core,
+            is_hidden: entry.is_hidden(),
+            exposure: entry.exposure(),
+            tool: entry.tool_instance(),
+        });
+        drop(inner);
+        self.version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    /// Whether a Core tool owns `name`.
+    ///
+    /// This is the immutability predicate registration refuses on,
+    /// exposed so a caller that learns a name out of band — a
+    /// plugin's claimed tools, an operator's config entry — can ask
+    /// the same question before reporting a registration as a
+    /// success.
+    #[must_use]
+    pub fn core_owns(&self, name: &str) -> bool {
+        core_occupies(&self.inner.read(), name)
+    }
+
     /// Insert a [`ToolEntry`] into `inner.tools`, allocating a fresh
     /// `RegistrationToken` for it. Caller must hold the write lock on
     /// `inner`. Returns the token used if the entry was inserted, or
@@ -309,11 +374,7 @@ impl ToolRegistry {
     ) -> Option<RegistrationToken> {
         let tool = entry.tool_instance();
         let name = synthia_core::RegistryItem::name(&entry).to_string();
-        if let Some(existing) = inner.tools.get(&name)
-            && existing
-                .iter()
-                .any(|e| e.provenance == ToolProvenance::Core)
-        {
+        if core_occupies(inner, &name) {
             return None;
         }
         let token = RegistrationToken(inner.next_registration);
@@ -326,6 +387,28 @@ impl ToolRegistry {
             tool,
         };
         inner.tools.entry(name).or_default().push(provider_entry);
+        Some(token)
+    }
+
+    /// Register a `ToolEntry` directly and return the token that
+    /// identifies it.
+    ///
+    /// The token is what a later withdrawal names:
+    /// [`Self::unregister_by_token`] removes exactly the entries
+    /// registered under it and leaves every other entry filed under
+    /// the same name alone — a name can hold a stack of entries, and
+    /// withdrawing one of them must not take the others with it.
+    ///
+    /// Returns `None` if a Core tool with the same name already
+    /// exists and won the immutability guard.
+    pub fn register_entry_with_token(
+        &self,
+        entry: ToolEntry,
+    ) -> Option<RegistrationToken> {
+        let mut inner = self.inner.write();
+        let token = self.register_entry_inner(&mut inner, entry)?;
+        self.version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(token)
     }
 
@@ -484,6 +567,16 @@ impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// The immutability rule, in one place: a name a Core tool owns is not
+// registrable again.
+fn core_occupies(inner: &ToolRegistryInner, name: &str) -> bool {
+    inner.tools.get(name).is_some_and(|entries| {
+        entries
+            .iter()
+            .any(|entry| entry.provenance == ToolProvenance::Core)
+    })
 }
 
 impl Clone for ToolRegistry {

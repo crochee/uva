@@ -23,32 +23,37 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use synthia::session::{SessionSink, manager::InputQueue as SessionInputQueue};
+use synthia::session::{LogWriter, SessionSink};
 use tokio::sync::mpsc;
 
 use crate::{
     cluster::{ClusterRuntime, ControlFrame, SessionKey, SessionOpWire},
     event_stream::EventBroadcaster,
+    session::input_queue::InputQueue as SessionInputQueue,
 };
 
 mod deps;
 mod dispatch;
 mod inner;
+mod live;
 mod ops;
 mod persist;
 mod pin;
 pub(crate) mod run_log;
 mod run_stream;
 mod run_task;
+mod spawn_gate;
 
 pub use deps::RunDependencies;
 use dispatch::run_controller_loop;
 use inner::ControllerInner;
-pub use ops::{SessionOp, SessionState};
+pub use live::{LiveToolCall, LiveTurn};
+pub use ops::{SessionOp, SessionState, SteerDelivery};
 pub use pin::PinnedProvider;
 use pin::SubmittedOp;
 pub(crate) use run_log::RunLog;
 pub use run_stream::{AgentRunStreamFactory, RunStreamFactory};
+pub(crate) use spawn_gate::SpawnGate;
 pub use synthia::harness::{AgentEvent, AgentInput};
 
 /// Default idle timeout before the controller shuts itself down when
@@ -58,7 +63,6 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Shared handle to a running session controller.
 pub struct SessionController {
     session_id: String,
-    user_id: String,
     state: Arc<Mutex<SessionState>>,
     op_tx: mpsc::Sender<SubmittedOp>,
     broadcaster: EventBroadcaster,
@@ -75,6 +79,19 @@ pub struct SessionController {
     /// `submit` publishes control frames and `subscribe` is fed from
     /// the bus instead of a local run loop.
     remote: bool,
+    /// The loop's shared state, for the one operation that must act
+    /// on the live run without waiting behind the serialized op
+    /// channel: a durable steer (see [`Self::steer`]). `None` for a
+    /// remote handle — it owns no run and no log.
+    inner: Option<Arc<ControllerInner>>,
+    /// The session's cold-open gate, owned by this controller.
+    ///
+    /// The gate map holds a weak reference to the lock and this
+    /// controller holds the strong one, so the map's entry lives
+    /// exactly as long as the controller does — whichever path dropped
+    /// it. `None` for a controller that was not opened through the
+    /// cold-open path (a test fixture's own).
+    spawn_gate: parking_lot::Mutex<Option<SpawnGate>>,
 }
 
 impl SessionController {
@@ -85,6 +102,7 @@ impl SessionController {
         session_id: impl Into<String>,
         queue: SessionInputQueue,
         session_store: Arc<dyn SessionSink>,
+        writer: Arc<LogWriter>,
         deps: RunDependencies,
         idle_timeout: Duration,
         run_factory: Arc<dyn RunStreamFactory>,
@@ -94,6 +112,7 @@ impl SessionController {
             session_id,
             queue,
             session_store,
+            writer,
             deps,
             idle_timeout,
             run_factory,
@@ -106,12 +125,17 @@ impl SessionController {
     /// `"{ns}:lease:session:{user}:{session}"`; a controller with an
     /// empty lease publishes no frames and renews nothing (tests and
     /// embedders take that shape).
+    ///
+    /// The `writer` is the session's one writer — the handle that
+    /// stamps the rows' ordinals and batches their flush. It must be
+    /// the writer of the session's own sink.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_lease(
         user_id: impl Into<String>,
         session_id: impl Into<String>,
         queue: SessionInputQueue,
         session_store: Arc<dyn SessionSink>,
+        writer: Arc<LogWriter>,
         deps: RunDependencies,
         idle_timeout: Duration,
         run_factory: Arc<dyn RunStreamFactory>,
@@ -134,41 +158,50 @@ impl SessionController {
         let subagent_router = deps.subagent_router.clone();
         let cluster = Arc::clone(&deps.cluster);
 
-        let controller = Arc::new(Self {
+        let inner = Arc::new(ControllerInner {
             session_id: session_id.clone(),
             user_id: user_id.clone(),
             state: state.clone(),
-            op_tx,
-            broadcaster: broadcaster.clone(),
-            alive: alive.clone(),
-            closed: AtomicBool::new(false),
-            snapshot_bus: snapshot_bus.clone(),
-            remote: false,
-        });
-
-        let inner = Arc::new(ControllerInner {
-            session_id: controller.session_id.clone(),
-            user_id: controller.user_id.clone(),
-            state,
             queue,
             session_store,
-            broadcaster,
+            writer,
+            broadcaster: broadcaster.clone(),
             deps: parking_lot::Mutex::new(deps),
             usage,
             subagent_router,
-            last_request_header: parking_lot::Mutex::new(None),
             idle_timeout,
             run_cancel: Mutex::new(None),
             run_factory,
-            alive,
-            snapshot_bus,
-            pending_multimodal: parking_lot::Mutex::new(None),
+            alive: alive.clone(),
+            snapshot_bus: snapshot_bus.clone(),
+            pending_multimodal: parking_lot::Mutex::new(
+                std::collections::VecDeque::new(),
+            ),
             pending_provider: parking_lot::Mutex::new(None),
             shutdown_finalised: AtomicBool::new(false),
             cluster,
             lease,
+            live: parking_lot::Mutex::new(LiveTurn::default()),
+            pending_resume: parking_lot::Mutex::new(None),
+            suspended: AtomicBool::new(false),
+            steer_gate: tokio::sync::Mutex::new(()),
         });
 
+        // The handle keeps the loop's shared state so a steer can act
+        // on the live run directly; the op loop, the run task, and the
+        // handle all share the one `Arc`.
+        let controller = Arc::new(Self {
+            session_id,
+            state,
+            op_tx,
+            broadcaster,
+            alive,
+            closed: AtomicBool::new(false),
+            snapshot_bus,
+            remote: false,
+            inner: Some(Arc::clone(&inner)),
+            spawn_gate: parking_lot::Mutex::new(None),
+        });
         tokio::spawn(run_controller_loop(inner, op_rx));
 
         controller
@@ -196,6 +229,11 @@ impl SessionController {
     /// Provider pins are node-local (`PinnedProvider` holds an
     /// `Arc<dyn ModelProvider>`), so a pinned submit on a remote
     /// handle is rejected rather than silently downgraded.
+    ///
+    /// A remote handle takes no writer: it runs no agent, writes no
+    /// row, and holds no checkpoint. The node that owns the session
+    /// owns its log, and a forwarder must not touch the session's
+    /// files — not even to open them.
     #[must_use]
     pub fn spawn_remote(
         user_id: impl Into<String>,
@@ -214,7 +252,6 @@ impl SessionController {
 
         let controller = Arc::new(Self {
             session_id,
-            user_id,
             state,
             op_tx,
             broadcaster: broadcaster.clone(),
@@ -222,6 +259,11 @@ impl SessionController {
             closed: AtomicBool::new(false),
             snapshot_bus,
             remote: true,
+            // A forwarder owns no run and no log: it can only
+            // forward the op, so a steer on it becomes a queued turn
+            // on the owning node.
+            inner: None,
+            spawn_gate: parking_lot::Mutex::new(None),
         });
 
         // Forwarder: local `submit` → bus control frame.
@@ -245,7 +287,23 @@ impl SessionController {
                                 key: key.clone(),
                                 op,
                             },
-                            None => continue,
+                            None => {
+                                // Resume has no wire form: it reads
+                                // the owner's log, so it is owner-node
+                                // only. Say so rather than drop it
+                                // silently.
+                                let kind = match &other {
+                                    SessionOp::Resume { .. } => "resume",
+                                    SessionOp::StartPending => "start_pending",
+                                    _ => "unknown",
+                                };
+                                tracing::warn!(
+                                    session = %key,
+                                    op = kind,
+                                    "cluster: op has no wire form; not forwarded"
+                                );
+                                continue;
+                            }
                         },
                     };
                     if let Err(e) = cluster.bus.publish_control(frame).await {
@@ -312,6 +370,51 @@ impl SessionController {
         Ok(())
     }
 
+    /// Deliver `content` into the run that is live now.
+    ///
+    /// A live run receives the message as a durable `user_message`
+    /// row (`source: "steer"`), flushed before this returns. The
+    /// loop re-derives its transcript from the log at every step
+    /// boundary, so the model sees the message in its next request
+    /// and never in the one already in flight; no in-memory steer
+    /// queue sits in between.
+    ///
+    /// When no run is live — it already settled, the session is
+    /// idle, or this is a remote forwarder — the message becomes an
+    /// ordinary queued turn and nothing is appended here: the run
+    /// that starts logs the turn itself, which is what keeps one
+    /// message one row.
+    ///
+    /// `provider` follows [`Self::submit_with_provider`]: it applies
+    /// only when the message degrades to a queued turn, because a
+    /// live run has already sampled with its own provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns the writer's error when a steer row cannot be made
+    /// durable, and the channel's error when a queued fallback cannot
+    /// be delivered.
+    pub async fn steer(
+        &self,
+        content: String,
+        provider: Option<PinnedProvider>,
+    ) -> Result<SteerDelivery> {
+        if let Some(inner) = self.inner.as_ref()
+            && inner.append_live_steer(&content).await?
+        {
+            return Ok(SteerDelivery::Steer);
+        }
+        self.submit_with_provider(
+            SessionOp::Steer {
+                content,
+                priority: 1,
+            },
+            provider,
+        )
+        .await?;
+        Ok(SteerDelivery::Queue)
+    }
+
     /// Convenience helper to request cancellation of the current run.
     pub async fn cancel(&self) -> Result<()> {
         self.submit(SessionOp::Cancel { reason: None }).await
@@ -328,9 +431,162 @@ impl SessionController {
         self.remote
     }
 
-    /// Current controller state.
+    /// Current controller state: the in-memory lifecycle only.
+    ///
+    /// [`Self::session_state`] is the wire answer — it also derives
+    /// `AwaitingApproval` from the log.
     pub fn state(&self) -> SessionState {
         *self.state.lock().expect("state mutex poisoned")
+    }
+
+    /// The state the wire reports.
+    ///
+    /// A live run wins outright. Otherwise the log decides whether a
+    /// suspended turn is waiting for decisions: an `approval_asked`
+    /// row with no `approval_decided` in the last suspended segment
+    /// means `AwaitingApproval`, whatever this process remembers. That
+    /// is what lets a restarted server report the same state.
+    ///
+    /// A status-shaped surface has no error channel, so an unreadable
+    /// log reports the in-memory state after a warning. The run path
+    /// does not make that trade — see
+    /// `ControllerInner::awaiting_approval`.
+    pub async fn session_state(&self) -> SessionState {
+        let state = self.state();
+        if state == SessionState::Running || self.remote {
+            return state;
+        }
+        let Some(inner) = self.inner.as_ref() else {
+            return state;
+        };
+        match inner.awaiting_approval().await {
+            Ok(true) => SessionState::AwaitingApproval,
+            Ok(false) => state,
+            Err(error) => {
+                tracing::warn!(
+                    target: "synthia.session",
+                    session_id = %inner.session_id,
+                    %error,
+                    "status: the log could not be read; reporting the                      in-memory state"
+                );
+                state
+            }
+        }
+    }
+
+    /// Re-queue a prompt a previous owner parked.
+    ///
+    /// The `parked_prompt` row is already in the log — the caller read
+    /// it and rebuilt the parts — so nothing is appended here. Appending
+    /// a second row per restart would grow the log by one entry per
+    /// process, and the row's job (say the turn is queued) is already
+    /// done. `park_id` is the recovered row's key, so the run this
+    /// prompt eventually starts spends the row that already exists
+    /// instead of leaving it to be recovered again. Returns `false` for
+    /// a remote handle, which owns no queue.
+    pub fn restore_parked_prompt(
+        &self,
+        parts: Vec<synthia::provider::ContentPart>,
+        park_id: String,
+        agent_name: Option<String>,
+        rerun: bool,
+    ) -> bool {
+        let Some(inner) = self.inner.as_ref() else {
+            return false;
+        };
+        inner
+            .pending_multimodal
+            .lock()
+            .push_back(inner::ParkedPrompt {
+                parts,
+                park_id,
+                agent_name,
+                rerun,
+            });
+        true
+    }
+
+    /// Install the state the log implies.
+    ///
+    /// A controller spawned over an existing session starts from
+    /// `Idle` — process memory has no history — so the node that takes a
+    /// session over asks the log what the session is doing and records
+    /// the answer here. A live run is never overwritten: the adoption is
+    /// the takeover path, which runs before this controller has a run.
+    pub(crate) fn adopt_state(&self, state: SessionState) {
+        let mut current = self.state.lock().expect("state mutex poisoned");
+        if *current == SessionState::Running {
+            return;
+        }
+        *current = state;
+    }
+
+    /// Give the controller the session's cold-open gate.
+    ///
+    /// The gate belongs to the controller: the map holds a weak
+    /// reference to the lock and the controller holds the strong one,
+    /// so the map's entry leaves with the controller — through every
+    /// path that drops it, not only the one that evicts a session
+    /// explicitly.
+    ///
+    /// The first gate wins. A controller that already owns one keeps
+    /// it, so a session that goes cold again queues on the same lock
+    /// as a request already waiting for it.
+    pub(crate) fn attach_spawn_gate(&self, gate: SpawnGate) {
+        let mut slot = self.spawn_gate.lock();
+        if slot.is_none() {
+            *slot = Some(gate);
+        }
+    }
+
+    /// Serialise a manual compaction against run starts, steers and
+    /// cancels.
+    ///
+    /// `maybe_start_run` takes the same gate, so a compaction pass that
+    /// holds it cannot have a run begin underneath it and read a
+    /// surface the replace is about to rewrite. The pass holds the gate
+    /// for its whole duration: a steer during a manual compaction waits
+    /// for it (the operation is deliberate and rare).
+    ///
+    /// The pass has **no summariser timeout today**: a provider that
+    /// never answers wedges the gate (and therefore steers and run
+    /// starts) until it returns. A timeout belongs on the compaction
+    /// request; it is deferred rather than faked with a timer here.
+    pub async fn compaction_gate(
+        &self,
+    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        match self.inner.as_ref() {
+            Some(inner) => Some(inner.steer_gate.lock().await),
+            None => None,
+        }
+    }
+
+    /// Feed one event into the live projection, for route tests that
+    /// cannot drive a real run.
+    #[cfg(test)]
+    pub(crate) fn tap_live_for_test(
+        &self,
+        event: &synthia::harness::AgentEvent,
+    ) {
+        if let Some(inner) = self.inner.as_ref() {
+            inner.tap_live(event);
+        }
+    }
+
+    /// Start a fresh live projection, for route tests.
+    #[cfg(test)]
+    pub(crate) fn reset_live_for_test(&self) {
+        if let Some(inner) = self.inner.as_ref() {
+            inner.reset_live();
+        }
+    }
+
+    /// The in-progress turn's transient projection.
+    pub fn live_snapshot(&self) -> LiveTurn {
+        match self.inner.as_ref() {
+            Some(inner) => inner.live_snapshot(),
+            None => LiveTurn::default(),
+        }
     }
 
     /// Returns `true` while the background loop is still running.

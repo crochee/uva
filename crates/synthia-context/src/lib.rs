@@ -13,14 +13,14 @@
 //! | [`context_manager`] | `NoopContextManager` (estimate-only) + `TruncatingContextManager` (pairwise drop) | traitclaw `ContextManager` |
 //! | [`summarizing`] | `SummarizingContextManager` — summarise tool-result batches, replace with compact assistant summary, archive originals for `context_tree_query` | [`pi-context-prune`](https://github.com/championswimmer/pi-context-prune) |
 //! | [`dag`] | `DagContextManager` — two-phase leaf + condensed hierarchical DAG compaction | [`pi-lcm`](https://github.com/codexstar69/pi-lcm) |
-//! | [`memory`] | 3-layer `Memory` (conversation / working / long-term) + `SessionMemory` sink adapter + `FileMemory` scoped file tier + shared `events_to_messages` projection | traitclaw `Memory`, pi-subagents `memory.ts` |
+//! | [`memory`] | 3-layer `Memory` (conversation / working / long-term) + `SessionMemory` writer adapter + `FileMemory` scoped file tier + shared `events_to_messages` projection | traitclaw `Memory`, pi-subagents `memory.ts` |
 //! ## Dependency direction
 //!
 //! ```text
 //! synthia-harness ──▶ synthia-context ──▶ synthia-provider
 //!                        │
 //!                        ▼
-//!                 synthia-session (SessionSink — conversation
+//!                 synthia-session (LogWriter — conversation
 //!                 tier of [`memory`])
 //! ```
 //!
@@ -88,4 +88,5 @@ pub use summarizing::{
     SummarizingContextManager,
     ToolCallArchive,
     ToolCallRecord,
+    ToolCallRecordKind,
 };

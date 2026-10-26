@@ -56,6 +56,7 @@ fn wire_tags_are_stable() {
         (WarningKind::Hook, "\"hook\""),
         (WarningKind::EditConflict, "\"edit_conflict\""),
         (WarningKind::Guard, "\"guard\""),
+        (WarningKind::Attachments, "\"attachments\""),
     ] {
         assert_eq!(serde_json::to_string(&kind).unwrap(), tag);
     }
@@ -147,4 +148,29 @@ fn model_done_carries_sampling_result() {
     let json = serde_json::to_string(&event).unwrap();
     assert!(json.contains("\"type\":\"ModelDone\""));
     assert!(json.contains("\"text\":\"hi\""));
+}
+
+#[test]
+fn plugin_is_a_live_only_notification() {
+    let event = SystemEvent::Plugin {
+        kind: "acme.span".to_string(),
+        payload: serde_json::json!({"span": "s1"}),
+    };
+    let json: serde_json::Value = serde_json::to_value(&event).unwrap();
+    assert_eq!(json["type"], "plugin", "the wire tag is snake_case");
+    assert_eq!(json["kind"], "acme.span", "the kind is the plugin's own");
+    assert_eq!(json["payload"]["span"], "s1");
+    assert_eq!(event.kind(), "Plugin");
+
+    // Live only: the durable half of the same fact is the session
+    // log's own `plugin` row, never this event.
+    let wrapped = AgentEvent::System(event);
+    assert!(
+        !wrapped.is_durable(),
+        "a plugin notification is a ping, not a record"
+    );
+    assert!(
+        wrapped.size_hint() >= "acme.span".len() + "s1".len(),
+        "the payload is priced into the buffer hint"
+    );
 }

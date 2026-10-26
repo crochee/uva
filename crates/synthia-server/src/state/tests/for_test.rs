@@ -20,7 +20,7 @@ async fn for_test_tool_registry_includes_skill_tool() {
     let session_registry = SessionRegistry::new(dir.path().join("sessions"));
     let state =
         AppState::for_test(session_registry, dir.path().to_path_buf()).await;
-    let reg = state.tool_registry.read().await;
+    let reg = state.tool_registry.as_ref();
     let entry = reg
         .get("skill")
         .expect("skill tool must be registered in the default registry");

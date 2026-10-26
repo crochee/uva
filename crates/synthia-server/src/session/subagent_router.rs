@@ -20,10 +20,14 @@
 //!    [`SessionRegistry`] every top-level session uses, so the child
 //!    shows up in `GET /api/v1/sessions` and replays through
 //!    `GET /api/v1/sessions/{id}` exactly like a user conversation;
-//! 2. every durable inner event is appended **unwrapped** to the
-//!    child's log, in the same row shape a top-level run writes
-//!    (`{"type":"Model","data":…}`), so the transcript folds with the
-//!    standard machinery;
+//! 2. the child's model facts — one `assistant_message` row per
+//!    turn, one `tool_result` row per result — are written by the
+//!    child's **own harness**, through the child session's writer
+//!    this module resolves for it
+//!    ([`SubagentWriters`](synthia::harness::SubagentWriters)); the
+//!    router copies none of the child's events (none is durable),
+//!    so the child's transcript folds with the standard
+//!    machinery exactly like a top-level run's;
 //! 3. a child `SessionEnded` closes the child log with a
 //!    `subagent_exit` footer;
 //! 4. the **parent's** log gets only the two lightweight
@@ -33,6 +37,15 @@
 //! 5. if a controller for the child session exists (a client opened
 //!    its SSE stream), the inner event is broadcast through it, so
 //!    the child session streams live like any other.
+//!
+//! Every row the router writes — the child's own and the parent's
+//! markers alike — goes through that session's one writer, so each
+//! log keeps one ordinal sequence and every row is stamped with its
+//! ordinal. The child's writer is flushed here before the child's
+//! live tail fires: the child has no run of its own to flush for it.
+//! The parent's markers ride the parent run's flush cadence (each
+//! durable parent event flushes, and the run task flushes at the
+//! tail).
 //!
 //! Nested delegation (a child delegating a grandchild) arrives as
 //! `Agent(m1, Agent(m2, inner))`. The recursion keeps each level's
@@ -45,7 +58,6 @@ use std::sync::Arc;
 
 use dashmap::DashSet;
 use synthia::{
-    core::Clock,
     harness::{AgentEvent, AgentMeta, SystemEvent},
     session::{manager::SessionRegistry, subagent_enter, subagent_exit},
 };
@@ -67,12 +79,15 @@ enum ParentSink<'a> {
 pub struct SubagentRouter {
     registry: Arc<SessionRegistry>,
     active: Arc<ActiveSessions>,
-    clock: synthia::core::SharedClock,
-    /// Child session ids whose `subagent_enter` header has been
-    /// written. Ids are ULIDs minted per delegation, so an id is
-    /// never legitimately reused; the set only guards the
-    /// double-write race between two events of the same child.
-    entered: DashSet<String>,
+    /// Child session ids whose own header + prompt rows are
+    /// written — by [`Self::open_child_session`] when the run
+    /// carried a writer source, otherwise by [`Self::route`] on
+    /// the first event. Ids are ULIDs minted per delegation, so an
+    /// id is never legitimately reused.
+    opened: DashSet<String>,
+    /// Child session ids whose `subagent_enter` marker has been
+    /// written to the parent's log.
+    marked: DashSet<String>,
 }
 
 impl SubagentRouter {
@@ -82,14 +97,55 @@ impl SubagentRouter {
     pub fn new(
         registry: Arc<SessionRegistry>,
         active: Arc<ActiveSessions>,
-        clock: synthia::core::SharedClock,
     ) -> Self {
         Self {
             registry,
             active,
-            clock,
-            entered: DashSet::new(),
+            opened: DashSet::new(),
+            marked: DashSet::new(),
         }
+    }
+
+    /// Open the child session `meta` names and return its writer.
+    ///
+    /// Called by the delegation runner (through
+    /// [`ChildSessionWriters`]) before the child run starts: the
+    /// enter header and dispatch prompt are stamped now, so the
+    /// child's own first row — its `request_header`, its first
+    /// assistant turn — lands after them. The rows take the
+    /// writer's synchronous path; the child's first flush lands
+    /// them.
+    pub(crate) fn open_child_session(
+        &self,
+        user_id: &str,
+        parent_session_id: &str,
+        meta: &AgentMeta,
+    ) -> Arc<synthia::session::LogWriter> {
+        let child_id = meta.child_session_id.trim().to_string();
+        let writer = self.registry.writer(user_id, &child_id);
+        if !is_safe_session_id(&child_id) {
+            return writer;
+        }
+        if self.opened.insert(child_id.clone()) {
+            let depth: u32 = meta.parent_depth.try_into().unwrap_or(u32::MAX);
+            let agent_name = meta.agent_name.as_deref().unwrap_or("unknown");
+            if let Ok(header) = serde_json::to_value(subagent_enter(
+                &child_id,
+                parent_session_id,
+                depth,
+                agent_name,
+            )) {
+                writer.append_nowait(header);
+            }
+            if let Some(prompt) = meta.prompt.as_ref().filter(|p| !p.is_empty())
+            {
+                writer.append_nowait(serde_json::json!({
+                    "type": "UserInput",
+                    "data": { "text": prompt },
+                }));
+            }
+        }
+        writer
     }
 
     /// Route one wrapped child event (and, recursively, any deeper
@@ -121,7 +177,8 @@ impl SubagentRouter {
                 parent_session_id,
                 child_session_id = %meta.child_session_id,
                 %error,
-                "subagent router: dropping child event after write failure"
+                "subagent router: a write failure left the child's \
+                 rows owed to the log; the next flush writes them"
             );
         }
     }
@@ -163,44 +220,47 @@ impl SubagentRouter {
         }
         let depth: u32 = meta.parent_depth.try_into().unwrap_or(u32::MAX);
         let agent_name = meta.agent_name.as_deref().unwrap_or("unknown");
-        let sink = self.registry.sink(user_id, &child_id);
+        // The child's rows go through the child session's writer —
+        // a different session, so a different writer, but the same
+        // rule: one writer per session, one ordinal source. The
+        // writer stamps each row's `seq` and `ts`.
+        let writer = self.registry.writer(user_id, &child_id);
 
-        if self.entered.insert(child_id.clone()) {
+        if self.marked.insert(child_id.clone()) {
             let header = serde_json::to_value(subagent_enter(
                 &child_id,
                 parent_session_id,
                 depth,
                 agent_name,
             ))?;
-            // Every row the router writes to the child's sink
-            // reserves its ordinal from that sink's counter — the
-            // child session's log is written by the router and by
-            // the child's own run, and one counter keeps the two
-            // from colliding.
-            sink.alloc_seq();
-            sink.append(&self.stamp_ts(header.clone())).await?;
-            if let Some(prompt) = meta.prompt.as_ref().filter(|p| !p.is_empty())
-            {
-                sink.alloc_seq();
-                sink.append(&serde_json::json!({
-                    "type": "UserInput",
-                    "data": { "text": prompt },
-                }))
-                .await?;
+            // The child's own header + prompt were pre-written by
+            // `open_child_session` when the run carried a writer
+            // source; without one this route is the only writer
+            // they have, so they land here.
+            if !self.opened.contains(&child_id) {
+                writer.append(header.clone()).await?;
+                if let Some(prompt) =
+                    meta.prompt.as_ref().filter(|p| !p.is_empty())
+                {
+                    writer
+                        .append(serde_json::json!({
+                            "type": "UserInput",
+                            "data": { "text": prompt },
+                        }))
+                        .await?;
+                }
             }
             self.append_to_parent(&mut parent, header).await?;
         }
 
         match event {
             AgentEvent::Agent(inner_meta, inner_event) => {
-                // The wrapped level below is THIS child's record of
+                // The wrapped level below is THIS child's record
                 // having delegated; the innermost events belong to
-                // the grandchild's own session.
-                if event.is_durable() {
-                    let value = serde_json::to_value(event)?;
-                    sink.alloc_seq();
-                    sink.append(&self.stamp_ts(value)).await?;
-                }
+                // the grandchild's own session. The wrapped row
+                // itself is not copied: the child's model facts
+                // come from the child's own writer (see
+                // [`SubagentWriters`]), never from this event tap.
                 self.route_level(
                     user_id,
                     &child_id,
@@ -211,11 +271,10 @@ impl SubagentRouter {
                 .await?;
             }
             inner => {
-                if inner.is_durable() {
-                    let value = serde_json::to_value(inner)?;
-                    sink.alloc_seq();
-                    sink.append(&self.stamp_ts(value)).await?;
-                }
+                // Nothing to copy: no `AgentEvent` is durable any
+                // more — the child's harness writes its own rows
+                // through the child session's writer. Only the
+                // exit footer is the router's to record.
                 if let AgentEvent::System(SystemEvent::SessionEnded {
                     reason,
                 }) = inner
@@ -225,11 +284,36 @@ impl SubagentRouter {
                         depth,
                         reason.as_str(),
                     ))?;
-                    sink.alloc_seq();
-                    sink.append(&self.stamp_ts(footer.clone())).await?;
+                    writer.append(footer.clone()).await?;
                     self.append_to_parent(&mut parent, footer).await?;
                 }
             }
+        }
+
+        // The child's rows are durable before the session is read or
+        // streamed: the child has no run of its own to flush for it,
+        // so this level's flush is the one that lands them.
+        // A failed flush does not drop the rows — they wait in the
+        // writer's spill — and the child's last event has no later
+        // flush to lean on, so one retry catches a transient write
+        // error before the failure is surfaced.
+        let flushed = match writer.flush().await {
+            Ok(()) => Ok(()),
+            Err(first) => {
+                tracing::warn!(
+                    target: "synthia.session",
+                    child_session_id = %child_id,
+                    %first,
+                    "subagent router: retrying the child's flush"
+                );
+                writer.flush().await
+            }
+        };
+        if let Err(error) = flushed {
+            return Err(anyhow::anyhow!(
+                "the child's rows stay owed to the log after a failed \
+                 flush: {error}"
+            ));
         }
 
         // Live tail: a client that opened the child session's stream
@@ -258,24 +342,46 @@ impl SubagentRouter {
         Ok(())
     }
 
-    /// Stamp an RFC 3339 timestamp on a row the typed builders leave
-    /// blank. Rows written straight to a sink (everything except the
-    /// root parent's `RunLog` path, which stamps its own) get their
-    /// wall clock here so replay views can order them.
-    fn stamp_ts(&self, mut value: serde_json::Value) -> serde_json::Value {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert(
-                "ts".to_string(),
-                serde_json::Value::String(self.clock.now().to_rfc3339()),
-            );
-        }
-        value
-    }
-
     /// Session registry the router creates child sinks through.
     #[must_use]
     pub fn registry(&self) -> &Arc<SessionRegistry> {
         &self.registry
+    }
+}
+
+/// [`SubagentWriters`](synthia::harness::SubagentWriters) bound to
+/// one parent run: a delegated child's harness writes its model
+/// facts through the child session's own writer, opened here
+/// through the router so the child's log opens in order.
+pub struct ChildSessionWriters {
+    router: Arc<SubagentRouter>,
+    user_id: String,
+    parent_session_id: String,
+}
+
+impl ChildSessionWriters {
+    /// Open child sessions for `user_id`'s delegations out of
+    /// `parent_session_id`.
+    pub fn new(
+        router: Arc<SubagentRouter>,
+        user_id: String,
+        parent_session_id: String,
+    ) -> Self {
+        Self {
+            router,
+            user_id,
+            parent_session_id,
+        }
+    }
+}
+
+impl synthia::harness::SubagentWriters for ChildSessionWriters {
+    fn open_child(&self, meta: &AgentMeta) -> Arc<synthia::session::LogWriter> {
+        self.router.open_child_session(
+            &self.user_id,
+            &self.parent_session_id,
+            meta,
+        )
     }
 }
 
@@ -293,11 +399,7 @@ fn is_safe_session_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use synthia::{
-        core::SharedClock,
-        provider::{ContentPart, TextContent},
-        session::SurfaceLedger,
-    };
+    use synthia::provider::{ContentPart, TextContent};
 
     use super::*;
 
@@ -337,19 +439,28 @@ mod tests {
         let router = SubagentRouter::new(
             Arc::clone(&registry),
             Arc::new(ActiveSessions::new()),
-            SharedClock::system(),
         );
         let parent_sink = registry.sink("u1", "parent-1");
-        let mut log = RunLog::new(
-            Arc::clone(&parent_sink),
-            Arc::new(SurfaceLedger::new()),
-            SharedClock::system(),
-        );
+        let mut log = RunLog::new(registry.writer("u1", "parent-1"));
 
         let meta = AgentMeta::new("parent-1", "child-1", 1)
             .with_agent_name(Some("scout".to_string()));
         // First forwarded event carries the dispatch prompt.
         let first_meta = meta.clone().with_prompt(Some("map the repo".into()));
+        // The child's run opens its own session before its first
+        // row: the opener stamps the header + prompt, and the
+        // child's harness writes its turn as one assistant row
+        // through the same writer — the shape this test then
+        // expects the routing below to fit around.
+        let child_writer =
+            router.open_child_session("u1", "parent-1", &first_meta);
+        child_writer.append_nowait(serde_json::json!({
+            "type": "assistant_message",
+            "data": {"role": "assistant",
+                     "content": {"Multi": [
+                         {"type": "text", "text": "step one"}
+                     ]}},
+        }));
         router
             .route(
                 "u1",
@@ -362,6 +473,13 @@ mod tests {
         router
             .route("u1", "parent-1", &meta, &ended_event(), &mut log)
             .await;
+        // The parent's markers ride the parent run's flush cadence;
+        // this test has no run, so the flush is the test's.
+        registry
+            .writer("u1", "parent-1")
+            .flush()
+            .await
+            .expect("parent flush");
         let child_events = registry
             .sink("u1", "child-1")
             .read()
@@ -369,8 +487,15 @@ mod tests {
             .expect("child read");
         assert_eq!(
             row_types(&child_events),
-            vec!["subagent_enter", "UserInput", "Model", "subagent_exit"],
-            "child log: header, prompt, own events, footer"
+            vec![
+                "subagent_enter",
+                "UserInput",
+                "assistant_message",
+                "subagent_exit"
+            ],
+            "child log: header, prompt, the child's own assistant \
+             row, footer — the child's model facts come from the \
+             child's writer, never inlined from the parent's stream"
         );
         assert_eq!(
             child_events[1]
@@ -409,19 +534,24 @@ mod tests {
         let router = SubagentRouter::new(
             Arc::clone(&registry),
             Arc::new(ActiveSessions::new()),
-            SharedClock::system(),
         );
         let parent_sink = registry.sink("u1", "root");
-        let mut log = RunLog::new(
-            Arc::clone(&parent_sink),
-            Arc::new(SurfaceLedger::new()),
-            SharedClock::system(),
-        );
+        let mut log = RunLog::new(registry.writer("u1", "root"));
 
         let m1 = AgentMeta::new("root", "child-1", 1)
             .with_agent_name(Some("scout".to_string()));
         let m2 = AgentMeta::new("child-1", "child-2", 2)
             .with_agent_name(Some("deep".to_string()));
+        // The grandchild's run opens its own session and writes
+        // its turn through it, exactly one level down.
+        let grandchild_writer = router.open_child_session("u1", "child-1", &m2);
+        grandchild_writer.append_nowait(serde_json::json!({
+            "type": "assistant_message",
+            "data": {"role": "assistant",
+                     "content": {"Multi": [
+                         {"type": "text", "text": "deep work"}
+                     ]}},
+        }));
         let nested = AgentEvent::Agent(m2, Box::new(text_event("deep work")));
         router
             .route(
@@ -432,6 +562,11 @@ mod tests {
                 &mut log,
             )
             .await;
+        registry
+            .writer("u1", "root")
+            .flush()
+            .await
+            .expect("parent flush");
 
         let grandchild = registry
             .sink("u1", "child-2")
@@ -440,8 +575,9 @@ mod tests {
             .expect("grandchild read");
         assert_eq!(
             row_types(&grandchild),
-            vec!["subagent_enter", "Model"],
-            "grandchild log: its own header + its own event"
+            vec!["subagent_enter", "assistant_message"],
+            "grandchild log: its own header + its own assistant row, \
+             written by the grandchild's writer"
         );
         assert_eq!(
             grandchild[0]
@@ -458,8 +594,9 @@ mod tests {
             .expect("child read");
         assert_eq!(
             row_types(&child),
-            vec!["subagent_enter", "UserInput", "Agent"],
-            "child log: header, prompt, and the wrapped grandchild trace"
+            vec!["subagent_enter", "UserInput"],
+            "child log: header + prompt; the wrapped grandchild \
+             trace is not inlined here"
         );
         let parent_events = parent_sink.read().await.expect("parent read");
         assert_eq!(

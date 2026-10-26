@@ -18,10 +18,6 @@ struct ChunkState(Arc<parking_lot::Mutex<ChunkStateInner>>);
 struct ChunkStateInner {
     assembler: BlockAssembler,
     published: usize,
-    /// Monotonic ordinal stamped on every `SessionEvent::AssistantChunk` so
-    /// the durable log preserves delta order and `assemble_chunks` rebuilds
-    /// the text deterministically.
-    chunk_seq: u64,
 }
 
 /// `Clone` shares the pass-local fold state (an `Arc`) so the provider's
@@ -38,42 +34,24 @@ impl ChunkAssembler {
 
     pub(super) fn ingest(&self, sink: &EventSink, chunk: StreamChunk) {
         let mut guard = self.state.0.lock();
-        // Preserve the raw delta durably BEFORE folding it into the
-        // assembled turn. Only emitted when a typed sink is wired,
-        // so the in-memory test harness pays nothing.
-        if sink.has_typed() {
-            let chunk_seq = guard.chunk_seq;
-            guard.chunk_seq += 1;
-            // `describe_chunk` performs the single delta clone;
-            // the single-key `data` object is built by hand so
-            // the cloned String moves straight into the durable
-            // record — byte-identical to the `json!` wire shape.
-            let (delta, finish_reason) = describe_chunk(&chunk);
-            let mut data = serde_json::Map::with_capacity(1);
-            data.insert(
-                String::from("delta"),
-                serde_json::Value::String(delta),
-            );
-            sink.emit_typed(synthia_session::SessionEvent::AssistantChunk {
-                seq: 0,
-                ts: String::new(),
-                chunk_seq,
-                finish_reason,
-                data: serde_json::Value::Object(data),
-            });
-        }
         handle_chunk(chunk, &mut guard, sink);
     }
 
     /// Safe to call before `IsDone`: the assembler drains any tool buffer the
     /// stream never closed (network cut-off, missing `ToolCallEnd`), so a
     /// partial tool call reaches the wire and history once.
+    ///
+    /// Also the one place the turn is persisted: the assembled
+    /// message — text and tool calls together — becomes exactly
+    /// one `assistant_message` row through the sink's typed path.
+    /// The deltas that produced it live on the event stream only.
     pub(super) fn finalize_outcome(&self, sink: &EventSink) -> SampleOutcome {
         let mut guard = self.state.0.lock();
         let (result, parts, _incomplete) = guard.assembler.finalize_assistant();
         // The drain above can append tool calls the stream never
         // closed; publish whatever is new before returning.
         publish_parts(&parts, &mut guard.published, sink);
+        sink.write_assistant_turn(&parts);
         SampleOutcome {
             result: Arc::new(result),
             parts,
@@ -84,18 +62,6 @@ impl ChunkAssembler {
 // ---------------------------------------------------------------------------
 // Free helpers — kept because they operate on plain data, no state.
 // ---------------------------------------------------------------------------
-
-fn describe_chunk(chunk: &StreamChunk) -> (String, Option<String>) {
-    match chunk {
-        StreamChunk::Content(ContentPart::Text(t)) => (t.text.clone(), None),
-        StreamChunk::Stop(reason) => (String::new(), Some(reason.clone())),
-        StreamChunk::IsDone { result } => {
-            (String::new(), result.stop_reason.clone())
-        }
-        _ => (String::new(), None),
-    }
-}
-
 fn publish_parts(
     parts: &[ContentPart],
     published: &mut usize,
@@ -155,7 +121,7 @@ mod tests {
 
     fn sink() -> (EventSink, mpsc::UnboundedReceiver<AgentEvent>) {
         let (tx, rx) = mpsc::unbounded();
-        (EventSink::new(Arc::new(tx), None, None), rx)
+        (EventSink::new(Arc::new(tx), None), rx)
     }
 
     fn model_parts(

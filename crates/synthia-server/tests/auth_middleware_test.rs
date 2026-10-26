@@ -106,3 +106,25 @@ async fn test_sessions_list_succeeds_when_auth_unconfigured() {
         resp.status()
     );
 }
+
+#[tokio::test]
+async fn test_plugins_list_succeeds_when_auth_unconfigured() {
+    // This route exposes deployment topology, so it must sit behind
+    // the same layer as its neighbours rather than being mounted
+    // outside the protected router. A per-route test is the only
+    // thing that notices if it is moved.
+    let app = make_app().await;
+
+    let req = Request::builder()
+        .uri("/api/v1/plugins")
+        .method("GET")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let resp = app.oneshot(req).await.unwrap();
+    assert!(
+        resp.status().is_success(),
+        "/api/v1/plugins must succeed when SYNTHIA_API_KEY is unset, got {}",
+        resp.status()
+    );
+}

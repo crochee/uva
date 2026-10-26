@@ -1,0 +1,25 @@
+[package]
+name = "synthia-plugin-protocol"
+description = "Wire protocol for Synthia's dynamic plugin channel: JSON-RPC method names, capability negotiation, and stable event/decision types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# The dynamic plugin channel's wire contract, and nothing else. A
+# third-party plugin author depends on this crate alone: serde derives
+# and `serde_json::Value` for the free-form JSON-RPC payloads. No
+# harness types, no runtime, no error-enum dependency (the wire error
+# is a closed enum below, so `thiserror` would buy nothing).
+#
+# Do not add a dependency here without asking whether a plugin author
+# in another language would accept it in *their* build.
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

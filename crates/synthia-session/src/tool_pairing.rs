@@ -25,9 +25,10 @@
 //! the first call (so cold-start replays work) and incrementally
 //! updated as new events arrive.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
+use synthia_provider::{ContentPart, Message, Role};
 
 use crate::events::{ReplaceRange, SessionEvent, SurfaceOp};
 
@@ -233,6 +234,72 @@ pub fn compaction_balanced(
     validate_replace_with_balance(cache, compaction.seq(), range)
 }
 
+/// `true` iff the prefix `history[..cut]` holds no unanswered
+/// `tool_use`.
+///
+/// This is the prefix half of [`balanced_message_cut`], exposed for
+/// callers that *replace* a range rather than keep a tail: a
+/// `Replace` deletes the message its start lands on, so the
+/// "kept tail must not begin with a tool result" half does not
+/// apply to that boundary. Keeping both compaction paths on this
+/// one predicate is what stops them from growing two subtly
+/// different pairing rules.
+#[must_use]
+pub fn balanced_prefix(history: &[Message], cut: usize) -> bool {
+    if cut > history.len() {
+        return false;
+    }
+    let mut open: HashSet<&str> = HashSet::new();
+    for message in &history[..cut] {
+        for part in &message.content {
+            match part {
+                ContentPart::ToolUse(call) => {
+                    open.insert(call.id.as_str());
+                }
+                ContentPart::ToolResult(result) => {
+                    open.remove(result.tool_use_id.as_str());
+                }
+                _ => {}
+            }
+        }
+        if let Some(id) = message.tool_call_id.as_deref() {
+            open.remove(id);
+        }
+    }
+    open.is_empty()
+}
+
+/// The seq-free counterpart of [`tool_pairing_balanced_before`]:
+/// `true` iff cutting a message history at `cut` leaves every tool
+/// call together with its result.
+///
+/// A cut is balanced when the prefix holds no unanswered
+/// `tool_use`, and the tail does not begin with a `tool` result
+/// whose call the cut shadowed — either shape would make the kept
+/// tail an invalid request on its own.
+#[must_use]
+pub fn balanced_message_cut(history: &[Message], cut: usize) -> bool {
+    balanced_prefix(history, cut)
+        && !matches!(
+            history.get(cut).map(|message| message.role),
+            Some(Role::Tool)
+        )
+}
+
+/// The nearest balanced cut at or before `cut`.
+///
+/// Moving the cut earlier keeps more history, which is the safe
+/// direction: a compaction may shadow less than it wanted, never
+/// more than the pairing allows. Returns `0` when no balanced cut
+/// exists in the prefix.
+#[must_use]
+pub fn balanced_cut_at_or_before(history: &[Message], cut: usize) -> usize {
+    (0..=cut.min(history.len()))
+        .rev()
+        .find(|&candidate| balanced_message_cut(history, candidate))
+        .unwrap_or(0)
+}
+
 /// Extract tool-call IDs from an assistant message payload.
 ///
 /// `Message.content` is `Vec<ContentPart>`; tool-use parts have
@@ -245,7 +312,26 @@ fn extract_tool_use_ids(data: &Value) -> Option<Vec<String>> {
     if ids.is_empty() { None } else { Some(ids) }
 }
 
-fn collect_tool_use_ids(value: &Value, out: &mut Vec<String>) {
+/// The id of the first tool call a message makes.
+///
+/// The typed twin of [`extract_tool_use_ids`]: both read the `id` of
+/// the first `tool_use` block, in the order the parts appear, so the
+/// raw-log path and the typed path name the same call. A turn that
+/// asks for several calls at once is named by the first one — a call
+/// id is unique, so one id identifies the turn that made it.
+pub(crate) fn first_tool_use_id(message: &Message) -> Option<&str> {
+    message.content.iter().find_map(|part| match part {
+        ContentPart::ToolUse(tool_use) => Some(tool_use.id.as_str()),
+        _ => None,
+    })
+}
+
+/// Collect every tool-use id in a raw payload, in the order the
+/// blocks appear.
+///
+/// The raw half of [`first_tool_use_id`]: the same `tool_use` blocks,
+/// read out of the JSON a log row carries.
+pub(crate) fn collect_tool_use_ids(value: &Value, out: &mut Vec<String>) {
     match value {
         Value::Object(map) => {
             // tool_use block: { "type": "tool_use", "id": "..." }
@@ -284,6 +370,7 @@ fn extract_tool_use_id(data: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use synthia_provider::{Content, ToolUse};
 
     use super::*;
     use crate::events::ReplaceRange;
@@ -293,6 +380,7 @@ mod tests {
             seq,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"role": "user", "content": "hi"}),
+            source: None,
             surface_op: Some(SurfaceOp::append()),
         }
     }
@@ -323,6 +411,7 @@ mod tests {
                 "tool_use_id": call_id,
                 "content": "ok"
             }),
+            is_error: false,
             surface_op: Some(SurfaceOp::append()),
         }
     }
@@ -435,5 +524,47 @@ mod tests {
         assert_eq!(cache.balance_after(3), Some(2));
         assert_eq!(cache.balance_after(4), Some(1));
         assert_eq!(find_unbalanced_seqs(&cache), vec![2, 3, 4]);
+    }
+
+    fn call_message(id: &str) -> Message {
+        Message::new(
+            Role::Assistant,
+            Content::Single(ContentPart::ToolUse(ToolUse {
+                id: id.to_string(),
+                name: "echo".to_string(),
+                input: json!({}),
+            })),
+        )
+    }
+
+    #[test]
+    fn a_message_cut_never_splits_a_call_from_its_result() {
+        let history = vec![
+            Message::user("go"),
+            call_message("c1"),
+            Message::tool("ok", "c1"),
+            Message::assistant("done"),
+        ];
+        assert!(balanced_message_cut(&history, 0));
+        assert!(!balanced_message_cut(&history, 2), "the call is open");
+        assert!(balanced_message_cut(&history, 3));
+        let orphaned_result =
+            vec![Message::assistant("x"), Message::tool("ok", "c1")];
+        assert!(
+            !balanced_message_cut(&orphaned_result, 1),
+            "the tail cannot start with a result whose call was shadowed"
+        );
+    }
+
+    #[test]
+    fn the_cut_moves_back_to_the_call_not_the_result() {
+        let history = vec![
+            Message::user("go"),
+            call_message("c1"),
+            Message::tool("ok", "c1"),
+            Message::assistant("done"),
+        ];
+        assert_eq!(balanced_cut_at_or_before(&history, 2), 1);
+        assert_eq!(balanced_cut_at_or_before(&history, 3), 3);
     }
 }

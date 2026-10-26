@@ -45,7 +45,16 @@ thiserror.workspace = true
 # the lib itself uses neither.
 synthia-core.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "sync",
+    # `completer_batch_demo` sleeps between scripted completions so
+    # `wall_ms` is meaningful; without this the example does not
+    # compile (`tokio::time` is gated behind it).
+    "time",
+] }
 futures.workspace = true
 
 [features]

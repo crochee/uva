@@ -20,6 +20,11 @@
 //!                          │
 //!                          ▼
 //! maybe_start_run: consume the pin, build AgentRunConfig { provider: … }
+//!                          │
+//!                          ▼
+//!                          except on a resume: the pin stays parked for
+//!                          the next turn, because the suspended envelope
+//!                          was recorded under the default provider
 //! ```
 //!
 //! The pin is *consumed* by the run it starts, which buys two

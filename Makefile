@@ -115,7 +115,8 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-public-api-runtime.sh \
 	  scripts/check-plugin-shape.sh \
 	  scripts/check-pub-surface-strict.sh \
-	  scripts/check-harness-docs.sh
+	  scripts/check-harness-docs.sh \
+	  scripts/check-single-writer.sh
 
 check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 	cd $(WEB_DIR) && npx tsc --noEmit
@@ -268,9 +269,10 @@ RUNTIME_FREE := synthia-core synthia-scheduler synthia-macros synthia-eval synth
 # `synthia-tool` keeps its OWN [dependencies] runtime-free (dispatch
 # runs on the caller's poll; tokio lives in [dev-dependencies] only).
 # It cannot join RUNTIME_FREE: the wire types it consumes come from
-# `synthia-provider`, whose SSE pump names tokio unconditionally, so
-# the crate gets the same depth-1 "declares no runtime" assertion
-# `check-harness-features` applies to `synthia-harness`.
+# `synthia-provider`, whose default features enable the two HTTP
+# adapters (and with them tokio), so the crate gets the same depth-1
+# "declares no runtime" assertion `check-harness-features` applies to
+# `synthia-harness`.
 check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	@for c in $(RUNTIME_FREE); do \
 	  n=$$(cargo tree -p $$c -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
@@ -366,7 +368,7 @@ CRATES := $(notdir $(wildcard crates/*))
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-claim-language check-clock check-harness-shape check-harness-docs check-plugin-shape check-test-layout check-deny ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + clock + license/ban invariants
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-test-layout check-deny ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + clock + single-writer + license/ban invariants
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -489,7 +491,13 @@ bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
 # here, so the inner loop skips it (it gets its 30-second smoke
 # in the telemetry workflow instead). The other conditionals add
 # the per-example `--features` flag a few examples require.
-examples: ## Run every example plus both consumer proofs (each prints a proof line)
+#
+# The three `docs/examples/` consumers run last and each prints a
+# proof line. The harness-only one also proves its *dependency tree*:
+# `cargo tree` there must contain zero `tokio`. A non-zero count means
+# the harness closure grew a runtime crate — fix the library, never add
+# tokio to the fixture to silence it.
+examples: ## Run every example plus all three consumer proofs (each prints a proof line)
 	@set -e; for d in $(wildcard crates/*/examples); do \
 	  ls $$d/*.rs >/dev/null 2>&1 || continue; \
 	  pkg=$$(echo $$d | cut -d/ -f2); \
@@ -510,6 +518,17 @@ examples: ## Run every example plus both consumer proofs (each prints a proof li
 	@cd docs/examples/external-consumer && cargo run -q
 	@echo "== docs/examples/minimal-consumer"
 	@cd docs/examples/minimal-consumer && cargo run -q
+	@echo "== docs/examples/harness-only-consumer (cargo tree | grep -c tokio)"
+	@cd docs/examples/harness-only-consumer \
+	  && n=$$(cargo tree -q | grep -c tokio || true) \
+	  && echo "tokio in tree: $$n" \
+	  && [ "$$n" = "0" ] || { \
+	    echo "FAIL: the harness closure pulls tokio into a consumer that"; \
+	    echo "      depends only on synthia-harness (AGENTS.md: libraries are"; \
+	    echo "      runtime-neutral). Remove it from the library."; \
+	    exit 1; }
+	@echo "== docs/examples/harness-only-consumer"
+	@cd docs/examples/harness-only-consumer && cargo run -q
 
 # ---- Wall-clock discipline gate ----
 # AGENTS.md §3.8: library code reads the wall clock through
@@ -601,6 +620,20 @@ check-harness-shape: ## Fail when a synthia-harness production fn grows past the
 # on growth so a later round cannot quietly put the tax back.
 check-harness-docs: ## Fail when synthia-harness private-item doc comments grow past the budget
 	@bash scripts/check-harness-docs.sh
+
+# ---- Single writer per session ----
+# A session's log has exactly one writer: the session crate's
+# `LogWriter`. Every row a session gains — the model's turns, the tool
+# results, the user's prompts, the feedback, a fork's inherited rows
+# — goes through it, so the ordinals come from one counter and the
+# flush cadence is one schedule. A direct `SessionSink::append` /
+# `append_many` outside the writer is a second write path, and the
+# next person who needs a row written outside the writer would add one
+# and CI would stay green. The gate skips the test code (an inline
+# `#[cfg(test)] mod` block is skipped for its whole extent, and the
+# files a `#[cfg(test)] mod NAME;` pulls in are skipped too).
+check-single-writer: ## Fail when a session's rows are written outside the session's one writer
+	@bash scripts/check-single-writer.sh
 
 # ---- Plugin shape (R-G) ----
 # Plugin tool crates (`synthia-tool-read` / `-write` / `-shell` /

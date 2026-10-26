@@ -15,6 +15,67 @@ use serde_json::Value;
 
 use crate::token_meter::UsageBuckets;
 
+/// `serde` skip predicate: a flag that is `false` carries no
+/// information, so the wire keeps the shape it had before the flag
+/// existed.
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
+/// `serde` skip predicate: an empty id is the absence of the field,
+/// which is how a row written before the field existed reads back.
+fn is_empty_str(value: &str) -> bool {
+    value.is_empty()
+}
+
+/// One attachment a parked prompt carries: a **re-readable
+/// reference**, never the bytes.
+///
+/// A multimodal prompt's image/audio payload is stored in the
+/// deployment's attachment store before the row is written
+/// (content-addressed, so the store dedups and the hash identifies
+/// the bytes), and the row carries this handle. `hash` is what makes
+/// the row a reference at all: the metadata this crate used to emit
+/// (`kind` / `name` / `mime_type` / `byte_len`) let a reloaded
+/// transcript say "an image was here" but gave it no way to fetch
+/// one, so a parked prompt could not be replayed.
+///
+/// The field set mirrors `synthia_attachment::ImageAttachmentRef` —
+/// the ref the store hands back — without depending on that crate:
+/// this one stays a leaf, and the log's row shape is the contract
+/// both sides share.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentRefRow {
+    /// The composer's own vocabulary: `"image"`, `"audio"` or
+    /// `"file"`.
+    pub kind: String,
+    /// Content hash (hex SHA-256) the attachment store resolves.
+    /// `None` for a part whose bytes were never local — a remote URL
+    /// is a reference to something this deployment does not store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    /// What the composer showed as the attachment's label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// MIME type, when the part carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Size in bytes, when it is knowable without fetching the
+    /// bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_len: Option<u64>,
+    /// Why the bytes are **not** in the store, when `hash` is `None`.
+    ///
+    /// Having no hash means one of two different things — the payload
+    /// was never local (a remote URL) or the store refused it (an
+    /// unsupported MIME, a payload over the cap) — and a row that
+    /// omitted the reason made them the same row on the wire. A reader
+    /// that shows "attachment unavailable" cannot otherwise tell a
+    /// reference it will never resolve from a store that dropped it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unstored: Option<String>,
+}
+
 /// Borrowed view of a [`SurfaceOp::Replace`] payload.
 #[derive(Debug, Clone, Copy)]
 pub struct ReplaceRange<'a> {
@@ -127,6 +188,18 @@ pub enum SessionEvent {
         ts: String,
         /// Message payload (matches `synthia_provider::Message`).
         data: Value,
+        /// Where the turn came from when it is not the ordinary
+        /// turn boundary — today only `"steer"`, a message the
+        /// user injected into a run that was already live.
+        ///
+        /// The row is the delivery mechanism: the loop re-derives
+        /// its transcript from the log at every step boundary, so
+        /// a row appended mid-run is in the next request and never
+        /// in the one already in flight. `None` is the ordinary
+        /// queue path, and the field is omitted from the wire so
+        /// an old reader keeps the shape it always had.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
         /// How this event joins the surface.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_op: Option<SurfaceOp>,
@@ -175,6 +248,15 @@ pub enum SessionEvent {
         ts: String,
         /// Message payload.
         data: Value,
+        /// True when the tool failed.
+        ///
+        /// The payload is the tool *message* — the tool's output and
+        /// the id of the call it answers — and the message carries no
+        /// failure flag of its own. The flag rides beside it, so the
+        /// durable row says what the live event said: without it, a
+        /// failed tool reads as a successful one after a reload.
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_error: bool,
         /// How this event joins the surface.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_op: Option<SurfaceOp>,
@@ -233,7 +315,7 @@ pub enum SessionEvent {
         /// `token` of the matching `CompactionStart`.
         token: String,
         /// `"committed"` | `"failed"` | `"interrupted"` (see
-        /// [`CompactionOutcome`]).
+        /// [`CompactionLifecycleOutcome`]).
         outcome: String,
         /// Terminal-state payload.
         data: Value,
@@ -348,6 +430,106 @@ pub enum SessionEvent {
         /// Epoch + provider + model + tool/system hashes.
         data: Value,
     },
+    /// A high-risk call held for approval — log-only.
+    #[serde(rename = "approval_asked")]
+    ApprovalAsked {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Request id the decision refers to.
+        id: String,
+        /// Provider call id of the held call.
+        call_id: String,
+        /// Tool the call addresses.
+        tool: String,
+        /// Digest of the call's arguments.
+        arguments_hash: String,
+        /// `"low"` | `"high"` | `"unknown"` at the gate site.
+        risk: String,
+        /// Agent the call belongs to.
+        agent: String,
+    },
+    /// An operator's decision on a held call — log-only.
+    #[serde(rename = "approval_decided")]
+    ApprovalDecided {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Request id the decision answers.
+        id: String,
+        /// Provider call id of the held call.
+        call_id: String,
+        /// `"approved"` | `"denied"` | `"cancelled"`.
+        status: String,
+        /// Who decided (`"resume"`, an operator id, …).
+        by: String,
+        /// Decision payload (a grant scope, a denial reason, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<Value>,
+    },
+    /// A durable approval grant — log-only.
+    #[serde(rename = "approval_granted")]
+    ApprovalGranted {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Request id the grant was born from.
+        id: String,
+        /// Tool the grant covers.
+        tool: String,
+        /// `"session"` | `"deployment"`.
+        scope: String,
+        /// Workspace the grant is bound to.
+        workspace_hash: String,
+    },
+    /// The intent record written before a tool runs — log-only.
+    ///
+    /// The row is the crash marker: a dispatch with no matching
+    /// `tool_result` means the side effect may have happened, so
+    /// repair reports `TOOL_OUTCOME_UNKNOWN` instead of re-running
+    /// the call.
+    #[serde(rename = "tool_dispatch")]
+    ToolDispatch {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Provider call id.
+        call_id: String,
+        /// Tool the call addresses.
+        tool: String,
+        /// Digest of the call's arguments.
+        arguments_hash: String,
+    },
+    /// The request envelope a model call ran under — log-only.
+    ///
+    /// Written before the request; a resume compares the current
+    /// fingerprint with this row and ends as `ConfigDrift` when
+    /// they disagree.
+    #[serde(rename = "request_snapshot")]
+    RequestSnapshot {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Provider id.
+        provider: String,
+        /// Model name.
+        model: String,
+        /// Hash of the sampling parameters.
+        params_hash: String,
+        /// Hash of the offered tool definitions.
+        tools_hash: String,
+        /// Hash of the assembled system prompt.
+        system_hash: String,
+        /// Prompt-section ids that contributed.
+        sections: Vec<String>,
+        /// Hash of the approval policy.
+        policy_hash: String,
+    },
     /// Per-call usage attribution — log-only.
     ///
     /// R30: the provider report is carried in two shapes. The
@@ -407,9 +589,282 @@ pub enum SessionEvent {
         /// Shutdown metadata (reason, child count, ...).
         data: Value,
     },
+    /// A tool result a registered transformer altered — log-only.
+    ///
+    /// Provenance, not reconciliation: transformers run *before* the
+    /// loop commits the result, so the `tool_result` row already holds
+    /// the rewritten text — the log and the model agree. This row
+    /// records who altered it on the way to that commit, with a digest
+    /// of each side (`before` / `after`) instead of the payload.
+    #[serde(rename = "tool_result_transformed")]
+    ToolResultTransformed {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// The transformers that ran, in registration order. A name may
+        /// contain any character, so they are a list, not a join.
+        transformers: Vec<String>,
+        /// Tool the rewritten result belongs to.
+        tool_name: String,
+        /// Provider call id the result answers.
+        call_id: String,
+        /// Digest of the result before the rewrite.
+        before: String,
+        /// Digest of the result the model reads.
+        after: String,
+    },
+    /// A prompt parked for the next run — log-only.
+    ///
+    /// The multimodal op path parks its lossless parts on the
+    /// controller (the text queue carries a `String` and nothing
+    /// else), and that slot used to be process memory: a crash
+    /// between the park and the run lost the turn. This row *is* the
+    /// park — appended and flushed before the op returns — so a node
+    /// that takes the session over reads the prompt back and re-parks
+    /// it.
+    ///
+    /// The attachment bytes are deliberately **not** in the row: a
+    /// base64 image would bloat the log and no reader wants it as
+    /// text. Each part is stored in the attachment store first and
+    /// the row carries [`AttachmentRefRow`]s, which resolve back to
+    /// the bytes by hash.
+    ///
+    /// The row is consumed by the run **started from it**, which
+    /// appends a [`SessionEvent::ParkConsumed`] naming this row's
+    /// `park_id` before that run's own prompt row; see
+    /// [`crate::repair::parked_prompts`]. The link is by id, not by
+    /// order: a text `Prompt` is not parked yet writes a `UserInput`
+    /// row too, so a position could not name the park it spent.
+    #[serde(rename = "parked_prompt")]
+    ParkedPrompt {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Handle the consuming run quotes back.
+        ///
+        /// Unique within the log (minted when the park is made, and
+        /// the same id whether or not its append reported success — a
+        /// row that landed anyway is still spent by its own run). A
+        /// row written before the link existed omits it and is treated
+        /// as still pending.
+        #[serde(default, skip_serializing_if = "is_empty_str")]
+        park_id: String,
+        /// The prompt's text parts, concatenated.
+        text: String,
+        /// Re-readable refs to the turn's attachments.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<AttachmentRefRow>,
+        /// The agent the turn named, when the client selected one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_name: Option<String>,
+        /// `true` when parked by a `Rerun`: the prompt row that turn
+        /// eventually writes replaces the turn it shadows, so the
+        /// flag has to survive the park.
+        #[serde(default, skip_serializing_if = "is_false")]
+        rerun: bool,
+    },
+    /// A run took a parked prompt — log-only.
+    ///
+    /// The durable half of the park/run link. Only the run started
+    /// from a park writes it, and it is written before that run's own
+    /// prompt row, so the pair is in the log whatever happens next.
+    /// `parked_prompts` folds the pairs by [`Self::ParkedPrompt`]'s
+    /// `park_id`: a park with this row is spent, a park without it is
+    /// still queued — so a prompt whose row is intact is never dropped
+    /// because some *other* turn consumed a row by position, and a run
+    /// that started from a park always spends exactly that park.
+    ///
+    /// Log-only: the model history, the folded surface and `fold`
+    /// ignore it, and it carries no `surface_op`.
+    #[serde(rename = "park_consumed")]
+    ParkConsumed {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// The `park_id` of the [`SessionEvent::ParkedPrompt`] this
+        /// run took.
+        park_id: String,
+    },
+    /// A plugin's own domain event — log-only.
+    ///
+    /// The escape hatch for a plugin that publishes a fact the
+    /// harness has no typed variant for: the sink appends it to the
+    /// durable log, so it survives a crash and replays with the rest
+    /// of the row stream. It is **log-only** — a plugin payload is
+    /// opaque to the loop, so the row never enters the model
+    /// history, the folded surface, or `fold`. The live-only
+    /// counterpart is `synthia_harness::SystemEvent::Plugin`: a
+    /// notification that may be dropped under backpressure. This
+    /// row is the record; that one is the ping.
+    #[serde(rename = "plugin")]
+    Plugin {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// Plugin-defined event kind. A runtime value, hence a
+        /// `String`: a plugin's kind cannot satisfy `'static`
+        /// without leaking the string it sent. Capped at
+        /// [`MAX_PLUGIN_KIND_BYTES`]; an empty kind is recorded as
+        /// `"unnamed"`.
+        kind: String,
+        /// Plugin-defined payload. A value over
+        /// [`MAX_PLUGIN_PAYLOAD_BYTES`] is replaced by a JSON
+        /// *string* holding its leading bytes, and
+        /// `original_bytes` says what it was.
+        payload: Value,
+        /// Encoded size of the payload the plugin produced, in
+        /// bytes — present only when the cap truncated it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        original_bytes: Option<u64>,
+    },
+}
+
+/// Cap on what one [`SessionEvent::Plugin`] payload costs the row, in
+/// bytes of the encoded form.
+///
+/// The payload arrives from a plugin process, so nothing bounds it
+/// upstream; an unbounded blob would ride every append and every
+/// replay of the log. 64 KiB fits a domain event's structured body
+/// (attributes, a metric sample, a ticket reference) while keeping a
+/// pathological payload from dominating the file.
+///
+/// Measured on the *escaped* form, because that is what the row
+/// carries: a payload stored as a JSON string is escaped a second
+/// time when the row is serialised, so a quote-dense body costs up to
+/// ~1.6× its raw length. A cap on the raw length would promise bytes
+/// the row never honours.
+pub const MAX_PLUGIN_PAYLOAD_BYTES: usize = 64 * 1024;
+
+/// Cap on a plugin row's `kind`, in bytes of the encoded form.
+///
+/// A kind is a filter key, not a body: without a cap a plugin moves
+/// its payload into it.
+pub const MAX_PLUGIN_KIND_BYTES: usize = 256;
+
+/// What a plugin row records when the plugin sent no kind.
+///
+/// A row whose filter key is `""` is indistinguishable from a row
+/// missing the field, so the degenerate case gets a name a consumer
+/// can count.
+const UNNAMED_PLUGIN_KIND: &str = "unnamed";
+
+/// Bytes one JSON string literal costs — what the row carries once
+/// the value is serialised.
+fn json_string_len(text: &str) -> usize {
+    serde_json::to_string(text)
+        .map(|literal| literal.len())
+        .unwrap_or(0)
+}
+
+/// Cut `text` at a char boundary so its JSON literal costs at most
+/// `max_bytes`.
+fn cap_json_string(text: &str, max_bytes: usize) -> String {
+    if json_string_len(text) <= max_bytes {
+        return text.to_string();
+    }
+    // Escaping only grows with the prefix, so the fit is monotone
+    // and a bisect over char boundaries finds the longest prefix
+    // that still fits (`""` costs two bytes, hence the `0` floor).
+    let mut boundaries: Vec<usize> =
+        text.char_indices().map(|(index, _)| index).collect();
+    boundaries.push(text.len());
+    let (mut lo, mut hi) = (0, boundaries.len() - 1);
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if json_string_len(&text[..boundaries[mid]]) <= max_bytes {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    text[..boundaries[lo]].to_string()
+}
+
+/// Bound one plugin payload, reporting the encoded size it had.
+fn bound_plugin_payload(payload: Value) -> (Value, Option<u64>) {
+    let Ok(encoded) = serde_json::to_string(&payload) else {
+        // A `Value` cannot fail to serialise; keep it verbatim if
+        // one ever does rather than dropping the row's content.
+        return (payload, None);
+    };
+    if encoded.len() <= MAX_PLUGIN_PAYLOAD_BYTES {
+        return (payload, None);
+    }
+    let original = encoded.len() as u64;
+    let kept = cap_json_string(&encoded, MAX_PLUGIN_PAYLOAD_BYTES);
+    (Value::String(kept), Some(original))
+}
+
+/// Bound one plugin kind, naming an empty one.
+fn bound_plugin_kind(kind: String) -> String {
+    let kept = cap_json_string(&kind, MAX_PLUGIN_KIND_BYTES);
+    if kept.is_empty() {
+        UNNAMED_PLUGIN_KIND.to_string()
+    } else {
+        kept
+    }
+}
+
+/// Bound a durable `plugin` row at the log boundary.
+///
+/// The writer runs this on every ingress path, so the cap holds for
+/// a row built through the variant literal as well as through
+/// [`SessionEvent::plugin`]: variant fields are public, and a bound
+/// that only a constructor enforces is advisory. Idempotent — a row
+/// this has already bounded is left alone (its payload is a string
+/// whose literal fits, so the size check passes).
+pub(crate) fn bound_plugin_row(mut row: Value) -> Value {
+    let Some(object) = row.as_object_mut() else {
+        return row;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("plugin") {
+        return row;
+    }
+    let payload = object.remove("payload").unwrap_or(Value::Null);
+    let (payload, original_bytes) = bound_plugin_payload(payload);
+    object.insert("payload".to_string(), payload);
+    if let Some(original) = original_bytes {
+        object.insert("original_bytes".to_string(), Value::from(original));
+    }
+    let kind = match object.remove("kind") {
+        Some(Value::String(kind)) => kind,
+        // A row with no kind is a row a consumer cannot filter: give
+        // it the degenerate name rather than leaving the slot open.
+        _ => String::new(),
+    };
+    object.insert("kind".to_string(), Value::String(bound_plugin_kind(kind)));
+    row
 }
 
 impl SessionEvent {
+    /// Build a [`SessionEvent::Plugin`] row with a bounded payload.
+    ///
+    /// The writer enforces the same bound on every append path, so
+    /// this is the ergonomic entry point rather than the enforcement
+    /// point. A payload over [`MAX_PLUGIN_PAYLOAD_BYTES`] (encoded)
+    /// becomes a JSON string of its leading bytes, and the size it
+    /// had lands in `original_bytes`.
+    #[must_use]
+    pub fn plugin(
+        seq: u64,
+        ts: impl Into<String>,
+        kind: impl Into<String>,
+        payload: Value,
+    ) -> Self {
+        let (payload, original_bytes) = bound_plugin_payload(payload);
+        Self::Plugin {
+            seq,
+            ts: ts.into(),
+            kind: bound_plugin_kind(kind.into()),
+            payload,
+            original_bytes,
+        }
+    }
+
     /// Sequence ordinal stamped by the sink.
     #[must_use]
     pub const fn seq(&self) -> u64 {
@@ -433,7 +888,16 @@ impl SessionEvent {
             | Self::SubagentEnter { seq, .. }
             | Self::SubagentExit { seq, .. }
             | Self::RequestHeader { seq, .. }
+            | Self::ApprovalAsked { seq, .. }
+            | Self::ApprovalDecided { seq, .. }
+            | Self::ApprovalGranted { seq, .. }
+            | Self::ToolDispatch { seq, .. }
+            | Self::RequestSnapshot { seq, .. }
             | Self::LifecycleShutdown { seq, .. }
+            | Self::ToolResultTransformed { seq, .. }
+            | Self::ParkedPrompt { seq, .. }
+            | Self::ParkConsumed { seq, .. }
+            | Self::Plugin { seq, .. }
             | Self::SandboxMode { seq, .. }
             | Self::Usage { seq, .. } => *seq,
         }
@@ -528,9 +992,18 @@ impl SessionEvent {
                 | "subagent_enter"
                 | "subagent_exit"
                 | "request_header"
+                | "approval_asked"
+                | "approval_decided"
+                | "approval_granted"
+                | "tool_dispatch"
+                | "request_snapshot"
                 | "usage"
                 | "sandbox_mode"
                 | "session_shutdown"
+                | "tool_result_transformed"
+                | "parked_prompt"
+                | "park_consumed"
+                | "plugin"
         );
         if !known {
             return None;
@@ -561,9 +1034,18 @@ impl SessionEvent {
             Self::SubagentEnter { .. } => "subagent_enter",
             Self::SubagentExit { .. } => "subagent_exit",
             Self::RequestHeader { .. } => "request_header",
+            Self::ApprovalAsked { .. } => "approval_asked",
+            Self::ApprovalDecided { .. } => "approval_decided",
+            Self::ApprovalGranted { .. } => "approval_granted",
+            Self::ToolDispatch { .. } => "tool_dispatch",
+            Self::RequestSnapshot { .. } => "request_snapshot",
             Self::Usage { .. } => "usage",
             Self::SandboxMode { .. } => "sandbox_mode",
             Self::LifecycleShutdown { .. } => "session_shutdown",
+            Self::ToolResultTransformed { .. } => "tool_result_transformed",
+            Self::ParkedPrompt { .. } => "parked_prompt",
+            Self::ParkConsumed { .. } => "park_consumed",
+            Self::Plugin { .. } => "plugin",
         }
     }
 }
@@ -641,7 +1123,7 @@ impl std::fmt::Display for SurfaceToken {
 /// [`SessionEvent::CompactionStart`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CompactionOutcome {
+pub enum CompactionLifecycleOutcome {
     /// The summary was committed to the surface.
     Committed,
     /// The compaction errored; the surface is unchanged.
@@ -650,7 +1132,7 @@ pub enum CompactionOutcome {
     Interrupted,
 }
 
-impl CompactionOutcome {
+impl CompactionLifecycleOutcome {
     /// Stable wire tag (snake_case), matching the `outcome`
     /// field on [`SessionEvent::CompactionEnd`].
     #[must_use]
@@ -687,9 +1169,18 @@ pub const KNOWN_SESSION_EVENT_TYPES: &[&str] = &[
     "subagent_enter",
     "subagent_exit",
     "request_header",
+    "approval_asked",
+    "approval_decided",
+    "approval_granted",
+    "tool_dispatch",
+    "request_snapshot",
     "usage",
     "sandbox_mode",
     "session_shutdown",
+    "tool_result_transformed",
+    "parked_prompt",
+    "park_consumed",
+    "plugin",
 ];
 
 /// Build an empty event skeleton for one of the typed `type_tag`
@@ -707,6 +1198,7 @@ pub fn empty_event_of(tag: &str) -> Option<SessionEvent> {
             seq: 0,
             ts: String::new(),
             data: Value::Null,
+            source: None,
             surface_op: Some(SurfaceOp::AppendString("append".to_string())),
         },
         "assistant_message" => SessionEvent::AssistantMessage {
@@ -726,6 +1218,7 @@ pub fn empty_event_of(tag: &str) -> Option<SessionEvent> {
             seq: 0,
             ts: String::new(),
             data: Value::Null,
+            is_error: false,
             surface_op: Some(SurfaceOp::AppendString("append".to_string())),
         },
         "compaction" => SessionEvent::Compaction {
@@ -808,6 +1301,51 @@ pub fn empty_event_of(tag: &str) -> Option<SessionEvent> {
             ts: String::new(),
             data: Value::Null,
         },
+        "approval_asked" => SessionEvent::ApprovalAsked {
+            seq: 0,
+            ts: String::new(),
+            id: String::new(),
+            call_id: String::new(),
+            tool: String::new(),
+            arguments_hash: String::new(),
+            risk: String::new(),
+            agent: String::new(),
+        },
+        "approval_decided" => SessionEvent::ApprovalDecided {
+            seq: 0,
+            ts: String::new(),
+            id: String::new(),
+            call_id: String::new(),
+            status: String::new(),
+            by: String::new(),
+            payload: None,
+        },
+        "approval_granted" => SessionEvent::ApprovalGranted {
+            seq: 0,
+            ts: String::new(),
+            id: String::new(),
+            tool: String::new(),
+            scope: String::new(),
+            workspace_hash: String::new(),
+        },
+        "tool_dispatch" => SessionEvent::ToolDispatch {
+            seq: 0,
+            ts: String::new(),
+            call_id: String::new(),
+            tool: String::new(),
+            arguments_hash: String::new(),
+        },
+        "request_snapshot" => SessionEvent::RequestSnapshot {
+            seq: 0,
+            ts: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            params_hash: String::new(),
+            tools_hash: String::new(),
+            system_hash: String::new(),
+            sections: Vec::new(),
+            policy_hash: String::new(),
+        },
         "usage" => SessionEvent::Usage {
             seq: 0,
             ts: String::new(),
@@ -823,6 +1361,36 @@ pub fn empty_event_of(tag: &str) -> Option<SessionEvent> {
             seq: 0,
             ts: String::new(),
             data: Value::Null,
+        },
+        "tool_result_transformed" => SessionEvent::ToolResultTransformed {
+            seq: 0,
+            ts: String::new(),
+            transformers: Vec::new(),
+            tool_name: String::new(),
+            call_id: String::new(),
+            before: String::new(),
+            after: String::new(),
+        },
+        "parked_prompt" => SessionEvent::ParkedPrompt {
+            seq: 0,
+            ts: String::new(),
+            park_id: String::new(),
+            text: String::new(),
+            attachments: Vec::new(),
+            agent_name: None,
+            rerun: false,
+        },
+        "park_consumed" => SessionEvent::ParkConsumed {
+            seq: 0,
+            ts: String::new(),
+            park_id: String::new(),
+        },
+        "plugin" => SessionEvent::Plugin {
+            seq: 0,
+            ts: String::new(),
+            kind: String::new(),
+            payload: Value::Null,
+            original_bytes: None,
         },
         _ => return None,
     };
@@ -844,6 +1412,41 @@ mod tests {
             }
             "compaction_end" => json!({"token": "t1", "outcome": "committed"}),
             "sandbox_mode" => json!({"mode": "workspace-write"}),
+            "approval_asked" => json!({
+                "id": "a1", "call_id": "c1", "tool": "shell",
+                "arguments_hash": "sha256:x", "risk": "high",
+                "agent": "default",
+            }),
+            "approval_decided" => json!({
+                "id": "a1", "call_id": "c1", "status": "approved",
+                "by": "resume",
+            }),
+            "approval_granted" => json!({
+                "id": "a1", "tool": "shell", "scope": "session",
+                "workspace_hash": "sha256:w",
+            }),
+            "tool_dispatch" => json!({
+                "call_id": "c1", "tool": "shell",
+                "arguments_hash": "sha256:x",
+            }),
+            "tool_result_transformed" => json!({
+                "transformers": ["eraser"], "tool_name": "read",
+                "call_id": "c1", "before": "sha256:a",
+                "after": "sha256:b",
+            }),
+            "parked_prompt" => json!({
+                "park_id": "park-1", "text": "queued",
+            }),
+            "park_consumed" => json!({"park_id": "park-1"}),
+            "plugin" => json!({
+                "kind": "acme.span", "payload": {"span": "s1"},
+            }),
+            "request_snapshot" => json!({
+                "provider": "fake", "model": "fake-1",
+                "params_hash": "p", "tools_hash": "t",
+                "system_hash": "s", "sections": ["identity"],
+                "policy_hash": "pol",
+            }),
             _ => json!({}),
         }
     }
@@ -933,9 +1536,18 @@ mod tests {
             "subagent_enter",
             "subagent_exit",
             "request_header",
+            "approval_asked",
+            "approval_decided",
+            "approval_granted",
+            "tool_dispatch",
+            "request_snapshot",
             "usage",
             "sandbox_mode",
             "session_shutdown",
+            "tool_result_transformed",
+            "parked_prompt",
+            "park_consumed",
+            "plugin",
         ];
         for tag in log_only {
             let v = event_json(tag, 99, false);
@@ -944,6 +1556,127 @@ mod tests {
             assert!(!ev.is_surface_eligible(), "{tag} should not be surface");
             assert!(ev.surface_op().is_none(), "{tag} should carry no op");
         }
+    }
+
+    #[test]
+    fn a_plugin_payload_under_the_cap_is_kept_verbatim() {
+        let payload = json!({"span": "s1", "attrs": {"attempt": 1}});
+        let ev = SessionEvent::plugin(
+            5,
+            "2026-10-26T00:00:00Z",
+            "acme.span",
+            payload.clone(),
+        );
+        let SessionEvent::Plugin {
+            kind,
+            payload: kept,
+            original_bytes,
+            ..
+        } = &ev
+        else {
+            panic!("a plugin row, got {ev:?}");
+        };
+        assert_eq!(kind, "acme.span");
+        assert_eq!(kept, &payload, "under the cap the payload is untouched");
+        assert_eq!(*original_bytes, None);
+        assert_eq!(ev.type_tag(), "plugin");
+        assert!(!ev.is_surface_eligible());
+        assert!(ev.surface_op().is_none());
+    }
+
+    #[test]
+    fn a_plugin_payload_over_the_cap_is_cut_to_its_encoded_budget() {
+        // Quote-dense filler: the kept text is stored as a JSON
+        // string and escaped a second time when the row is written,
+        // so a raw-length cap would let the row carry ~1.5× the
+        // constant it promises.
+        let filler = "\"".repeat(MAX_PLUGIN_PAYLOAD_BYTES);
+        let ev = SessionEvent::plugin(
+            6,
+            "2026-10-26T00:00:01Z",
+            "acme.blob",
+            json!({"blob": filler}),
+        );
+        let SessionEvent::Plugin {
+            payload,
+            original_bytes,
+            ..
+        } = &ev
+        else {
+            panic!("a plugin row, got {ev:?}");
+        };
+        let kept = payload
+            .as_str()
+            .expect("a truncated payload is a JSON string");
+        // What the row actually carries is the escaped literal.
+        let stored = serde_json::to_string(payload).expect("serialises");
+        assert!(
+            stored.len() <= MAX_PLUGIN_PAYLOAD_BYTES,
+            "the row carries at most the cap, got {}",
+            stored.len()
+        );
+        assert!(
+            original_bytes.is_some_and(|n| n > MAX_PLUGIN_PAYLOAD_BYTES as u64),
+            "the pre-cap size is recorded: {original_bytes:?}"
+        );
+        // Valid UTF-8 is the log's contract: the cut backs off to a
+        // boundary rather than splitting a char.
+        assert!(std::str::from_utf8(kept.as_bytes()).is_ok());
+
+        // The record survives the wire with its truncation marker.
+        let written = serde_json::to_value(&ev).expect("the row serialises");
+        assert_eq!(
+            written["original_bytes"],
+            json!(original_bytes.expect("recorded"))
+        );
+        let replayed = SessionEvent::from_value(&written).expect("replays");
+        assert_eq!(replayed.seq(), 6);
+        assert_eq!(replayed.type_tag(), "plugin");
+    }
+
+    #[test]
+    fn a_plugin_kind_is_capped_and_an_empty_one_is_named() {
+        let long = "k".repeat(MAX_PLUGIN_KIND_BYTES * 4);
+        let ev = SessionEvent::plugin(7, "t", long, Value::Null);
+        let SessionEvent::Plugin { kind, .. } = &ev else {
+            panic!("a plugin row, got {ev:?}");
+        };
+        let stored = serde_json::to_string(kind).expect("the kind serialises");
+        assert!(
+            stored.len() <= MAX_PLUGIN_KIND_BYTES,
+            "a kind is a filter key, not a body: {} bytes",
+            stored.len()
+        );
+
+        let empty = SessionEvent::plugin(8, "t", "", Value::Null);
+        let SessionEvent::Plugin { kind, .. } = &empty else {
+            panic!("a plugin row, got {empty:?}");
+        };
+        assert_eq!(
+            kind, "unnamed",
+            "an empty filter key is indistinguishable from a missing one"
+        );
+    }
+
+    #[test]
+    fn bounding_a_row_twice_is_a_no_op() {
+        // `append_copied` re-spills a stamped row that already went
+        // through `enqueue`, so the bound runs over its own output.
+        // If the second pass re-cut, a bounded row would lose bytes
+        // every time it was re-spilled, and `original_bytes` would
+        // drift off the size the plugin actually sent.
+        let filler = "\"".repeat(MAX_PLUGIN_PAYLOAD_BYTES);
+        let row = serde_json::to_value(SessionEvent::plugin(
+            9,
+            "2026-10-26T00:00:02Z",
+            "k".repeat(MAX_PLUGIN_KIND_BYTES * 4),
+            json!({"blob": filler}),
+        ))
+        .expect("the row serialises");
+
+        let once = bound_plugin_row(row);
+        let twice = bound_plugin_row(once.clone());
+        assert_eq!(twice, once);
     }
 
     #[test]
@@ -972,6 +1705,105 @@ mod tests {
         assert_eq!(back.seq(), 3);
         assert!(back.is_surface_eligible());
         assert!(back.surface_op().unwrap().is_append());
+    }
+
+    #[test]
+    fn a_tool_result_row_carries_its_failure_flag() {
+        let failed = json!({
+            "seq": 4,
+            "ts": "2026-09-10T00:00:00Z",
+            "type": "tool_result",
+            "data": {"role": "tool", "tool_call_id": "c1", "content": "boom"},
+            "is_error": true,
+        });
+        let ev = SessionEvent::from_value(&failed).expect("the row parses");
+        assert!(
+            matches!(ev, SessionEvent::ToolResult { is_error: true, .. }),
+            "the flag survives the parse: {ev:?}"
+        );
+        let written = serde_json::to_value(&ev).expect("the row serialises");
+        assert_eq!(written["is_error"], json!(true));
+        // The flag is beside the message, not inside it: the payload
+        // stays exactly what the loop put into the transcript.
+        assert_eq!(written["data"]["role"], json!("tool"));
+        assert_eq!(written["data"]["tool_call_id"], json!("c1"));
+    }
+
+    #[test]
+    fn a_tool_result_row_without_a_failure_keeps_todays_wire_shape() {
+        let row = json!({
+            "seq": 4,
+            "ts": "2026-09-10T00:00:00Z",
+            "type": "tool_result",
+            "data": {"role": "tool", "tool_call_id": "c1", "content": "ok"},
+        });
+        let ev = SessionEvent::from_value(&row).expect("the row parses");
+        assert!(
+            matches!(
+                ev,
+                SessionEvent::ToolResult {
+                    is_error: false,
+                    ..
+                }
+            ),
+            "a row without the flag is a tool that returned: {ev:?}"
+        );
+        let written = serde_json::to_value(&ev).expect("the row serialises");
+        assert!(
+            written.get("is_error").is_none(),
+            "a tool that returned keeps the wire it had: {written}"
+        );
+    }
+
+    /// A `user_message` row written before `source` existed has no
+    /// such key, and must keep deserialising: the field is an
+    /// annotation on top of the wire, not a new requirement.
+    #[test]
+    fn an_old_user_row_without_source_still_deserializes() {
+        let row = json!({
+            "type": "user_message",
+            "seq": 1,
+            "ts": "2026-10-25T00:00:00Z",
+            "data": {"role": "user", "content": "hi"},
+            "surface_op": "append",
+        });
+        let event: SessionEvent =
+            serde_json::from_value(row).expect("the old row parses");
+        match event {
+            SessionEvent::UserMessage { source, .. } => {
+                assert!(source.is_none(), "no source means the ordinary turn")
+            }
+            other => panic!("expected a user_message row, got {other:?}"),
+        }
+    }
+
+    /// The steer row's source survives the wire, and an ordinary row
+    /// keeps the shape it always had — no `"source": null` on every
+    /// user turn.
+    #[test]
+    fn a_user_row_carries_its_source_only_when_it_has_one() {
+        let steer = SessionEvent::UserMessage {
+            seq: 3,
+            ts: "2026-10-25T00:00:00Z".to_string(),
+            data: json!({"role": "user", "content": "focus on the tests"}),
+            source: Some("steer".to_string()),
+            surface_op: None,
+        };
+        let written = serde_json::to_value(&steer).expect("serialises");
+        assert_eq!(written["source"], json!("steer"));
+
+        let ordinary = SessionEvent::UserMessage {
+            seq: 4,
+            ts: "2026-10-25T00:00:00Z".to_string(),
+            data: json!({"role": "user", "content": "hi"}),
+            source: None,
+            surface_op: None,
+        };
+        let written = serde_json::to_value(&ordinary).expect("serialises");
+        assert!(
+            written.get("source").is_none(),
+            "an ordinary turn keeps its shape: {written}"
+        );
     }
 
     #[test]
@@ -1054,8 +1886,8 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            22,
-            "expected 22 typed event variants; add the new one to KNOWN_SESSION_EVENT_TYPES"
+            31,
+            "expected 31 typed event variants; add the new one to KNOWN_SESSION_EVENT_TYPES"
         );
     }
 
@@ -1165,21 +1997,22 @@ mod tests {
     #[test]
     fn compaction_outcome_serialises_snake_case() {
         for (outcome, wire) in [
-            (CompactionOutcome::Committed, "committed"),
-            (CompactionOutcome::Failed, "failed"),
-            (CompactionOutcome::Interrupted, "interrupted"),
+            (CompactionLifecycleOutcome::Committed, "committed"),
+            (CompactionLifecycleOutcome::Failed, "failed"),
+            (CompactionLifecycleOutcome::Interrupted, "interrupted"),
         ] {
             assert_eq!(
                 serde_json::to_string(&outcome).unwrap(),
                 format!("\"{wire}\"")
             );
-            let back: CompactionOutcome =
+            let back: CompactionLifecycleOutcome =
                 serde_json::from_str(&format!("\"{wire}\"")).unwrap();
             assert_eq!(back, outcome);
             assert_eq!(outcome.as_str(), wire);
         }
         assert!(
-            serde_json::from_str::<CompactionOutcome>("\"bogus\"").is_err()
+            serde_json::from_str::<CompactionLifecycleOutcome>("\"bogus\"")
+                .is_err()
         );
     }
 
@@ -1279,6 +2112,7 @@ mod tests {
                 seq: 0,
                 ts: String::new(),
                 data: json!({}),
+                source: None,
                 surface_op: None,
             }
             .provider_usage()
@@ -1307,5 +2141,47 @@ mod tests {
     fn round_trip_value(event: &SessionEvent) -> SessionEvent {
         let value = serde_json::to_value(event).unwrap();
         SessionEvent::from_value(&value).expect("round-trip")
+    }
+
+    /// The audit row: the log must be able to name the plugin that
+    /// rewrote a tool result, and to tell the two versions apart.
+    #[test]
+    fn a_transformed_result_row_names_its_plugin_and_its_two_versions() {
+        let row = json!({
+            "type": "tool_result_transformed",
+            "seq": 11,
+            "ts": "2026-10-26T00:00:00Z",
+            "transformers": ["eraser", "a, b"],
+            "tool_name": "read",
+            "call_id": "c1",
+            "before": "sha256:aaaa",
+            "after": "sha256:bbbb",
+        });
+        let event = SessionEvent::from_value(&row).expect("the row parses");
+        let SessionEvent::ToolResultTransformed {
+            transformers,
+            tool_name,
+            call_id,
+            before,
+            after,
+            ..
+        } = &event
+        else {
+            panic!("the row is an audit row: {event:?}");
+        };
+        assert_eq!(transformers, &["eraser", "a, b"]);
+        assert_eq!(tool_name, "read");
+        assert_eq!(call_id, "c1");
+        assert_ne!(before, after, "the two versions must be distinguishable");
+
+        // Log-only: it never joins the model's history or the surface.
+        assert!(!event.is_surface_eligible());
+        assert!(event.surface_op().is_none());
+        assert_eq!(event.type_tag(), "tool_result_transformed");
+        assert_eq!(event.seq(), 11);
+        assert_eq!(
+            round_trip_value(&event).type_tag(),
+            "tool_result_transformed"
+        );
     }
 }

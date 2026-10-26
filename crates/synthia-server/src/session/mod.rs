@@ -1,6 +1,7 @@
 //! Session controller and supporting types.
 
 pub mod controller;
+pub mod input_queue;
 pub mod lane;
 pub mod subagent_router;
 

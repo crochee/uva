@@ -98,9 +98,6 @@ pub use retry::{
     is_retryable_error,
     parse_retry_after,
     retry_config_for,
-    retry_with_backoff,
-    retry_with_classification,
-    retry_with_retry_after,
 };
 pub use stop_reason::is_length_stop_reason;
 #[cfg(feature = "anthropic")]

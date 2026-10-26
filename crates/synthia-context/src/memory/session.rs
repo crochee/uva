@@ -1,12 +1,13 @@
-//! Session-sink-backed implementation of the [`Memory`] trait.
+//! Session-writer-backed implementation of the [`Memory`] trait.
 //!
 //! Bridges the layered-memory seam to the durable event log:
 //!
 //! - **Conversation tier** — projected from
-//!   [`SessionSink::read`] via [`events_to_messages`]; `append`
-//!   writes a lossless `"Message"` envelope back to the sink.
+//!   [`LogWriter::read`] via [`events_to_messages`]; `append`
+//!   writes a lossless `"Message"` envelope back through the
+//!   session's writer, which stamps the row's ordinal.
 //! - **Working tier** — in-process map (volatile across process
-//!   restarts; the sink is reserved for the conversation log).
+//!   restarts; the log is reserved for the conversation log).
 //! - **Long-term tier** — in-process vec (until a persistent
 //!   backend exists).
 //!
@@ -25,8 +26,8 @@ use std::{collections::HashMap, sync::Arc};
 use async_trait::async_trait;
 use parking_lot::RwLock;
 use serde_json::{Value, json};
-use synthia_provider::{ContentPart, Message, Role};
-use synthia_session::{SessionSink, fold_log_surface};
+use synthia_provider::Message;
+use synthia_session::{LogWriter, fold_log_surface, surface_to_messages};
 
 use super::{Memory, MemoryEntry, MemoryError};
 /// Project sink events to conversation messages.
@@ -47,100 +48,27 @@ use super::{Memory, MemoryEntry, MemoryError};
 /// resumed session sees the compacted surface instead of replaying
 /// the span the compaction shadowed.
 ///
+/// The folded payloads are projected by
+/// [`synthia_session::surface_to_messages`], the one projection the
+/// harness's [`synthia_session::derive_history`] also uses: it normalises a
+/// compaction's record shape into the assistant turn the model saw,
+/// and coalesces a legacy per-part assistant turn into the single
+/// message every provider expects.
+///
 /// Unknown or malformed rows are dropped (warn-logged) by the fold,
 /// and a replacement that cannot be validated is skipped rather than
 /// aborting the projection — one bad row must not wedge a long-lived
 /// session.
 pub fn events_to_messages(events: &[Value]) -> Vec<Message> {
-    project_surface_messages(&fold_log_surface(events).messages)
+    surface_to_messages(&fold_log_surface(events).messages)
 }
 
-/// Project folded surface payloads into messages, coalescing the parts of
-/// one assistant turn.
-///
-/// Shared by this module's [`events_to_messages`] and the typed
-/// projection in [`super::typed`], because both read the same folded
-/// payloads and both would otherwise ship their own copy of the
-/// coalescing rule — one fixed, one still emitting an invalid request.
-pub(super) fn project_surface_messages(payloads: &[Value]) -> Vec<Message> {
-    let mut messages: Vec<Message> = Vec::new();
-    for payload in payloads {
-        let Some(message) = message_from_payload(payload) else {
-            continue;
-        };
-        // A log row carries ONE part, so an assistant turn that asked for
-        // several tools in parallel is several `tool_use` rows. Projected
-        // as separate messages that breaks the contract every provider
-        // enforces: a message carrying `tool_calls` must be followed
-        // immediately by its tool results, and here the first one is
-        // followed by another assistant message instead — OpenAI rejects
-        // it with "insufficient tool messages following tool_calls
-        // message".
-        //
-        // The merge is deliberately narrower than "adjacent assistant
-        // rows": it applies only while the message being extended holds a
-        // pending `ToolUse`. Two text-only assistant messages are
-        // genuinely separate turns (a compaction summary following the
-        // text it replaced), and merging those would rewrite the
-        // transcript's meaning rather than repair its wire shape.
-        if message.role == Role::Assistant
-            && let Some(last) = messages.last_mut()
-            && last.role == Role::Assistant
-            && last
-                .content
-                .iter()
-                .any(|part| matches!(part, ContentPart::ToolUse(_)))
-        {
-            merge_assistant_parts(last, message);
-            continue;
-        }
-        messages.push(message);
-    }
-    messages
-}
-
-/// Append one assistant message's parts onto `into`.
-///
-/// The parts are carried in the wire-neutral `Content` the two rows hold,
-/// so this stays a content merge rather than a re-encode: a single-part
-/// `Content::Single` is expanded into a `Multi` only when the other side
-/// has something to join it to.
-fn merge_assistant_parts(into: &mut Message, from: Message) {
-    let mut parts: Vec<ContentPart> = into.content.iter().cloned().collect();
-    parts.extend(from.content.iter().cloned());
-    into.content = synthia_provider::Content::parts(parts);
-    // A `tool_call_id` belongs to a tool message; two assistant rows
-    // never carry one, but keep the first if either did.
-    if into.tool_call_id.is_none() {
-        into.tool_call_id = from.tool_call_id;
-    }
-}
-
-/// Normalise one folded surface payload into a [`Message`].
-///
-/// Message rows carry a `Message`-shaped payload. A `compaction` row
-/// carries its own record shape (`{ "summary": … }`); the model sees
-/// the summary as the assistant turn that replaced the batch.
-///
-/// `pub(super)` so the typed projection in
-/// [`super::typed`] decodes the same payloads the same way.
-pub(super) fn message_from_payload(payload: &Value) -> Option<Message> {
-    if let Ok(message) = serde_json::from_value::<Message>(payload.clone()) {
-        return Some(message);
-    }
-    if let Some(summary) = payload.get("summary").and_then(Value::as_str) {
-        return Some(Message::assistant(summary));
-    }
-    tracing::warn!(
-        target: "synthia.context",
-        "events_to_messages: dropping a surface row that is not a message"
-    );
-    None
-}
-/// [`Memory`] view over one session's [`SessionSink`].
+/// [`Memory`] view over one session's [`LogWriter`].
 pub struct SessionMemory {
-    sink: Arc<dyn SessionSink>,
-    /// Rehydration budget: project only the last `N` sink events.
+    /// The session's one writer: it stamps each row's ordinal and
+    /// batches the flush, so the log has one numbering.
+    writer: Arc<LogWriter>,
+    /// Rehydration budget: project only the last `N` log events.
     max_events: Option<usize>,
     /// Working memory: `session_id` → (`key` → value).
     working: RwLock<HashMap<String, HashMap<String, Value>>>,
@@ -149,29 +77,23 @@ pub struct SessionMemory {
 }
 
 impl SessionMemory {
-    /// Create a memory view over `sink` with **unbounded**
-    /// rehydration (projects the full event log).
+    /// Create a memory view over the session's `writer` with
+    /// **unbounded** rehydration (projects the full event log).
     #[must_use]
-    pub fn new(sink: Arc<dyn SessionSink>) -> Self {
+    pub fn new(writer: Arc<LogWriter>) -> Self {
         Self {
-            sink,
+            writer,
             max_events: None,
             working: RwLock::new(HashMap::new()),
             long_term: RwLock::new(Vec::new()),
         }
     }
 
-    /// Cap rehydration to the last `max` sink events.
+    /// Cap rehydration to the last `max` log events.
     #[must_use]
     pub fn with_max_events(mut self, max: usize) -> Self {
         self.max_events = Some(max);
         self
-    }
-
-    /// The backing sink (e.g. for the server controller to
-    /// persist its own envelopes through the same handle).
-    pub fn sink(&self) -> &Arc<dyn SessionSink> {
-        &self.sink
     }
 
     fn tail<'a>(&self, events: &'a [Value]) -> &'a [Value] {
@@ -188,9 +110,9 @@ impl Memory for SessionMemory {
         &self,
         _session_id: &str,
     ) -> Result<Vec<Message>, MemoryError> {
-        // The sink is already session-scoped (one JSONL per
+        // The log is already session-scoped (one JSONL per
         // session id); the parameter stays for trait parity.
-        let events = self.sink.read().await?;
+        let events = self.writer.read().await?;
         Ok(events_to_messages(self.tail(&events)))
     }
 
@@ -204,11 +126,13 @@ impl Memory for SessionMemory {
             "data": serde_json::to_value(&message)
                 .map_err(|e| MemoryError::Decode(e.to_string()))?,
         });
-        // The `Memory` trait's `append` returns unit; the row's
-        // ordinal is reserved here so the sink's counter stays the
-        // one every appender on this session draws from.
-        self.sink.alloc_seq();
-        self.sink.append(&envelope).await.map_err(MemoryError::from)
+        // The writer stamps the row with the ordinal it hands out
+        // and with the wall clock; the flush makes the message
+        // durable before the call returns — the promise the sink's
+        // write-through `append` used to give.
+        self.writer.append(envelope).await?;
+        self.writer.flush().await?;
+        Ok(())
     }
 
     async fn get_context(
@@ -272,8 +196,9 @@ impl Memory for SessionMemory {
 
 #[cfg(test)]
 mod tests {
+    use synthia_core::SystemClock;
     use synthia_provider::{Content, ContentPart, Role, TextContent};
-    use synthia_session::in_memory::InMemorySessionSink;
+    use synthia_session::{SessionSink, in_memory::InMemorySessionSink};
 
     use super::*;
 
@@ -281,9 +206,20 @@ mod tests {
         Arc::new(InMemorySessionSink::new("s1"))
     }
 
+    /// The session's one writer, over `sink`.
+    fn writer_over(sink: &Arc<InMemorySessionSink>) -> Arc<LogWriter> {
+        Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)))
+    }
+
+    /// Write one row through the writer and make it durable.
+    async fn write(writer: &Arc<LogWriter>, row: Value) {
+        writer.append(row).await.expect("append");
+        writer.flush().await.expect("flush");
+    }
+
     #[tokio::test]
     async fn append_then_messages_round_trips_verbatim() {
-        let mem = SessionMemory::new(sink());
+        let mem = SessionMemory::new(writer_over(&sink()));
         let original = vec![
             Message::user("hello"),
             Message::assistant("hi"),
@@ -312,8 +248,30 @@ mod tests {
 
     #[tokio::test]
     async fn messages_empty_sink_is_empty() {
-        let mem = SessionMemory::new(sink());
+        let mem = SessionMemory::new(writer_over(&sink()));
         assert!(mem.messages("s1").await.unwrap().is_empty());
+    }
+
+    /// The row the memory tier writes must carry the stamp the
+    /// session's writer puts on it: the ordinal it handed out and
+    /// the wall clock. A row without them is numbered by something
+    /// other than the log's one counter.
+    #[tokio::test]
+    async fn an_appended_message_carries_the_writers_stamp() {
+        let sink = sink();
+        let mem = SessionMemory::new(writer_over(&sink));
+        mem.append("s1", Message::user("hello")).await.unwrap();
+        let rows = sink.read().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["seq"].as_u64(),
+            Some(1),
+            "the writer stamps the ordinal: {rows:?}"
+        );
+        assert!(
+            rows[0]["ts"].is_string(),
+            "the writer stamps the wall clock: {rows:?}"
+        );
     }
 
     #[tokio::test]
@@ -373,6 +331,7 @@ mod tests {
     #[tokio::test]
     async fn resume_honours_a_durable_compaction_checkpoint() {
         let sink = sink();
+        let writer = writer_over(&sink);
         let tool_row = |call_id: &str| {
             json!({
                 "type": "Model",
@@ -389,31 +348,32 @@ mod tests {
         };
         // Rows 1..4 are what the run persisted; row 5 is the record
         // `CompactionCheckpoint` wrote for the two tool results.
-        sink.alloc_seq();
-        sink.append(&json!({"type": "UserInput", "data": {"text": "hello"}}))
-            .await
-            .unwrap();
-        sink.alloc_seq();
-        sink.append(&json!({
-            "type": "Model",
-            "data": {"type": "text", "text": "working"},
-        }))
-        .await
-        .unwrap();
-        sink.alloc_seq();
-        sink.append(&tool_row("c1")).await.unwrap();
-        sink.alloc_seq();
-        sink.append(&tool_row("c2")).await.unwrap();
-        sink.alloc_seq();
-        sink.append(&json!({
-            "type": "compaction",
-            "seq": 5,
-            "ts": "2026-09-12T00:00:00Z",
-            "surface_op": {"start": 2, "end": 4, "source_event_seqs": [3, 4]},
-            "data": {"source_indices": [2, 3], "summary": "compacted tail"},
-        }))
-        .await
-        .unwrap();
+        // The writer stamps the ordinals, so the checkpoint's
+        // citations name the rows they shadow.
+        write(
+            &writer,
+            json!({"type": "UserInput", "data": {"text": "hello"}}),
+        )
+        .await;
+        write(
+            &writer,
+            json!({
+                "type": "Model",
+                "data": {"type": "text", "text": "working"},
+            }),
+        )
+        .await;
+        write(&writer, tool_row("c1")).await;
+        write(&writer, tool_row("c2")).await;
+        write(
+            &writer,
+            json!({
+                "type": "compaction",
+                "surface_op": {"start": 2, "end": 4, "source_event_seqs": [3, 4]},
+                "data": {"source_indices": [2, 3], "summary": "compacted tail"},
+            }),
+        )
+        .await;
 
         let events = sink.read().await.unwrap();
         let messages = events_to_messages(&events);
@@ -515,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn max_events_bounds_projection_to_log_tail() {
-        let mem = SessionMemory::new(sink()).with_max_events(3);
+        let mem = SessionMemory::new(writer_over(&sink())).with_max_events(3);
         for i in 0..5 {
             mem.append("s1", Message::user(format!("m{i}")))
                 .await
@@ -529,14 +489,14 @@ mod tests {
 
     #[tokio::test]
     async fn max_events_larger_than_log_is_unbounded() {
-        let mem = SessionMemory::new(sink()).with_max_events(50);
+        let mem = SessionMemory::new(writer_over(&sink())).with_max_events(50);
         mem.append("s1", Message::user("only")).await.unwrap();
         assert_eq!(mem.messages("s1").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn working_and_long_term_tiers_behave_like_in_memory() {
-        let mem = SessionMemory::new(sink());
+        let mem = SessionMemory::new(writer_over(&sink()));
         mem.set_context("a", "k", serde_json::json!(7))
             .await
             .unwrap();
@@ -558,7 +518,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_session_lifecycle_uses_defaults() {
-        let mem = SessionMemory::new(sink());
+        let mem = SessionMemory::new(writer_over(&sink()));
         let id = mem.create_session().await.unwrap();
         assert!(!id.is_empty());
         assert!(mem.list_sessions().await.unwrap().is_empty());

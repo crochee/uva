@@ -80,7 +80,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::{Value, json};
-    use synthia_harness::{AgentRegistry, SyntheticTool};
+    use synthia_harness::{AgentRegistry, DelegatingTool};
     use synthia_tool::ToolFeatures;
 
     use super::*;
@@ -248,12 +248,16 @@ mod tests {
     }
 
     #[test]
-    fn delegator_claims_only_task_and_advertises_one_definition() {
+    fn delegator_advertises_only_the_task_definition() {
         let delegator = TaskDelegator::new(Arc::new(AgentRegistry::new()));
-        assert!(delegator.claims("task"));
-        assert!(!delegator.claims("shell"));
         let defs = delegator.definitions();
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].name, "task");
+        assert_eq!(
+            delegator.mode(),
+            synthia_tool::ExecutionMode::Sequential,
+            "delegation spawns a whole child run, so it never shares the \
+             parallel bucket by default"
+        );
     }
 }

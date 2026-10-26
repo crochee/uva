@@ -79,7 +79,7 @@ pub struct ToolDetail {
 async fn collect_tool_defs(
     state: &Arc<AppState>,
 ) -> Vec<synthia::provider::ToolDefinition> {
-    let version = state.tool_registry.read().await.version();
+    let version = state.tool_registry.version();
     {
         let guard = state.tool_defs_cache.read();
         if let Some((v, cached)) = guard.as_ref()
@@ -88,7 +88,7 @@ async fn collect_tool_defs(
             return (**cached).clone();
         }
     }
-    let descriptors = state.tool_registry.read().await.descriptors();
+    let descriptors = state.tool_registry.descriptors();
     // Self-management MCP tools (`mcp__self__*`) are server-facing
     // (operators reach them via MCP), not model-facing. The HTTP
     // `/api/tools` catalog follows the same contract as the agent
@@ -159,22 +159,16 @@ pub async fn register_tool(
         params.clone(),
     );
 
-    {
-        let reg = state.tool_registry.write().await;
-        let existed = reg
-            .list(None)
-            .await
-            .map(|entries| entries.iter().any(|e| e.name() == req.name))
-            .unwrap_or(false);
-        if existed {
-            return Err(AppError::from(Error::already_exists(format!(
-                "tool '{}'",
-                req.name
-            ))));
-        }
-        reg.put(tool).await.map_err(|e| {
-            Error::internal(format!("failed to register tool: {e}"))
-        })?;
+    // One write guard decides and inserts: reading the name and then
+    // registering it let two concurrent requests for one name both
+    // pass the check, and the second would shadow the first. On a
+    // cluster the other nodes learn of this registration through the
+    // mutation below, exactly as they learn of it on the local path.
+    if !state.tool_registry.register_entry_if_absent(tool) {
+        return Err(AppError::from(Error::already_exists(format!(
+            "tool '{}'",
+            req.name
+        ))));
     }
     // Tell the other nodes; a local bus publishes into the process
     // (the dispatcher skips our own origin, the local apply already
@@ -211,7 +205,7 @@ pub async fn get_tool(
     AppPath(name): AppPath<String>,
 ) -> Result<Json<ToolDetail>, AppError> {
     validate_resource_name(&name)?;
-    let tool_reg = state.tool_registry.read().await;
+    let tool_reg = state.tool_registry.as_ref();
     // O(1) lookup against the registry's `HashMap<String, Vec<ToolEntry>>`
     // instead of the previous O(n) `list()` + linear search that
     // cloned every `ToolDefinition` (including the JSON schema)
@@ -258,7 +252,7 @@ pub async fn unregister_tool(
 ) -> Result<Json<ToolInfo>, AppError> {
     validate_resource_name(&name)?;
     {
-        let reg = state.tool_registry.write().await;
+        let reg = state.tool_registry.as_ref();
         let entries = reg.list(None).await.unwrap_or_default();
         let target =
             entries.into_iter().find(|e| e.name() == name).ok_or_else(
@@ -325,7 +319,7 @@ mod tests {
     async fn collect_tool_defs_projects_exposure_and_privacy() {
         let (state, _dir) = test_state().await;
         {
-            let registry = state.tool_registry.read().await;
+            let registry = state.tool_registry.as_ref();
             registry.register_entry(synthia::tool::ToolEntry::dynamic(
                 "alpha".to_string(),
                 "a direct tool".to_string(),

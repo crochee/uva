@@ -14,14 +14,17 @@ It stays in the offline tier — no HTTP, no DB, no OTel.
 
 ## Surface
 
-- `Budget { tokens: TokenBudget, latency: LatencyBudget, cost:
-  CostBudget }`. Each budget has a `used` counter and a `limit`.
+- `Budget { tokens: Option<TokenBudget>, latency:
+  Option<LatencyBudget>, cost: Option<CostBudget>,
+  on_exceeded: BudgetOutcome }`. Each budget has a `used` counter
+  and a `limit`.
 - `TokenSource` trait — `synthia_session::TokenMeter` plugs in
   directly; a custom impl works too.
 - `PricingTable` trait + `StaticPricingTable` fixture (Anthropic /
   OpenAI 2026 rates). Unpriced models log `model_unpriced` and
   the cost gate is skipped.
-- `BudgetProvider { inner, budget, on_exceeded }`.
+- `BudgetProvider { inner, budget }` (+ `trip_count()`,
+  `set_budget()`); `on_exceeded` lives on `Budget`, not the wrapper.
 - `BudgetTool` mirrors the wrap.
 - `BudgetExceeded { kind, used, limit }` event published via the
   event sink.
@@ -30,25 +33,49 @@ It stays in the offline tier — no HTTP, no DB, no OTel.
 
 ```rust
 use std::sync::Arc;
+use std::time::Duration;
 
 use synthia_budget::{
-    Budget, CostBudget, LatencyBudget, PricingTable, StaticPricingTable,
-    TokenBudget, BudgetProvider,
+    Budget,
+    BudgetProvider,
+    CostBudget,
+    LatencyBudget,
+    PricingTable,
+    SharedClock,
+    StaticPricingTable,
+    TokenBudget,
 };
-use synthia_provider::AnthropicProvider;
+use synthia_provider::ModelProvider;
 
-let pricing = Arc::new(StaticPricingTable::anthropic_2026());
-let budget = Budget::builder()
-    .tokens(TokenBudget::new(200_000))
-    .latency(LatencyBudget::new(Duration::from_secs(120)))
-    .cost(CostBudget::new(50_00, pricing)) // 50.00 USD
-    .build();
-let provider = BudgetProvider::new(inner_provider, budget);
+/// Wrap the provider you already talk to. The wrapper forwards
+/// every call to `inner_provider` unchanged and only counts
+/// tokens, latency and cost.
+fn with_budget(
+    inner_provider: Arc<dyn ModelProvider>,
+) -> BudgetProvider {
+    // `anthropic_2026()` already returns an `Arc`; `CostBudget`
+    // takes the trait object.
+    let pricing: Arc<dyn PricingTable> =
+        StaticPricingTable::anthropic_2026();
+    let budget = Budget::builder()
+        .tokens(TokenBudget::new(200_000))
+        .latency(LatencyBudget::new(
+            Duration::from_secs(120),
+            Arc::new(SharedClock::system()),
+        ))
+        .cost(CostBudget::new(5_000, pricing)) // 5_000 cents = 50.00 USD
+        .build();
+    BudgetProvider::new(inner_provider, budget)
+}
 ```
+
+`inner_provider` is the provider you already hold — anything that
+implements `ModelProvider`, e.g. `AnthropicProvider::new(model_config)`
+from `synthia-provider` (enable its `anthropic` feature).
 
 ## Demo
 
-```
+```console
 cargo run --example budget_demo -p synthia-budget
 ```
 

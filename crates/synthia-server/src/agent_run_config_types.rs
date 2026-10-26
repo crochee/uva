@@ -17,7 +17,7 @@ use synthia::{
     context::ContextManager,
     harness::{AgentRegistry, PromptContext, ReasoningStrategy},
     provider::traits::ModelProvider,
-    session::TypedEventSink,
+    session::LogWriter,
     steering::Steering,
     tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy},
 };
@@ -48,8 +48,20 @@ pub struct AgentRunConfig {
     pub steering: Arc<Steering>,
     /// Named agent catalog.
     pub agent_registry: Option<Arc<AgentRegistry>>,
-    /// Typed-event sink for structural boundary events.
-    pub typed_event_sink: Option<TypedEventSink>,
+    /// The session's one writer: the agent's structural boundary
+    /// events go into it.
+    pub log_writer: Option<Arc<LogWriter>>,
+    /// Writer source resolving the log writer of a session a
+    /// delegated child runs in. The run factory installs it on
+    /// the agent, so the `task` delegator hands each child its
+    /// own session's writer and the child's harness writes its
+    /// model facts there.
+    pub subagent_writers: Option<Arc<dyn synthia::harness::SubagentWriters>>,
+    /// The deployment's plugin host. The run factory passes a clone
+    /// to the agent it builds, so the plugin tools installed at boot
+    /// are callable from chat. `None` (tests, embedders) leaves the
+    /// agent with the harness's empty default host.
+    pub host: Option<synthia::harness::Host>,
 }
 
 /// Per-run overrides applied on top of [`AgentRunConfig`].

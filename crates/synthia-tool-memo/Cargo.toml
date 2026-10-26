@@ -26,5 +26,12 @@ tracing.workspace = true
 blake3 = "1.5"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+# Test-only: the crate itself names no runtime — the memo store is
+# plain data, and the tool it wraps is awaited by the caller's
+# executor. The tests need a current-thread runtime (`#[tokio::test]`
+# + `tokio::spawn`) and one real delay: the single-flight test sleeps
+# so the two concurrent calls overlap, and `tokio::time::sleep` is
+# gated behind the `time` feature. No `rt-multi-thread`: nothing here
+# asks for a multi-threaded runtime.
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
 tempfile.workspace = true

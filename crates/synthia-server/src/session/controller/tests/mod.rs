@@ -14,20 +14,26 @@
 //! | [`cancel`]       | `Cancel` op — terminates run, idempotent, safe before run starts |
 //! | [`event_emission`] | Persist + broadcast of agent events, durable/ephemeral split, `request_header` epoch marker |
 //! | [`history`]      | Multi-turn memory: second prompt seeds `history` from sink, user-role reconstruction, compaction-checkpoint fold |
-//! | [`run_log`]      | `RunLog` ledger-feed and ordinal provenance (sink-assigned, not local counter) |
+//! | [`run_log`]      | `RunLog` — the run's handle on the session's one writer: ordinal provenance and the ledger feed |
 //! | [`prompt_multi`] | `PromptMulti` — lossless parts round-trip + text-only persistence of multimodal turn |
 //! | [`rerun`]        | `Rerun` — parts reach factory, prompt row shadows the replaced turn, chained reruns compose, defensive no-user-turn fallback, mid-run rerun |
 //! | [`run_config`]   | R34/R50/R58 + factory wiring: `tool_surface` / `strategy` / `tool_restriction` deps-to-config hop, factory narrows wire tools, runs the configured strategy |
+//! | [`plugin_host`]  | A plugin installed at boot is visible to the per-run session agent (the deployment host + one shared registry) |
 //! | [`usage`]        | Process-wide usage counters: `SystemEvent::Usage` token totals and one turn per `SystemEvent::SessionEnded` (any reason) |
-
+//! | [`writer`]       | One writer per session: feedback interleaves cleanly, a durable row is on disk before broadcast, a fork re-stamps |
 mod cancel;
 mod event_emission;
 mod history;
 mod lifecycle;
+mod parked_prompt;
+mod plugin_host;
 mod prompt_multi;
+mod provider_park;
 mod rerun;
 mod run_config;
 mod run_log;
+mod subagent_sessions;
 mod support;
 mod truncate;
 mod usage;
+mod writer;

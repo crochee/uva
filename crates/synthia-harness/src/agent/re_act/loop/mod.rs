@@ -1,8 +1,11 @@
 //! The ReAct loop's run state machine: the loop struct and the per-iteration order (checkpoint → sample → commit → dispatch).
+mod compaction;
 mod finalize;
 mod guard;
 mod hooks;
 mod prepare;
+mod resume;
+mod suspend;
 
 pub(super) mod sample;
 pub(super) mod tools;
@@ -14,6 +17,7 @@ use synthia_steering::{HookDecision, HookEvent};
 use tracing::{info, warn};
 
 use super::{
+    delegation::Delegators,
     panic::isolate,
     state::{RunState, SampleOutcome, Step},
 };
@@ -21,6 +25,7 @@ use crate::{
     AgentCaps,
     agent::{caps::AgentRuntime, sink::EventSink},
     events::{SessionEndReason, SystemEvent, WarningKind},
+    prompt::PromptContext,
 };
 
 pub(crate) struct ReActLoop {
@@ -31,16 +36,34 @@ pub(crate) struct ReActLoop {
     /// Read once when the loop was built so a whole run costs exactly one
     /// provider read.
     pub(super) cfg: synthia_provider::ModelConfig,
+    /// The manifest this run renders, snapshotted once in
+    /// [`ReActLoop::from_caps`]: the dispatch's context (or the agent's
+    /// default) plus the host's prompt sections in registration order.
+    /// A section a plugin registers during the run appears on the next
+    /// run, not this one.
+    pub(super) prompt_context: Arc<PromptContext>,
     pub(super) run: RunState,
-    /// Every synthetic plugin's advertised definitions, collected
-    /// once per run: the fingerprint and the projection's compose
-    /// step share this one build.
-    pub(super) synthetic_defs: Arc<Vec<synthia_provider::ToolDefinition>>,
-    pub(super) synthetic_fingerprint: u64,
+    /// Every delegator the loop dispatches, indexed by the names it is
+    /// advertised under: built once per run from the agent's own installs
+    /// and its host's registrations, so dispatch is one table hit.
+    pub(super) delegators: Delegators,
+    /// Every delegator's advertised definitions, collected once per run:
+    /// the fingerprint and the projection's compose step share this one
+    /// build.
+    pub(super) delegator_defs: Arc<Vec<synthia_provider::ToolDefinition>>,
+    pub(super) delegator_fingerprint: u64,
     /// Built once so a tool call does not pay a `PathBuf` clone per
     /// dispatch.
     pub(super) ctx: synthia_tool::Context,
+    /// The workspace identity grant matching uses, hashed once per
+    /// run.
+    pub(super) workspace_hash: String,
     pub(super) sink: EventSink,
+    /// Whether this run opened a turn that finalize must close. A
+    /// suspension writes its own `turn_end_suspended`, and a resumed
+    /// run reopens the turn from the log, so the ordinary `turn_end`
+    /// is written only when this run's own start is still open.
+    pub(super) turn_open: bool,
 }
 
 impl ReActLoop {
@@ -49,27 +72,36 @@ impl ReActLoop {
         cfg: synthia_provider::ModelConfig,
         run: RunState,
         sink: EventSink,
+        prompt_context: Arc<PromptContext>,
     ) -> Self {
-        let synthetic_defs: Vec<_> = caps
-            .tools
-            .synthetic
-            .iter()
-            .flat_map(|t| t.definitions())
-            .collect();
-        let synthetic_fingerprint =
-            super::projection::tool_names_hash(&synthetic_defs);
+        let mut delegators = Delegators::default();
+        for tool in &caps.tools.delegators {
+            delegators.merge(Arc::clone(tool));
+        }
+        for tool in caps.control.host.delegators() {
+            delegators.merge(tool);
+        }
+        let delegator_defs = delegators.definitions();
+        let delegator_fingerprint =
+            super::projection::tool_names_hash(&delegator_defs);
         let ctx = synthia_tool::Context::new(
             String::new(),
             caps.env.workspace_root.clone(),
         );
+        let workspace_hash =
+            crate::agent::approval::workspace_hash(&caps.env.workspace_root);
         Self {
             caps,
             cfg,
+            prompt_context,
             run,
-            synthetic_defs: Arc::new(synthetic_defs),
-            synthetic_fingerprint,
+            delegators,
+            delegator_defs: Arc::new(delegator_defs),
+            delegator_fingerprint,
             ctx,
+            workspace_hash,
             sink,
+            turn_open: false,
         }
     }
 
@@ -93,6 +125,17 @@ impl ReActLoop {
         ));
     }
 
+    /// The execution mode a call's name declares: a delegator's own mode,
+    /// else the registry's per-name mode.
+    pub(super) fn execution_mode(
+        &self,
+        name: &str,
+    ) -> synthia_tool::ExecutionMode {
+        self.delegators
+            .mode(name)
+            .unwrap_or_else(|| self.caps.tools.registry.execution_mode(name))
+    }
+
     pub(crate) fn cancelled(&self, reason: &str) -> bool {
         hooks::cancelled(&*self.run.cancel, &self.sink, reason)
     }
@@ -105,10 +148,7 @@ impl ReActLoop {
     /// reader cannot see is a hole in the log, and a hole makes
     /// every later compaction unresolvable.
     pub(crate) async fn flush_log(&self) -> Result<(), SessionEndReason> {
-        let Some(writer) = self.caps.env.log_writer.as_ref() else {
-            return Ok(());
-        };
-        writer.flush().await.map_err(|e| {
+        self.sink.flush_log().await.map_err(|e| {
             SessionEndReason::Error(format!("log flush failed: {e}"))
         })
     }
@@ -134,8 +174,19 @@ pub(crate) async fn drive_from_runtime(
         agent_state,
     )
     .with_model_hint(model_hint);
-    let loop_ =
-        ReActLoop::from_caps(runtime.caps, cfg, run_state, sink.clone());
+    // The run's manifest, snapshotted here and nowhere later: this is
+    // the boundary that makes a plugin's prompt section visible from
+    // the next run on, and keeps the prompt byte-stable inside this one.
+    let prompt_context = runtime
+        .caps
+        .run_prompt_context(input.prompt_context.as_ref());
+    let loop_ = ReActLoop::from_caps(
+        runtime.caps,
+        cfg,
+        run_state,
+        sink.clone(),
+        prompt_context,
+    );
     drive(loop_, input).await;
 }
 
@@ -171,6 +222,29 @@ pub(super) async fn drive(
         history_len = input.history.len(),
         "session start: preparing messages and dispatching LLM loop"
     );
+    // 0. The turn boundary. One run is one turn: the start must be in
+    // the log before the first step, so a crash mid-call leaves an
+    // open turn for repair to close. A resumed run is the exception —
+    // the resume reopens the turn it continues and would otherwise
+    // write a second start.
+    if input.resume.is_none() {
+        this.emit_typed(synthia_session::turn_start(TURN_ORDINAL));
+        this.turn_open = true;
+    }
+
+    // The run's first boundary: the host queued this run's prompt
+    // before it invoked the agent, and setup writes rows of its own (a
+    // compaction pass can run here). Both are on disk before the first
+    // model call, and a crash between the prompt and the answer keeps
+    // the prompt.
+    if let Err(reason) = this.flush_log().await {
+        let cancel = Arc::clone(&this.run.cancel);
+        let depth = this.run.subagent_depth;
+        return this
+            .drive_finalize(RunState::failed(cancel, depth, reason), false)
+            .await;
+    }
+
     // 1. Setup.
     let mut session = match this.drive_setup(&input).await {
         Ok(session) => session,
@@ -183,8 +257,29 @@ pub(super) async fn drive(
         }
     };
 
-    // 2. Stamp the request header once per run.
-    this.stamp_request_header();
+    // 2. The request envelope. Its fingerprint is what a resume is
+    // checked against, so it is derived before the resume runs; the
+    // row itself is written only after a resume has validated the
+    // token against the log's old tail.
+    let offered = super::projection::offered_tools(
+        &this.caps,
+        &this.delegator_defs,
+        this.delegator_fingerprint,
+    );
+    let snapshot = prepare::request_snapshot_event(&this, &offered);
+    let snapshot_hash =
+        prepare::request_snapshot_hash(&snapshot).unwrap_or_default();
+    session.request_snapshot_hash = Some(snapshot_hash.clone());
+    if let Err(reason) =
+        apply_resume(&mut this, &mut session, &input, &snapshot_hash).await
+    {
+        return this
+            .drive_finalize(session.with_end_reason(reason), false)
+            .await;
+    }
+    // The sink owns the write, so every strategy leaves the same rows.
+    this.emit_typed(snapshot);
+    this.sink.stamp_request_header(&this.caps, &offered);
 
     // 3. Loop.
     let mut exhausted = true;
@@ -193,25 +288,41 @@ pub(super) async fn drive(
             drive_one_iteration(&mut this, &mut session, iteration).await;
         match step {
             Step::Continue(_) => {
+                // A policy that ended the run after a tool
+                // returned: the step's results are committed, and
+                // the run stops here.
+                if let Some(reason) = session.terminate.take() {
+                    exhausted = false;
+                    session.end_reason = SessionEndReason::Error(reason);
+                    break;
+                }
                 // `after_step` (pi `finishTurn` parity): the step's
                 // results are committed and the loop would sample
                 // another iteration — the one interception point
                 // that can stop it. `Block` is meaningless here and
                 // falls through like `Allow`.
-                if let HookDecision::Terminate { reason } =
-                    hooks::dispatch_hook(&this.caps.control.steering, || {
+                let arbitration =
+                    hooks::dispatch_hook(&this.caps.control, || {
                         HookEvent::AfterStep {
                             agent_name: this.caps.model.descriptor.name.clone(),
                             run_idx: 0,
                             iteration: iteration as u32,
                         }
                     })
-                    .await
+                    .await;
+                if let HookDecision::Terminate { reason } = arbitration.decision
                 {
                     exhausted = false;
                     session.end_reason = SessionEndReason::Error(reason);
                     break;
                 }
+            }
+            Step::Suspended => {
+                // The suspension row and its event are already out;
+                // the run ends here and a resume continues it.
+                exhausted = false;
+                session.end_reason = SessionEndReason::Suspended;
+                break;
             }
             Step::Completed => {
                 exhausted = false;
@@ -230,13 +341,67 @@ pub(super) async fn drive(
     this.drive_finalize(session, exhausted).await
 }
 
+// Refuse a fresh run over pending approvals, then resume when the
+// input names a token. The log's tail is still the suspension's: the
+// new request snapshot has not been written yet.
+async fn apply_resume(
+    this: &mut ReActLoop,
+    session: &mut RunState,
+    input: &crate::input::AgentInput,
+    snapshot_hash: &str,
+) -> Result<(), SessionEndReason> {
+    if input.resume.is_none()
+        && let Some(writer) = this.caps.env.log_writer.as_ref()
+    {
+        let rows = writer.read().await.map_err(|error| {
+            SessionEndReason::Error(format!("session log read failed: {error}"))
+        })?;
+        if resume::has_open_requests(&rows) {
+            return Err(SessionEndReason::Error(
+                "stale approval: the session has open approval requests; \
+                 resume them or cancel them first"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(token) = input.resume.clone() {
+        resume::resume_suspended(
+            this,
+            session,
+            &token,
+            &input.resume_decisions,
+            input.allow_drift,
+            snapshot_hash,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 async fn drive_one_iteration(
     this: &mut ReActLoop,
     session: &mut RunState,
     iteration: usize,
 ) -> Step {
+    // The step boundary, before the model call: the run waits for the
+    // disk here, so the facts the model is about to see are already
+    // on it. The run's own prompt is one of them — the user's
+    // message is durable before the model ever sees it, and a crash
+    // in the window between the prompt and the answer keeps it.
+    if let Err(reason) = this.flush_log().await {
+        return Step::Failed(reason);
+    }
     let step = iteration_body(this, session, iteration).await;
-    this.emit_step_end_action(iteration as u32, step.action());
+    if matches!(step, Step::Suspended) {
+        // The approval rows and the suspended boundary are the
+        // suspension's durability: write them, then the `Suspended`
+        // event (the boundary flushes first).
+        if let Err(reason) = suspend::boundary(this, session).await {
+            return Step::Failed(reason);
+        }
+    } else {
+        this.emit_step_end_action(iteration as u32, step.action());
+    }
     // The step boundary is where the run waits for the disk: every
     // row this step produced is durable before the next model call
     // goes out, so a resume can say "it ran, the result is here".
@@ -255,6 +420,20 @@ async fn iteration_body(
     // then the checkpoint.
     if let Some(step) = iteration_start_setup(this, session, iteration).await {
         return step;
+    }
+    // The log is the transcript's source of truth: re-derive it at
+    // the boundary, before the request is assembled. A log-only row
+    // (the request header, the step's own structure) moves the tail
+    // but not the transcript, so this costs one row scan.
+    if let Err(reason) = prepare::refresh_history(this, session).await {
+        return Step::Failed(reason);
+    }
+    // Compaction sits on the same boundary, after the projection is
+    // fresh and before the request is assembled: `plan` →
+    // `summarize` → durable replace → re-derive. A summariser
+    // failure is not fatal — the run continues uncompacted.
+    if let Err(reason) = compaction::compact(this, session, iteration).await {
+        return Step::Failed(reason);
     }
     // Iteration 0's checkpoint ran at the end of `drive_setup` —
     // one checkpoint per *boundary*, and setup is the boundary
@@ -425,7 +604,7 @@ pub(super) async fn dispatch_truncated_batch(
         tool_call_count = tool_uses.len(),
         "length stop with tool calls; failing the batch instead of executing"
     );
-    sample::fail_truncated_tool_batch(this, session, tool_uses);
+    sample::fail_truncated_tool_batch(this, session, tool_uses).await;
     Step::Continue("tools_truncated")
 }
 
@@ -440,6 +619,11 @@ pub(super) async fn dispatch_execute_tools(
         tool_call_count = tool_uses.len(),
         "step 4: executing tool calls returned by LLM"
     );
-    tools::execute_tools(this, session, tool_uses).await;
+    if let Err(reason) = tools::execute_tools(this, session, tool_uses).await {
+        return Step::Failed(reason);
+    }
+    if !session.pending_approvals.is_empty() {
+        return Step::Suspended;
+    }
     Step::Continue("tools_complete")
 }

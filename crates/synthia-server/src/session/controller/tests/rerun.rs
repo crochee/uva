@@ -10,10 +10,11 @@
 //! starts its own run via the `pending_multimodal` slot.
 
 use std::{
-    sync::{Arc, Mutex, atomic::AtomicUsize},
+    sync::{Arc, atomic::AtomicUsize},
     time::Duration,
 };
 
+use parking_lot::Mutex;
 use synthia::{
     harness::{SessionEndReason, SystemEvent},
     provider::{ContentPart, TextContent},
@@ -68,14 +69,14 @@ async fn rerun_hands_its_parts_to_the_factory() {
         .unwrap();
 
     tokio::time::timeout(Duration::from_secs(2), async {
-        while calls.lock().unwrap().is_empty() {
+        while calls.lock().is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
     .expect("rerun must start a run");
 
-    let inputs = calls.lock().unwrap();
+    let inputs = calls.lock();
     let text = inputs[0]
         .content
         .iter()
@@ -380,7 +381,7 @@ async fn rerun_during_an_active_run_still_starts_its_own_run() {
         .unwrap();
 
     tokio::time::timeout(Duration::from_secs(3), async {
-        while calls.lock().unwrap().len() < 2 {
+        while calls.lock().len() < 2 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })

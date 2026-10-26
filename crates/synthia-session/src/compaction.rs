@@ -1,0 +1,689 @@
+//! Compaction seam — when a history outgrows its window, one
+//! summary replaces the span it shadows.
+//!
+//! The trait is **provider-free**: `plan` decides *what* to
+//! compact from the projected history and the token budget, and
+//! `summarize` produces the replacement. The default
+//! [`SummaryCompactor`] owns a provider handle and a model name,
+//! so a host that wants an LLM summary constructs it once and
+//! installs it on the agent.
+//!
+//! ## Who owns what
+//!
+//! - The **compactor** owns selection: the surface range, and the
+//!   summary text that replaces it.
+//! - The **harness** owns provenance: a plan sees provider
+//!   messages, not log ordinals, so `shadowed_seqs` is filled from
+//!   [`crate::surface::FoldedSurface::surface_seqs`] after `plan`
+//!   returns. A summary's `Replace` therefore cites exactly the
+//!   rows the fold showed the model, satisfying the fold's rule
+//!   that every cited seq precedes the compaction row and no
+//!   later than the previous surface maximum.
+//!
+//! ## Order
+//!
+//! Tool results are pruned **before** the summary call
+//! ([`Compactor::prune`]): the summariser reads placeholders for
+//! oversized results, not the full text. Pruning is a property of
+//! the summary input only — the durable rows and the `Replace`
+//! range are untouched.
+//!
+//! ## Pairing
+//!
+//! A summary that cuts between an assistant's `tool_use` and its
+//! `tool_result` leaves the kept tail invalid. [`SummaryCompactor::plan`]
+//! moves its cut back to the nearest balanced boundary
+//! ([`crate::tool_pairing::balanced_cut_at_or_before`]).
+
+use std::{ops::Range, sync::Arc};
+
+use futures::{FutureExt, future::BoxFuture};
+use serde_json::Value;
+use synthia_core::{
+    CancelToken,
+    sleeper::{Sleeper, ThreadSleeper},
+};
+use synthia_provider::{
+    CompletionRequest,
+    Content,
+    ContentPart,
+    Message,
+    ModelProvider,
+    Role,
+    TokenUsage,
+    estimate_messages_token_count,
+};
+
+use crate::{
+    SessionError,
+    events::{
+        CompactionLifecycleOutcome,
+        SessionEvent,
+        SurfaceOp,
+        SurfaceToken,
+    },
+    history::surface_message,
+    log_surface::try_fold_log_surface,
+    surface::FoldError,
+    tool_pairing::balanced_cut_at_or_before,
+    writer::LogWriter,
+};
+
+/// The placeholder an oversized tool result is replaced with in
+/// the summary input.
+pub const PRUNED_TOOL_RESULT: &str = "[tool result pruned]";
+
+/// Results shorter than this many characters reach the summariser
+/// verbatim.
+pub const DEFAULT_PRUNE_MIN_CHARS: usize = 1_024;
+
+const DEFAULT_RESERVE: usize = 16_384;
+/// The kept tail may use this fraction of the post-reserve budget.
+const TAIL_DIVISOR: usize = 2;
+const SUMMARY_INSTRUCTION: &str = "You compact an assistant's \
+conversation history for another assistant. Summarise what happened: \
+the goal, the decisions, the files and tools that mattered, and what \
+is still open. Keep concrete identifiers. Reply with the summary only.";
+
+/// What a request may spend: the model's window and the reserve the
+/// reply needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TokenBudget {
+    pub window: usize,
+    pub reserve: usize,
+}
+
+impl TokenBudget {
+    /// A budget for `window`, reserving the smaller of
+    /// `DEFAULT_RESERVE` and a quarter of the window.
+    #[must_use]
+    pub fn for_window(window: usize) -> Self {
+        Self {
+            window,
+            reserve: DEFAULT_RESERVE.min(window / 4),
+        }
+    }
+
+    /// Tokens the history may occupy before compaction triggers.
+    #[must_use]
+    pub fn trigger(&self) -> usize {
+        self.window.saturating_sub(self.reserve)
+    }
+}
+
+/// One compaction decision: which surface messages to shadow and
+/// what the replacement is made from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompactionPlan {
+    /// Surface range `[start, end)` the summary replaces.
+    pub range: Range<usize>,
+    /// Seqs of the shadowed surface rows.
+    ///
+    /// Empty when `plan` built the plan (it sees no log); the
+    /// harness fills it from the fold before `summarize`.
+    pub shadowed_seqs: Vec<u64>,
+    /// Number of messages the plan keeps after the cut.
+    pub keep_recent: usize,
+    /// The shadowed messages, snapshotted at plan time — the
+    /// summariser's input.
+    pub shadowed: Vec<Message>,
+    /// Heuristic token price of the shadowed span, measured before
+    /// pruning.
+    pub shadowed_tokens: usize,
+}
+
+/// What one successful summary produced.
+///
+/// `shadowed_seqs` / `shadowed_tokens` echo the plan. The harness
+/// treats them as advisory: it writes the *plan's* values into the
+/// durable replace, so a compactor cannot cite a seq the fold did not
+/// hand it. The identity fields describe the call that produced the
+/// text; a custom compactor may leave them `None`.
+#[derive(Clone, Debug)]
+pub struct CompactionOutcome {
+    /// The assistant turn that replaces the shadowed span.
+    pub summary: String,
+    /// The plan's shadowed seqs, echoed back.
+    pub shadowed_seqs: Vec<u64>,
+    /// The plan's pre-prune token price, echoed back.
+    pub shadowed_tokens: usize,
+    /// The summariser provider's name.
+    pub provider: Option<String>,
+    /// The model the summary was requested from.
+    pub model: Option<String>,
+    /// The provider's usage report for the summary call.
+    pub usage: Option<TokenUsage>,
+}
+
+/// Why a summary did not happen.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CompactionError {
+    /// The run was cancelled before the summary was produced.
+    #[error("compaction cancelled")]
+    Cancelled,
+    /// The summariser's provider call failed.
+    #[error("summariser provider failed: {0}")]
+    Provider(String),
+    /// The summariser did not answer within its timeout.
+    #[error("summariser timed out after {0:?}")]
+    Timeout(std::time::Duration),
+    /// The provider returned no text.
+    #[error("summariser returned no text")]
+    EmptySummary,
+}
+
+/// Decides whether to compact and produces the replacement.
+pub trait Compactor: Send + Sync {
+    /// Return the span to compact, or `None` to leave history alone.
+    fn plan(
+        &self,
+        history: &[Message],
+        budget: TokenBudget,
+    ) -> Option<CompactionPlan>;
+
+    /// Prune the plan's tool results ahead of the summary call.
+    ///
+    /// The default replaces oversized tool-result text with
+    /// [`PRUNED_TOOL_RESULT`]. Overrides keep the same contract:
+    /// the returned messages are the summary input, never the
+    /// surface.
+    fn prune(&self, plan: &CompactionPlan) -> Vec<Message> {
+        prune_tool_results(&plan.shadowed, DEFAULT_PRUNE_MIN_CHARS)
+    }
+
+    /// Produce the summary. May call the provider once.
+    fn summarize(
+        &self,
+        plan: &CompactionPlan,
+        cancel: Arc<dyn CancelToken>,
+    ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>>;
+}
+
+/// The default compactor: keep a balanced recent tail, summarise
+/// the rest with the installed provider.
+pub struct SummaryCompactor {
+    provider: Arc<dyn ModelProvider>,
+    model: String,
+    timeout: Option<std::time::Duration>,
+    /// The seam that arms `timeout`. Runtime-free by default, so the
+    /// crate never names a timer.
+    sleeper: Arc<dyn Sleeper>,
+}
+
+/// The timeout a host should install on its summariser.
+///
+/// The harness is runtime-free, so it cannot arm a timer itself; a
+/// host installs one with [`SummaryCompactor::with_sleeper`] and opts
+/// into [`SummaryCompactor::with_timeout`]. Without a timeout a hung
+/// provider is bounded only by the transport's own timeout.
+pub const DEFAULT_SUMMARY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(120);
+
+impl SummaryCompactor {
+    /// Build the default compactor around `provider` and `model`.
+    #[must_use]
+    pub fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            timeout: None,
+            sleeper: Arc::new(ThreadSleeper),
+        }
+    }
+
+    /// Install the seam that waits out [`Self::with_timeout`].
+    ///
+    /// The default, [`ThreadSleeper`], waits on a std thread — it
+    /// needs no reactor, at the cost of one thread per armed timeout.
+    /// A host on a real runtime installs that runtime's sleeper (the
+    /// tokio one lives in `synthia-harness-tokio`).
+    #[must_use]
+    pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self {
+        self.sleeper = sleeper;
+        self
+    }
+
+    /// Override how long the provider call may take.
+    ///
+    /// The deadline is armed through [`Self::with_sleeper`]; the
+    /// default sleeper needs no runtime, so this works on any
+    /// executor.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    fn tail_cut(&self, history: &[Message], tail_budget: usize) -> usize {
+        let mut tokens = 0usize;
+        let mut cut = history.len();
+        for (index, message) in history.iter().enumerate().rev() {
+            let price =
+                estimate_messages_token_count(std::slice::from_ref(message));
+            if cut < history.len() && tokens.saturating_add(price) > tail_budget
+            {
+                break;
+            }
+            tokens = tokens.saturating_add(price);
+            cut = index;
+        }
+        cut
+    }
+}
+
+impl Compactor for SummaryCompactor {
+    fn plan(
+        &self,
+        history: &[Message],
+        budget: TokenBudget,
+    ) -> Option<CompactionPlan> {
+        let trigger = budget.trigger();
+        if trigger == 0 || history.len() < 2 {
+            return None;
+        }
+        if estimate_messages_token_count(history) <= trigger {
+            return None;
+        }
+        let cut = self.tail_cut(history, (trigger / TAIL_DIVISOR).max(1));
+        let cut = balanced_cut_at_or_before(history, cut);
+        // A leading system message is part of the provider's cached
+        // prefix; never shadow it.
+        let start = usize::from(history[0].role == Role::System);
+        if cut <= start {
+            return None;
+        }
+        let shadowed = history[start..cut].to_vec();
+        Some(CompactionPlan {
+            range: start..cut,
+            shadowed_seqs: Vec::new(),
+            keep_recent: history.len() - cut,
+            shadowed_tokens: estimate_messages_token_count(&shadowed),
+            shadowed,
+        })
+    }
+
+    fn summarize(
+        &self,
+        plan: &CompactionPlan,
+        cancel: Arc<dyn CancelToken>,
+    ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
+        // Pruning is part of building the request, so it provably
+        // precedes the provider call.
+        let prompt = render_messages(&self.prune(plan));
+        let provider = Arc::clone(&self.provider);
+        let provider_name = self.provider.name().to_string();
+        let model = self.model.clone();
+        let shadowed_seqs = plan.shadowed_seqs.clone();
+        let shadowed_tokens = plan.shadowed_tokens;
+        let timeout = self.timeout;
+        let sleeper = Arc::clone(&self.sleeper);
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return Err(CompactionError::Cancelled);
+            }
+            let request = CompletionRequest {
+                model: model.clone(),
+                messages: Arc::new(vec![
+                    Message::system(SUMMARY_INSTRUCTION),
+                    Message::user(prompt),
+                ]),
+                ..CompletionRequest::default()
+            };
+            // The three futures are raced in this order and no other:
+            // a cancelled run reports cancellation even when the
+            // provider's answer happens to be ready too, and the
+            // deadline only wins once nothing else is.
+            let response = match timeout {
+                Some(timeout) => futures::select_biased! {
+                    () = cancel.cancelled().fuse() => {
+                        return Err(CompactionError::Cancelled);
+                    }
+                    result = provider.complete(request).fuse() => result
+                        .map_err(|error| {
+                            CompactionError::Provider(error.to_string())
+                        })?,
+                    () = sleeper.sleep(timeout).fuse() => {
+                        return Err(CompactionError::Timeout(timeout));
+                    }
+                },
+                None => futures::select_biased! {
+                    () = cancel.cancelled().fuse() => {
+                        return Err(CompactionError::Cancelled);
+                    }
+                    response = provider.complete(request).fuse() => response
+                        .map_err(|error| {
+                            CompactionError::Provider(error.to_string())
+                        })?,
+                },
+            };
+            let summary = response
+                .content
+                .extract_text()
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .ok_or(CompactionError::EmptySummary)?;
+            Ok(CompactionOutcome {
+                summary,
+                shadowed_seqs,
+                shadowed_tokens,
+                provider: Some(provider_name),
+                model: Some(model.clone()),
+                usage: Some(response.usage),
+            })
+        })
+    }
+}
+
+/// Replace oversized tool-result text with a placeholder.
+///
+/// Copies every message, so the caller's history is untouched. A
+/// tool message (`role == Tool`) and a `ToolResult` content part
+/// are both pruned; results under `min_chars` keep their text.
+#[must_use]
+pub fn prune_tool_results(
+    messages: &[Message],
+    min_chars: usize,
+) -> Vec<Message> {
+    messages
+        .iter()
+        .map(|message| prune_one(message, min_chars))
+        .collect()
+}
+
+fn prune_one(message: &Message, min_chars: usize) -> Message {
+    if message.role != Role::Tool
+        && !message
+            .content
+            .iter()
+            .any(|part| matches!(part, ContentPart::ToolResult(_)))
+    {
+        return message.clone();
+    }
+    let mut pruned = message.clone();
+    match &mut pruned.content {
+        Content::Single(part) => prune_part(part, min_chars),
+        Content::Multi(parts) => {
+            for part in parts {
+                prune_part(part, min_chars);
+            }
+        }
+    }
+    pruned
+}
+
+fn prune_part(part: &mut ContentPart, min_chars: usize) {
+    match part {
+        ContentPart::Text(text) if text.text.chars().count() >= min_chars => {
+            text.text = format!(
+                "{PRUNED_TOOL_RESULT} ({} chars)",
+                text.text.chars().count()
+            );
+        }
+        ContentPart::ToolResult(result) => {
+            for inner in &mut result.content {
+                prune_part(inner, min_chars);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn render_messages(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for message in messages {
+        out.push_str(message.role.as_str());
+        out.push_str(": ");
+        for part in &message.content {
+            render_part(part, &mut out);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn render_part(part: &ContentPart, out: &mut String) {
+    match part {
+        ContentPart::Text(text) => out.push_str(&text.text),
+        ContentPart::ToolUse(call) => {
+            out.push_str(&format!("called {}({})", call.name, call.input));
+        }
+        ContentPart::ToolResult(result) => {
+            for inner in &result.content {
+                render_part(inner, out);
+            }
+        }
+        ContentPart::Reasoning(reasoning) => out.push_str(&reasoning.text),
+        ContentPart::Image(_) => out.push_str("[image]"),
+        ContentPart::Audio(_) => out.push_str("[audio]"),
+        ContentPart::Resource(link) => {
+            out.push_str(&format!("[resource {}]", link.uri));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+// ---------------------------------------------------------------------------
+// The durable pass, shared by the loop and a host's manual compaction
+// ---------------------------------------------------------------------------
+
+/// Why a compaction pass could not even plan.
+#[derive(Debug, thiserror::Error)]
+pub enum CompactionPassError {
+    // The log's surface ops are inconsistent (bad provenance).
+    #[error("the log does not fold into a surface: {0}")]
+    Fold(#[from] FoldError),
+    // A surface row is not a provider message the compactor can read.
+    #[error("a surface row is not a projectable message")]
+    NotAMessage,
+}
+
+/// What a compaction pass produced, for the caller's audit/UI.
+#[derive(Debug)]
+pub enum CompactionPass<'a> {
+    // The summary replaced its span; the Compaction row's ordinal is
+    // returned by [`finish_compaction`].
+    Committed(&'a CompactionOutcome),
+    // The summariser failed (or was cancelled). The audit end row is
+    // still written so the start/end pair is never orphaned.
+    Failed {
+        /// The summariser's error, recorded in the end row.
+        error: &'a str,
+        /// `failed` or `interrupted`.
+        outcome: CompactionLifecycleOutcome,
+    },
+}
+
+/// What planning a pass decided.
+#[derive(Debug)]
+pub enum PlannedCompaction {
+    // There is a span to summarise.
+    Plan(CompactionPlan),
+    // The compactor declined: the history is under the trigger.
+    Declined,
+    // The compactor named a span that the fold clamps to nothing (an
+    // out-of-range plan, or the system prompt as the only candidate).
+    // Distinct from [`PlannedCompaction::Declined`] so a host can say
+    // why nothing was committed.
+    EmptySpan,
+}
+
+/// Plan one pass over the durable log.
+///
+/// Folds the log, decodes one message per surface row, asks `compactor`
+/// whether to compact, and binds the plan's range and provenance to the
+/// fold: the range is clamped to the surface, the leading system message
+/// is never shadowed, and `shadowed_seqs` comes from the fold (never
+/// from the compactor). A plan the fold clamps to nothing is
+/// [`PlannedCompaction::EmptySpan`], not an error — nothing is broken,
+/// there is just nothing to shadow.
+///
+/// The caller reads the rows (it may need them for other decisions) and
+/// keeps ownership of the live events; this function only decides.
+///
+/// # Errors
+///
+/// Returns [`CompactionPassError`] when the log does not fold or a
+/// surface row is not a message.
+pub fn plan_compaction(
+    rows: &[Value],
+    compactor: &dyn Compactor,
+    budget: TokenBudget,
+) -> Result<PlannedCompaction, CompactionPassError> {
+    let surface = try_fold_log_surface(rows)?;
+    let history = surface
+        .messages
+        .iter()
+        .map(surface_message)
+        .collect::<Option<Vec<_>>>()
+        .ok_or(CompactionPassError::NotAMessage)?;
+    let Some(plan) = compactor.plan(&history, budget) else {
+        return Ok(PlannedCompaction::Declined);
+    };
+    Ok(match bind_plan(plan, &history, &surface.surface_seqs) {
+        Some(plan) => PlannedCompaction::Plan(plan),
+        None => PlannedCompaction::EmptySpan,
+    })
+}
+
+// Rebuild a plan's content from the surface it points at, then fill the
+// provenance the compactor cannot know. `None` refuses an empty span.
+fn bind_plan(
+    mut plan: CompactionPlan,
+    history: &[Message],
+    surface_seqs: &[u64],
+) -> Option<CompactionPlan> {
+    if history.is_empty() {
+        return None;
+    }
+    let floor = usize::from(history[0].role == Role::System);
+    let start = plan.range.start.max(floor);
+    let end = plan.range.end.min(history.len()).min(surface_seqs.len());
+    if start >= end {
+        return None;
+    }
+    plan.range = start..end;
+    plan.shadowed = history[start..end].to_vec();
+    plan.shadowed_seqs = surface_seqs[start..end].to_vec();
+    plan.shadowed_tokens = estimate_messages_token_count(&plan.shadowed);
+    plan.keep_recent = history.len() - end;
+    Some(plan)
+}
+
+/// Write the pass's `compaction_start` audit row.
+///
+/// Called **before** the summary call so a crash mid-pass leaves a
+/// start row the loader can report as an orphaned compaction.
+///
+/// # Errors
+///
+/// Returns the writer's error when the row cannot be queued.
+pub async fn begin_compaction(
+    writer: &LogWriter,
+    plan: &CompactionPlan,
+    reason: &str,
+) -> Result<SurfaceToken, SessionError> {
+    let token = SurfaceToken::new();
+    writer
+        .append_event(&SessionEvent::CompactionStart {
+            seq: 0,
+            ts: String::new(),
+            token: token.to_string(),
+            data: serde_json::json!({
+                "reason": reason,
+                "start": plan.range.start,
+                "end": plan.range.end,
+                "shadowed_token_count": plan.shadowed_tokens,
+            }),
+        })
+        .await?;
+    Ok(token)
+}
+
+/// Write the pass's terminal rows and flush.
+///
+/// A committed pass writes `compaction_summary` → `compaction`
+/// (`SurfaceOp::Replace` citing the plan's ordinals) → `compaction_end`.
+/// A failed one writes only the end row. The flush lands the replace
+/// before the caller re-derives a request from it, so an observer never
+/// sees a summary the next request will not carry.
+///
+/// Returns the `compaction` row's ordinal for a committed pass.
+///
+/// # Errors
+///
+/// Returns the writer's error when a row cannot be queued or flushed.
+pub async fn finish_compaction(
+    writer: &LogWriter,
+    token: &SurfaceToken,
+    reason: &str,
+    plan: &CompactionPlan,
+    pass: CompactionPass<'_>,
+) -> Result<Option<u64>, SessionError> {
+    let seq = match pass {
+        CompactionPass::Committed(outcome) => {
+            writer
+                .append_event(&SessionEvent::CompactionSummary {
+                    seq: 0,
+                    ts: String::new(),
+                    token: token.to_string(),
+                    data: serde_json::json!({"summary": outcome.summary}),
+                })
+                .await?;
+            let seq = writer
+                .append_event(&SessionEvent::Compaction {
+                    seq: 0,
+                    ts: String::new(),
+                    data: serde_json::json!({
+                        "summary": outcome.summary,
+                        "source_indices":
+                            plan.range.clone().collect::<Vec<_>>(),
+                        "shadowed_token_count": plan.shadowed_tokens,
+                        "provider": outcome.provider,
+                        "model": outcome.model,
+                        "usage": outcome.usage,
+                    }),
+                    surface_op: SurfaceOp::Replace {
+                        start: plan.range.start,
+                        end: plan.range.end,
+                        source_event_seqs: plan.shadowed_seqs.clone(),
+                    },
+                })
+                .await?;
+            writer
+                .append_event(&SessionEvent::CompactionEnd {
+                    seq: 0,
+                    ts: String::new(),
+                    token: token.to_string(),
+                    outcome: CompactionLifecycleOutcome::Committed
+                        .as_str()
+                        .to_string(),
+                    data: serde_json::json!({
+                        "shadowed_messages": plan.range.len(),
+                        "shadowed_tokens": plan.shadowed_tokens,
+                        "reason": reason,
+                    }),
+                })
+                .await?;
+            Some(seq)
+        }
+        CompactionPass::Failed { error, outcome } => {
+            writer
+                .append_event(&SessionEvent::CompactionEnd {
+                    seq: 0,
+                    ts: String::new(),
+                    token: token.to_string(),
+                    outcome: outcome.as_str().to_string(),
+                    data: serde_json::json!({"error": error, "reason": reason}),
+                })
+                .await?;
+            None
+        }
+    };
+    writer.flush().await?;
+    Ok(seq)
+}

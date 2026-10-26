@@ -201,7 +201,7 @@ async fn tool_schemas_never_appear_in_assembled_system_prompt() {
     );
 }
 
-/// The harness has no git dependency, so the old git line was a permanent `unknown`.
+// The harness has no git dependency, so the old git line was a permanent `unknown`.
 #[tokio::test]
 async fn runtime_snapshot_names_the_model_and_omits_git() {
     let provider =

@@ -122,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let runtime = runtime(provider.clone());
     let (tx, _rx) = futures::channel::mpsc::unbounded();
-    let sink = EventSink::new(Arc::new(tx), None, None);
+    let sink = EventSink::new(Arc::new(tx), None);
 
     let strategy =
         PlanExecuteStrategy::new(PlanExecuteConfig::default().max_steps(20));

@@ -29,6 +29,8 @@ import { memo, useEffect, useRef, useState } from 'react';
 import type { JSX } from 'react';
 import { Link } from 'react-router-dom';
 import { Markdown } from './Markdown';
+import { ApprovalCard, type ApprovalCardProps } from './ApprovalCard';
+import { CompactionMarker } from './CompactionMarker';
 import type { ChatFile, ChatImage, MessageSegment } from '../../api/chat-message';
 import type { SessionPart } from '../../api/types';
 import { basename, childSessionIdOf, parseTodoItems } from '../../lib/session-panel-data';
@@ -499,9 +501,14 @@ function safeParseObject(raw: string): Record<string, unknown> | null {
 const SegmentView = memo(function SegmentView({
   segment,
   now,
+  approval,
 }: {
   segment: MessageSegment;
   now: number;
+  /** Present while a suspended run waits for decisions. A tool block
+   *  whose call is held renders the card inside itself, so approving is
+   *  done against the exact call it applies to. */
+  approval?: ApprovalCardProps;
 }): JSX.Element {
   // All collapsible segments (thinking, tool_call, tool_result, tool_block)
   // start collapsed. Thinking is verbose and only relevant when the user
@@ -515,6 +522,10 @@ const SegmentView = memo(function SegmentView({
   // shared .nt-session__artifact-* styles always win.
   if (segment.type === 'attachment') {
     return <ArtifactSegment segment={segment} />;
+  }
+
+  if (segment.type === 'compaction') {
+    return <CompactionMarker info={segment.compaction ?? { summary: segment.content }} />;
   }
 
   const isCollapsible =
@@ -561,6 +572,7 @@ const SegmentView = memo(function SegmentView({
   // collapsed-JSON default.
   if (segment.type === 'tool_block') {
     const elapsed = segment.pendingSince ? Math.floor((now - segment.pendingSince) / 1000) : 0;
+    const held = approval?.interrupts.filter((call) => call.call_id === segment.toolUseId) ?? [];
     const summary =
       segment.toolName === 'TodoWrite' ? (
         <TodoSummary callContent={segment.callContent} />
@@ -643,6 +655,7 @@ const SegmentView = memo(function SegmentView({
             </div>
           )}
         </div>
+        {held.length > 0 && approval && <ApprovalCard {...approval} interrupts={held} />}
       </>
     );
   }
@@ -732,10 +745,13 @@ export const ChatMessageList = memo(function ChatMessageList({
   messages,
   now,
   className,
+  approval,
 }: {
   messages: ReadonlyArray<ChatMessageViewItem>;
   now: number;
   className?: string;
+  /** Open approvals, bound to the tool blocks whose calls are held. */
+  approval?: ApprovalCardProps;
 }): JSX.Element {
   return (
     <div
@@ -771,7 +787,7 @@ export const ChatMessageList = memo(function ChatMessageList({
           </div>
           <div className="nt-chat__message-content">
             {msg.segments.map((segment) => (
-              <SegmentView key={segment.id} segment={segment} now={now} />
+              <SegmentView key={segment.id} segment={segment} now={now} approval={approval} />
             ))}
           </div>
         </div>
