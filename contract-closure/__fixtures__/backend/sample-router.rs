@@ -1,4 +1,4 @@
-// test fixture: synthia-server router.rs (synthia-style layout)
+// test fixture: elysper-server router.rs (elysper-style layout)
 // Models a Router::new()...route()...route(); pattern, plus a few
 // let VAR = Router::new()...; blocks that nest via Router::new().nest(...).
 

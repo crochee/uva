@@ -6,7 +6,7 @@
 
 **Architecture:** 十三项任务分四波。第一波改**持久化格式**（行的 durable key、压缩写 durable 事件、版本号门禁），因为后面所有验收都跑在新格式上；第二波修**语义**（resume 错误码、gate 生命周期），彼此独立；第三波**收口**（文档、规则去重）；第四波是**与 harness 无关的既有欠债**（四个 crate 的测试变绿），单独成波。最后两项落承诺与交接材料，末项重跑验收。
 
-**Tech Stack:** Rust 2024 edition，MSRV 1.98；`thiserror`（库）/ `anyhow`（应用）；`tokio` 只出现在 app 与 opt-in crate；`serde_json` 为日志载体；前端为 TypeScript + React（`synthia-web`）。
+**Tech Stack:** Rust 2024 edition，MSRV 1.98；`thiserror`（库）/ `anyhow`（应用）；`tokio` 只出现在 app 与 opt-in crate；`serde_json` 为日志载体；前端为 TypeScript + React（`elysper-web`）。
 
 **Spec:** `docs/design/2026-10-26-harness-v4-remainders-design.md`（本计划的每条决定都出自它）
 **验收记录（本轮要更新的那份）:** `docs/design/2026-10-26-harness-v4-acceptance.md`
@@ -16,9 +16,9 @@
 以下每条都来自仓库规范或设计文档，**每个任务都隐含包含**：
 
 - 库用 `thiserror`、应用用 `anyhow`；`max_width = 80`；禁通配符导入（`use foo::*`）。
-- `synthia-harness` **不得**有 `[features]` 表，闭包内**不得**出现 tokio，库 crate 的公开面**不得**出现运行时类型（`make check-no-runtime` / `make check-harness-features` / `make check-public-api-runtime`）。
+- `elysper-harness` **不得**有 `[features]` 表，闭包内**不得**出现 tokio，库 crate 的公开面**不得**出现运行时类型（`make check-no-runtime` / `make check-harness-features` / `make check-public-api-runtime`）。
 - harness 私有项的 `///` 预算**正好 50/50**（`make check-harness-docs`）—— 新增任何一行 harness 私有文档前必须先删一行。
-- 库生产代码**不得**直接调用 `chrono::Utc::now()`，一律走 `synthia_core::Clock`（`make check-clock`）。
+- 库生产代码**不得**直接调用 `chrono::Utc::now()`，一律走 `elysper_core::Clock`（`make check-clock`）。
 - `make check-test-layout`：内联 `#[cfg(test)] mod` 测试块 < 400 行；新测试放同级 `tests.rs`。
 - `make check-pub-surface` / `make check-pub-surface-strict`：禁 glob re-export；七个范式 crate 的 `pub use` 计数不得增长。
 - `make check-claim-language`：状态文档里不许有与代码矛盾的绝对化措辞。
@@ -42,17 +42,17 @@
 
 | 文件 | 责任 | 本轮动它吗 |
 |---|---|---|
-| `crates/synthia-session/src/ledger_key.rs`（新） | 一行/一条消息的 durable identity 的**唯一**推导处 | Task 2 建 |
-| `crates/synthia-session/src/log_surface.rs` | ledger 与 fold 共享的行分类与 key 解析 | Task 2、3 |
-| `crates/synthia-session/src/jsonl.rs` | 日志读写、头行、版本号 | Task 1、4 |
-| `crates/synthia-session/src/writer/mod.rs` | 行号分配、盖章、队列、spill、批量写 | Task 1 |
-| `crates/synthia-session/src/events.rs` | `SessionEvent` 的变体与表 | Task 3、4 |
-| `crates/synthia-context/src/summarizing/manager.rs` | 自动压缩的 splice 与 `CompactionRecord` | Task 2、3 |
-| `crates/synthia-context/src/summarizing/lifecycle.rs` | `CompactionRecord` 的形状 | Task 3 |
-| `crates/synthia-server/src/routes/follow.rs` | follow / resume 路由 | Task 5、8 |
-| `crates/synthia-server/src/session/controller/inner.rs` | controller 的日志派生状态 | Task 5 |
-| `crates/synthia-server/src/state/app_state/{mod,sessions}.rs` | `AppState` 与会话表 | Task 6 |
-| `crates/synthia-web/src/**` | 前端 | Task 5 |
+| `crates/elysper-session/src/ledger_key.rs`（新） | 一行/一条消息的 durable identity 的**唯一**推导处 | Task 2 建 |
+| `crates/elysper-session/src/log_surface.rs` | ledger 与 fold 共享的行分类与 key 解析 | Task 2、3 |
+| `crates/elysper-session/src/jsonl.rs` | 日志读写、头行、版本号 | Task 1、4 |
+| `crates/elysper-session/src/writer/mod.rs` | 行号分配、盖章、队列、spill、批量写 | Task 1 |
+| `crates/elysper-session/src/events.rs` | `SessionEvent` 的变体与表 | Task 3、4 |
+| `crates/elysper-context/src/summarizing/manager.rs` | 自动压缩的 splice 与 `CompactionRecord` | Task 2、3 |
+| `crates/elysper-context/src/summarizing/lifecycle.rs` | `CompactionRecord` 的形状 | Task 3 |
+| `crates/elysper-server/src/routes/follow.rs` | follow / resume 路由 | Task 5、8 |
+| `crates/elysper-server/src/session/controller/inner.rs` | controller 的日志派生状态 | Task 5 |
+| `crates/elysper-server/src/state/app_state/{mod,sessions}.rs` | `AppState` 与会话表 | Task 6 |
+| `crates/elysper-web/src/**` | 前端 | Task 5 |
 | `scripts/check-frozen-api.sh`（新） | 公开 API 冻结门禁 | Task 11 建 |
 | `docs/design/2026-10-26-harness-v4-acceptance.md` | 验收记录 | Task 13 改 |
 
@@ -61,9 +61,9 @@
 ### Task 1: writer 的重试不重复写行
 
 **Files:**
-- Modify: `crates/synthia-session/src/jsonl.rs`（`JsonlSessionSink::append_many`，`:358`）
-- Modify: `crates/synthia-session/src/writer/mod.rs`（`write_batch`，`:480`；`stamp`，`:525`）
-- Test: `crates/synthia-session/src/writer/tests.rs`（已有 `GatedSink`，`:584`，可复用）
+- Modify: `crates/elysper-session/src/jsonl.rs`（`JsonlSessionSink::append_many`，`:358`）
+- Modify: `crates/elysper-session/src/writer/mod.rs`（`write_batch`，`:480`；`stamp`，`:525`）
+- Test: `crates/elysper-session/src/writer/tests.rs`（已有 `GatedSink`，`:584`，可复用）
 
 **Interfaces:**
 - Consumes: 现有 `SessionSink::append_many(&self, events: &[Value])`（`sink.rs:324`）；行上已由 `stamp` 写入的顶层 `seq` 与 `ts`。
@@ -73,11 +73,11 @@
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-session/src/writer/tests.rs` 加一个测试，用一个"写成功但随后报错"的后端（`GatedSink` 已有类似形状，`:584`）：第一次 `flush()` 返回 `Err`，第二次 `flush()` 返回 `Ok`；然后断言后端**最终持有**的行里，每个 `seq` 只出现一次，且行数等于第一次尝试的批大小。
+在 `crates/elysper-session/src/writer/tests.rs` 加一个测试，用一个"写成功但随后报错"的后端（`GatedSink` 已有类似形状，`:584`）：第一次 `flush()` 返回 `Err`，第二次 `flush()` 返回 `Ok`；然后断言后端**最终持有**的行里，每个 `seq` 只出现一次，且行数等于第一次尝试的批大小。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-session --lib a_retry_after_a_failed_flush_does_not_duplicate_a_row`
+Run: `cargo test -p elysper-session --lib a_retry_after_a_failed_flush_does_not_duplicate_a_row`
 Expected: FAIL —— 重复行出现。
 
 - [ ] **Step 3: 让 `JsonlSessionSink::append_many` 幂等**
@@ -86,18 +86,18 @@ Expected: FAIL —— 重复行出现。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-session --lib`
+Run: `cargo test -p elysper-session --lib`
 Expected: 全绿。
 
 - [ ] **Step 5: 跑门禁**
 
-Run: `cargo clippy -p synthia-session --all-targets -- -D warnings && cargo +nightly fmt --all --check`
+Run: `cargo clippy -p elysper-session --all-targets -- -D warnings && cargo +nightly fmt --all --check`
 Expected: 干净。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-session/src/jsonl.rs crates/synthia-session/src/writer
+git add crates/elysper-session/src/jsonl.rs crates/elysper-session/src/writer
 git commit -m "fix(session): skip rows a failed flush already wrote"
 ```
 
@@ -106,17 +106,17 @@ git commit -m "fix(session): skip rows a failed flush already wrote"
 ### Task 2: 每个 surface 行都有 durable identity
 
 **Files:**
-- Create: `crates/synthia-session/src/ledger_key.rs`
-- Modify: `crates/synthia-session/src/lib.rs`（导出新模块）
-- Modify: `crates/synthia-session/src/log_surface.rs`（`classify_typed_message`，`:168`；`decode_message`，`:187`）
-- Modify: `crates/synthia-context/src/summarizing/manager.rs`（`source_keys` 的来源，`:464`）
-- Test: `crates/synthia-session/src/log_surface/tests.rs`（若该文件已存在则追加；否则在 `log_surface.rs` 内联 `#[cfg(test)] mod`）
+- Create: `crates/elysper-session/src/ledger_key.rs`
+- Modify: `crates/elysper-session/src/lib.rs`（导出新模块）
+- Modify: `crates/elysper-session/src/log_surface.rs`（`classify_typed_message`，`:168`；`decode_message`，`:187`）
+- Modify: `crates/elysper-context/src/summarizing/manager.rs`（`source_keys` 的来源，`:464`）
+- Test: `crates/elysper-session/src/log_surface/tests.rs`（若该文件已存在则追加；否则在 `log_surface.rs` 内联 `#[cfg(test)] mod`）
 
 **Interfaces:**
-- Consumes: `synthia_provider::types::Message`（字段 `role` / `content` / `tool_call_id`）。
+- Consumes: `elysper_provider::types::Message`（字段 `role` / `content` / `tool_call_id`）。
 - Produces:
   ```rust
-  // crates/synthia-session/src/ledger_key.rs
+  // crates/elysper-session/src/ledger_key.rs
   /// The durable identity of a message, or `None` when it carries none.
   ///
   /// The identity must survive a copy into another log — a row's
@@ -136,13 +136,13 @@ git commit -m "fix(session): skip rows a failed flush already wrote"
 **背景（已核实）:** `decode_message`（`log_surface.rs:187`）现在把 key 取成 `message.tool_call_id`，
 于是**只有 tool_result 行有 key**，assistant 行的 key 恒为 `None`；`SurfaceLedger::resolve`
 （`:844`）遇到 `None` 就返回 `MappingGap::MissingKey { position }`（`:861`）。
-`CompactionRecord.source_keys`（`synthia-context/src/summarizing/lifecycle.rs:27`）是
+`CompactionRecord.source_keys`（`elysper-context/src/summarizing/lifecycle.rs:27`）是
 `Vec<Option<String>>`，它的文档已经写明："a `None` entry means the row has no durable identity
 and the splice must not be written with invented provenance"。
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `synthia-session` 里加测试：
+在 `elysper-session` 里加测试：
 - `key_of` 对一条带 `tool_call_id` 的 tool 消息返回 `Some("tool:<id>")`；
 - 对一条含两个 `tool_use` 部件的 assistant 消息返回 `Some("assistant:<第一个 id>")`；
 - 对一条纯文本 assistant 消息返回 `None`；
@@ -151,34 +151,34 @@ and the splice must not be written with invented provenance"。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-session --lib ledger_key`
+Run: `cargo test -p elysper-session --lib ledger_key`
 Expected: FAIL —— 模块不存在。
 
 - [ ] **Step 3: 建 `ledger_key` 模块**
 
-按 Interfaces 里的规则实现 `key_of`。`Message` 的 content 是 `synthia_provider::types::Content`；
+按 Interfaces 里的规则实现 `key_of`。`Message` 的 content 是 `elysper_provider::types::Content`；
 `tool_use` 部件是 `ContentPart::ToolUse`，其 id 字段按现有 `collect_tool_use_ids`
-（`crates/synthia-session/src/tool_pairing.rs:296`）的取法读 —— **复用那里的取法**，不要另写一份。
+（`crates/elysper-session/src/tool_pairing.rs:296`）的取法读 —— **复用那里的取法**，不要另写一份。
 
 - [ ] **Step 4: 让 log_surface 用它**
 
 `classify_typed_message` / `decode_message`（`log_surface.rs:168,187`）改为调用
-`synthia_session::ledger_key::key_of`，不再自己取 `tool_call_id`。
+`elysper_session::ledger_key::key_of`，不再自己取 `tool_call_id`。
 
 - [ ] **Step 5: 让压缩的 `source_keys` 用它**
 
-`synthia-context/src/summarizing/manager.rs:464` 的 `source_keys` 从 `msg.tool_call_id.clone()`
-改为 `synthia_session::ledger_key::key_of(msg)`。
+`elysper-context/src/summarizing/manager.rs:464` 的 `source_keys` 从 `msg.tool_call_id.clone()`
+改为 `elysper_session::ledger_key::key_of(msg)`。
 
 - [ ] **Step 6: 跑测试确认通过**
 
-Run: `cargo test -p synthia-session --lib && cargo test -p synthia-context --lib`
+Run: `cargo test -p elysper-session --lib && cargo test -p elysper-context --lib`
 Expected: 全绿。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/synthia-session crates/synthia-context
+git add crates/elysper-session crates/elysper-context
 git commit -m "feat(session): give every shadowable row a durable identity"
 ```
 
@@ -187,13 +187,13 @@ git commit -m "feat(session): give every shadowable row a durable identity"
 ### Task 3: 压缩写 durable 事件，重放 == 实时
 
 **Files:**
-- Modify: `crates/synthia-context/src/summarizing/manager.rs`（`CompactionRecord` 的发出，`:353`）
-- Modify: `crates/synthia-session/src/events.rs`（durable `Compaction` 事件）
-- Modify: `crates/synthia-session/src/log_surface.rs`（`SurfaceLedger::record` 对压缩行的处理）
-- Test: `crates/synthia-session/src/history/tests.rs`（`crates/synthia-session/src/history.rs`）
+- Modify: `crates/elysper-context/src/summarizing/manager.rs`（`CompactionRecord` 的发出，`:353`）
+- Modify: `crates/elysper-session/src/events.rs`（durable `Compaction` 事件）
+- Modify: `crates/elysper-session/src/log_surface.rs`（`SurfaceLedger::record` 对压缩行的处理）
+- Test: `crates/elysper-session/src/history/tests.rs`（`crates/elysper-session/src/history.rs`）
 
 **Interfaces:**
-- Consumes: Task 2 的 `synthia_session::ledger_key::key_of`；`SurfaceLedger::resolve(&[Option<String>]) -> Result<ResolvedReplace, MappingGap>`（`log_surface.rs:844`）。
+- Consumes: Task 2 的 `elysper_session::ledger_key::key_of`；`SurfaceLedger::resolve(&[Option<String>]) -> Result<ResolvedReplace, MappingGap>`（`log_surface.rs:844`）。
 - Produces: durable 的 `SessionEvent::Compaction` 行，其 `source_keys` 每项都 `Some`。
 
 **背景（已核实）:** 压缩的 splice 目前只在内存里发生。durable 侧的检查点因为
@@ -202,19 +202,19 @@ git commit -m "feat(session): give every shadowable row a durable identity"
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-session/src/history/tests.rs` 加测试：构造一个 surface（一条 assistant 行 + 两条
-tool_result 行），跑一次压缩（用 `synthia-context` 的 summariser），把产生的 durable 行读进日志，
+在 `crates/elysper-session/src/history/tests.rs` 加测试：构造一个 surface（一条 assistant 行 + 两条
+tool_result 行），跑一次压缩（用 `elysper-context` 的 summariser），把产生的 durable 行读进日志，
 然后**分别**用实时 fold 与重放 fold 计算 surface，断言**两者逐行相同**，且压缩记录**在**日志里
 （不是被 park 掉）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-session --lib a_compacted_surface_replays_identically`
+Run: `cargo test -p elysper-session --lib a_compacted_surface_replays_identically`
 Expected: FAIL —— 重放的面与实时的面不同。
 
 - [ ] **Step 3: 让压缩写出 durable 事件**
 
-`synthia-context` 的 `CompactionRecord` 发出点（`manager.rs:353`）在 `source_keys` 全部 `Some` 时
+`elysper-context` 的 `CompactionRecord` 发出点（`manager.rs:353`）在 `source_keys` 全部 `Some` 时
 写出 durable 的 `SessionEvent::Compaction`；有任何一个 `None` 时**不写**（不编造 provenance），
 并 `tracing::warn!` 记下被跳过的原因。
 
@@ -226,13 +226,13 @@ Expected: FAIL —— 重放的面与实时的面不同。
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cargo test -p synthia-session --lib && cargo test -p synthia-context --lib`
+Run: `cargo test -p elysper-session --lib && cargo test -p elysper-context --lib`
 Expected: 全绿。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-session crates/synthia-context
+git add crates/elysper-session crates/elysper-context
 git commit -m "fix(session): write a durable compaction event so replay matches the live surface"
 ```
 
@@ -241,16 +241,16 @@ git commit -m "fix(session): write a durable compaction event so replay matches 
 ### Task 4: 日志格式版本门禁 —— 升 v2，拒绝旧版
 
 **Files:**
-- Modify: `crates/synthia-session/src/jsonl.rs`（`CURRENT_SCHEMA_VERSION`，`:78`；`detect_schema_version_from_line`；`read`）
-- Modify: `crates/synthia-session/src/errors.rs`（或 `SessionError` 所在处）—— 新增错误变体
-- Modify: `crates/synthia-session/src/events.rs`（若变体登记表需要）
-- Test: `crates/synthia-session/src/jsonl/tests.rs`
+- Modify: `crates/elysper-session/src/jsonl.rs`（`CURRENT_SCHEMA_VERSION`，`:78`；`detect_schema_version_from_line`；`read`）
+- Modify: `crates/elysper-session/src/errors.rs`（或 `SessionError` 所在处）—— 新增错误变体
+- Modify: `crates/elysper-session/src/events.rs`（若变体登记表需要）
+- Test: `crates/elysper-session/src/jsonl/tests.rs`
 
 **Interfaces:**
 - Consumes: 现有 `CURRENT_SCHEMA_VERSION: u32`（`jsonl.rs:78`）与头行 `_meta.schema_version`（`:104`）。
 - Produces:
   ```rust
-  // synthia-session
+  // elysper-session
   pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
   // SessionError 的新变体
@@ -271,13 +271,13 @@ git commit -m "fix(session): write a durable compaction event so replay matches 
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-session/src/jsonl/tests.rs` 加测试：写一个 `schema_version: 1` 的头行 + 一行事件，
+在 `crates/elysper-session/src/jsonl/tests.rs` 加测试：写一个 `schema_version: 1` 的头行 + 一行事件，
 用 `JsonlSessionSink::read` 读它，断言返回 `Err(SessionError::UnsupportedSchemaVersion { found: 1, supported: 2 })`；
 再写一个 `schema_version: 3` 的，断言同样被拒且 `found == 3`；再写一个 v2 的，断言能读。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-session --lib schema_version`
+Run: `cargo test -p elysper-session --lib schema_version`
 Expected: FAIL —— v1 今天能读。
 
 - [ ] **Step 3: 升版本并加门禁**
@@ -292,13 +292,13 @@ Expected: FAIL —— v1 今天能读。
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cargo test -p synthia-session --lib && cargo test -p synthia-server --lib`
+Run: `cargo test -p elysper-session --lib && cargo test -p elysper-server --lib`
 Expected: 全绿。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-session crates/synthia-server
+git add crates/elysper-session crates/elysper-server
 git commit -m "feat(session): version the log format and refuse the versions we cannot read"
 ```
 
@@ -307,9 +307,9 @@ git commit -m "feat(session): version the log format and refuse the versions we 
 ### Task 5: resume 的三种结局分成三个码
 
 **Files:**
-- Modify: `crates/synthia-server/src/routes/follow.rs`（`:886`、`:898`、`:913`、`:924` 四处）
-- Modify: `crates/synthia-web/src/**`（resume 的错误处理）
-- Test: `crates/synthia-server/src/routes/tests/follow.rs`
+- Modify: `crates/elysper-server/src/routes/follow.rs`（`:886`、`:898`、`:913`、`:924` 四处）
+- Modify: `crates/elysper-web/src/**`（resume 的错误处理）
+- Test: `crates/elysper-server/src/routes/tests/follow.rs`
 
 **Interfaces:**
 - Consumes: 现有的 `not_suspended` / `stale_resume` 两个 code。
@@ -322,12 +322,12 @@ git commit -m "feat(session): version the log format and refuse the versions we 
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-server/src/routes/tests/follow.rs` 加三个测试，分别构造上面三种情形，
+在 `crates/elysper-server/src/routes/tests/follow.rs` 加三个测试，分别构造上面三种情形，
 断言各自的 code 与 HTTP 状态。第一个测试要断言**成功**而不是错误。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-server --lib resume_`
+Run: `cargo test -p elysper-server --lib resume_`
 Expected: FAIL —— 现在三种情形都是 `stale_resume` 或 `not_suspended`。
 
 - [ ] **Step 3: 拆码**
@@ -337,17 +337,17 @@ Expected: FAIL —— 现在三种情形都是 `stale_resume` 或 `not_suspended
 
 - [ ] **Step 4: 前端跟着改**
 
-`synthia-web` 里处理 resume 错误的地方按新 code 分三种反应。改完跑 `make check-web`。
+`elysper-web` 里处理 resume 错误的地方按新 code 分三种反应。改完跑 `make check-web`。
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cargo test -p synthia-server --lib && make check-web`
+Run: `cargo test -p elysper-server --lib && make check-web`
 Expected: 全绿。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-server synthia-web
+git add crates/elysper-server elysper-web
 git commit -m "feat(server): tell a client apart from a stale, a spent and a snapshotless resume"
 ```
 
@@ -356,15 +356,15 @@ git commit -m "feat(server): tell a client apart from a stale, a spent and a sna
 ### Task 6: spawn gate 归 controller 所有
 
 **Files:**
-- Modify: `crates/synthia-server/src/state/app_state/mod.rs`（`spawn_gates` 字段，`:135`）
-- Modify: `crates/synthia-server/src/state/app_state/sessions.rs`（`SessionSpawnGates`，`:446`、`:454`）
-- Test: `crates/synthia-server/src/state/app_state/tests.rs`（或就近的同级 `tests.rs`）
+- Modify: `crates/elysper-server/src/state/app_state/mod.rs`（`spawn_gates` 字段，`:135`）
+- Modify: `crates/elysper-server/src/state/app_state/sessions.rs`（`SessionSpawnGates`，`:446`、`:454`）
+- Test: `crates/elysper-server/src/state/app_state/tests.rs`（或就近的同级 `tests.rs`）
 
 **Interfaces:**
 - Consumes: `AppState::spawn_gates: Arc<crate::state::SessionSpawnGates>`（`mod.rs:135`）。
 - Produces: gate 由 controller 持有，映射以 `Weak` 引用 controller；controller 被移除时 gate 一起消失。
 
-**背景（已核实）:** `spawn_gates` 与 session controller **同在 `synthia-server`**，所以这是本 crate
+**背景（已核实）:** `spawn_gates` 与 session controller **同在 `elysper-server`**，所以这是本 crate
 内的局部改动，不跨 crate 边界，也不动任何库 crate 的公开面。
 
 - [ ] **Step 1: 写失败的测试**
@@ -374,7 +374,7 @@ git commit -m "feat(server): tell a client apart from a stale, a spent and a sna
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-server --lib spawn_gate`
+Run: `cargo test -p elysper-server --lib spawn_gate`
 Expected: FAIL —— 表在增长。
 
 - [ ] **Step 3: 改成 controller 持有**
@@ -384,13 +384,13 @@ gate 的映射改成以 controller 的 `Weak` 为键，或让 controller 持有 
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-server --lib`
+Run: `cargo test -p elysper-server --lib`
 Expected: 全绿。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-server
+git add crates/elysper-server
 git commit -m "fix(server): let a session's spawn gate die with its controller"
 ```
 
@@ -399,22 +399,22 @@ git commit -m "fix(server): let a session's spawn gate die with its controller"
 ### Task 7: 文档说实话（依赖面 + 公开面）
 
 **Files:**
-- Modify: `crates/synthia-harness/README.md`
+- Modify: `crates/elysper-harness/README.md`
 - Modify: `docs/tutorial/complete-agent.md`
 - Modify: `docs/examples/harness-only-consumer/Cargo.toml`（若需要补注释说明它依赖哪几个 crate）
-- Modify: `crates/synthia-harness/src/lib.rs`（模块文档里说明公开面的分层）
+- Modify: `crates/elysper-harness/src/lib.rs`（模块文档里说明公开面的分层）
 
 **Interfaces:**
-- Consumes: `crates/synthia-harness/src/lib.rs` 现有的精选面（**59 个**名字）。
+- Consumes: `crates/elysper-harness/src/lib.rs` 现有的精选面（**60 个**名字）。
 - Produces: 文档里三处一致的说明。
 
 **要写清楚的三件事:**
-1. **"只依赖 harness" 需要 4 个 crate。** 消费方要写 `synthia-harness` + `synthia-core` +
-   `synthia-provider` + `synthia-tool`（外加 `async-trait`），因为 harness **不** re-export
+1. **"只依赖 harness" 需要 4 个 crate。** 消费方要写 `elysper-harness` + `elysper-core` +
+   `elysper-provider` + `elysper-tool`（外加 `async-trait`），因为 harness **不** re-export
    `Spawner` / `ModelProvider` / `Tool` —— 理由不是会加依赖（harness 本来就依赖 core/provider/tool），而是：被承诺的那张面应该是 harness 自己的面，零运行时的承诺不该被别的 crate 的 feature 集绑住。
    文档给这四个 crate 与各自负责的东西。
-2. **公开面分两层。** 精选面（59 个名字）是稳定面；走深路径
-   （`synthia_harness::agent::…`；`re_act` 是 `pub(crate)`，不在公开面上）够得着的另外 64 个 `pub` 名**不在承诺内**，将来可动。
+2. **公开面分两层。** 精选面（60 个名字）是稳定面；走深路径
+   （`elysper_harness::agent::…`；`re_act` 是 `pub(crate)`，不在公开面上）够得着的另外 64 个 `pub` 名**不在承诺内**，将来可动。
 3. **依赖数要与 `cargo tree` 一致。** 写进文档的依赖数必须等于实际跑出来的数。
 
 - [ ] **Step 1: 写下新的说明**
@@ -429,13 +429,13 @@ Run: `cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml`
 
 - [ ] **Step 3: 跑门禁**
 
-Run: `make check-claim-language && make check-web && cargo doc --no-deps -p synthia-harness`
+Run: `make check-claim-language && make check-web && cargo doc --no-deps -p elysper-harness`
 Expected: 全绿（`cargo doc` 的 `-D warnings` 由 `make doc-check` 覆盖，可一并跑）。
 
 - [ ] **Step 4: 提交**
 
 ```bash
-git add crates/synthia-harness/README.md crates/synthia-harness/src/lib.rs docs
+git add crates/elysper-harness/README.md crates/elysper-harness/src/lib.rs docs
 git commit -m "docs: say what a harness consumer actually depends on"
 ```
 
@@ -444,22 +444,22 @@ git commit -m "docs: say what a harness consumer actually depends on"
 ### Task 8: 转场边界规则去重 + 旧 park 行的处置
 
 **Files:**
-- Modify: `crates/synthia-server/src/routes/follow.rs`（`:323-338` 附近重复实现的边界规则）
-- Modify: `crates/synthia-session/src/repair.rs`（`parked_prompts`）
-- Test: `crates/synthia-server/src/routes/tests/follow.rs`、`crates/synthia-session/src/repair/tests.rs`
+- Modify: `crates/elysper-server/src/routes/follow.rs`（`:323-338` 附近重复实现的边界规则）
+- Modify: `crates/elysper-session/src/repair.rs`（`parked_prompts`）
+- Test: `crates/elysper-server/src/routes/tests/follow.rs`、`crates/elysper-session/src/repair/tests.rs`
 
 **Interfaces:**
-- Consumes: `synthia_harness::approval::suspended_segment`（唯一真源）。
+- Consumes: `elysper_harness::approval::suspended_segment`（唯一真源）。
 - Produces: `follow.rs` 不再自带一份边界规则。
 
 - [ ] **Step 1: 写失败的测试**
 
 加一个测试：同一段日志，`follow` 算出来的"最后一段被挂起的对话"与
-`synthia_harness::approval::suspended_segment` 算出来的一致。
+`elysper_harness::approval::suspended_segment` 算出来的一致。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-server --lib suspended_segment`
+Run: `cargo test -p elysper-server --lib suspended_segment`
 Expected: FAIL —— 两份实现不一致（或测试证明它们今天一致但代码重复；那就让测试锁住"只有一份实现"）。
 
 - [ ] **Step 3: 删掉重复实现**
@@ -474,25 +474,25 @@ Expected: FAIL —— 两份实现不一致（或测试证明它们今天一致�
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cargo test -p synthia-server --lib && cargo test -p synthia-session --lib`
+Run: `cargo test -p elysper-server --lib && cargo test -p elysper-session --lib`
 Expected: 全绿。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-server crates/synthia-session
+git add crates/elysper-server crates/elysper-session
 git commit -m "refactor(server): keep one turn-boundary rule and retire keyless park rows"
 ```
 
 ---
 
-### Task 9: synthia-resilience 与 synthia-tool-memo 的测试变绿
+### Task 9: elysper-resilience 与 elysper-tool-memo 的测试变绿
 
 **Files:**
-- Modify: `crates/synthia-resilience/Cargo.toml`（`tokio` 的 feature）
-- Modify: `crates/synthia-resilience/src/provider.rs`（`:393` 附近）
-- Modify: `crates/synthia-tool-memo/Cargo.toml`（`tokio` 的 feature）
-- Modify: `crates/synthia-tool-memo/src/tests.rs`（`:304` 附近）
+- Modify: `crates/elysper-resilience/Cargo.toml`（`tokio` 的 feature）
+- Modify: `crates/elysper-resilience/src/provider.rs`（`:393` 附近）
+- Modify: `crates/elysper-tool-memo/Cargo.toml`（`tokio` 的 feature）
+- Modify: `crates/elysper-tool-memo/src/tests.rs`（`:304` 附近）
 
 **Interfaces:**
 - Consumes: 无（独立的既有欠债）。
@@ -508,12 +508,12 @@ git commit -m "refactor(server): keep one turn-boundary rule and retire keyless 
 
 - [ ] **Step 1: 复现失败**
 
-Run: `cargo test -p synthia-resilience -p synthia-tool-memo`
+Run: `cargo test -p elysper-resilience -p elysper-tool-memo`
 Expected: 两个都编译失败，报 `cannot find 'time' in 'tokio'`。
 
 - [ ] **Step 2: 定位 `tokio::time` 的用处**
 
-Run: `grep -rn "tokio::time" crates/synthia-resilience/src crates/synthia-tool-memo/src`
+Run: `grep -rn "tokio::time" crates/elysper-resilience/src crates/elysper-tool-memo/src`
 看清是生产代码还是测试代码。
 
 - [ ] **Step 3: 按规则修**
@@ -522,38 +522,38 @@ Run: `grep -rn "tokio::time" crates/synthia-resilience/src crates/synthia-tool-m
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-resilience && cargo test -p synthia-tool-memo`
+Run: `cargo test -p elysper-resilience && cargo test -p elysper-tool-memo`
 Expected: 退出 0。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-resilience crates/synthia-tool-memo
+git add crates/elysper-resilience crates/elysper-tool-memo
 git commit -m "fix(resilience): declare the tokio features the crate actually uses"
 ```
 
 ---
 
-### Task 10: synthia-budget 与 synthia-semantic-cache 的 doctest 变绿
+### Task 10: elysper-budget 与 elysper-semantic-cache 的 doctest 变绿
 
 **Files:**
-- Modify: `crates/synthia-budget/src/lib.rs`（crate 级 doctest）
-- Modify: `crates/synthia-semantic-cache/src/lib.rs`（crate 级 doctest）
+- Modify: `crates/elysper-budget/src/lib.rs`（crate 级 doctest）
+- Modify: `crates/elysper-semantic-cache/src/lib.rs`（crate 级 doctest）
 
 **Interfaces:**
 - Consumes: `LatencyBudget::new` 的当前签名；`SemanticCacheProvider::new` 的当前签名。
 - Produces: 两个 crate 的 `cargo test -p <crate>` 退出 0（doctest 会被跑到）。
 
 **背景（已核实）:**
-- `synthia-budget` 的 crate 级 doctest 还在调 `LatencyBudget::new(one_arg)`，并把
+- `elysper-budget` 的 crate 级 doctest 还在调 `LatencyBudget::new(one_arg)`，并把
   `Arc<Arc<StaticPricingTable>>` 传给要 `Arc<dyn PricingTable>` 的地方。
-- `synthia-semantic-cache` 的 crate 级 doctest 在一个**没有开** `synthia_provider` 的 feature 组合下
-  `use synthia_provider::AnthropicProvider`，并用 5 个参数里的 4 个调 `SemanticCacheProvider::new`
+- `elysper-semantic-cache` 的 crate 级 doctest 在一个**没有开** `elysper_provider` 的 feature 组合下
+  `use elysper_provider::AnthropicProvider`，并用 5 个参数里的 4 个调 `SemanticCacheProvider::new`
   （缺 `Arc<dyn Clock>`）。
 
 - [ ] **Step 1: 复现失败**
 
-Run: `cargo test -p synthia-budget && cargo test -p synthia-semantic-cache`
+Run: `cargo test -p elysper-budget && cargo test -p elysper-semantic-cache`
 Expected: 两个都失败（doctest 编译不过）。
 
 - [ ] **Step 2: 读当前签名并改 doctest**
@@ -564,13 +564,13 @@ Expected: 两个都失败（doctest 编译不过）。
 
 - [ ] **Step 3: 跑测试确认通过**
 
-Run: `cargo test -p synthia-budget && cargo test -p synthia-semantic-cache`
+Run: `cargo test -p elysper-budget && cargo test -p elysper-semantic-cache`
 Expected: 退出 0。
 
 - [ ] **Step 4: 提交**
 
 ```bash
-git add crates/synthia-budget crates/synthia-semantic-cache
+git add crates/elysper-budget crates/elysper-semantic-cache
 git commit -m "fix(budget): bring the crate doctests back in line with the signatures"
 ```
 
@@ -586,10 +586,10 @@ git commit -m "fix(budget): bring the crate doctests back in line with the signa
 - Modify: `scripts/paradigm-surface/baselines/*`（若冻结面覆盖到范式 crate）
 
 **Interfaces:**
-- Consumes: `crates/synthia-harness/src/lib.rs` 的精选面（59 个名字）；七个范式 crate 的精选面。
+- Consumes: `crates/elysper-harness/src/lib.rs` 的精选面（60 个名字）；七个范式 crate 的精选面。
 - Produces:
   - `docs/api-frozen.md`：人读的承诺 —— 哪些名字稳定、承诺到哪个版本、改动要走过什么流程。
-  - `scripts/frozen-api/baseline`：每行一个冻结的公开名，形如 `synthia-harness::ReActAgent`。
+  - `scripts/frozen-api/baseline`：每行一个冻结的公开名，形如 `elysper-harness::ReActAgent`。
   - `scripts/check-frozen-api.sh`：读每个冻结 crate 的公开名，**新增**了 baseline 里没有的名字 → 退出非 0，
     错误信息点名新增的是哪个。
 
@@ -640,7 +640,7 @@ git commit -m "feat: freeze the curated public surface and gate new names"
 - Create: `docs/api-surface.md`（新用户视角的公开面清单）
 - Create: `docs/log-format.md`（格式兼容说明）
 - Create: `docs/contributing/first-steps.md`（外部贡献者第一份材料）
-- Modify: `crates/synthia-harness/README.md`（指向上面三份）
+- Modify: `crates/elysper-harness/README.md`（指向上面三份）
 
 **Interfaces:**
 - Consumes: Task 11 的 `docs/api-frozen.md` 与 baseline；Task 4 的版本规则。
@@ -663,7 +663,7 @@ v1 与 v2 各是什么形状、碰到旧版本会怎样（**拒绝**，错误长
 
 - [ ] **Step 4: 接进 harness 的 README**
 
-`crates/synthia-harness/README.md` 里链到这三份。
+`crates/elysper-harness/README.md` 里链到这三份。
 
 - [ ] **Step 5: 跑门禁**
 
@@ -673,7 +673,7 @@ Expected: 全绿。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add docs crates/synthia-harness/README.md
+git add docs crates/elysper-harness/README.md
 git commit -m "docs: hand the harness to the next reader"
 ```
 

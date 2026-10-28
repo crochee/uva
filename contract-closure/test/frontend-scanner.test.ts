@@ -31,3 +31,19 @@ describe('scanFrontendFile', () => {
     expect(eps.every((e) => e.source_files.frontend?.[0]).valueOf()).toBeTruthy();
   });
 });
+
+describe('scanFrontendFile — URL helper call shapes', () => {
+  const HELPERS = join(__dirname, '..', '__fixtures__', 'frontend', 'sample-url-helpers.ts');
+
+  it('finds a fetch through an arrow-function URL helper', () => {
+    const eps = scanFrontendFile(HELPERS);
+    const ids = eps.map((e) => `${e.method} ${e.path}`);
+    expect(ids).toContain('GET /api/v1/sessions/{key}/follow');
+  });
+
+  it('finds a fetch through api.getRaw', () => {
+    const eps = scanFrontendFile(HELPERS);
+    const ids = eps.map((e) => `${e.method} ${e.path}`);
+    expect(ids).toContain('GET /api/v1/sessions/{key}/export');
+  });
+});

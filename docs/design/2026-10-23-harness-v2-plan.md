@@ -12,13 +12,13 @@
 
 ## Global Constraints
 
-- Library crates use `thiserror` only. Never `anyhow` outside `synthia-server`.
+- Library crates use `thiserror` only. Never `anyhow` outside `elysper-server`.
 - Every dependency version is `major.minor` (e.g. `1.1`, never `1.1.0`).
 - New deps must come from `[workspace.dependencies]` in the root `Cargo.toml`; crate manifests use `dep = { workspace = true }`.
 - `max_width = 80`. No wildcard imports (`use foo::*`).
-- No function over 100 lines, no nesting over 4 levels, in `synthia-harness` production code (`scripts/harness-shape/clippy.toml`).
-- No `chrono::Utc::now()` in library production code — use `synthia_core::Clock`.
-- No `#[cfg(feature = ...)]` anywhere in `synthia-harness`. No tokio in its `[dependencies]`.
+- No function over 100 lines, no nesting over 4 levels, in `elysper-harness` production code (`scripts/harness-shape/clippy.toml`).
+- No `chrono::Utc::now()` in library production code — use `elysper_core::Clock`.
+- No `#[cfg(feature = ...)]` anywhere in `elysper-harness`. No tokio in its `[dependencies]`.
 - `scripts/harness-docs/baseline` is **56** and current is **56** — zero slack. Private-item `///` comments must be deleted or the gate fails.
 - Run `cargo +nightly fmt --all` after each task; then fix every warning.
 - Commit after every task. Each task's commits must leave the workspace compiling.
@@ -39,27 +39,27 @@ These are failure modes the spec implies that a consumer would experience as a b
 
 **Created:**
 
-- `crates/synthia-harness/src/log/mod.rs` — `LogWriter`, `Durability`, `StampedRow`. The single append path.
-- `crates/synthia-harness/src/log/queue.rs` — bounded channel + backpressure sender.
-- `crates/synthia-harness/src/log/tests.rs` — `LogWriter` unit tests (reached via `#[cfg(test)] mod tests;` in `log/mod.rs`).
+- `crates/elysper-harness/src/log/mod.rs` — `LogWriter`, `Durability`, `StampedRow`. The single append path.
+- `crates/elysper-harness/src/log/queue.rs` — bounded channel + backpressure sender.
+- `crates/elysper-harness/src/log/tests.rs` — `LogWriter` unit tests (reached via `#[cfg(test)] mod tests;` in `log/mod.rs`).
 
 **Modified:**
 
-- `crates/synthia-harness/src/lib.rs` — declare `mod log;` (private, not `pub`).
-- `crates/synthia-harness/src/agent/sink.rs` — `EventSink::emit_typed` routes through `LogWriter`.
-- `crates/synthia-harness/src/agent/caps.rs` — `EnvCaps` gains `log_writer` / `durability`.
-- `crates/synthia-harness/src/agent/re_act/loop/finalize.rs` — call `flush()` at the step boundary.
-- `crates/synthia-session/src/sink.rs` — `append` signature `Result<u64, _>` → `Result<(), _>`; `alloc_seq()` added.
-- `crates/synthia-session/src/jsonl.rs`, `in_memory.rs` — implement the new signature.
-- `crates/synthia-server/src/session/controller/run_log.rs` — take ordinal from `alloc_seq()`.
-- `crates/synthia-server/src/session/controller/dispatch.rs`, `inner.rs` — route bypass appenders through the shared counter.
+- `crates/elysper-harness/src/lib.rs` — declare `mod log;` (private, not `pub`).
+- `crates/elysper-harness/src/agent/sink.rs` — `EventSink::emit_typed` routes through `LogWriter`.
+- `crates/elysper-harness/src/agent/caps.rs` — `EnvCaps` gains `log_writer` / `durability`.
+- `crates/elysper-harness/src/agent/re_act/loop/finalize.rs` — call `flush()` at the step boundary.
+- `crates/elysper-session/src/sink.rs` — `append` signature `Result<u64, _>` → `Result<(), _>`; `alloc_seq()` added.
+- `crates/elysper-session/src/jsonl.rs`, `in_memory.rs` — implement the new signature.
+- `crates/elysper-server/src/session/controller/run_log.rs` — take ordinal from `alloc_seq()`.
+- `crates/elysper-server/src/session/controller/dispatch.rs`, `inner.rs` — route bypass appenders through the shared counter.
 
 **Deleted** (Task 1, the documented dead set):
 `ReActAgent::{with_run_inbox, run_inbox, with_clock, with_tool_registry, with_model_hint}`, `MpscInbox`, `RunInbox`, `RunInboxHandle`, `AgentRegistry::is_empty`, `Checkpointer::list_keys`, `InMemoryCheckpointer::new`, `CheckpointSnapshot::at`, `StrategyRegistry::names`, `AgentInput::to_message`, `SessionEndReason::as_str`.
 
 `AgentCaps::defaults` is **kept and made private** — it has two crate-internal callers.
 
-`crates/synthia-harness/src/agent/re_act/tests/inbox_tests.rs` (1,009 lines) is deleted with `RunInbox`.
+`crates/elysper-harness/src/agent/re_act/tests/inbox_tests.rs` (1,009 lines) is deleted with `RunInbox`.
 
 ---
 
@@ -69,8 +69,8 @@ Frees the comment budget that `log/` will consume (Global Constraints: baseline 
 
 **Files:**
 
-- Modify: `crates/synthia-harness/src/agent/re_act/agent.rs`, `agent/run.rs`, `agent/registry/mod.rs`, `agent/checkpoint.rs`, `agent/strategy/mod.rs`, `input.rs`, `events/mod.rs`, `agent/caps.rs`, `agent/mod.rs`, `lib.rs`
-- Delete: `crates/synthia-harness/src/agent/re_act/tests/inbox_tests.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/agent.rs`, `agent/run.rs`, `agent/registry/mod.rs`, `agent/checkpoint.rs`, `agent/strategy/mod.rs`, `input.rs`, `events/mod.rs`, `agent/caps.rs`, `agent/mod.rs`, `lib.rs`
+- Delete: `crates/elysper-harness/src/agent/re_act/tests/inbox_tests.rs`
 
 **Interfaces:**
 
@@ -82,19 +82,19 @@ Frees the comment budget that `log/` will consume (Global Constraints: baseline 
 Run:
 
 ```bash
-cd /home/crochee/workspace/synthia
+cd /home/crochee/workspace/elysper
 for s in with_run_inbox run_inbox with_clock with_tool_registry with_model_hint \
          AgentRegistry::is_empty list_keys CheckpointSnapshot::at \
          StrategyRegistry::names to_message as_str; do
   n=$(grep -rn "\b$s\b" --include='*.rs' crates/ \
-      | grep -v '^crates/synthia-harness/src/' | wc -l)
+      | grep -v '^crates/elysper-harness/src/' | wc -l)
   echo "$s: $n"
 done
 ```
 
 Expected: `0` for every line. Two need care — `with_clock` has hits that are
 `SchedulerTool::with_clock` (a different type) and `with_tool_registry` has one
-doc mention in `synthia-tool/src/restriction.rs:166`. If either count is nonzero,
+doc mention in `elysper-tool/src/restriction.rs:166`. If either count is nonzero,
 **stop** and re-read the hit before deleting.
 
 - [ ] **Step 2: Delete the items and their re-exports**
@@ -114,7 +114,7 @@ Change `AgentCaps::defaults` (`agent/caps.rs:70`) from `pub fn` to
 
 - [ ] **Step 3: Delete `inbox_tests.rs` and its `mod` declaration**
 
-`crates/synthia-harness/src/agent/re_act/tests/inbox_tests.rs` (1,009 lines) exists only
+`crates/elysper-harness/src/agent/re_act/tests/inbox_tests.rs` (1,009 lines) exists only
 to test the removed `RunInbox`. Delete the file and its declaration in
 `tests/mod.rs`.
 
@@ -128,7 +128,7 @@ to test the removed `RunInbox`. Delete the file and its declaration in
 Run:
 
 ```bash
-cargo build -p synthia-harness && cargo test -p synthia-harness --lib
+cargo build -p elysper-harness && cargo test -p elysper-harness --lib
 make check-harness-docs
 ```
 
@@ -137,7 +137,7 @@ Expected: build clean, tests pass, and `check-harness-docs` reports **strictly b
 - [ ] **Step 6: Commit**
 
 ```bash
-git add -A crates/synthia-harness
+git add -A crates/elysper-harness
 git commit -m "refactor(harness): delete dead public surface and RunInbox"
 ```
 
@@ -147,12 +147,12 @@ git commit -m "refactor(harness): delete dead public surface and RunInbox"
 
 **Files:**
 
-- Create: `crates/synthia-harness/src/log/mod.rs`, `log/queue.rs`, `log/tests.rs`
-- Modify: `crates/synthia-harness/src/lib.rs` (add `mod log;`, private)
+- Create: `crates/elysper-harness/src/log/mod.rs`, `log/queue.rs`, `log/tests.rs`
+- Modify: `crates/elysper-harness/src/lib.rs` (add `mod log;`, private)
 
 **Interfaces:**
 
-- Consumes: `synthia_session::{SessionEvent, SessionSink, SessionError, SessionSnapshot}`.
+- Consumes: `elysper_session::{SessionEvent, SessionSink, SessionError, SessionSnapshot}`.
 - Produces:
 
   ```rust
@@ -181,7 +181,7 @@ git commit -m "refactor(harness): delete dead public surface and RunInbox"
 
 - [ ] **Step 1: Write the failing test for gap-free saturation**
 
-In `crates/synthia-harness/src/log/tests.rs`:
+In `crates/elysper-harness/src/log/tests.rs`:
 
 ```rust
 #[tokio::test]
@@ -205,7 +205,7 @@ dropping.
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `cargo test -p synthia-harness --log 2>/dev/null; cargo test -p synthia-harness saturated -- --nocapture`
+Run: `cargo test -p elysper-harness --log 2>/dev/null; cargo test -p elysper-harness saturated -- --nocapture`
 
 Expected: FAIL — `LogWriter` does not exist yet.
 
@@ -246,14 +246,14 @@ channel into the buffer and issues one `sink.append_many(..)` — a single fsync
 
 - [ ] **Step 6: Run the tests**
 
-Run: `cargo test -p synthia-harness --lib log`
+Run: `cargo test -p elysper-harness --lib log`
 
 Expected: PASS, both tests green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add -A crates/synthia-harness
+git add -A crates/elysper-harness
 git commit -m "feat(harness): LogWriter with backpressure and harness-owned seq"
 ```
 
@@ -267,18 +267,18 @@ compaction provenance.
 
 **Files:**
 
-- Modify: `crates/synthia-session/src/sink.rs`, `jsonl.rs`, `in_memory.rs`
-- Modify: `crates/synthia-server/src/session/controller/run_log.rs`, `dispatch.rs`, `inner.rs`
-- Modify: `crates/synthia-harness/src/agent/caps.rs`, `agent/sink.rs`
-- Test: `crates/synthia-session/src/sink.rs` inline tests; `crates/synthia-server/src/session/controller/tests/`
+- Modify: `crates/elysper-session/src/sink.rs`, `jsonl.rs`, `in_memory.rs`
+- Modify: `crates/elysper-server/src/session/controller/run_log.rs`, `dispatch.rs`, `inner.rs`
+- Modify: `crates/elysper-harness/src/agent/caps.rs`, `agent/sink.rs`
+- Test: `crates/elysper-session/src/sink.rs` inline tests; `crates/elysper-server/src/session/controller/tests/`
 
 **Interfaces:**
 
-- Consumes: `synthia_session::SessionSink` as it exists today.
+- Consumes: `elysper_session::SessionSink` as it exists today.
 - Produces:
 
   ```rust
-  // synthia-session/src/sink.rs — the trait after this task
+  // elysper-session/src/sink.rs — the trait after this task
   pub trait SessionSink: Send + Sync {
       /// Allocate the next ordinal. Synchronous, monotonic, gap-free.
       /// The sink retains the counter so that callers which bypass
@@ -292,7 +292,7 @@ compaction provenance.
   }
   ```
 
-  `synthia-harness::agent::EnvCaps` gains `log_writer: Option<Arc<LogWriter>>` and
+  `elysper-harness::agent::EnvCaps` gains `log_writer: Option<Arc<LogWriter>>` and
   `durability: Durability`.
 
 - [ ] **Step 1: Write the failing test for Review Focus #1 — the bypass appender**
@@ -303,7 +303,7 @@ This is the constraint the design doc did not record: `dispatch.rs:313` and
 A counter inside `RunLog` alone therefore collides. The fix is that the counter
 lives in the **sink**, and every appender draws from it.
 
-In `crates/synthia-server/src/session/controller/tests/`, add:
+In `crates/elysper-server/src/session/controller/tests/`, add:
 
 ```rust
 #[tokio::test]
@@ -320,7 +320,7 @@ async fn bypass_appenders_draw_from_the_same_sequence_as_the_run_log() {
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `cargo test -p synthia-server bypass_appenders`
+Run: `cargo test -p elysper-server bypass_appenders`
 
 Expected: FAIL — `RunLog::new` does not take a starting ordinal, and `append` returns
 the sink-assigned value rather than a caller-stamped one.
@@ -361,18 +361,18 @@ are unchanged.
 
 Run: `cargo build --workspace`
 
-Expect breakage in `synthia-server`, the strategy crates, and any example that
+Expect breakage in `elysper-server`, the strategy crates, and any example that
 implements `SessionSink` — including
-`crates/synthia-session/examples/compaction_checkpoint.rs:84`. Fix each.
+`crates/elysper-session/examples/compaction_checkpoint.rs:84`. Fix each.
 
 - [ ] **Step 8: Run the tests**
 
 Run:
 
 ```bash
-cargo test -p synthia-session --lib
-cargo test -p synthia-server --lib
-cargo test -p synthia-harness --lib
+cargo test -p elysper-session --lib
+cargo test -p elysper-server --lib
+cargo test -p elysper-harness --lib
 ```
 
 Expected: all PASS.
@@ -390,9 +390,9 @@ git commit -m "refactor(session): number rows via alloc_seq, not the sink's appe
 
 **Files:**
 
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/finalize.rs`, `loop/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/sink.rs` (`emit_typed` routes through `LogWriter`)
-- Test: `crates/synthia-harness/src/log/tests.rs`, `agent/re_act/tests/lifecycle/`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/finalize.rs`, `loop/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/sink.rs` (`emit_typed` routes through `LogWriter`)
+- Test: `crates/elysper-harness/src/log/tests.rs`, `agent/re_act/tests/lifecycle/`
 
 **Interfaces:**
 
@@ -424,7 +424,7 @@ Without the boundary flush this fails: the last row is still in the channel.
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `cargo test -p synthia-harness completed_run_flushes`
+Run: `cargo test -p elysper-harness completed_run_flushes`
 
 Expected: FAIL — no `with_log_writer` exists.
 
@@ -460,7 +460,7 @@ This is the property that the current `try_send`-and-drop bug silently destroys.
 `ReActAgent::with_log_writer(Arc<LogWriter>)` installs it. `EventSink::emit_typed`
 calls `stamp()` then `append(..).await`. Delete `EventSink::has_typed` and the
 `typed_sink` field; delete `TypedEventSink` / `TypedEventReceiver` and the
-`with_typed_event_sink` setter, along with `synthia-session/src/typed_event_sink.rs`.
+`with_typed_event_sink` setter, along with `elysper-session/src/typed_event_sink.rs`.
 
 - [ ] **Step 4: Call `flush()` at the step boundary**
 
@@ -471,11 +471,11 @@ Review Focus #3 holds. When `durability` is `Off`, skip.
 
 - [ ] **Step 5: Delete the `try_send` path**
 
-Confirm no `try_send` remains in `crates/synthia-harness/src` or
-`crates/synthia-session/src/typed_event_sink.rs`'s dependents. Run:
+Confirm no `try_send` remains in `crates/elysper-harness/src` or
+`crates/elysper-session/src/typed_event_sink.rs`'s dependents. Run:
 
 ```bash
-grep -rn "try_send" crates/synthia-harness/src crates/synthia-session/src
+grep -rn "try_send" crates/elysper-harness/src crates/elysper-session/src
 ```
 
 Expected: no hits.
@@ -485,7 +485,7 @@ Expected: no hits.
 Run:
 
 ```bash
-cargo test -p synthia-harness --lib
+cargo test -p elysper-harness --lib
 make check-harness-docs && make check-public-api-runtime && make check-harness-features
 ```
 
@@ -512,9 +512,9 @@ make ci
 
 `make ci` must be green. Additionally:
 
-- `cargo run --example runtime_agnostic -p synthia-harness` completes a full turn on a
+- `cargo run --example runtime_agnostic -p elysper-harness` completes a full turn on a
   non-tokio executor — the zero-runtime invariant.
-- `cargo bench -p synthia-harness` shows no regression against the pre-change baseline
+- `cargo bench -p elysper-harness` shows no regression against the pre-change baseline
   in `benches/hot_paths.rs`.
 
 ## Follow-on plans
@@ -528,4 +528,4 @@ sections become their own plans, in dependency order:
    projection of `fold_surface`; drops its mutable fields.
 3. **Suspension and resume** — spec §6. `Suspension` / `ResumeToken`, and the
    `Agent::run` signature change that ripples through the three
-   `synthia-strategy-*` crates.
+   `elysper-strategy-*` crates.

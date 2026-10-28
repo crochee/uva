@@ -1,10 +1,11 @@
-# shellcheck.yml — Synthia
+# shellcheck.yml — Elysper
 #
-# Lock the two bash gate scripts (`scripts/check-harness-shape.sh`,
-# `scripts/check-public-api-runtime.sh`) to a clean `shellcheck`
-# baseline. These scripts are invoked from `Makefile` and
+# Lock the bash gate scripts to a clean `shellcheck` baseline. These
+# scripts are invoked from `Makefile` and
 # `.github/workflows/rust-quality.yml`, so a drift in them breaks the
-# gate chain.
+# gate chain. The list below mirrors `make lint-sh`; a new
+# `scripts/*.sh` gate must be added to BOTH in the same change (and
+# to AGENTS.md §3.6's shellcheck row).
 #
 # `ludeeus/action-shellcheck@master` is the de-facto community action
 # (used by dockcross / cross-rs / cargo-deny CI among others); it
@@ -41,12 +42,20 @@ jobs:
       - name: shellcheck
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
-          # Two gate scripts only; future scripts/*.sh additions must
-          # update this list and the matching local `make shellcheck`
-          # target (no glob — keeps the scope deterministic).
+          # Every gate script `make lint-sh` covers; a new
+          # scripts/*.sh addition must update this list, the local
+          # `make lint-sh` target and AGENTS.md §3.6 in the same
+          # change (no glob — keeps the scope deterministic).
           scandir: |
+            ./scripts/check-frozen-api.sh
+            ./scripts/check-harness-docs.sh
             ./scripts/check-harness-shape.sh
+            ./scripts/check-plugin-shape.sh
+            ./scripts/check-pub-surface-strict.sh
             ./scripts/check-public-api-runtime.sh
+            ./scripts/check-public-docs.sh
+            ./scripts/check-publishable.sh
+            ./scripts/check-single-writer.sh
           # SC1091 (sourced file not found) is irrelevant: the gate
           # scripts do not source anything. SC2086 (unquoted globbing)
           # is intentional in the awk pipeline; see the comment in

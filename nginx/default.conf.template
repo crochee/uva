@@ -29,19 +29,19 @@ server {
         try_files $uri =404;
     }
 
-    # synthia-server endpoints reverse-proxied through nginx so the
+    # elysper-server endpoints reverse-proxied through nginx so the
     # SPA and the API share one origin (avoids CORS, keeps cookies
     # first-party). Probes (`/livez`, `/readyz`, `/version`) are
     # included so k8s can hit them through the ingress layer too.
     #
-    # `SYNTHIA_API_UPSTREAM` is substituted at container start via
+    # `ELYSPER_API_UPSTREAM` is substituted at container start via
     # `envsubst`; default in compose / k8s points at the server
     # service. The chat surface's SSE endpoint
     # (`/api/v1/chat/sessions/{id}/stream`) MUST be in this list
     # — streaming responses are not buffered by nginx (the
     # `proxy_buffering off` below covers that).
     location ~ ^/(api|livez|readyz|version)(/|$) {
-        proxy_pass ${SYNTHIA_API_UPSTREAM};
+        proxy_pass ${ELYSPER_API_UPSTREAM};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

@@ -15,7 +15,7 @@ const fe: Endpoint[] = [
   { id: 'GET /api/health',         method: 'GET',    path: '/api/health',         source: 'frontend', source_files: { frontend: ['health.ts:5'] } },
   { id: 'GET /api/tasks',          method: 'GET',    path: '/api/tasks',          source: 'frontend', source_files: { frontend: ['tasks.ts:10'] } },
   { id: 'POST /api/tasks',         method: 'POST',   path: '/api/tasks',          source: 'frontend', source_files: { frontend: ['tasks.ts:15'] } },
-  { id: 'GET /synthia/health',     method: 'GET',    path: '/synthia/health',     source: 'frontend', source_files: { frontend: ['rogue.ts:1'] } },
+  { id: 'GET /elysper/health',     method: 'GET',    path: '/elysper/health',     source: 'frontend', source_files: { frontend: ['rogue.ts:1'] } },
   // Frontend uses canonicalised `{key}` placeholder; backend uses `{id}`. They should pair.
   { id: 'DELETE /api/mcp/servers/{key}', method: 'DELETE', path: '/api/mcp/servers/{key}', source: 'frontend', source_files: { frontend: ['mcp.ts:63'] } },
 ];
@@ -37,7 +37,7 @@ describe('unionEndpoints', () => {
 
   it('keeps frontend-only entries', () => {
     const cf = unionEndpoints(be, fe);
-    const rogue = cf.endpoints.find((e) => e.id === 'GET /synthia/health');
+    const rogue = cf.endpoints.find((e) => e.id === 'GET /elysper/health');
     expect(rogue).toBeDefined();
     expect(rogue?.source).toBe('frontend');
   });
@@ -111,5 +111,31 @@ describe('checkContract', () => {
     expect(res.ok).toBe(true);
     expect(res.frontend_only.length).toBe(0);
     expect(res.backend_only.length).toBe(0);
+  });
+});
+
+describe('curated web-free endpoints', () => {
+  const curated: Endpoint[] = [
+    {
+      id: 'GET /api/tools',
+      method: 'GET',
+      path: '/api/tools',
+      source: 'backend',
+      source_files: {},
+      notes: 'The web app does not call this route.',
+      frontend_consumed: false,
+    },
+  ];
+
+  it('does not report a curated web-free endpoint as drift', () => {
+    const res = checkContract(be, fe, curated);
+    expect(res.backend_only.map((d) => d.path)).not.toContain('/api/tools');
+  });
+
+  it('keeps the curated flag across a re-scan', () => {
+    const cf = unionEndpoints(be, fe, curated);
+    const tools = cf.endpoints.find((e) => e.id === 'GET /api/tools')!;
+    expect(tools.frontend_consumed).toBe(false);
+    expect(tools.notes).toContain('does not call');
   });
 });

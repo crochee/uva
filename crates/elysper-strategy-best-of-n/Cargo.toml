@@ -1,0 +1,39 @@
+[package]
+name = "elysper-strategy-best-of-n"
+description = "Best-of-N reasoning strategy for elysper-harness: N parallel samples, scored, the winner published via EventSink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+elysper-harness.workspace = true
+elysper-provider.workspace = true
+elysper-session.workspace = true
+elysper-core.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+elysper-core = { workspace = true, features = ["tokio-util"] }
+tokio-util.workspace = true
+tracing-subscriber.workspace = true
+elysper-test-support.workspace = true
+elysper-tool.workspace = true
+elysper-context.workspace = true
+
+[[example]]
+name = "best_of_n_demo"

@@ -2,23 +2,23 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 `synthia-harness` 变成依赖闭包零 tokio 的真基座，落地"静态 Rust 插件 + 动态跨语言插件"双通道与运行时组合层，并把 `synthia-server` 改造成计算节点无状态。
+**Goal:** 把 `elysper-harness` 变成依赖闭包零 tokio 的真基座，落地"静态 Rust 插件 + 动态跨语言插件"双通道与运行时组合层，并把 `elysper-server` 改造成计算节点无状态。
 
-**Architecture:** 三段有依赖顺序的工程。W1 先把 harness 的 tokio 依赖闭包清零（新增 `Sleeper` / `Blocking` 两个 runtime-free 接缝，tokio 实现进兄弟 crate `synthia-harness-tokio`），再做泛型核心化与公开面收窄。W2 新增两个 crate：`synthia-plugin-protocol`（serde-only、零运行时、不依赖 harness）与 `synthia-plugin-host`（把远端进程的能力翻译成 `Host` 注册），并把"这次部署带哪些能力"从 45 条 cargo feature 搬到 config 驱动的运行时组合层。W3 把 server 的会话真源收敛到 workspace 上的 JSONL 日志，排队中的多模态载荷与 pending resume 落盘，`follow` 基线改尾读。
+**Architecture:** 三段有依赖顺序的工程。W1 先把 harness 的 tokio 依赖闭包清零（新增 `Sleeper` / `Blocking` 两个 runtime-free 接缝，tokio 实现进兄弟 crate `elysper-harness-tokio`），再做泛型核心化与公开面收窄。W2 新增两个 crate：`elysper-plugin-protocol`（serde-only、零运行时、不依赖 harness）与 `elysper-plugin-host`（把远端进程的能力翻译成 `Host` 注册），并把"这次部署带哪些能力"从 45 条 cargo feature 搬到 config 驱动的运行时组合层。W3 把 server 的会话真源收敛到 workspace 上的 JSONL 日志，排队中的多模态载荷与 pending resume 落盘，`follow` 基线改尾读。
 
-**Tech Stack:** Rust 1.98、edition 2024、`futures`、`serde` / `serde_json`、`thiserror`（库）/`anyhow`（server）。不新增第三方依赖，不给 `synthia-harness` 加任何 cargo feature。
+**Tech Stack:** Rust 1.98、edition 2024、`futures`、`serde` / `serde_json`、`thiserror`（库）/`anyhow`（server）。不新增第三方依赖，不给 `elysper-harness` 加任何 cargo feature。
 
 **Spec:** `docs/design/2026-10-26-harness-v4-design.md`
 **Supporting evidence:** `docs/research/harness-comparison-pi-dsh-2026-10-25.md`、`docs/design/2026-10-25-harness-v3-design.md`
 
 ## Global Constraints
 
-- 库 crate 只用 `thiserror`；`synthia-server` 是 app crate，用 `anyhow`。
+- 库 crate 只用 `thiserror`；`elysper-server` 是 app crate，用 `anyhow`。
 - 依赖版本一律 `major.minor`；新依赖只能来自根 `Cargo.toml` 的 `[workspace.dependencies]`。
-- `max_width = 80`；禁通配符导入；`synthia-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
-- 库代码不得直接 `chrono::Utc::now()`；墙钟走 `synthia_core::Clock`，ID 走 `synthia_core::IdGen`。
+- `max_width = 80`；禁通配符导入；`elysper-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
+- 库代码不得直接 `chrono::Utc::now()`；墙钟走 `elysper_core::Clock`，ID 走 `elysper_core::IdGen`。
 - 库 crate 的公开 API 不得出现具体运行时类型（`tokio::` 等）。
-- `synthia-harness` 不得有 `[features]` 表，不得依赖 tokio。
+- `elysper-harness` 不得有 `[features]` 表，不得依赖 tokio。
 - 测试按 crate 分批执行，禁止 `cargo test --workspace`。
 - 破坏性 API 一次切干净，不留 shim、别名或兼容分支。
 - 每个任务结束：工作区能编译、`cargo +nightly fmt --all` 干净、该 crate 测试绿。
@@ -26,8 +26,8 @@
 
 ## Review Focus
 
-1. **provider 的 `tokio` 依赖边没被真正移除。** 期望：`cargo tree -p synthia-harness -e normal` 里零 tokio 条目 —— gate 掉代码不算，必须动 manifest。检查在 Task 4 Step 5。
-2. **去掉 normal 侧的 `synthia-core/tokio-util` 后 server 编译不过。** 期望：server 显式取得该 feature 或改用 `AtomicCancelToken`，不靠 provider/steering 搭便车。处理在 Task 4 Step 4。
+1. **provider 的 `tokio` 依赖边没被真正移除。** 期望：`cargo tree -p elysper-harness -e normal` 里零 tokio 条目 —— gate 掉代码不算，必须动 manifest。检查在 Task 4 Step 5。
+2. **去掉 normal 侧的 `elysper-core/tokio-util` 后 server 编译不过。** 期望：server 显式取得该 feature 或改用 `AtomicCancelToken`，不靠 provider/steering 搭便车。处理在 Task 4 Step 4。
 3. **远端插件用 `destructive_hint: false` 躲掉审批。** 期望：远端工具的 risk 由宿主策略决定，插件自报的注解只作展示。测试在 Task 13。
 4. **远端 transformer 改写工具结果却不落审计行。** 期望：日志里有 `tool_result_transformed`，崩溃恢复后重放得到相同结果。测试在 Task 13。
 5. **排队中的多模态 prompt 随节点崩溃丢失。** 期望：字节进 attachment store、日志存可回读 ref、重启后 prompt 仍在。测试在 Task 16。
@@ -36,17 +36,17 @@
 
 ## File Structure
 
-**synthia-core**
+**elysper-core**
 
 - Create `src/sleeper.rs`：`Sleeper` trait、`ThreadSleeper`、`FixedSleeper`（测试用）。
 - Create `src/blocking.rs`：`Blocking` trait、`ThreadBlocking`。
 - Modify `src/lib.rs`：导出两个 trait 与默认实现。
 
-**synthia-harness-tokio**
+**elysper-harness-tokio**
 
 - Modify `src/lib.rs`：加 `TokioSleeper`、`TokioBlocking`（与 `TokioSpawner` 同款先例）。
 
-**synthia-session**
+**elysper-session**
 
 - Create `src/fs.rs`：把 `jsonl.rs` 的 fs 读写搬到 runtime-free 形态（`Blocking` 接缝驱动）。
 - Modify `src/compaction.rs`：`SummaryCompactor` 的超时改走 `Sleeper`，去掉 `tokio::select!`。
@@ -55,18 +55,18 @@
 - Modify `src/jsonl.rs`：改用 `src/fs.rs`。
 - Modify `src/lib.rs`：导出变化。
 
-**synthia-provider**
+**elysper-provider**
 
 - Modify `Cargo.toml`：`tokio` 改 `optional`，`anthropic` / `openai` 各自开它。
 - Modify `src/retry.rs`：删两个死 async 函数；剩下的 gate 到 adapter feature。
 - Modify `src/streaming/idle_watchdog.rs`：无条件项与 adapter feature 对齐。
 - Modify `src/lib.rs`：删两个死 re-export。
 
-**synthia-steering**
+**elysper-steering**
 
-- Modify `Cargo.toml`：`tokio-util` 与 `synthia-core/tokio-util` 移到 `[dev-dependencies]`。
+- Modify `Cargo.toml`：`tokio-util` 与 `elysper-core/tokio-util` 移到 `[dev-dependencies]`。
 
-**synthia-harness**
+**elysper-harness**
 
 - Modify `src/agent/caps.rs`：`ModelCaps` 泛型化。
 - Modify `src/agent/re_act/agent.rs`：`ReActAgent` 泛型化（增量，旧签名不变）。
@@ -74,20 +74,20 @@
 - Modify `src/agent/re_act/loop/tools/route.rs`、`guard.rs`：消除 `call.input` 深拷贝。
 - Modify `src/lib.rs`：导出变化。
 
-**synthia-plugin-protocol**（新 crate）
+**elysper-plugin-protocol**（新 crate）
 
 - Create `src/lib.rs`：方法名常量、能力协商、错误码、wire 类型。
 - Create `src/wire.rs`：wire 事件与决策类型。
 - Modify `Cargo.toml`。
 
-**synthia-plugin-host**（新 crate）
+**elysper-plugin-host**（新 crate）
 
 - Create `src/lib.rs`：`RemotePlugin`、`PluginRegistry`。
 - Create `src/process.rs`：进程管理。
 - Create `src/client.rs`：JSON-RPC 客户端。
 - Create `src/remote_tool.rs`：远端 `Tool` 实现（含 risk 覆写）。
 
-**synthia-server**
+**elysper-server**
 
 - Create `src/session/input_queue.rs`：从 session 挪来的 `InputQueue`。
 - Create `src/composition.rs`：运行时组合层（config → 插件/工具装配）。
@@ -97,22 +97,22 @@
 
 **docs/examples**
 
-- Create `harness-only-consumer/`：只依赖 `synthia-harness` 的零 tokio 消费方。
+- Create `harness-only-consumer/`：只依赖 `elysper-harness` 的零 tokio 消费方。
 
 ---
 
-## Task 1: `synthia-core` 的 `Sleeper` 接缝
+## Task 1: `elysper-core` 的 `Sleeper` 接缝
 
 **Files:**
-- Create: `crates/synthia-core/src/sleeper.rs`
-- Modify: `crates/synthia-core/src/lib.rs`
-- Test: `crates/synthia-core/src/sleeper/tests.rs`
+- Create: `crates/elysper-core/src/sleeper.rs`
+- Modify: `crates/elysper-core/src/lib.rs`
+- Test: `crates/elysper-core/src/sleeper/tests.rs`
 
 **Interfaces:**
 - Consumes: 无（首个任务）
 - Produces:
   ```rust
-  // synthia_core::sleeper
+  // elysper_core::sleeper
   pub trait Sleeper: Send + Sync + 'static {
       fn sleep(&self, duration: std::time::Duration)
           -> futures::future::BoxFuture<'static, ()>;
@@ -127,7 +127,7 @@
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-core/src/sleeper/tests.rs` 建文件，内容：
+在 `crates/elysper-core/src/sleeper/tests.rs` 建文件，内容：
 
 ```rust
 use std::time::{Duration, Instant};
@@ -157,10 +157,10 @@ fn sleeper_is_usable_as_a_trait_object() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-core sleeper --lib`
+Run: `cargo test -p elysper-core sleeper --lib`
 Expected: FAIL —— `cannot find module or type sleeper`（模块还不存在）
 
-- [ ] **Step 3: 实现 `crates/synthia-core/src/sleeper.rs`**
+- [ ] **Step 3: 实现 `crates/elysper-core/src/sleeper.rs`**
 
 文件头写 `//! Runtime-neutral delay seam.`。定义上面 Interfaces 里的三个类型。
 
@@ -175,30 +175,30 @@ Expected: FAIL —— `cannot find module or type sleeper`（模块还不存在�
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-core sleeper --lib`
+Run: `cargo test -p elysper-core sleeper --lib`
 Expected: PASS，3 个用例全绿
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-core/src/sleeper.rs crates/synthia-core/src/sleeper/tests.rs crates/synthia-core/src/lib.rs
+git add crates/elysper-core/src/sleeper.rs crates/elysper-core/src/sleeper/tests.rs crates/elysper-core/src/lib.rs
 git commit -m "feat(core): add runtime-neutral Sleeper seam"
 ```
 
 ---
 
-## Task 2: `synthia-core` 的 `Blocking` 接缝
+## Task 2: `elysper-core` 的 `Blocking` 接缝
 
 **Files:**
-- Create: `crates/synthia-core/src/blocking.rs`
-- Modify: `crates/synthia-core/src/lib.rs`
-- Test: `crates/synthia-core/src/blocking/tests.rs`
+- Create: `crates/elysper-core/src/blocking.rs`
+- Modify: `crates/elysper-core/src/lib.rs`
+- Test: `crates/elysper-core/src/blocking/tests.rs`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
   ```rust
-  // synthia_core::blocking
+  // elysper_core::blocking
   pub trait Blocking: Send + Sync + 'static {
       /// Run `f` on a blocking thread; the returned future resolves
       /// when `f` has completed. The closure's own return value is
@@ -214,14 +214,14 @@ git commit -m "feat(core): add runtime-neutral Sleeper seam"
   impl Blocking for ThreadBlocking { /* std::thread::spawn + oneshot */ }
   ```
 
-**注意**：`synthia_core::spawn::Spawner` 已经有 `spawn_blocking`，但它是
+**注意**：`elysper_core::spawn::Spawner` 已经有 `spawn_blocking`，但它是
 fire-and-forget（返回值被擦掉）。`Blocking` 与它的区别是**可 await** —— session 的 fs 写需要
 拿到 `Result`，所以必须有完成信号。两者并存不冲突：`Spawner::spawn_blocking` 的文档已经说明
 "a caller that needs the return value hands it out through a channel of its own"。
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-core/src/blocking/tests.rs` 建文件：
+在 `crates/elysper-core/src/blocking/tests.rs` 建文件：
 
 ```rust
 use std::sync::{
@@ -259,10 +259,10 @@ fn blocking_is_usable_as_a_trait_object() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-core blocking --lib`
+Run: `cargo test -p elysper-core blocking --lib`
 Expected: FAIL —— 找不到 `blocking` 模块
 
-- [ ] **Step 3: 实现 `crates/synthia-core/src/blocking.rs`**
+- [ ] **Step 3: 实现 `crates/elysper-core/src/blocking.rs`**
 
 按 Interfaces 的签名实现。`ThreadBlocking::run` 用 `std::thread::spawn` 跑闭包，跑完后
 通过 oneshot 发出完成信号；返回的 future 等这个信号。**闭包必须真的在线程上跑** ——
@@ -273,30 +273,30 @@ Expected: FAIL —— 找不到 `blocking` 模块
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-core blocking --lib`
+Run: `cargo test -p elysper-core blocking --lib`
 Expected: PASS，3 个用例全绿
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-core/src/blocking.rs crates/synthia-core/src/blocking/tests.rs crates/synthia-core/src/lib.rs
+git add crates/elysper-core/src/blocking.rs crates/elysper-core/src/blocking/tests.rs crates/elysper-core/src/lib.rs
 git commit -m "feat(core): add awaitable Blocking seam"
 ```
 
 ---
 
-## Task 3: `synthia-harness-tokio` 的 tokio 实现
+## Task 3: `elysper-harness-tokio` 的 tokio 实现
 
 **Files:**
-- Modify: `crates/synthia-harness-tokio/src/lib.rs`
-- Modify: `crates/synthia-harness-tokio/Cargo.toml`
-- Test: `crates/synthia-harness-tokio/tests/tokio_seams.rs`
+- Modify: `crates/elysper-harness-tokio/src/lib.rs`
+- Modify: `crates/elysper-harness-tokio/Cargo.toml`
+- Test: `crates/elysper-harness-tokio/tests/tokio_seams.rs`
 
 **Interfaces:**
-- Consumes: `synthia_core::sleeper::Sleeper`、`synthia_core::blocking::Blocking`（Task 1、2）
+- Consumes: `elysper_core::sleeper::Sleeper`、`elysper_core::blocking::Blocking`（Task 1、2）
 - Produces:
   ```rust
-  // synthia_harness_tokio
+  // elysper_harness_tokio
   pub struct TokioSleeper;
   impl Sleeper for TokioSleeper { /* tokio::time::sleep */ }
   pub struct TokioBlocking;
@@ -305,14 +305,14 @@ git commit -m "feat(core): add awaitable Blocking seam"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-harness-tokio/tests/tokio_seams.rs`：
+建 `crates/elysper-harness-tokio/tests/tokio_seams.rs`：
 
 ```rust
 use std::time::{Duration, Instant};
 
-use synthia_core::blocking::Blocking;
-use synthia_core::sleeper::Sleeper;
-use synthia_harness_tokio::{TokioBlocking, TokioSleeper};
+use elysper_core::blocking::Blocking;
+use elysper_core::sleeper::Sleeper;
+use elysper_harness_tokio::{TokioBlocking, TokioSleeper};
 
 #[tokio::test]
 async fn tokio_sleeper_waits() {
@@ -333,8 +333,8 @@ async fn tokio_blocking_runs_off_the_worker_thread() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-harness-tokio --test tokio_seams`
-Expected: FAIL —— `unresolved import synthia_harness_tokio::TokioSleeper`
+Run: `cargo test -p elysper-harness-tokio --test tokio_seams`
+Expected: FAIL —— `unresolved import elysper_harness_tokio::TokioSleeper`
 
 - [ ] **Step 3: 实现两个适配器**
 
@@ -363,17 +363,17 @@ impl Blocking for TokioBlocking {
 }
 ```
 
-`BoxFuture` 从 `synthia_core::spawn::BoxFuture` 取（该 crate 已经导出了它）。
+`BoxFuture` 从 `elysper_core::spawn::BoxFuture` 取（该 crate 已经导出了它）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-harness-tokio --test tokio_seams`
+Run: `cargo test -p elysper-harness-tokio --test tokio_seams`
 Expected: PASS，2 个用例全绿
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-harness-tokio/src/lib.rs crates/synthia-harness-tokio/Cargo.toml crates/synthia-harness-tokio/tests/tokio_seams.rs
+git add crates/elysper-harness-tokio/src/lib.rs crates/elysper-harness-tokio/Cargo.toml crates/elysper-harness-tokio/tests/tokio_seams.rs
 git commit -m "feat(harness-tokio): add TokioSleeper and TokioBlocking"
 ```
 
@@ -382,31 +382,31 @@ git commit -m "feat(harness-tokio): add TokioSleeper and TokioBlocking"
 ## Task 4: provider / steering 去掉 normal 侧的 tokio 边
 
 **Files:**
-- Modify: `crates/synthia-provider/Cargo.toml`
-- Modify: `crates/synthia-provider/src/retry.rs`
-- Modify: `crates/synthia-provider/src/streaming/idle_watchdog.rs`
-- Modify: `crates/synthia-provider/src/lib.rs`
-- Modify: `crates/synthia-steering/Cargo.toml`
-- Modify: `crates/synthia-server/Cargo.toml`
-- Test: `crates/synthia-provider/tests/tokio_edges.rs`
+- Modify: `crates/elysper-provider/Cargo.toml`
+- Modify: `crates/elysper-provider/src/retry.rs`
+- Modify: `crates/elysper-provider/src/streaming/idle_watchdog.rs`
+- Modify: `crates/elysper-provider/src/lib.rs`
+- Modify: `crates/elysper-steering/Cargo.toml`
+- Modify: `crates/elysper-server/Cargo.toml`
+- Test: `crates/elysper-provider/tests/tokio_edges.rs`
 
 **Interfaces:**
 - Consumes: 无
 - Produces: 无新公开 API（这是依赖边清理）
 
-**关键**：`synthia-provider` 的 `tokio` 依赖是 **normal 无条件依赖**（`Cargo.toml:30`），
+**关键**：`elysper-provider` 的 `tokio` 依赖是 **normal 无条件依赖**（`Cargo.toml:30`），
 与 `anthropic` / `openai` feature 无关 —— 而 harness 的树里那两个 feature 是关的。
 **只 gate 代码不去掉依赖边，`cargo tree` 里 tokio 还在。**
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-provider/tests/tokio_edges.rs` —— 真正的门禁是 **Step 5 的 `cargo tree`
+建 `crates/elysper-provider/tests/tokio_edges.rs` —— 真正的门禁是 **Step 5 的 `cargo tree`
 检查**（依赖边只能从 manifest 上看出来）。测试文件的作用是**守住那些不依赖边也守不住的
 语义**：无 adapter 时 retry 的分类逻辑仍然可用、仍然被导出。
 
 ```rust
-// crates/synthia-provider/tests/tokio_edges.rs
-use synthia_provider::retry::{RetryClass, classify_error, is_retryable_error};
+// crates/elysper-provider/tests/tokio_edges.rs
+use elysper_provider::retry::{RetryClass, classify_error, is_retryable_error};
 
 #[test]
 fn retry_classifiers_need_no_adapter() {
@@ -419,7 +419,7 @@ fn retry_classifiers_need_no_adapter() {
 fn error_classification_works_without_an_adapter() {
     // `classify_error` takes the crate's own `Error` type, which must
     // be constructible without any adapter feature enabled.
-    let classified = classify_error(&synthia_provider::Error::Internal {
+    let classified = classify_error(&elysper_provider::Error::Internal {
         message: "boom".into(),
     });
     assert!(matches!(
@@ -429,7 +429,7 @@ fn error_classification_works_without_an_adapter() {
 }
 ```
 
-`cargo test -p synthia-provider --no-default-features --test tokio_edges`
+`cargo test -p elysper-provider --no-default-features --test tokio_edges`
 必须能跑通 —— 这本身就是"无 adapter 时 crate 仍自洽"的证据。
 
 **不要**写 `assert!(true)` 之类的占位断言：它不证明任何东西，却会让这条测试看起来
@@ -437,36 +437,36 @@ fn error_classification_works_without_an_adapter() {
 
 - [ ] **Step 2: 跑测试确认现状**
 
-Run: `cargo test -p synthia-provider --no-default-features --test tokio_edges`
+Run: `cargo test -p elysper-provider --no-default-features --test tokio_edges`
 Expected: PASS（纯函数本来就与 adapter 无关）—— 这一步是**记录基线**，不是确认失败。
 真正的失败在 Step 5。
 
-- [ ] **Step 3: 改 `synthia-provider/Cargo.toml`**
+- [ ] **Step 3: 改 `elysper-provider/Cargo.toml`**
 
 把 `tokio = { workspace = true, features = ["macros", "time"] }` 改成
 `tokio = { workspace = true, features = ["macros", "time"], optional = true }`，
 并让两个 adapter feature 各自带上它：
 
 ```toml
-anthropic = ["dep:reqwest", "dep:base64", "dep:tokio", "synthia-core/reqwest"]
-openai = ["dep:reqwest", "dep:base64", "dep:tokio", "synthia-core/reqwest"]
+anthropic = ["dep:reqwest", "dep:base64", "dep:tokio", "elysper-core/reqwest"]
+openai = ["dep:reqwest", "dep:base64", "dep:tokio", "elysper-core/reqwest"]
 ```
 
 `tokio-util`（`Cargo.toml:31`）同样改 `optional = true`，只有
 `anthropic` / `openai` 需要它（生产代码里唯一用处是 `idle_watchdog.rs` 的测试）。
-`synthia-core` 的 `features = ["tokio-util"]`（`:15`）从 normal 侧移除 —— 移到
+`elysper-core` 的 `features = ["tokio-util"]`（`:15`）从 normal 侧移除 —— 移到
 `[dev-dependencies]`。
 
-- [ ] **Step 4: 改代码与 `synthia-steering/Cargo.toml`**
+- [ ] **Step 4: 改代码与 `elysper-steering/Cargo.toml`**
 
-`crates/synthia-steering/Cargo.toml`：`tokio-util.workspace = true` 与
-`synthia-core = { workspace = true, features = ["tokio-util"] }` 从 `[dependencies]`
+`crates/elysper-steering/Cargo.toml`：`tokio-util.workspace = true` 与
+`elysper-core = { workspace = true, features = ["tokio-util"] }` 从 `[dependencies]`
 移到 `[dev-dependencies]`。
 
-`crates/synthia-provider/src/retry.rs`：
+`crates/elysper-provider/src/retry.rs`：
 - **删除** `retry_with_backoff`（`:97`）与 `retry_with_retry_after`（`:145`）——
   全仓零调用点，只剩 `lib.rs:101,103` 的 re-export。注意
-  `synthia-resilience/src/provider.rs:374` 有一个**同名但无关**的
+  `elysper-resilience/src/provider.rs:374` 有一个**同名但无关**的
   `retry_with_backoff`，不要动它。
 - `retry_with_classification`（`:499`）保留，但函数体里的 `tokio::time::sleep`
   换成 `Sleeper` 接缝：给 `SummaryCompactor` 那类调用方一个 `Arc<dyn Sleeper>`
@@ -474,26 +474,26 @@ openai = ["dep:reqwest", "dep:base64", "dep:tokio", "synthia-core/reqwest"]
   gate 起来** —— 它只被两个 adapter 调用，这样零依赖。
   选定 `cfg` 方案时：`lib.rs` 里对应的 re-export 也要同样 gate。
 
-`crates/synthia-provider/src/lib.rs`：删 `retry_with_backoff` 与
+`crates/elysper-provider/src/lib.rs`：删 `retry_with_backoff` 与
 `retry_with_retry_after` 的 re-export。
 
-`crates/synthia-provider/src/streaming/idle_watchdog.rs`：
+`crates/elysper-provider/src/streaming/idle_watchdog.rs`：
 - 四个 tokio-free 导出（`DEFAULT_STREAM_IDLE_TIMEOUT` / `IDLE_TIMEOUT_MARKER` /
   `idle_timeout_error` / `is_idle_timeout`）**保持无条件** —— 它们与 adapter 无关。
 - 里面的 tokio 项已经逐项 gate 过（`:16,62,69,135,178`），检查是否还有漏网的无条件
   tokio 引用；`tokio-util` 的测试 import 在 `:221` 的 `#[cfg(all(test, ...))]` 内，
   改成 `#[cfg(test)]` 即可（测试总是开着）。
 
-**`synthia-server` 的连带处理**：`crates/synthia-server/Cargo.toml` 目前**没有**请求
-`synthia-core/tokio-util` —— 它是搭 provider / steering 的便车拿到的。而
-`crates/synthia-server/src/session/controller/run_stream.rs:24` 的生产代码要
+**`elysper-server` 的连带处理**：`crates/elysper-server/Cargo.toml` 目前**没有**请求
+`elysper-core/tokio-util` —— 它是搭 provider / steering 的便车拿到的。而
+`crates/elysper-server/src/session/controller/run_stream.rs:24` 的生产代码要
 `Arc<tokio_util::sync::CancellationToken>`。两个选择：
-(a) server 显式请求（facade 上加一条 feature 转发 `synthia-core/tokio-util`）；
+(a) server 显式请求（facade 上加一条 feature 转发 `elysper-core/tokio-util`）；
 (b) 改用 runtime-free 的 `AtomicCancelToken`（`workflow_host.rs:80` 已经这么用）。
 **选 (b)** —— server 是 app crate 但不该为了一个取消令牌多背一条 feature，
 且 `AtomicCancelToken` 已经是既有的 runtime-free 等价物。
 `run_stream.rs` 里凡是 `tokio_util::sync::CancellationToken` 都要换成
-`synthia_core::cancel::AtomicCancelToken`（注意 `run_stream.rs:97` 把它传给
+`elysper_core::cancel::AtomicCancelToken`（注意 `run_stream.rs:97` 把它传给
 `agent.run(input, cancel)`，后者收 `Arc<dyn CancelToken>` —— `AtomicCancelToken`
 实现了这个 trait）。
 
@@ -501,15 +501,15 @@ openai = ["dep:reqwest", "dep:base64", "dep:tokio", "synthia-core/reqwest"]
 
 Run:
 ```bash
-cargo tree -p synthia-harness -e normal | grep -c tokio
+cargo tree -p elysper-harness -e normal | grep -c tokio
 ```
 Expected: `0`
 
-若不为 0，用 `cargo tree -p synthia-harness -e normal -i tokio` 找到还剩哪条边。
+若不为 0，用 `cargo tree -p elysper-harness -e normal -i tokio` 找到还剩哪条边。
 
 再跑：
 ```bash
-cargo tree -p synthia-provider -e normal --no-default-features | grep -c tokio
+cargo tree -p elysper-provider -e normal --no-default-features | grep -c tokio
 ```
 Expected: `0`
 
@@ -517,17 +517,17 @@ Expected: `0`
 
 Run:
 ```bash
-cargo test -p synthia-provider --lib
-cargo test -p synthia-steering --lib
-cargo test -p synthia-server --lib
+cargo test -p elysper-provider --lib
+cargo test -p elysper-steering --lib
+cargo test -p elysper-server --lib
 ```
-Expected: 全绿。`synthia-server` 若因 `CancellationToken` 换类型而编译失败，
+Expected: 全绿。`elysper-server` 若因 `CancellationToken` 换类型而编译失败，
 按 Step 4 的 (b) 方案改完再跑。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/synthia-provider crates/synthia-steering crates/synthia-server
+git add crates/elysper-provider crates/elysper-steering crates/elysper-server
 git commit -m "fix(provider): drop normal-side tokio dependency edges"
 ```
 
@@ -536,20 +536,20 @@ git commit -m "fix(provider): drop normal-side tokio dependency edges"
 ## Task 5: session 的 runtime-free 化
 
 **Files:**
-- Create: `crates/synthia-session/src/fs.rs`
-- Modify: `crates/synthia-session/src/jsonl.rs`
-- Modify: `crates/synthia-session/src/compaction.rs`
-- Modify: `crates/synthia-session/src/search/backend.rs`
-- Modify: `crates/synthia-session/src/manager.rs`
-- Modify: `crates/synthia-session/src/lib.rs`
-- Create: `crates/synthia-session/src/fs/tests.rs`
-- Test: `crates/synthia-session/tests/runtime_free.rs`
+- Create: `crates/elysper-session/src/fs.rs`
+- Modify: `crates/elysper-session/src/jsonl.rs`
+- Modify: `crates/elysper-session/src/compaction.rs`
+- Modify: `crates/elysper-session/src/search/backend.rs`
+- Modify: `crates/elysper-session/src/manager.rs`
+- Modify: `crates/elysper-session/src/lib.rs`
+- Create: `crates/elysper-session/src/fs/tests.rs`
+- Test: `crates/elysper-session/tests/runtime_free.rs`
 
 **Interfaces:**
-- Consumes: `synthia_core::sleeper::Sleeper`、`synthia_core::blocking::Blocking`（Task 1、2）
+- Consumes: `elysper_core::sleeper::Sleeper`、`elysper_core::blocking::Blocking`（Task 1、2）
 - Produces:
   ```rust
-  // synthia_session::fs
+  // elysper_session::fs
   pub struct FsBackend { blocking: Arc<dyn Blocking> }
   impl FsBackend {
       pub fn new(blocking: Arc<dyn Blocking>) -> Self;
@@ -562,24 +562,24 @@ git commit -m "fix(provider): drop normal-side tokio dependency edges"
       ) -> Result<(), String>;
   }
   ```
-  `synthia_session::SummaryCompactor` 新增一个 builder：
+  `elysper_session::SummaryCompactor` 新增一个 builder：
   ```rust
   pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self;
   ```
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-session/src/fs/tests.rs`：
+建 `crates/elysper-session/src/fs/tests.rs`：
 
 ```rust
 use std::sync::Arc;
 
 use super::FsBackend;
-use synthia_core::blocking::ThreadBlocking;
+use elysper_core::blocking::ThreadBlocking;
 
 #[test]
 fn appends_then_reads_back() {
-    let dir = std::env::temp_dir().join(format!("synthia-fs-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("elysper-fs-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("events.jsonl");
     let backend = FsBackend::new(Arc::new(ThreadBlocking));
@@ -600,19 +600,19 @@ fn appends_then_reads_back() {
 }
 ```
 
-再建 `crates/synthia-session/tests/runtime_free.rs` —— 真正的门禁是 **Step 8 的 `cargo tree`
+再建 `crates/elysper-session/tests/runtime_free.rs` —— 真正的门禁是 **Step 8 的 `cargo tree`
 检查**。这个测试文件守的是**行为**：session 的读写路径在没有 tokio 的情况下仍然正确。
 
 ```rust
-// crates/synthia-session/tests/runtime_free.rs
+// crates/elysper-session/tests/runtime_free.rs
 use std::sync::Arc;
 
-use synthia_core::blocking::ThreadBlocking;
-use synthia_session::{JsonlSessionSink, SessionSink};
+use elysper_core::blocking::ThreadBlocking;
+use elysper_session::{JsonlSessionSink, SessionSink};
 
 #[test]
 fn a_jsonl_sink_round_trips_without_a_runtime() {
-    let dir = std::env::temp_dir().join(format!("synthia-rt-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("elysper-rt-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let sink = JsonlSessionSink::new(dir.path()).unwrap()
         .with_blocking(Arc::new(ThreadBlocking));
@@ -640,10 +640,10 @@ fn a_jsonl_sink_round_trips_without_a_runtime() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-session --lib fs`
+Run: `cargo test -p elysper-session --lib fs`
 Expected: FAIL —— 找不到 `fs` 模块
 
-- [ ] **Step 3: 实现 `crates/synthia-session/src/fs.rs`**
+- [ ] **Step 3: 实现 `crates/elysper-session/src/fs.rs`**
 
 按 Interfaces 的签名。`read_file` 与 `append_lines` 都通过 `blocking.run(...)` 把阻塞
 fs 调用挪到线程上，**返回值经调用方自己的 oneshot 传回**（`Blocking` 的契约）。
@@ -682,41 +682,41 @@ fs 调用挪到线程上，**返回值经调用方自己的 oneshot 传回**（`
 
 - [ ] **Step 7: 把 `InputQueue` 挪出 session**
 
-`crates/synthia-session/src/manager.rs` 的 `InputQueue`（`:252`）与它依赖的
-`PendingEntry` **移到 `synthia-server`**。本任务里：
+`crates/elysper-session/src/manager.rs` 的 `InputQueue`（`:252`）与它依赖的
+`PendingEntry` **移到 `elysper-server`**。本任务里：
 - 在 session 里删掉 `InputQueue` 与 `PendingEntry`；
-- 在 `crates/synthia-server/src/session/input_queue.rs` 建同样的类型（用
+- 在 `crates/elysper-server/src/session/input_queue.rs` 建同样的类型（用
   `futures::lock::Mutex`，不是 `tokio::sync::Mutex`）；
 - 更新 server 的引用点（`controller/deps.rs` 与 `controller/dispatch.rs` 的
   `push_text_input`）；
-- 更新 `crates/synthia/src/session.rs`（facade 的 glob 会自动跟随，但确认没有
-  别的 crate 引用 `synthia_session::manager::InputQueue`）；
-- 更新 `scripts/paradigm-surface/baselines/` 里 `synthia-session` 的基线。
+- 更新 `crates/elysper/src/session.rs`（facade 的 glob 会自动跟随，但确认没有
+  别的 crate 引用 `elysper_session::manager::InputQueue`）；
+- 更新 `scripts/paradigm-surface/baselines/` 里 `elysper-session` 的基线。
 
-**这一步是生态可见的破坏**：`synthia::session::manager::InputQueue` 从 facade 公开面上
+**这一步是生态可见的破坏**：`elysper::session::manager::InputQueue` 从 facade 公开面上
 消失，不留别名。
 
 - [ ] **Step 8: 验证依赖闭包**
 
-Run: `cargo tree -p synthia-harness -e normal | grep -c tokio`
+Run: `cargo tree -p elysper-harness -e normal | grep -c tokio`
 Expected: `0`
 
-Run: `cargo tree -p synthia-session -e normal | grep -c tokio`
+Run: `cargo tree -p elysper-session -e normal | grep -c tokio`
 Expected: `0`
 
 - [ ] **Step 9: 跑测试**
 
 Run:
 ```bash
-cargo test -p synthia-session --lib
-cargo test -p synthia-server --lib
+cargo test -p elysper-session --lib
+cargo test -p elysper-server --lib
 ```
 Expected: 全绿
 
 - [ ] **Step 10: 提交**
 
 ```bash
-git add crates/synthia-session crates/synthia-server/src/session crates/synthia/src/session.rs scripts/paradigm-surface/baselines
+git add crates/elysper-session crates/elysper-server/src/session crates/elysper/src/session.rs scripts/paradigm-surface/baselines
 git commit -m "refactor(session): make the session crate runtime-free"
 ```
 
@@ -725,17 +725,17 @@ git commit -m "refactor(session): make the session crate runtime-free"
 ## Task 6: `ReActAgent` 泛型化
 
 **Files:**
-- Modify: `crates/synthia-harness/src/agent/caps.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/agent.rs`
-- Modify: `crates/synthia-harness/src/agent/mod.rs`
-- Modify: `crates/synthia-harness/src/lib.rs`
-- Test: `crates/synthia-harness/src/agent/re_act/tests/generic_agent.rs`
+- Modify: `crates/elysper-harness/src/agent/caps.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/agent.rs`
+- Modify: `crates/elysper-harness/src/agent/mod.rs`
+- Modify: `crates/elysper-harness/src/lib.rs`
+- Test: `crates/elysper-harness/src/agent/re_act/tests/generic_agent.rs`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
   ```rust
-  // synthia_harness
+  // elysper_harness
   pub struct ReActAgent<P = Arc<dyn ModelProvider>> { /* … */ }
   impl<P: ModelProvider + 'static> ReActAgent<P> {
       pub fn with_provider(provider: P) -> Self;  // 泛型构造
@@ -746,13 +746,13 @@ git commit -m "refactor(session): make the session crate runtime-free"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-harness/src/agent/re_act/tests/generic_agent.rs`：
+建 `crates/elysper-harness/src/agent/re_act/tests/generic_agent.rs`：
 
 ```rust
 use std::sync::Arc;
 
-use synthia_provider::{CompletionRequest, CompletionResponse, ModelProvider};
-use synthia_tool::ToolRegistry;
+use elysper_provider::{CompletionRequest, CompletionResponse, ModelProvider};
+use elysper_tool::ToolRegistry;
 
 use crate::ReActAgent;
 
@@ -768,7 +768,7 @@ impl ModelProvider for CountingProvider {
     async fn complete(
         &self,
         _request: CompletionRequest,
-    ) -> Result<CompletionResponse, synthia_provider::ProviderError> {
+    ) -> Result<CompletionResponse, elysper_provider::ProviderError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(CompletionResponse::default())
     }
@@ -787,7 +787,7 @@ fn generic_agent_accepts_a_concrete_provider() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-harness --lib generic_agent`
+Run: `cargo test -p elysper-harness --lib generic_agent`
 Expected: FAIL —— `with_provider` 不存在
 
 - [ ] **Step 3: 泛型化 `ModelCaps` 与 `ReActAgent`**
@@ -825,13 +825,13 @@ impl<P: ModelProvider + 'static> ReActAgent<P> {
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-harness --lib`
+Run: `cargo test -p elysper-harness --lib`
 Expected: 全绿（含既有测试 —— setter 签名没变，既有调用方零改动）
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-harness
+git add crates/elysper-harness
 git commit -m "feat(harness): generic agent over the provider type"
 ```
 
@@ -840,9 +840,9 @@ git commit -m "feat(harness): generic agent over the provider type"
 ## Task 7: `prompt_section` 链接上
 
 **Files:**
-- Modify: `crates/synthia-harness/src/prompt/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/agent.rs`
-- Test: `crates/synthia-harness/src/prompt/tests/sections.rs`
+- Modify: `crates/elysper-harness/src/prompt/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/agent.rs`
+- Test: `crates/elysper-harness/src/prompt/tests/sections.rs`
 
 **Interfaces:**
 - Consumes: `Host::prompt_sections()`（已存在，`host.rs:856`）
@@ -850,7 +850,7 @@ git commit -m "feat(harness): generic agent over the provider type"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-harness/src/prompt/tests/sections.rs`：
+建 `crates/elysper-harness/src/prompt/tests/sections.rs`：
 
 ```rust
 use std::sync::Arc;
@@ -888,7 +888,7 @@ fn sections_render_in_registration_order() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-harness --lib sections`
+Run: `cargo test -p elysper-harness --lib sections`
 Expected: FAIL —— `assemble_prompt` 不存在（函数名待实现者按实际签名对齐）或
 断言失败（section 没进 prompt）
 
@@ -906,8 +906,8 @@ Expected: FAIL —— `assemble_prompt` 不存在（函数名待实现者按实�
       pub fn sections(&self) -> &[PromptSection];
   }
   ```
-  `PromptSection` 现在住在 `synthia_harness::agent::host` —— `PromptContext` 在
-  `synthia_harness::prompt`，同 crate 内可以直接用。
+  `PromptSection` 现在住在 `elysper_harness::agent::host` —— `PromptContext` 在
+  `elysper_harness::prompt`，同 crate 内可以直接用。
 - `ReActAgent` 在构造 caps 时，把 `host.prompt_sections()` 拷进 `PromptContext`。
   **拷贝时机**：每次 run 开始时（`prepare.rs` 的 prepare 阶段）刷新一次，
   不要只在构造时取 —— 插件可以在 run 之间注册 section。
@@ -917,13 +917,13 @@ Expected: FAIL —— `assemble_prompt` 不存在（函数名待实现者按实�
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-harness --lib`
+Run: `cargo test -p elysper-harness --lib`
 Expected: 全绿
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-harness
+git add crates/elysper-harness
 git commit -m "feat(harness): render plugin prompt sections"
 ```
 
@@ -932,10 +932,10 @@ git commit -m "feat(harness): render plugin prompt sections"
 ## Task 8: 热路径 —— 消除 `call.input` 深拷贝并修正基准
 
 **Files:**
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/tools/route.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/guard.rs`
-- Modify: `crates/synthia-harness/benches/hot_paths.rs`
-- Test: `crates/synthia-harness/src/agent/re_act/tests/lifecycle/tool_execution.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/tools/route.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/guard.rs`
+- Modify: `crates/elysper-harness/benches/hot_paths.rs`
+- Test: `crates/elysper-harness/src/agent/re_act/tests/lifecycle/tool_execution.rs`
 
 **Interfaces:**
 - Consumes: 无
@@ -943,7 +943,7 @@ git commit -m "feat(harness): render plugin prompt sections"
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/synthia-harness/src/agent/re_act/tests/lifecycle/tool_execution.rs` 追加：
+在 `crates/elysper-harness/src/agent/re_act/tests/lifecycle/tool_execution.rs` 追加：
 
 ```rust
 /// The tool input must reach the tool without a deep copy on the
@@ -977,7 +977,7 @@ fn the_tool_receives_the_same_input_allocation_the_gate_saw() {
 
 - [ ] **Step 2: 跑测试确认现状**
 
-Run: `cargo test -p synthia-harness --lib tool_execution`
+Run: `cargo test -p elysper-harness --lib tool_execution`
 Expected: PASS（记录基线）
 
 - [ ] **Step 3: 消除两处深拷贝**
@@ -987,10 +987,10 @@ Expected: PASS（记录基线）
 
 改法：把工具调用上的 `input` 从 `serde_json::Value` 改成
 `Arc<serde_json::Value>`，两处都传 `Arc::clone`。这要求 `ToolCall` 的
-`input` 字段类型变化 —— 查 `synthia-provider/src/types/tool.rs` 里 `ToolCall` 的定义，
+`input` 字段类型变化 —— 查 `elysper-provider/src/types/tool.rs` 里 `ToolCall` 的定义，
 若是 `serde_json::Value`，改成 `Arc<serde_json::Value>` 会影响 provider 的
 序列化（`CompletionRequest` 的 serde 派生对 `Arc<Value>` 需要 `serde` 的 `rc`
-feature —— `synthia-provider/Cargo.toml:17` 已经开了 `features = ["rc"]`）。
+feature —— `elysper-provider/Cargo.toml:17` 已经开了 `features = ["rc"]`）。
 
 **若改动面过大**，退一步：只让 `guard.rs` 复用 `route.rs` 已经 clone 好的那份
 （把 clone 提到调用链的更上游一次），使全路径只 clone 一次。**判据是"审批门控路径上
@@ -1025,20 +1025,20 @@ Bench {
 
 - [ ] **Step 5: 跑基准并记录**
 
-Run: `cargo bench -p synthia-harness --bench hot_paths`
+Run: `cargo bench -p elysper-harness --bench hot_paths`
 Expected: 打印新表。`TruncatingContextManager` 的新数字**应该显著低于 386.9 µs**
 —— 但那部分来自"不再把 clone 算进去"，**不是**性能改进。要区分二者：
 在 commit message 里同时写"修基准后的数字"与"真实改进量"。
 
 - [ ] **Step 6: 跑测试**
 
-Run: `cargo test -p synthia-harness --lib`
+Run: `cargo test -p elysper-harness --lib`
 Expected: 全绿
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/synthia-harness
+git add crates/elysper-harness
 git commit -m "perf(harness): drop the duplicate tool-input copy and fix the bench fixture"
 ```
 
@@ -1047,21 +1047,21 @@ git commit -m "perf(harness): drop the duplicate tool-input copy and fix the ben
 ## Task 9: 公开面收窄与死代码清理
 
 **Files:**
-- Modify: `crates/synthia-session/src/typed_event_sink.rs`
-- Modify: `crates/synthia-session/src/compaction.rs`
-- Modify: `crates/synthia-provider/Cargo.toml`（`ahash` 降 dev-dependency）
-- Modify: `crates/synthia-provider/src/config.rs`
-- Modify: `crates/synthia-provider/src/cache_mark.rs`
-- Modify: `crates/synthia-provider/src/profile/openai.rs`
-- Modify: `crates/synthia-context/src/summarizing/manager.rs`
-- Modify: `crates/synthia-server/Cargo.toml`（`publish = false`）
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/tools/mod.rs`（注释漂移）
-- Modify: `scripts/paradigm-surface/baselines/crates/synthia-harness`（5 → 4）
-- Delete: `crates/synthia-server/src/config/server.rs.tmp`
+- Modify: `crates/elysper-session/src/typed_event_sink.rs`
+- Modify: `crates/elysper-session/src/compaction.rs`
+- Modify: `crates/elysper-provider/Cargo.toml`（`ahash` 降 dev-dependency）
+- Modify: `crates/elysper-provider/src/config.rs`
+- Modify: `crates/elysper-provider/src/cache_mark.rs`
+- Modify: `crates/elysper-provider/src/profile/openai.rs`
+- Modify: `crates/elysper-context/src/summarizing/manager.rs`
+- Modify: `crates/elysper-server/Cargo.toml`（`publish = false`）
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/tools/mod.rs`（注释漂移）
+- Modify: `scripts/paradigm-surface/baselines/crates/elysper-harness`（5 → 4）
+- Delete: `crates/elysper-server/src/config/server.rs.tmp`
 
-（**不动** `crates/synthia/Cargo.toml`：facade 保持可发布。**不动**
-`crates/synthia-provider/src/lib.rs` 与 `retry.rs`：两个 retry helper 已由 Task 4 删除。
-**不动** `crates/synthia-server/src/lib.rs`：见 Step 2 的撤销。）
+（**不动** `crates/elysper/Cargo.toml`：facade 保持可发布。**不动**
+`crates/elysper-provider/src/lib.rs` 与 `retry.rs`：两个 retry helper 已由 Task 4 删除。
+**不动** `crates/elysper-server/src/lib.rs`：见 Step 2 的撤销。）
 
 **Interfaces:**
 - Consumes: 无
@@ -1073,12 +1073,12 @@ git commit -m "perf(harness): drop the duplicate tool-input copy and fix the ben
 
 | 符号 | 位置 |
 |---|---|
-| `synthia_session::as_value` | `typed_event_sink.rs:57` |
-| `synthia_session::with_prune_threshold` | `compaction.rs:244` |
-| `synthia_provider::create_default_provider` | `config.rs:299` |
-| `synthia_provider::cache_mark::…::hash_to_u64` | `cache_mark.rs:63`（**收窄不删**，见下） |
-| `synthia_provider::openai_compat` | `profile/openai.rs:69` |
-| `synthia_context::with_archive` | `summarizing/manager.rs:97` |
+| `elysper_session::as_value` | `typed_event_sink.rs:57` |
+| `elysper_session::with_prune_threshold` | `compaction.rs:244` |
+| `elysper_provider::create_default_provider` | `config.rs:299` |
+| `elysper_provider::cache_mark::…::hash_to_u64` | `cache_mark.rs:63`（**收窄不删**，见下） |
+| `elysper_provider::openai_compat` | `profile/openai.rs:69` |
+| `elysper_context::with_archive` | `summarizing/manager.rs:97` |
 
 **注意**：符号名是 `hash_to_u64`（不是 `hash_to_u`）；`openai_compat` 在
 `profile/openai.rs`（是个常量或函数，按实际形态删）。
@@ -1092,19 +1092,19 @@ git commit -m "perf(harness): drop the duplicate tool-input copy and fix the ben
 - [ ] **Step 2: 删 server 的多余 `pub`**（**已撤销**）
 
 原计划把 14 个 `pub mod` 一律降 `pub(crate)`。**不做**：`tests/` 下 14 个 integration test 是
-独立 crate，直接 `use synthia_server::…`；`main.rs` 用
+独立 crate，直接 `use elysper_server::…`；`main.rs` 用
 `build_info` / `config::server::BindOverrides` / `server::boot_server`。这些路径触达的模块必须保持
 `pub`。server 既不可发布（Step 3），其 `pub` 面已非出厂契约，批量降级是无消费者的 churn。
 
 - [ ] **Step 3: 加 `publish = false`（只加到 server）**
 
-**只**在 `crates/synthia-server/Cargo.toml` 加 `publish = false`。**`crates/synthia/Cargo.toml`
-不加** —— facade 是文档化的消费入口（`cargo add synthia`），标成不可发布会砍掉主分发路径。
+**只**在 `crates/elysper-server/Cargo.toml` 加 `publish = false`。**`crates/elysper/Cargo.toml`
+不加** —— facade 是文档化的消费入口（`cargo add elysper`），标成不可发布会砍掉主分发路径。
 全仓 39 个 crate 目前无一标 `publish = false`，只有两个 example consumer 标了。
 
 - [ ] **Step 4: 删 `.tmp`**
 
-`git rm crates/synthia-server/src/config/server.rs.tmp` —— 它是已入 git 的 **0 字节
+`git rm crates/elysper-server/src/config/server.rs.tmp` —— 它是已入 git 的 **0 字节
 占位文件**（blob `e69de29b…`）。
 
 - [ ] **Step 5: 跑门禁**
@@ -1122,45 +1122,45 @@ Expected: 全绿（基线若因删除而变化，更新基线文件并在 commit
 
 Run:
 ```bash
-cargo test -p synthia-provider --lib
-cargo test -p synthia-session --lib
-cargo test -p synthia-context --lib
-cargo test -p synthia-server --lib
+cargo test -p elysper-provider --lib
+cargo test -p elysper-session --lib
+cargo test -p elysper-context --lib
+cargo test -p elysper-server --lib
 ```
 Expected: 全绿
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add -A crates/synthia-provider crates/synthia-session crates/synthia-context crates/synthia-server crates/synthia scripts
+git add -A crates/elysper-provider crates/elysper-session crates/elysper-context crates/elysper-server crates/elysper scripts
 git commit -m "refactor: drop dead public surface and unpublish the server crate"
 ```
 
 ---
 
-## Task 10: `synthia-plugin-protocol` crate 骨架
+## Task 10: `elysper-plugin-protocol` crate 骨架
 
 **Files:**
-- Create: `crates/synthia-plugin-protocol/Cargo.toml`
-- Create: `crates/synthia-plugin-protocol/src/lib.rs`
-- Create: `crates/synthia-plugin-protocol/src/wire.rs`
-- Test: `crates/synthia-plugin-protocol/tests/wire_shape.rs`
+- Create: `crates/elysper-plugin-protocol/Cargo.toml`
+- Create: `crates/elysper-plugin-protocol/src/lib.rs`
+- Create: `crates/elysper-plugin-protocol/src/wire.rs`
+- Test: `crates/elysper-plugin-protocol/tests/wire_shape.rs`
 
 **Interfaces:**
 - Consumes: 无
 - Produces:
   ```rust
-  // synthia_plugin_protocol
+  // elysper_plugin_protocol
   pub mod methods;   // 方法名常量
   pub mod wire;      // wire 类型
 
   // methods
-  pub const INITIALIZE: &str = "synthia/initialize";
-  pub const TOOLS_LIST: &str = "synthia/tools/list";
-  pub const TOOLS_CALL: &str = "synthia/tools/call";
-  pub const TRANSFORM: &str = "synthia/transform";
-  pub const EVENT: &str = "synthia/event";
-  pub const GATE: &str = "synthia/gate";
+  pub const INITIALIZE: &str = "elysper/initialize";
+  pub const TOOLS_LIST: &str = "elysper/tools/list";
+  pub const TOOLS_CALL: &str = "elysper/tools/call";
+  pub const TRANSFORM: &str = "elysper/transform";
+  pub const EVENT: &str = "elysper/event";
+  pub const GATE: &str = "elysper/gate";
 
   // wire
   #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1210,10 +1210,10 @@ git commit -m "refactor: drop dead public surface and unpublish the server crate
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-plugin-protocol/tests/wire_shape.rs`：
+建 `crates/elysper-plugin-protocol/tests/wire_shape.rs`：
 
 ```rust
-use synthia_plugin_protocol::{
+use elysper_plugin_protocol::{
     PluginCapabilities, PluginDecision, PluginError, PluginEvent,
 };
 
@@ -1253,16 +1253,16 @@ fn error_codes_are_stable() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-plugin-protocol`
+Run: `cargo test -p elysper-plugin-protocol`
 Expected: FAIL —— crate 还不存在（`cargo` 报 "no such package"）
 
 - [ ] **Step 3: 建 crate**
 
-`Cargo.toml`（照 `synthia-tool` 的形状）：
+`Cargo.toml`（照 `elysper-tool` 的形状）：
 ```toml
 [package]
-name = "synthia-plugin-protocol"
-description = "Wire protocol for Synthia's dynamic plugin channel: JSON-RPC method names, capability negotiation, and stable event/decision types"
+name = "elysper-plugin-protocol"
+description = "Wire protocol for Elysper's dynamic plugin channel: JSON-RPC method names, capability negotiation, and stable event/decision types"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -1282,28 +1282,28 @@ serde_json.workspace = true
 ```
 
 **只依赖 `serde` 与 `serde_json`** —— 这是"零运行时"的全部含义。**不要**加
-`synthia-harness`、`synthia-core` 或任何 tokio。
+`elysper-harness`、`elysper-core` 或任何 tokio。
 
 根 `Cargo.toml` 的 `[workspace.dependencies]` 加
-`synthia-plugin-protocol = { path = "crates/synthia-plugin-protocol" }`，
-`[workspace.members]` 加 `"crates/synthia-plugin-protocol"`。
+`elysper-plugin-protocol = { path = "crates/elysper-plugin-protocol" }`，
+`[workspace.members]` 加 `"crates/elysper-plugin-protocol"`。
 
 `src/lib.rs` 按 Interfaces 定义模块与导出。`src/wire.rs` 放 wire 类型。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-plugin-protocol`
+Run: `cargo test -p elysper-plugin-protocol`
 Expected: PASS，4 个用例全绿
 
 - [ ] **Step 5: 验证零依赖**
 
-Run: `cargo tree -p synthia-plugin-protocol -e normal`
+Run: `cargo tree -p elysper-plugin-protocol -e normal`
 Expected: 只有 `serde` / `serde_json` / `proc-macro2` 一类，**没有 tokio**
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-plugin-protocol Cargo.toml Cargo.lock
+git add crates/elysper-plugin-protocol Cargo.toml Cargo.lock
 git commit -m "feat(protocol): add the dynamic plugin wire protocol crate"
 ```
 
@@ -1312,12 +1312,12 @@ git commit -m "feat(protocol): add the dynamic plugin wire protocol crate"
 ## Task 11: facade feature 表收窄
 
 **Files:**
-- Modify: `crates/synthia/Cargo.toml`
-- Modify: `crates/synthia/src/lib.rs`（模块的 `#[cfg(feature = ...)]`）
-- Modify: `crates/synthia-tool-scheduler/Cargo.toml`
-- Modify: `crates/synthia-provider/Cargo.toml`
-- Modify: `crates/synthia-search/Cargo.toml`
-- Test: `crates/synthia/tests/feature_surface.rs`
+- Modify: `crates/elysper/Cargo.toml`
+- Modify: `crates/elysper/src/lib.rs`（模块的 `#[cfg(feature = ...)]`）
+- Modify: `crates/elysper-tool-scheduler/Cargo.toml`
+- Modify: `crates/elysper-provider/Cargo.toml`
+- Modify: `crates/elysper-search/Cargo.toml`
+- Test: `crates/elysper/tests/feature_surface.rs`
 
 **Interfaces:**
 - Consumes: 无
@@ -1331,23 +1331,23 @@ git commit -m "feat(protocol): add the dynamic plugin wire protocol crate"
 
 - [ ] **Step 1: 删两条空转发 feature**
 
-`crates/synthia/Cargo.toml`：
-- 删 `checkpoint = ["harness"]` —— `synthia-harness` **没有 `[features]` 表**，
+`crates/elysper/Cargo.toml`：
+- 删 `checkpoint = ["harness"]` —— `elysper-harness` **没有 `[features]` 表**，
   这条什么都不启用。
-- 删 `transcript = ["eval"]` —— `synthia-eval` **也没有 `[features]` 表`**。
+- 删 `transcript = ["eval"]` —— `elysper-eval` **也没有 `[features]` 表`**。
 
-**删之前先确认** `synthia-eval` 与 `synthia-harness` 确实没有 `[features]` 表
+**删之前先确认** `elysper-eval` 与 `elysper-harness` 确实没有 `[features]` 表
 （`grep -c "^\[features\]"` 应为 0），并且没有 crate 依赖 facade 的这两条 feature。
 
-同时更新 `crates/synthia/src/lib.rs` 里对应的 `#[cfg(feature = "checkpoint")]` /
+同时更新 `crates/elysper/src/lib.rs` 里对应的 `#[cfg(feature = "checkpoint")]` /
 `#[cfg(feature = "transcript")]` 模块门控。
 
 - [ ] **Step 2: 把组合 feature 拆到 crate 自己的依赖里**
 
-`tool-scheduler` 现在在 facade 上是 `tool-scheduler = ["dep:synthia-tool-scheduler", "tool", "scheduler", ...]`
+`tool-scheduler` 现在在 facade 上是 `tool-scheduler = ["dep:elysper-tool-scheduler", "tool", "scheduler", ...]`
 —— 它同时拉 `tool` 与 `scheduler`。**改**：让
-`crates/synthia-tool-scheduler/Cargo.toml` 自己依赖 `synthia-scheduler`，
-facade 上的 `tool-scheduler` 只剩 `["dep:synthia-tool-scheduler"]`。
+`crates/elysper-tool-scheduler/Cargo.toml` 自己依赖 `elysper-scheduler`，
+facade 上的 `tool-scheduler` 只剩 `["dep:elysper-tool-scheduler"]`。
 
 同样处理其它"拉 ≥2 个 crate"的组合 feature：`context`、`tool`、`session`、`steering`、
 `harness`、`skill`、`mcp`、`telemetry`、`safety`、`eval`、`workflow`、
@@ -1356,10 +1356,10 @@ facade 上的 `tool-scheduler` 只剩 `["dep:synthia-tool-scheduler"]`。
 `tool-search`、`provider-anthropic`、`provider-openai`。
 
 **逐条处理原则**：
-- 若 feature X 只是为了把 crate C 拉进来 → 改成 `["dep:synthia-c"]`，
+- 若 feature X 只是为了把 crate C 拉进来 → 改成 `["dep:elysper-c"]`，
   C 自己的依赖写进 C 的 Cargo.toml。
-- 若 feature X 转发的是 crate C 的**子 feature**（`synthia-c/sub`）→
-  保留转发，但**同时**把 C 本身拉进来：`X = ["dep:synthia-c", "synthia-c/sub"]`。
+- 若 feature X 转发的是 crate C 的**子 feature**（`elysper-c/sub`）→
+  保留转发，但**同时**把 C 本身拉进来：`X = ["dep:elysper-c", "elysper-c/sub"]`。
 - 若 feature X 是纯能力开关且无对应 crate → 按规则 4 删除或降级。
 
 - [ ] **Step 3: 收窄 `default`**
@@ -1368,14 +1368,14 @@ facade 上的 `tool-scheduler` 只剩 `["dep:synthia-tool-scheduler"]`。
 只保留"一个 agent 跑起来必需的最小集"。
 
 **判据**：`docs/examples/harness-only-consumer`（Task 17）必须能只依赖
-`synthia-harness` 就跑通一轮 —— 那说明 `harness` 这一条 feature 足够。
+`elysper-harness` 就跑通一轮 —— 那说明 `harness` 这一条 feature 足够。
 
 具体保留哪些由实现者定，但 `default` 里**不应**再出现 `tool-read` / `tool-write` /
 `tool-shell` / `tool-todo` / `tool-web` / `tool-task` 这六条工具插件。
 
 - [ ] **Step 4: 写失败的测试**
 
-建 `crates/synthia/tests/feature_surface.rs`：
+建 `crates/elysper/tests/feature_surface.rs`：
 
 ```rust
 //! The facade's feature table must express crate availability only.
@@ -1400,49 +1400,49 @@ fn facade_features_are_declared_consistently() {
 
 Run:
 ```bash
-for f in $(grep -E "^[a-z0-9_-]+ = \[" crates/synthia/Cargo.toml | cut -d' ' -f1); do
-  cargo check -p synthia --no-default-features --features "$f" || echo "FAILED: $f"
+for f in $(grep -E "^[a-z0-9_-]+ = \[" crates/elysper/Cargo.toml | cut -d' ' -f1); do
+  cargo check -p elysper --no-default-features --features "$f" || echo "FAILED: $f"
 done
 ```
 Expected: 无 `FAILED:` 输出
 
-再跑 `cargo check -p synthia`（default 集）与
-`cargo check -p synthia --all-features`。
+再跑 `cargo check -p elysper`（default 集）与
+`cargo check -p elysper --all-features`。
 
 - [ ] **Step 6: 跑门禁与测试**
 
 Run:
 ```bash
 make check-mvp-deps
-cargo test -p synthia --lib
+cargo test -p elysper --lib
 ```
 Expected: 全绿
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/synthia crates/synthia-tool-scheduler crates/synthia-provider crates/synthia-search Cargo.lock
+git add crates/elysper crates/elysper-tool-scheduler crates/elysper-provider crates/elysper-search Cargo.lock
 git commit -m "refactor(facade): narrow features to crate availability"
 ```
 
 ---
 
-## Task 12: `synthia-plugin-host` crate
+## Task 12: `elysper-plugin-host` crate
 
 **Files:**
-- Create: `crates/synthia-plugin-host/Cargo.toml`
-- Create: `crates/synthia-plugin-host/src/lib.rs`
-- Create: `crates/synthia-plugin-host/src/client.rs`
-- Create: `crates/synthia-plugin-host/src/remote_tool.rs`
-- Create: `crates/synthia-plugin-host/src/process.rs`
-- Test: `crates/synthia-plugin-host/tests/remote_tool.rs`
+- Create: `crates/elysper-plugin-host/Cargo.toml`
+- Create: `crates/elysper-plugin-host/src/lib.rs`
+- Create: `crates/elysper-plugin-host/src/client.rs`
+- Create: `crates/elysper-plugin-host/src/remote_tool.rs`
+- Create: `crates/elysper-plugin-host/src/process.rs`
+- Test: `crates/elysper-plugin-host/tests/remote_tool.rs`
 
 **Interfaces:**
-- Consumes: `synthia_plugin_protocol`（Task 10）、`synthia_harness::Host`、
-  `synthia_tool::Tool`、`synthia_core::blocking::Blocking`
+- Consumes: `elysper_plugin_protocol`（Task 10）、`elysper_harness::Host`、
+  `elysper_tool::Tool`、`elysper_core::blocking::Blocking`
 - Produces:
   ```rust
-  // synthia_plugin_host
+  // elysper_plugin_host
   pub struct RemotePluginConfig {
       pub name: String,
       pub command: Vec<String>,
@@ -1464,16 +1464,16 @@ git commit -m "refactor(facade): narrow features to crate availability"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-plugin-host/tests/remote_tool.rs`：
+建 `crates/elysper-plugin-host/tests/remote_tool.rs`：
 
 ```rust
 use std::sync::Arc;
 
-use synthia_core::blocking::ThreadBlocking;
-use synthia_harness::host::{Host, PluginHandle};
-use synthia_plugin_host::{Authority, RemotePlugin, RemotePluginConfig};
-use synthia_plugin_protocol::PluginCapabilities;
-use synthia_tool::{Risk, Tool, ToolRegistry};
+use elysper_core::blocking::ThreadBlocking;
+use elysper_harness::host::{Host, PluginHandle};
+use elysper_plugin_host::{Authority, RemotePlugin, RemotePluginConfig};
+use elysper_plugin_protocol::PluginCapabilities;
+use elysper_tool::{Risk, Tool, ToolRegistry};
 
 /// A plugin that advertises one tool and refuses to block.
 struct FakePlugin;
@@ -1485,7 +1485,7 @@ fn remote_tool_overrides_risk_with_the_host_policy() {
     let config = RemotePluginConfig {
         name: "fake".into(),
         command: vec!["true".into()],
-        transport: synthia_plugin_host::TransportKind::Stdio,
+        transport: elysper_plugin_host::TransportKind::Stdio,
         capabilities: PluginCapabilities { tools: true, observe: false, transform: false },
         authority: Authority::Reduced,
         risk: Risk::Unknown,
@@ -1500,7 +1500,7 @@ fn reduced_authority_exposes_no_gate_method() {
     let config = RemotePluginConfig {
         name: "fake".into(),
         command: vec!["true".into()],
-        transport: synthia_plugin_host::TransportKind::Stdio,
+        transport: elysper_plugin_host::TransportKind::Stdio,
         capabilities: PluginCapabilities { tools: true, observe: false, transform: false },
         authority: Authority::Reduced,
         risk: Risk::Low,
@@ -1512,13 +1512,13 @@ fn reduced_authority_exposes_no_gate_method() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-plugin-host`
+Run: `cargo test -p elysper-plugin-host`
 Expected: FAIL —— crate 不存在
 
 - [ ] **Step 3: 建 crate 与骨架**
 
-`Cargo.toml` 依赖：`synthia-plugin-protocol`、`synthia-harness`、`synthia-tool`、
-`synthia-core`、`serde`、`serde_json`、`async-trait`、`futures`。
+`Cargo.toml` 依赖：`elysper-plugin-protocol`、`elysper-harness`、`elysper-tool`、
+`elysper-core`、`serde`、`serde_json`、`async-trait`、`futures`。
 根 `Cargo.toml` 的 `[workspace.dependencies]` 与 `[workspace.members]` 各加一条。
 
 `src/lib.rs` 定义 `RemotePluginConfig`、`Authority`、`TransportKind`、`RemotePlugin`、
@@ -1526,20 +1526,20 @@ Expected: FAIL —— crate 不存在
 
 - `capabilities.tools` 为真 → 向 `host` 注册一个 `RemoteTool`（`src/remote_tool.rs`）。
 - `capabilities.observe` 为真 → 向 `host` 注册一个远端观察者（用
-  `synthia/event` 通知，无返回值）。
+  `elysper/event` 通知，无返回值）。
 - `capabilities.transform` 为真 → 注册一个远端 transformer。
 - `authority == Reduced` → **不注册任何 gate**，`exposes_gate()` 返回 `false`。
 - `authority == Full` → 注册一个远端 gate，其决策经 `PluginDecision` 映射到
-  `synthia_steering::HookDecision`。
+  `elysper_steering::HookDecision`。
 
-`src/remote_tool.rs` 的 `RemoteTool` 实现 `synthia_tool::Tool`：
+`src/remote_tool.rs` 的 `RemoteTool` 实现 `elysper_tool::Tool`：
 - `name` / `description` / `parameters` 来自 `tools/list` 的缓存。
-- `call` 通过 JSON-RPC 调 `synthia/tools/call`。
+- `call` 通过 JSON-RPC 调 `elysper/tools/call`。
 - **`fn risk(&self, _input: &serde_json::Value) -> Risk` 必须覆写**，返回宿主配置的值
   —— **绝不**用 `Risk::from_annotations(self.annotations())`（那是默认实现，
   会让插件自报的注解绕过审批）。
 
-`src/client.rs`：JSON-RPC 客户端。请求用 `synthia_plugin_protocol::methods` 的常量。
+`src/client.rs`：JSON-RPC 客户端。请求用 `elysper_plugin_protocol::methods` 的常量。
 响应解析失败要返回 `PluginError::BadRequest` 而不是 panic。
 
 `src/process.rs`：进程管理（spawn + stdin/stdout）。**stdio 传输**用
@@ -1547,13 +1547,13 @@ Expected: FAIL —— crate 不存在
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p synthia-plugin-host`
+Run: `cargo test -p elysper-plugin-host`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-plugin-host Cargo.toml Cargo.lock
+git add crates/elysper-plugin-host Cargo.toml Cargo.lock
 git commit -m "feat(plugin-host): add the dynamic plugin host crate"
 ```
 
@@ -1562,16 +1562,16 @@ git commit -m "feat(plugin-host): add the dynamic plugin host crate"
 ## Task 13: 远端权限矩阵与审计行
 
 **Files:**
-- Modify: `crates/synthia-plugin-host/src/remote_tool.rs`
-- Modify: `crates/synthia-plugin-host/src/lib.rs`
-- Modify: `crates/synthia-session/src/events.rs`
-- Test: `crates/synthia-plugin-host/tests/authority.rs`
+- Modify: `crates/elysper-plugin-host/src/remote_tool.rs`
+- Modify: `crates/elysper-plugin-host/src/lib.rs`
+- Modify: `crates/elysper-session/src/events.rs`
+- Test: `crates/elysper-plugin-host/tests/authority.rs`
 
 **Interfaces:**
-- Consumes: `synthia_plugin_protocol`（Task 10）、`synthia_session::SessionEvent`（Task 10 之后的 session）
+- Consumes: `elysper_plugin_protocol`（Task 10）、`elysper_session::SessionEvent`（Task 10 之后的 session）
 - Produces:
   ```rust
-  // synthia_session::events
+  // elysper_session::events
   SessionEvent::ToolResultTransformed {
       plugin: String,
       tool_name: String,
@@ -1583,18 +1583,18 @@ git commit -m "feat(plugin-host): add the dynamic plugin host crate"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-plugin-host/tests/authority.rs`：
+建 `crates/elysper-plugin-host/tests/authority.rs`：
 
 ```rust
-use synthia_plugin_host::{Authority, RemotePlugin, RemotePluginConfig};
-use synthia_plugin_protocol::PluginCapabilities;
-use synthia_tool::Risk;
+use elysper_plugin_host::{Authority, RemotePlugin, RemotePluginConfig};
+use elysper_plugin_protocol::PluginCapabilities;
+use elysper_tool::Risk;
 
 fn config(authority: Authority) -> RemotePluginConfig {
     RemotePluginConfig {
         name: "fake".into(),
         command: vec!["true".into()],
-        transport: synthia_plugin_host::TransportKind::Stdio,
+        transport: elysper_plugin_host::TransportKind::Stdio,
         capabilities: PluginCapabilities { tools: true, observe: false, transform: false },
         authority,
         risk: Risk::Unknown,
@@ -1623,7 +1623,7 @@ fn remote_risk_ignores_plugin_annotations() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-plugin-host --test authority`
+Run: `cargo test -p elysper-plugin-host --test authority`
 Expected: FAIL —— 缺失的项尚未实现
 
 - [ ] **Step 3: 实现权限矩阵**
@@ -1640,16 +1640,16 @@ pub fn remote_risk(&self) -> Risk {
 `install` 里：只有 `exposes_gate()` 为真才注册 gate。
 
 **远端 gate 的决策映射**：`PluginDecision::Block { reason }` →
-`synthia_steering::HookDecision::Block { reason }`；
+`elysper_steering::HookDecision::Block { reason }`；
 `Ask { reason }` → `HookDecision::Ask { reason }`；
 `Terminate { reason }` → `HookDecision::Terminate { reason }`；
 `Allow` → `Allow`。
 
-**降权路径下宿主不发送 `synthia/gate` 请求** —— 插件即使实现了这个方法也收不到调用。
+**降权路径下宿主不发送 `elysper/gate` 请求** —— 插件即使实现了这个方法也收不到调用。
 
 - [ ] **Step 4: 加审计行**
 
-`synthia-session/src/events.rs` 加 `SessionEvent::ToolResultTransformed` 变体
+`elysper-session/src/events.rs` 加 `SessionEvent::ToolResultTransformed` 变体
 （字段见 Interfaces）。远端 transformer 改写工具结果后，宿主追加这一行。
 
 **这个事件是 log-only**（不进模型历史）。若 session 的 `SessionEvent` 有
@@ -1659,15 +1659,15 @@ pub fn remote_risk(&self) -> Risk {
 
 Run:
 ```bash
-cargo test -p synthia-plugin-host
-cargo test -p synthia-session --lib
+cargo test -p elysper-plugin-host
+cargo test -p elysper-session --lib
 ```
 Expected: 全绿
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-plugin-host crates/synthia-session
+git add crates/elysper-plugin-host crates/elysper-session
 git commit -m "feat(plugin-host): enforce the reduced-authority matrix and audit transforms"
 ```
 
@@ -1676,23 +1676,23 @@ git commit -m "feat(plugin-host): enforce the reduced-authority matrix and audit
 ## Task 14: `PluginEvent` 逃生舱
 
 **Files:**
-- Modify: `crates/synthia-session/src/events.rs`
-- Modify: `crates/synthia-harness/src/events/mod.rs`
-- Test: `crates/synthia-harness/src/events/tests/plugin_event.rs`
+- Modify: `crates/elysper-session/src/events.rs`
+- Modify: `crates/elysper-harness/src/events/mod.rs`
+- Test: `crates/elysper-harness/src/events/tests/plugin_event.rs`
 
 **Interfaces:**
-- Consumes: `synthia_plugin_protocol::PluginEvent`（Task 10）
+- Consumes: `elysper_plugin_protocol::PluginEvent`（Task 10）
 - Produces:
   ```rust
-  // synthia_session::events
+  // elysper_session::events
   SessionEvent::Plugin { kind: String, payload: serde_json::Value }
-  // synthia_harness::events
+  // elysper_harness::events
   SystemEvent::Plugin { kind: String, payload: serde_json::Value }
   ```
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-harness/src/events/tests/plugin_event.rs`：
+建 `crates/elysper-harness/src/events/tests/plugin_event.rs`：
 
 ```rust
 use crate::events::SystemEvent;
@@ -1711,7 +1711,7 @@ fn plugin_event_round_trips_through_json() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-harness --lib plugin_event`
+Run: `cargo test -p elysper-harness --lib plugin_event`
 Expected: FAIL —— `SystemEvent::Plugin` 不存在
 
 - [ ] **Step 3: 实现两个变体**
@@ -1729,15 +1729,15 @@ Expected: FAIL —— `SystemEvent::Plugin` 不存在
 
 Run:
 ```bash
-cargo test -p synthia-harness --lib
-cargo test -p synthia-session --lib
+cargo test -p elysper-harness --lib
+cargo test -p elysper-session --lib
 ```
 Expected: 全绿
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/synthia-harness crates/synthia-session
+git add crates/elysper-harness crates/elysper-session
 git commit -m "feat(events): add the PluginEvent escape hatch"
 ```
 
@@ -1746,17 +1746,17 @@ git commit -m "feat(events): add the PluginEvent escape hatch"
 ## Task 15: 运行时组合层
 
 **Files:**
-- Create: `crates/synthia-server/src/composition.rs`
-- Modify: `crates/synthia-server/src/config/server.rs`
-- Modify: `crates/synthia-server/src/state/app_state/boot.rs`
-- Modify: `crates/synthia-server/src/agent_assembly.rs`
-- Test: `crates/synthia-server/src/composition/tests.rs`
+- Create: `crates/elysper-server/src/composition.rs`
+- Modify: `crates/elysper-server/src/config/server.rs`
+- Modify: `crates/elysper-server/src/state/app_state/boot.rs`
+- Modify: `crates/elysper-server/src/agent_assembly.rs`
+- Test: `crates/elysper-server/src/composition/tests.rs`
 
 **Interfaces:**
-- Consumes: `synthia_plugin_host::RemotePlugin`（Task 12）、`synthia_harness::Host`
+- Consumes: `elysper_plugin_host::RemotePlugin`（Task 12）、`elysper_harness::Host`
 - Produces:
   ```rust
-  // synthia_server::config
+  // elysper_server::config
   #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
   pub struct PluginsConfig {
       pub plugins: Vec<PluginEntry>,
@@ -1778,7 +1778,7 @@ git commit -m "feat(events): add the PluginEvent escape hatch"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-server/src/composition/tests.rs`：
+建 `crates/elysper-server/src/composition/tests.rs`：
 
 ```rust
 use crate::config::PluginEntry;
@@ -1825,12 +1825,12 @@ plugins:
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-server --lib composition`
+Run: `cargo test -p elysper-server --lib composition`
 Expected: FAIL —— `PluginsConfig` 不存在
 
 - [ ] **Step 3: 加配置段**
 
-`crates/synthia-server/src/config/server.rs` 的 `ServerConfig` 加
+`crates/elysper-server/src/config/server.rs` 的 `ServerConfig` 加
 `pub plugins: PluginsConfig`，带 `#[serde(default)]`。
 
 `PluginEntry` 的 `Remote` 变体按 Interfaces 定义。`authority` 的合法值是
@@ -1839,7 +1839,7 @@ Expected: FAIL —— `PluginsConfig` 不存在
 
 - [ ] **Step 4: 实现组装器**
 
-`crates/synthia-server/src/composition.rs`：
+`crates/elysper-server/src/composition.rs`：
 
 ```rust
 pub struct Composition {
@@ -1870,13 +1870,13 @@ fail-closed 语义不同 —— gate 是安全决策，插件启动失败不是�
 
 - [ ] **Step 5: 跑测试**
 
-Run: `cargo test -p synthia-server --lib`
+Run: `cargo test -p elysper-server --lib`
 Expected: 全绿
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/synthia-server
+git add crates/elysper-server
 git commit -m "feat(server): add the runtime plugin composition layer"
 ```
 
@@ -1885,26 +1885,26 @@ git commit -m "feat(server): add the runtime plugin composition layer"
 ## Task 16: server 无状态化
 
 **Files:**
-- Modify: `crates/synthia-server/src/session/controller/inner.rs`
-- Modify: `crates/synthia-server/src/session/controller/dispatch.rs`
-- Modify: `crates/synthia-server/src/session/controller/run_task.rs`
-- Modify: `crates/synthia-session/src/events.rs`
-- Modify: `crates/synthia-session/src/repair.rs`
-- Modify: `crates/synthia-attachment/src/lib.rs`
-- Modify: `crates/synthia-server/src/routes/follow.rs`
-- Modify: `crates/synthia-session/src/jsonl.rs`
-- Test: `crates/synthia-server/src/session/controller/tests/parked_prompt.rs`
+- Modify: `crates/elysper-server/src/session/controller/inner.rs`
+- Modify: `crates/elysper-server/src/session/controller/dispatch.rs`
+- Modify: `crates/elysper-server/src/session/controller/run_task.rs`
+- Modify: `crates/elysper-session/src/events.rs`
+- Modify: `crates/elysper-session/src/repair.rs`
+- Modify: `crates/elysper-attachment/src/lib.rs`
+- Modify: `crates/elysper-server/src/routes/follow.rs`
+- Modify: `crates/elysper-session/src/jsonl.rs`
+- Test: `crates/elysper-server/src/session/controller/tests/parked_prompt.rs`
 
 **Interfaces:**
-- Consumes: `synthia_attachment::AttachmentStore`（已存在，`lib.rs:305`）
+- Consumes: `elysper_attachment::AttachmentStore`（已存在，`lib.rs:305`）
 - Produces:
   ```rust
-  // synthia_session::events
+  // elysper_session::events
   SessionEvent::ParkedPrompt {
       text: String,
       attachments: Vec<AttachmentRefRow>,
   }
-  // synthia_server::routes::follow
+  // elysper_server::routes::follow
   pub(crate) async fn read_tail(
       sink: &dyn SessionSink,
       window: usize,
@@ -1913,7 +1913,7 @@ git commit -m "feat(server): add the runtime plugin composition layer"
 
 - [ ] **Step 1: 写失败的测试**
 
-建 `crates/synthia-server/src/session/controller/tests/parked_prompt.rs`：
+建 `crates/elysper-server/src/session/controller/tests/parked_prompt.rs`：
 
 ```rust
 #[tokio::test]
@@ -1939,12 +1939,12 @@ async fn a_parked_prompt_is_durable() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p synthia-server --lib parked_prompt`
+Run: `cargo test -p elysper-server --lib parked_prompt`
 Expected: FAIL —— `SessionEvent::ParkedPrompt` 不存在
 
 - [ ] **Step 3: 让排队的多模态 prompt 落盘**
 
-`synthia-session/src/events.rs` 加 `SessionEvent::ParkedPrompt`。
+`elysper-session/src/events.rs` 加 `SessionEvent::ParkedPrompt`。
 
 `dispatch.rs:263`（`handle_prompt_multi_op`）在 park 的同时追加这一行。
 **字节不进日志**：图片/音频先经 `AttachmentStore::save_image` 存下（内容寻址，
@@ -1953,7 +1953,7 @@ Expected: FAIL —— `SessionEvent::ParkedPrompt` 不存在
 （`kind` / `name` / `mime_type` / `byte_len`），**没有 `hash`，回读不了**，
 要给它补上 `hash` 字段。
 
-`synthia-attachment/src/lib.rs` 的 `ImageAttachmentRef` 已有 `hash` 与
+`elysper-attachment/src/lib.rs` 的 `ImageAttachmentRef` 已有 `hash` 与
 `matches()` —— ref 行的字段按它来。
 
 `repair.rs` 要认识 `ParkedPrompt`：崩溃后残留的排队 prompt 要能被恢复。
@@ -1964,7 +1964,7 @@ Expected: FAIL —— `SessionEvent::ParkedPrompt` 不存在
 对整个 `events.jsonl` 做 `fs::read`（`jsonl.rs:436`），200 行的窗口是**读完之后
 在内存里切的**（`follow.rs:210-214`）。长会话下每次订阅都整文件读。
 
-改法：`synthia-session/src/jsonl.rs` 加一个按尾部窗口读的路径
+改法：`elysper-session/src/jsonl.rs` 加一个按尾部窗口读的路径
 （`read_tail(window)`：从文件尾反向读行，取最后 `window` 行），
 `follow.rs` 改调它。
 
@@ -1985,15 +1985,15 @@ Expected: FAIL —— `SessionEvent::ParkedPrompt` 不存在
 
 Run:
 ```bash
-cargo test -p synthia-session --lib
-cargo test -p synthia-server --lib
+cargo test -p elysper-session --lib
+cargo test -p elysper-server --lib
 ```
 Expected: 全绿
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/synthia-session crates/synthia-server crates/synthia-attachment
+git add crates/elysper-session crates/elysper-server crates/elysper-attachment
 git commit -m "feat(server): make parked prompts durable and read the follow baseline by tail"
 ```
 
@@ -2005,13 +2005,13 @@ git commit -m "feat(server): make parked prompts durable and read the follow bas
 - Create: `docs/examples/harness-only-consumer/Cargo.toml`
 - Create: `docs/examples/harness-only-consumer/src/main.rs`
 - Modify: `Makefile`
-- Modify: `synthia-web/src/...`（组合层与远端插件状态）
+- Modify: `elysper-web/src/...`（组合层与远端插件状态）
 - Modify: `docs/tutorial/complete-agent.md`
 - Test: `docs/examples/harness-only-consumer/` 自身的运行
 
 **Interfaces:**
-- Consumes: `synthia-harness`（Task 6）、`synthia-harness-tokio`（Task 3）、
-  `synthia_plugin_host`（Task 12）
+- Consumes: `elysper-harness`（Task 6）、`elysper-harness-tokio`（Task 3）、
+  `elysper_plugin_host`（Task 12）
 - Produces: 无新公开 API（这是验收 fixture 与文档）
 
 - [ ] **Step 1: 建只依赖 harness 的消费方**
@@ -2024,13 +2024,13 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-synthia-harness = { path = "../../../crates/synthia-harness" }
+elysper-harness = { path = "../../../crates/elysper-harness" }
 futures = "0.3"
 serde_json = "1"
 ```
 
 **没有 tokio。** `main.rs` 用 `futures::executor::block_on` 跑一轮
-（照 `crates/synthia-harness/examples/runtime_agnostic.rs` 的形状）。
+（照 `crates/elysper-harness/examples/runtime_agnostic.rs` 的形状）。
 
 - [ ] **Step 2: 验证零 tokio**
 
@@ -2063,7 +2063,7 @@ Expected: 打印一行 proof（照既有 example 的形状，如 `HARNESS-ONLY: 
 
 `docs/tutorial/complete-agent.md` 加两章：
 - "写一个静态插件"（Rust crate，`impl Plugin` → `install` → `PluginHandle`）
-- "写一个动态插件"（任意语言进程，按 `synthia-plugin-protocol` 的方法集）
+- "写一个动态插件"（任意语言进程，按 `elysper-plugin-protocol` 的方法集）
 
 从空环境照做，不需要读源码。
 
@@ -2082,7 +2082,7 @@ Expected: 全绿
 - [ ] **Step 8: 提交**
 
 ```bash
-git add -A docs/examples synthia-web Makefile docs/tutorial
+git add -A docs/examples elysper-web Makefile docs/tutorial
 git commit -m "docs: add the harness-only consumer fixture and the plugin tutorials"
 ```
 
@@ -2101,9 +2101,9 @@ git commit -m "docs: add the harness-only consumer fixture and the plugin tutori
 
 Run:
 ```bash
-cargo tree -p synthia-harness -e normal | grep -c tokio
-cargo tree -p synthia-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"
-cargo tree -p synthia-plugin-protocol -e normal | grep -c tokio
+cargo tree -p elysper-harness -e normal | grep -c tokio
+cargo tree -p elysper-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"
+cargo tree -p elysper-plugin-protocol -e normal | grep -c tokio
 ```
 Expected: `0` / `0` / `0`
 
@@ -2121,7 +2121,7 @@ Expected: 全绿
 - [ ] **Step 3: 跑端到端剧本**
 
 按 `docs/tutorial/complete-agent.md` 的 A–G 剧本，加 H（远端插件）、I（无状态重启），
-在真实 `synthia-server` + `synthia-web` 上跑。每条要可观察断言。
+在真实 `elysper-server` + `elysper-web` 上跑。每条要可观察断言。
 
 - [ ] **Step 4: 记录验收结果**
 

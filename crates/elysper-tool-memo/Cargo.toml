@@ -1,0 +1,37 @@
+[package]
+name = "elysper-tool-memo"
+description = "Deterministic tool result memoization: a `Tool` wrapper that short-circuits identical invocations through an LRU + TTL store, single-flighting concurrent calls for the same key"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+elysper-core.workspace = true
+elysper-tool.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# BLAKE3 for stable, fast key hashing of canonicalised inputs.
+blake3 = "1.5"
+
+[dev-dependencies]
+# Test-only: the crate itself names no runtime — the memo store is
+# plain data, and the tool it wraps is awaited by the caller's
+# executor. The tests need a current-thread runtime (`#[tokio::test]`
+# + `tokio::spawn`) and one real delay: the single-flight test sleeps
+# so the two concurrent calls overlap, and `tokio::time::sleep` is
+# gated behind the `time` feature. No `rt-multi-thread`: nothing here
+# asks for a multi-threaded runtime.
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tempfile.workspace = true

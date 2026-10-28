@@ -1,0 +1,24 @@
+diff --git a/crates/elysper-harness/src/agent/re_act/prepare.rs b/crates/elysper-harness/src/agent/re_act/prepare.rs
+index 8f7e6d5..4c3b2a1 100644
+--- a/crates/elysper-harness/src/agent/re_act/prepare.rs
++++ b/crates/elysper-harness/src/agent/re_act/prepare.rs
+@@ -27,9 +27,13 @@ pub(super) fn first_user_text(input: &AgentInput) -> String {
+-    input.messages[0]
+-        .content
+-        .iter()
+-        .find_map(|part| match part {
+-            ContentPart::Text(text) => Some(text.text.clone()),
+-            _ => None,
+-        })
+-        .expect("a user message must carry text")
++    input
++        .messages
++        .first()
++        .and_then(|message| {
++            message.content.iter().find_map(|part| match part {
++                ContentPart::Text(text) => Some(text.text.clone()),
++                _ => None,
++            })
++        })
++        .unwrap_or_default()
+ }

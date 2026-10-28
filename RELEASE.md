@@ -2,8 +2,8 @@
 
 semver、可复现产物、零手工步骤 —— 产物全部由 CI 构建，人只做决定。
 tag 触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，
-构建并推送两个跨平台容器镜像（`docker.io/crochee/synthia-server` +
-`docker.io/crochee/synthia-web`，linux/amd64 + linux/arm64），OCI
+构建并推送两个跨平台容器镜像（`docker.io/crochee/elysper-server` +
+`docker.io/crochee/elysper-web`，linux/amd64 + linux/arm64），OCI
 `org.opencontainers.image.{revision,version,created}` 自证身份
 （详见 §"供应链保障"）。
 
@@ -18,35 +18,35 @@ tag 触发 [`.github/workflows/release.yml`](.github/workflows/release.yml)，
 
 公共 API = 每个 crate 的 `pub` 表面；模型 wire type（OpenAI 兼容
 request / response shape、Anthropic messages API）；`config.yaml` schema
-（`crates/synthia-server/src/`）；facade 的 feature flags（详见
-[`crates/synthia/Cargo.toml`](crates/synthia/Cargo.toml)）。
+（`crates/elysper-server/src/`）；facade 的 feature flags（详见
+[`crates/elysper/Cargo.toml`](crates/elysper/Cargo.toml)）。
 
 ## 版本固化
 
-构建期就把以下三样东西写进每个产物 —— `synthia-server --version`
+构建期就把以下三样东西写进每个产物 —— `elysper-server --version`
 在任何环境（无 stdin、无 config.yaml、无网络）都能回放：
 
 ```
-Synthia 0.1.0 5f6c<sha> (release 2026-09-30T12:34:56Z)
+Elysper 0.1.0 5f6c<sha> (release 2026-09-30T12:34:56Z)
   │        │    │        │         │
-  │        │    │        │         └─ UTC ISO-8601, 注入 SYNTHIA_BUILD_TIME
+  │        │    │        │         └─ UTC ISO-8601, 注入 ELYSPER_BUILD_TIME
   │        │    │        └─ PROFILE 注入, "release" / "debug"
-  │        │    │              （详细见 `crates/synthia-server/build.rs`，
+  │        │    │              （详细见 `crates/elysper-server/build.rs`，
   │        │    │               默认实现与 Cargo feature 对齐）
-  │        │    └─ GITHUB_SHA, 注入 SYNTHIA_GIT_SHA, dev 走 git rev-parse HEAD
+  │        │    └─ GITHUB_SHA, 注入 ELYSPER_GIT_SHA, dev 走 git rev-parse HEAD
   │        └─ Cargo.toml `version`（单一真源：`Cargo.toml` 顶层
   │             `[workspace.package] version`）
-  └─ NAME, 来自 `crates/synthia-server/src/identity.rs`
+  └─ NAME, 来自 `crates/elysper-server/src/identity.rs`
 ```
 
 分辨率（优先级降序）：
 
-1. **`SYNTHIA_GIT_SHA`** 环境变量 —— CI 在 `cargo build` 之前显式注入，
+1. **`ELYSPER_GIT_SHA`** 环境变量 —— CI 在 `cargo build` 之前显式注入，
    让产物字节与 tag 完全对齐，不依赖宿主机有 `.git/`。
 2. **`git rev-parse HEAD`** —— 本地 `make build` / `make windows`：
    `build.rs` 在 `.git/HEAD` 存在时直接调 git，dev 工作流零配置。
 3. **`"unknown"`** —— `cargo-chef` recipe cook / 无 git 的镜像回退；
-   `--version` 此时打印 `Synthia 0.1.0 (release unknown)`。
+   `--version` 此时打印 `Elysper 0.1.0 (release unknown)`。
 
 ## 发布步骤
 
@@ -60,13 +60,13 @@ Synthia 0.1.0 5f6c<sha> (release 2026-09-30T12:34:56Z)
    - `Cargo.toml` 顶层 `[workspace.package] version`；
    - 整理 `git log --oneline <last-tag>..` 进 release notes
      （用户可观察的行为差异，不是 commit 罗列）。
-3. **打 tag**：`git tag -s vX.Y.Z -m "synthia vX.Y.Z"`（签署 tag）
+3. **打 tag**：`git tag -s vX.Y.Z -m "elysper vX.Y.Z"`（签署 tag）
    并推送。
 4. **CI 出产物**：tag 触发
    [`.github/workflows/release.yml`](.github/workflows/release.yml)，
    产出两个跨平台容器镜像：
-   - `docker.io/crochee/synthia-server`（linux/amd64 + linux/arm64）；
-   - `docker.io/crochee/synthia-web`（linux/amd64 + linux/arm64）。
+   - `docker.io/crochee/elysper-server`（linux/amd64 + linux/arm64）；
+   - `docker.io/crochee/elysper-web`（linux/amd64 + linux/arm64）。
 
    每个镜像打 tag 两件套：`<tag>` 直用 + `<tag>-<short-sha>` 追溯。
    （workflow 仅在 `v*.*.*` 形式的 tag push 触发，所以
@@ -82,15 +82,15 @@ Synthia 0.1.0 5f6c<sha> (release 2026-09-30T12:34:56Z)
 
 ```sh
 # 1. 拉镜像
-docker pull docker.io/crochee/synthia-server:vX.Y.Z
-docker pull docker.io/crochee/synthia-web:vX.Y.Z
+docker pull docker.io/crochee/elysper-server:vX.Y.Z
+docker pull docker.io/crochee/elysper-web:vX.Y.Z
 
 # 2. 容器镜像身份（OCI labels 与 tag 关联 SHA 对齐）
-docker buildx imagetools inspect docker.io/crochee/synthia-server:vX.Y.Z \
+docker buildx imagetools inspect docker.io/crochee/elysper-server:vX.Y.Z \
   --format '{{json .Image.Labels}}' | jq -r '."org.opencontainers.image.revision"'
 
-# 3. 容器内 binary 身份（与 OCI labels 同源, 都是 SYNTHIA_GIT_SHA)
-docker run --rm docker.io/crochee/synthia-server:vX.Y.Z --version
+# 3. 容器内 binary 身份（与 OCI labels 同源, 都是 ELYSPER_GIT_SHA)
+docker run --rm docker.io/crochee/elysper-server:vX.Y.Z --version
 ```
 
 镜像 tag 两件套（`<tag>` / `<tag>-<short-sha>`）由 release job
@@ -112,8 +112,8 @@ docker run --rm docker.io/crochee/synthia-server:vX.Y.Z --version
 
 | 资产 | 工具 / 流程 | 触发 |
 |---|---|---|
-| 镜像 manifest | `docker buildx build --push` (linux/amd64 + linux/arm64) | `release.yml` `Build and push synthia-{server,web}` step |
-| OCI image labels | `Dockerfile.{server,web}` 烤入 `org.opencontainers.image.{revision,version,created}` | build arg `SYNTHIA_GIT_SHA` / `SYNTHIA_VERSION` / `SYNTHIA_BUILD_TIME` |
+| 镜像 manifest | `docker buildx build --push` (linux/amd64 + linux/arm64) | `release.yml` `Build and push elysper-{server,web}` step |
+| OCI image labels | `Dockerfile.{server,web}` 烤入 `org.opencontainers.image.{revision,version,created}` | build arg `ELYSPER_GIT_SHA` / `ELYSPER_VERSION` / `ELYSPER_BUILD_TIME` |
 | Identity 校验 | `docker buildx imagetools inspect --raw` + `jq` | `release.yml` `Verify image labels` step |
 
 第三方校验路径：
@@ -134,5 +134,5 @@ OCI labels 覆盖 [NTIA Minimum Elements](https://www.ntia.gov/sbom) 的
   SLSA Build L3 标识（与上游二进制 release 的 `id-token: write` 同条件）。
 - 镜像 SBOM：接 `cosign attach sbom` 把 `cargo-cyclonedx` 的 SBOM 钉
   到 manifest 上，给企业审计 / EU CRA 用。
-- 包仓库：crates.io 由 `cargo publish` 触发（`crates/synthia` facade
-  + `synthia-core` 起步），R 后续开启 `release.yml` 的 publish job。
+- 包仓库：crates.io 由 `cargo publish` 触发（`crates/elysper` facade
+  + `elysper-core` 起步），R 后续开启 `release.yml` 的 publish job。

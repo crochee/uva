@@ -1,11 +1,11 @@
 [package]
-name = "synthia-minimal-consumer"
+name = "elysper-minimal-consumer"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 # Same posture as `../external-consumer`: the empty `[workspace]` table
-# keeps this crate OUT of the synthia workspace, so it compiles as an
+# keeps this crate OUT of the elysper workspace, so it compiles as an
 # independent consumer would.
 [workspace]
 
@@ -17,7 +17,7 @@ publish = false
 # minimal subset ever stops assembling a working agent, this build
 # fails.
 [dependencies]
-synthia = { path = "../../../crates/synthia", default-features = false, features = [
+elysper = { path = "../../../crates/elysper", default-features = false, features = [
     "core",
     "provider",
     "context",

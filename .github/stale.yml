@@ -1,4 +1,4 @@
-# Stale bot — Synthia
+# Stale bot — Elysper
 #
 # 自动关闭停滞的 issue / PR。
 # 规则: CNCF / Kubernetes / Rust-Bridge 通用配置（GitHub 官方 stale action）。
@@ -56,7 +56,7 @@ exempt_assignees: []
   close_comment: |
     这条 issue 已 **60** 天无活动。
     短问题用 `Question` 模板即可；**设计讨论**走
-    [Discussions](https://github.com/crochee/synthia/discussions) 而不是
+    [Discussions](https://github.com/crochee/elysper/discussions) 而不是
     issue tracker。**7** 天后仍无活动将被自动关闭。
 
 # ── enhancement / 90 天 ────────────────────────────────────
@@ -67,7 +67,7 @@ exempt_assignees: []
   close_comment: |
     这条 enhancement 已 **90** 天无活动。
     提议实现前请先在
-    [Discussions](https://github.com/crochee/synthia/discussions) 收敛到
+    [Discussions](https://github.com/crochee/elysper/discussions) 收敛到
     「改这个 trait / 加这个 crate / 加这个 feature flag」。**14** 天后仍无
     活动将被自动关闭。
 

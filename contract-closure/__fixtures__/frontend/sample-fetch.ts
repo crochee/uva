@@ -1,4 +1,4 @@
-// test fixture: synthia-web frontend fetch usage
+// test fixture: elysper-web frontend fetch usage
 const HEALTH_URL = "/api/health";
 
 export async function getHealth(baseURL: string) {

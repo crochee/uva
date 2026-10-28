@@ -1,36 +1,36 @@
-# The Minimal Synthia Agent
+# The Minimal Elysper Agent
 
 A from-zero guide for the consumer who wants the **smallest** working
 agent and is willing to learn more pieces later. Each crate is opt-in;
-nothing in `synthia` is forced on you.
+nothing in `elysper` is forced on you.
 
 ## Step 0 — Decide what you actually need
 
 | Want to … | Add this crate | Add this feature flag |
 |---|---|---|
-| Talk to a model (your own impl) | `synthia-provider` | `provider` |
-| Use the bundled Anthropic adapter | `synthia-provider` | `provider-anthropic` |
-| Use the bundled OpenAI adapter | `synthia-provider` | `provider-openai` |
-| Define tools | `synthia-tool` | `tool` |
-| Give the agent the offline file and process tools | `synthia-tool-read`, `-write`, `-shell`, `-todo` | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
-| Let the agent fetch URLs | `synthia-tool-web` | `tool-web` |
-| Delegate to peer agents | `synthia-tool-task` | `tool-task` |
-| Run a ReAct loop | `synthia-harness` | `harness` |
-| Have a context window policy | `synthia-context` | `context` |
-| Persist session events | `synthia-session` | `session` |
-| Apply guards / hints / hooks | `synthia-steering` | `steering` |
-| Cancel a run | `synthia-core` (in the others already) | `core` |
-| Derive `#[derive(Tool)]` | `synthia-macros` | `macros` |
-| Persist SQLite memory | `synthia-context` | `sqlite` |
-| Drive MCP servers | `synthia-mcp` | `mcp` |
-| Let the agent browse and call MCP tools | `synthia-mcp` | `mcp` |
-| Run a scheduler (host-owned timer) | `synthia-scheduler` | `scheduler` |
-| Let the agent create / pause / cancel scheduled jobs | `synthia-tool-scheduler` | `tool-scheduler` |
-| Define workflows | `synthia-workflow` | `workflow` |
-| Run eval suites | `synthia-eval` | `eval` |
-| Bundle skills | `synthia-skill` | `skill` |
-| Attach images / audio / files | `synthia-attachment` | `attachment` |
-| Ship a full HTTP server | `synthia-server` | `server` |
+| Talk to a model (your own impl) | `elysper-provider` | `provider` |
+| Use the bundled Anthropic adapter | `elysper-provider` | `provider-anthropic` |
+| Use the bundled OpenAI adapter | `elysper-provider` | `provider-openai` |
+| Define tools | `elysper-tool` | `tool` |
+| Give the agent the offline file and process tools | `elysper-tool-read`, `-write`, `-shell`, `-todo` | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
+| Let the agent fetch URLs | `elysper-tool-web` | `tool-web` |
+| Delegate to peer agents | `elysper-tool-task` | `tool-task` |
+| Run a ReAct loop | `elysper-harness` | `harness` |
+| Have a context window policy | `elysper-context` | `context` |
+| Persist session events | `elysper-session` | `session` |
+| Apply guards / hints / hooks | `elysper-steering` | `steering` |
+| Cancel a run | `elysper-core` (in the others already) | `core` |
+| Derive `#[derive(Tool)]` | `elysper-macros` | `macros` |
+| Persist SQLite memory | `elysper-context` | `sqlite` |
+| Drive MCP servers | `elysper-mcp` | `mcp` |
+| Let the agent browse and call MCP tools | `elysper-mcp` | `mcp` |
+| Run a scheduler (host-owned timer) | `elysper-scheduler` | `scheduler` |
+| Let the agent create / pause / cancel scheduled jobs | `elysper-tool-scheduler` | `tool-scheduler` |
+| Define workflows | `elysper-workflow` | `workflow` |
+| Run eval suites | `elysper-eval` | `eval` |
+| Bundle skills | `elysper-skill` | `skill` |
+| Attach images / audio / files | `elysper-attachment` | `attachment` |
+| Ship a full HTTP server | `elysper-server` | `server` |
 
 The default feature set assembles a basic agent — including the two
 bundled HTTP adapters and the `web_fetch` builtin. The **minimum**
@@ -38,7 +38,7 @@ subset you can ship an MVP with is:
 
 ```toml
 [dependencies]
-synthia = { version = "0.1", default-features = false, features = [
+elysper = { version = "0.1", default-features = false, features = [
     "core", "provider", "context", "tool", "session", "steering", "harness",
 ] }
 ```
@@ -70,7 +70,7 @@ as a single delta, so overriding it is an optimisation, not an
 obligation.
 
 ```rust
-use synthia::prelude::*;
+use elysper::prelude::*;
 
 // Simple path: one synchronous answer per turn.
 struct OneShot { answer: &'static str }
@@ -105,8 +105,8 @@ impl ModelProvider for OneShot {
 }
 ```
 
-For a real provider, see `synthia-provider::AnthropicProvider` and
-`synthia-provider::OpenAICompatibleProvider`. They both implement the
+For a real provider, see `elysper-provider::AnthropicProvider` and
+`elysper-provider::OpenAICompatibleProvider`. They both implement the
 same trait, so the rest of your code does not change.
 
 ## Step 2 — Assemble the agent
@@ -120,7 +120,7 @@ it runs one turn.
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use synthia::prelude::*;
+use elysper::prelude::*;
 
 async fn assemble(provider: Arc<dyn ModelProvider>) {
     // 1) tools      — the paradigm ships no agent-facing set: the
@@ -130,8 +130,8 @@ async fn assemble(provider: Arc<dyn ModelProvider>) {
     //                 as you want them.
     let registry = Arc::new(ToolRegistry::new());
 
-    // 2) steering   — noop means no guards, no hints, no hooks
-    let steering = Arc::new(Steering::noop());
+    // 2) policy     — an empty host means no guards, hints, or hooks
+    let host = Host::new();
 
     // 3) context    — truncating drops the oldest pair until it fits
     let cm: Arc<dyn ContextManager> = Arc::new(TruncatingContextManager);
@@ -141,7 +141,8 @@ async fn assemble(provider: Arc<dyn ModelProvider>) {
 
     let agent = ReActAgent::new(provider, registry)
         .with_workspace(".")
-        .with_steering(steering)
+        .with_host(host)
+        .expect("the empty host binds to the agent's registry")
         .with_context_manager(cm)
         .with_max_iterations(4);
 
@@ -178,7 +179,7 @@ make check-mvp-deps
 ```
 
 `docs/examples/minimal-consumer` is the guide above turned into a
-program: one dependency (`synthia`, `default-features = false`), the
+program: one dependency (`elysper`, `default-features = false`), the
 seven features, a scripted provider that asks for a tool, a hand-written
 `Tool`, and an assertion that the tool really ran. It compiles no tool
 implementation at all — the paradigm ships the registry and the trait,
@@ -194,14 +195,14 @@ re-enters that feature set.
 | A bundled model adapter | add the `provider-anthropic` / `provider-openai` feature → `AnthropicProvider` / `OpenAICompatibleProvider` |
 | The offline file and process tools | add `tool-read` / `tool-write` / `tool-shell` / `tool-todo` and register the bricks you want: `registry.register_entry(ToolEntry::new(Arc::new(ReadTool::new())))` |
 | `web_fetch` | add the `tool-web` feature |
-| Your own executor | `.with_spawner(Arc::new(MySpawner))` — the loop's per-run detach goes wherever you say (`cargo run --example runtime_agnostic -p synthia-harness`) |
-| Durable run log | `synthia::session::LogWriter::new(sink, clock)` + `.with_log_writer(writer)` — the session's one writer stamps each row's ordinal, buffers it, and flushes at the step boundary |
+| Your own executor | `.with_spawner(Arc::new(MySpawner))` — the loop's per-run detach goes wherever you say (`cargo run --example runtime_agnostic -p elysper-harness`) |
+| Durable run log | `elysper::session::LogWriter::new(sink, clock)` + `.with_log_writer(writer)` — the session's one writer stamps each row's ordinal, buffers it, and flushes at the step boundary |
 | Structured output schema | `.with_output_schema(json!({...}))` |
-| LLM-driven compaction | server-side factory `synthia_server::agent_run_config::context_manager_for_compaction_with_emitters`; the harness accepts the resolved manager directly through `.with_context_manager(...)` |
-| Tier-aware steering | `tier::auto(provider.tier(), ".")` instead of `Steering::noop()` |
+| LLM-driven compaction | `SummaryCompactor::new(provider, model).with_settings(settings)` + `.with_compactor(...)`: the session crate owns the one compaction engine, and a context manager only projects the request |
+| The defensive policy | `Host::default_policy(workspace)` instead of `Host::new()` — five guards, three hints, the adaptive tracker and the logging hook |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
-| Multi-agent delegation | `synthia-tool-task`: `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
-| Remote MCP tools the host discovered | `synthia-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
+| Multi-agent delegation | `elysper-tool-task`: `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
+| Remote MCP tools the host discovered | `elysper-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
 | Scheduling, model-side | add `tool-scheduler` and share one store: `let store = Arc::new(ScheduleStore::new(dir)); register_scheduler_tool(&registry, SchedulerTool::new(Arc::clone(&store)));` — the host still owns delivery (`Scheduler::new(store).tick(now)`), and a tool-side write (or a `ScheduleStore::load` that ingests another process's rows) reaches the next `tick` / `next_deadline` on its own: the pass sees the store's revision move and rebuilds its wheel. `Scheduler::resync(now)` stays available as the explicit rebuild, for a host that needs the wheel correct between passes |
 
 Each one is **opt-in**: if you do not add the feature or call the
@@ -219,11 +220,11 @@ table silently lying.
 use std::sync::Arc;
 
 use serde_json::json;
-use synthia::core::spawn::{BoxFuture, Spawner};
-use synthia::harness::ReActAgent;
-use synthia::prelude::*;
-use synthia::session::{LogWriter, in_memory::InMemorySessionSink};
-use synthia::tool::ToolRestriction;
+use elysper::core::spawn::{BoxFuture, Spawner};
+use elysper::harness::ReActAgent;
+use elysper::prelude::*;
+use elysper::session::{LogWriter, SummaryCompactor, in_memory::InMemorySessionSink};
+use elysper::tool::ToolRestriction;
 
 // Everything the Step-3 table names, in one chain. Each call is the
 // real mutator name: the bare `.spawner(..)` / `.strategy(..)` forms
@@ -249,16 +250,21 @@ fn every_opt_in(
         Arc::new(SystemClock),
     ));
 
+    // Compression is the session's `Compactor`; a context manager only
+    // projects or trims the request it is handed.
+    let settings = elysper::session::CompactionSettings::default();
+    let compactor =
+        Arc::new(SummaryCompactor::new(Arc::clone(&provider), "model").with_settings(settings));
+
     ReActAgent::new(provider, registry)
         .with_spawner(Arc::new(MySpawner))
         .with_output_schema(json!({"type": "object"}))
         .with_log_writer(log_writer)
         .with_tool_restriction(ToolRestriction::deny(["shell"]))
-        // LLM-driven compaction lives on the server-side factory
-        // (`synthia-server::agent_run_config::context_manager_for_compaction_with_emitters`).
-        // The harness accepts the resolved manager directly:
+        .with_compactor(compactor)
         .with_context_manager(Arc::new(TruncatingContextManager))
-        .with_steering(Arc::new(Steering::noop()))
+        .with_host(Host::new())
+        .expect("the empty host binds to the agent's registry")
 }
 ```
 
@@ -268,17 +274,16 @@ The prelude is the **minimum** vocabulary for the canonical
 7-piece assembly. Beyond that, name types by module path:
 
 ```rust
-use synthia::{
-    context::DagContextManager, // pi-lcm hierarchical DAG
-    context::SummarizingContextManager, // pi-style context prune
+use elysper::{
     session::jsonl::JsonlSessionSink, // production durable sink
-    tool::GroupedRegistry,     // named tool groups
+    session::{SummaryCompactor, plan_compaction}, // the one compaction engine
+    tool::ToolSurfacePolicy,  // what the model is shown
 };
 ```
 
 The plugin crates add their own modules once you enable the feature —
-`synthia::tool_read::ReadTool`, `synthia::tool_web::WebFetchTool`,
-`synthia::tool_task::{TaskDelegator, SubagentPool, LeaderRouter}`, and so on:
+`elysper::tool_read::ReadTool`, `elysper::tool_web::WebFetchTool`,
+`elysper::tool_task::TaskDelegator`, and so on:
 if a name is not in the prelude, the module that owns it has it.
 
 Every `pub use` at the facade's module roots is a lego brick; the
@@ -289,16 +294,16 @@ in the prelude.
 
 | Don't | Do |
 |---|---|
-| Reach into `synthia_provider::types::Content` directly from your app | Use `Content` through the prelude or `synthia::prelude::Content` |
-| Hard-code `Arc<tokio_util::sync::CancellationToken>` as a `CancelToken` | Use `synthia_core::AtomicCancelToken` and keep the runtime choice yours |
-| Implement `Agent` directly for a custom paradigm | Compose: change the loop, keep `Steering` / `ContextManager` / `ToolRegistry` the same |
-| Build `Vec<Arc<dyn Tool>>` by hand | Use `ToolRegistry` — it gives you scoping, grouping, and the deferred-exposure seam for free |
+| Reach into `elysper_provider::types::Content` directly from your app | Use `Content` through the prelude or `elysper::prelude::Content` |
+| Hard-code `Arc<tokio_util::sync::CancellationToken>` as a `CancelToken` | Use `elysper_core::AtomicCancelToken` and keep the runtime choice yours |
+| Implement `Agent` directly for a custom paradigm | Compose: change the loop, keep `Host` / `ContextManager` / `ToolRegistry` the same |
+| Build `Vec<Arc<dyn Tool>>` by hand | Use `ToolRegistry` — it gives you scoping, surfacing, and the deferred-exposure seam for free |
 | Pass `&dyn ModelProvider` across an `await` | Wrap it in `Arc<dyn ModelProvider>` once, share the `Arc` |
 
 ## Where to read next
 
 - [`SEAMS.md`](SEAMS.md) — every extendable trait in one table, with the line that installs a replacement
-- [`crates/synthia/examples/assemble_from_zero.rs`](crates/synthia/examples/assemble_from_zero.rs) — the full MVP code as a runnable program
+- [`crates/elysper/examples/assemble_from_zero.rs`](crates/elysper/examples/assemble_from_zero.rs) — the full MVP code as a runnable program
 - [`docs/examples/README.md`](docs/examples/README.md) — every example, organised by seam
-- [`crates/synthia/Cargo.toml`](crates/synthia/Cargo.toml) — the canonical feature → module map
+- [`crates/elysper/Cargo.toml`](crates/elysper/Cargo.toml) — the canonical feature → module map
 - [`docs/architecture/adr/`](docs/architecture/adr/) — the decisions that shaped this shape

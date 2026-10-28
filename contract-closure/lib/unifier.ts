@@ -92,6 +92,13 @@ function mergeByKey(
       // so a previously-closed fix card stays closed.
       const existing = map.get(k)!;
       if (e.status && !existing.status) existing.status = e.status;
+      // The curated `frontend_consumed` flag travels with the entry:
+      // an endpoint the web app deliberately does not call stays
+      // marked as such across re-scans.
+      if (e.frontend_consumed === false) {
+        existing.frontend_consumed = false;
+      }
+      if (e.notes && !existing.notes) existing.notes = e.notes;
       continue;
     }
     const canonicalPath = normalizePathKey(e.path);
@@ -100,8 +107,10 @@ function mergeByKey(
       id: `${e.method} ${canonicalPath}`,
       path: canonicalPath,
       // Manually-curated entries are treated as `both` because the
-      // fix-card author asserts the endpoint exists on both sides.
-      source: 'both',
+      // fix-card author asserts the endpoint exists on both sides —
+      // unless the entry says otherwise (a curated web-free route
+      // keeps its own `source`).
+      source: e.source ?? 'both',
     });
   }
 
@@ -118,6 +127,11 @@ function mergeByKey(
         evidence: (e.source_files.frontend ?? []).map((f) => parseLoc(f)),
       });
     } else if (e.source === 'backend') {
+      // A curated `frontend_consumed: false` says the web app does not
+      // call this endpoint on purpose (an external client's surface,
+      // an ops probe, the attachment store's own API). That is not
+      // drift, so it is not reported as one.
+      if (e.frontend_consumed === false) continue;
       backend_only.push({
         kind: 'backend-only',
         method: e.method,

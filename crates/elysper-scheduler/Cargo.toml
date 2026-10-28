@@ -1,0 +1,38 @@
+[package]
+name = "elysper-scheduler"
+description = "Job scheduler runtime for elysper: PID-locked JSON store, interval / cron (opt-in) / one-shot triggers, host-owned tick loop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+elysper-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+libc.workspace = true
+# BoxFuture for AgentSpawner::spawn — the scheduler is runtime-free
+# (the host's executor runs the future), so the dep is needed only
+# for the type. Keeping this crate's tokio-free gate green.
+futures.workspace = true
+cron = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+default = []
+# Real cron recurrence (`CronTrigger`). Off by default: `JobKind::Cron`
+# falls back to a one-minute placeholder so a build that never schedules
+# cron pays neither the parser nor the dependency.
+cron = ["dep:cron"]

@@ -1,0 +1,25 @@
+diff --git a/crates/elysper-cli/src/main.rs b/crates/elysper-cli/src/main.rs
+index 1a2b3c4..5d6e7f8 100644
+--- a/crates/elysper-cli/src/main.rs
++++ b/crates/elysper-cli/src/main.rs
+@@ -18,6 +18,10 @@ struct Args {
+     /// Print the final answer only.
+     #[arg(long)]
+     quiet: bool,
++
++    /// Print the run report as JSON on stdout.
++    #[arg(long)]
++    json: bool,
+ }
+ 
+ #[tokio::main]
+@@ -41,6 +45,11 @@ async fn main() -> anyhow::Result<()> {
+         println!("{answer}");
+     }
++
++    if args.json {
++        println!("{}", serde_json::to_string(&report)?);
++    }
++
+     Ok(())
+ }

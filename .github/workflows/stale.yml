@@ -1,4 +1,4 @@
-# stale.yml — Synthia
+# stale.yml — Elysper
 #
 # Invokes `.github/stale.yml` (the GitHub-native stale config, format
 # `version: "2"`) on a daily 02:00 UTC schedule. The config sets the

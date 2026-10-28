@@ -1,7 +1,7 @@
-# Synthia full-stack Makefile
+# Elysper full-stack Makefile
 #
 # Unified entry point for development, build, test, and deployment
-# of the synthia-server (Rust) and synthia-web (React/Vite) pair.
+# of the elysper-server (Rust) and elysper-web (React/Vite) pair.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -9,8 +9,8 @@ SHELL := /bin/bash
 # ---- Configuration ----
 SERVER_PORT       ?= 8080
 WEB_PORT          ?= 5173
-SERVER_CRATE      := synthia-server
-WEB_DIR           := synthia-web
+SERVER_CRATE      := elysper-server
+WEB_DIR           := elysper-web
 DOCKER_COMPOSE    := docker compose
 COMPOSE_FILE_DEV  := docker-compose.yml
 COMPOSE_FILE_PROD := docker-compose.prod.yml
@@ -27,7 +27,7 @@ help: ## Show this help
 .PHONY: dev dev-server dev-web dev-stop
 
 dev: ## Start backend (:8080) and frontend (:5173) in parallel
-	@echo "Starting synthia-server on :$(SERVER_PORT) and synthia-web on :$(WEB_PORT)"
+	@echo "Starting elysper-server on :$(SERVER_PORT) and elysper-web on :$(WEB_PORT)"
 	@$(MAKE) -j2 dev-server dev-web
 
 dev-server: ## Start backend only (cargo run with hot reload on file changes)
@@ -74,6 +74,7 @@ test-unit: ## Run every member's library unit tests in turn
 # --- Contract closure (双侧契约闭环) ---
 
 contract-scan: ## Scan backend router + frontend fetch calls into docs/interface-contract/
+	@mkdir -p docs/interface-contract
 	cd contract-closure && npm run scan
 
 contract-report: ## Render the scanned contract as Markdown
@@ -116,7 +117,10 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-plugin-shape.sh \
 	  scripts/check-pub-surface-strict.sh \
 	  scripts/check-harness-docs.sh \
-	  scripts/check-single-writer.sh
+	  scripts/check-single-writer.sh \
+	  scripts/check-frozen-api.sh \
+	  scripts/check-publishable.sh \
+	  scripts/check-public-docs.sh
 
 check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 	cd $(WEB_DIR) && npx tsc --noEmit
@@ -125,7 +129,7 @@ check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 
 # ---- MVP dependency gate ----
 # The smallest agent (MINIMAL.md) must not drag the deployment stack
-# along: the seven-feature subset of the `synthia` facade has to build
+# along: the seven-feature subset of the `elysper` facade has to build
 # with no HTTP client, no exporter, no HTTP framework, no database, and
 # no OTLP transport. This target fails if any of them reappear.
 #
@@ -136,26 +140,26 @@ check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 MVP_FEATURES := core,provider,context,tool,session,steering,harness
 MVP_FORBIDDEN := opentelemetry|tonic|axum|rusqlite|sqlx|reqwest|hyper|rustls|h2|tower|webpki
 # The offline tool plugins must stay offline on their own, independent
-# of the facade: `synthia-tool-web` is the only tool crate allowed an
+# of the facade: `elysper-tool-web` is the only tool crate allowed an
 # HTTP client.
-OFFLINE_TOOL_CRATES := synthia-tool-read synthia-tool-write synthia-tool-shell synthia-tool-todo synthia-tool-task synthia-tool-scheduler synthia-tool-search synthia-tool-memo
+OFFLINE_TOOL_CRATES := elysper-tool-read elysper-tool-write elysper-tool-shell elysper-tool-todo elysper-tool-task elysper-tool-scheduler elysper-tool-search elysper-tool-memo
 # R-OPT-HPC round (5-plug-in perf + concurrency set): every
-# new surface stays offline by default. `synthia-hpc-batch`
+# new surface stays offline by default. `elysper-hpc-batch`
 # is the batched embedder / completer adapter — it carries
-# only the `synthia-provider` / `synthia-search` wire
+# only the `elysper-provider` / `elysper-search` wire
 # traits, no HTTP stack. The `hpc-pool` / `hpc-simd` /
 # `hpc-coalesce` / `hpc-pipeline` features live inside
 # existing crates and pull no new external dep (the only
 # "new" dep each carries is already in the workspace graph).
-R_OPT_HPC_PLUGIN_CRATES := synthia-hpc-batch
+R_OPT_HPC_PLUGIN_CRATES := elysper-hpc-batch
 # R-OPT-HPC round (Tier 1 performance + concurrency, Tier 2 reasoning
 # + quality): six new opt-in plugin crates, all in the offline tier
 # (no HTTP/OTel/DB by default — proved by the `mvp-forbidden` check
 # below).
-ROPT_PLUGIN_CRATES := synthia-semantic-cache synthia-tool-memo synthia-resilience synthia-strategy-plan-execute synthia-reflection synthia-budget
+ROPT_PLUGIN_CRATES := elysper-semantic-cache elysper-tool-memo elysper-resilience elysper-strategy-plan-execute elysper-reflection elysper-budget
 # The two crates whose interesting configuration the plain loops never
-# check each get their own section: `synthia-search` under
-# `--features provider`, `synthia-tool-scheduler` under `--features
+# check each get their own section: `elysper-search` under
+# `--features provider`, `elysper-tool-scheduler` under `--features
 # cron`. `doc-check` builds only the default features, so the cron
 # section also runs a rustdoc pass — otherwise the cron-gated surface
 # is documented nowhere in `make ci`.
@@ -163,12 +167,12 @@ ROPT_PLUGIN_CRATES := synthia-semantic-cache synthia-tool-memo synthia-resilienc
 .PHONY: check-mvp-deps
 
 check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty prelude compiles
-	@cargo check -q -p synthia --no-default-features 2>/dev/null \
-	  && echo "OK: synthia --no-default-features compiles (the prelude is empty, not broken)"
-	@if cargo tree -p synthia --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
+	@cargo check -q -p elysper --no-default-features 2>/dev/null \
+	  && echo "OK: elysper --no-default-features compiles (the prelude is empty, not broken)"
+	@if cargo tree -p elysper --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
 	  | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
 	  echo "FAIL: the MVP feature subset pulled a forbidden dependency:"; \
-	  cargo tree -p synthia --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
+	  cargo tree -p elysper --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	  exit 1; \
 	fi
@@ -204,55 +208,55 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	done
 	@echo "OK: $(R_OPT_HPC_PLUGIN_CRATES) pull no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features simd"; do \
-	  if cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: synthia-search $$f pulled a forbidden dependency:"; \
-	    cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: elysper-search $$f pulled a forbidden dependency:"; \
+	    cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: synthia-search (default + --features simd) stays offline"
+	@echo "OK: elysper-search (default + --features simd) stays offline"
 	@for f in "" "--features provider" "--features hnsw"; do \
-	  if cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: synthia-search $$f pulled a forbidden dependency:"; \
-	    cargo tree -p synthia-search $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: elysper-search $$f pulled a forbidden dependency:"; \
+	    cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: synthia-search (default + --features provider + --features hnsw) pulls no ($(MVP_FORBIDDEN))"
+	@echo "OK: elysper-search (default + --features provider + --features hnsw) pulls no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features cron"; do \
-	  if cargo tree -p synthia-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p elysper-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: synthia-tool-scheduler $$f pulled a forbidden dependency:"; \
-	    cargo tree -p synthia-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: elysper-tool-scheduler $$f pulled a forbidden dependency:"; \
+	    cargo tree -p elysper-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: synthia-tool-scheduler (default + --features cron) pulls no ($(MVP_FORBIDDEN))"
+	@echo "OK: elysper-tool-scheduler (default + --features cron) pulls no ($(MVP_FORBIDDEN))"
 	@for f in ""; do \
-	  if cargo tree -p synthia-harness $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p elysper-harness $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: synthia-harness $$f pulled a forbidden dependency:"; \
-	    cargo tree -p synthia-harness $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: elysper-harness $$f pulled a forbidden dependency:"; \
+	    cargo tree -p elysper-harness $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: synthia-harness (default) pulls no ($(MVP_FORBIDDEN))"
-	@cargo check -q -p synthia-harness --no-default-features 2>/dev/null \
-	  && echo "OK: synthia-harness --no-default-features compiles"
-	@for p in synthia-strategy-cot synthia-strategy-best-of-n; do \
+	@echo "OK: elysper-harness (default) pulls no ($(MVP_FORBIDDEN))"
+	@cargo check -q -p elysper-harness --no-default-features 2>/dev/null \
+	  && echo "OK: elysper-harness --no-default-features compiles"
+	@for p in elysper-strategy-cot elysper-strategy-best-of-n; do \
 	  cargo check -q -p $$p 2>/dev/null \
 	    || { echo "FAIL: $$p does not build standalone"; exit 1; }; \
 	done
 	@echo "OK: each strategy plugin crate builds standalone"
-	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p synthia-scheduler \
+	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p elysper-scheduler \
 	    --features cron 2>/dev/null \
-	  && echo "OK: synthia-scheduler --features cron rustdoc is warning-free"
+	  && echo "OK: elysper-scheduler --features cron rustdoc is warning-free"
 
 # ---- Runtime-free gate ----
 # These pieces promise their consumer no async runtime: their own code
@@ -262,17 +266,19 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 # reappearing in one of their *lib* trees means the promise broke —
 # most likely because someone went back to inheriting the workspace's
 # tokio entry instead of declaring features on it.
-RUNTIME_FREE := synthia-core synthia-scheduler synthia-macros synthia-eval synthia-workflow synthia-search
+RUNTIME_FREE := elysper-core elysper-scheduler elysper-macros elysper-eval \
+	elysper-workflow elysper-search elysper-session elysper-harness \
+	elysper-context elysper-steering elysper-plugin-protocol elysper-tool-task
 
 .PHONY: check-no-runtime
 
-# `synthia-tool` keeps its OWN [dependencies] runtime-free (dispatch
+# `elysper-tool` keeps its OWN [dependencies] runtime-free (dispatch
 # runs on the caller's poll; tokio lives in [dev-dependencies] only).
 # It cannot join RUNTIME_FREE: the wire types it consumes come from
-# `synthia-provider`, whose default features enable the two HTTP
+# `elysper-provider`, whose default features enable the two HTTP
 # adapters (and with them tokio), so the crate gets the same depth-1
 # "declares no runtime" assertion `check-harness-features` applies to
-# `synthia-harness`.
+# `elysper-harness`.
 check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	@for c in $(RUNTIME_FREE); do \
 	  n=$$(cargo tree -p $$c -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
@@ -280,26 +286,26 @@ check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	    echo "FAIL: $$c (lib) pulls tokio ($$n crates)"; exit 1; \
 	  fi; \
 	done
-	@n=$$(cargo tree -p synthia-telemetry --no-default-features -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
+	@n=$$(cargo tree -p elysper-telemetry --no-default-features -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
 	  if [ "$$n" != "0" ]; then \
-	    echo "FAIL: synthia-telemetry --no-default-features pulls tokio ($$n crates)"; exit 1; \
+	    echo "FAIL: elysper-telemetry --no-default-features pulls tokio ($$n crates)"; exit 1; \
 	  fi
-	@n=$$(cargo tree -p synthia-tool -e normal --depth 1 --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -cE '^(tokio|tokio-stream|tokio-util|async-std|smol|futures-executor)' || true); \
+	@n=$$(cargo tree -p elysper-tool -e normal --depth 1 --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -cE '^(tokio|tokio-stream|tokio-util|async-std|smol|futures-executor)' || true); \
 	  if [ "$$n" != "0" ]; then \
-	    echo "FAIL: synthia-tool declares a runtime dependency ($$n crates)"; exit 1; \
+	    echo "FAIL: elysper-tool declares a runtime dependency ($$n crates)"; exit 1; \
 	  fi
-	@echo "OK: $(RUNTIME_FREE), synthia-telemetry --no-default-features, and synthia-tool's own deps are tokio-free"
+	@echo "OK: $(RUNTIME_FREE), elysper-telemetry --no-default-features, and elysper-tool's own deps are tokio-free"
 
 
 .PHONY: check-harness-features
 
-check-harness-features: ## Assert synthia-harness declares zero features and no direct runtime dependency
-	@if grep -q '^\[features\]' crates/synthia-harness/Cargo.toml; then \
-	  echo "FAIL: synthia-harness must not declare a [features] table"; exit 1; fi
-	@if cargo tree -p synthia-harness -e normal --depth 1 --prefix none 2>/dev/null \
+check-harness-features: ## Assert elysper-harness declares zero features and no direct runtime dependency
+	@if grep -q '^\[features\]' crates/elysper-harness/Cargo.toml; then \
+	  echo "FAIL: elysper-harness must not declare a [features] table"; exit 1; fi
+	@if cargo tree -p elysper-harness -e normal --depth 1 --prefix none 2>/dev/null \
 	  | cut -d' ' -f1 | sort -u | grep -Eq '^(tokio|tokio-util|async-std|smol|futures-executor)'; then \
-	  echo "FAIL: synthia-harness declares a runtime dependency"; exit 1; fi
-	@echo "OK: synthia-harness has no features and no direct runtime dependency"
+	  echo "FAIL: elysper-harness declares a runtime dependency"; exit 1; fi
+	@echo "OK: elysper-harness has no features and no direct runtime dependency"
 
 # ---- Claim-language gate ----
 # Forbidden phrasings that contradict facts the code enforces (the
@@ -325,7 +331,7 @@ CLAIM_CRATE_DOCS := $(wildcard crates/*/README.md)
 # Doc comments / inline comments in the facade and the paradigm crate
 # are scanned; tests are exempt (they pin a contract that the runtime
 # enforces, and the wording there is necessarily literal).
-CLAIM_RUST_DOCS := crates/synthia/src/lib.rs crates/synthia/src/tool.rs crates/synthia-tool/src/lib.rs
+CLAIM_RUST_DOCS := crates/elysper/src/lib.rs crates/elysper/src/tool.rs crates/elysper-tool/src/lib.rs
 
 .PHONY: check-claim-language
 
@@ -368,7 +374,7 @@ CRATES := $(notdir $(wildcard crates/*))
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-test-layout check-deny ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + clock + single-writer + license/ban invariants
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + clock + single-writer + publishability + license/ban invariants + every member's test suite
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -377,7 +383,7 @@ test-crates: ## Run every member's test suite in turn (never --workspace)
 	done
 
 test-sqlite: ## Run the optional SQLite memory tier's tests
-	cargo test -p synthia-context -q --features sqlite
+	cargo test -p elysper-context -q --features sqlite
 
 check-public-api-runtime: ## Fail if a library crate's public API names a runtime type
 	@bash scripts/check-public-api-runtime.sh
@@ -395,8 +401,8 @@ doc-check: ## Fail on any rustdoc warning (a broken intra-doc link points at not
 .PHONY: test-guides
 
 test-guides: ## Compile MINIMAL.md's fences under both feature sets
-	cargo test -p synthia --doc
-	cargo test -p synthia --doc --no-default-features \
+	cargo test -p elysper --doc
+	cargo test -p elysper --doc --no-default-features \
 	    --features core,provider,context,tool,session,steering,harness
 
 # ---- Public-surface gate ----
@@ -404,27 +410,27 @@ test-guides: ## Compile MINIMAL.md's fences under both feature sets
 # naming every re-export explicitly. A `pub use <module>::*;` makes
 # any future `pub` item inside that module part of the crate's
 # contract without anyone choosing it. The facade is the one
-# exception — `crates/synthia/src/*.rs` propagate their crate's
+# exception — `crates/elysper/src/*.rs` propagate their crate's
 # curated surface wholesale, which is safe precisely because the
 # crates below are curated.
 .PHONY: pub-surface-audit check-pub-surface
 
 pub-surface-audit: ## List glob re-exports outside the facade
 	@grep -rnE '^[[:space:]]*pub use [a-z_]+::\*;' crates/*/src --include='*.rs' 2>/dev/null \
-	  | grep -v '^crates/synthia/src/' || echo "  none"
+	  | grep -v '^crates/elysper/src/' || echo "  none"
 
-check-pub-surface: ## Fail on a glob re-export inside a synthia-* crate
+check-pub-surface: ## Fail on a glob re-export inside a elysper-* crate
 	@hits=$$(grep -rnE '^[[:space:]]*pub use [a-z_]+::\*;' crates/*/src --include='*.rs' 2>/dev/null \
-	  | grep -v '^crates/synthia/src/' || true); \
+	  | grep -v '^crates/elysper/src/' || true); \
 	if [ -n "$$hits" ]; then \
 	  echo "FAIL: glob re-export in a library crate's src (AGENTS.md §3.7):"; \
 	  echo "$$hits"; \
 	  echo "List the names explicitly; the crate's lib.rs is the single place that"; \
-	  echo "decides what is public. The facade (crates/synthia/src/) is exempt — it"; \
+	  echo "decides what is public. The facade (crates/elysper/src/) is exempt — it"; \
 	  echo "propagates each crate's already-curated surface. Run 'make pub-surface-audit'."; \
 	  exit 1; \
 	fi; \
-	echo "OK: no glob re-export inside a synthia-* crate (facade exempt)"
+	echo "OK: no glob re-export inside a elysper-* crate (facade exempt)"
 
 # ---- Strict paradigm-crate surface (R-G --strict-paradigm) ----
 # The glob `pub use <module>::*;` check above catches the worst
@@ -432,7 +438,7 @@ check-pub-surface: ## Fail on a glob re-export inside a synthia-* crate
 # without anyone choosing it), but a crate can still drift toward
 # the same problem by *counting* — 50 explicit re-exports are not
 # meaningfully safer than one glob. AGENTS.md §3.7 says each
-# `synthia-*` crate's lib.rs is the *single* place that decides
+# `elysper-*` crate's lib.rs is the *single* place that decides
 # what is public, so a tighter ratchet is appropriate: each
 # non-facade lib crate gets a per-crate line-count budget, encoded
 # in `scripts/paradigm-surface/baselines/<crate>=<N>`, and any
@@ -440,18 +446,18 @@ check-pub-surface: ## Fail on a glob re-export inside a synthia-* crate
 # commit as a baseline bump — mirrors the `check-plugin-shape`
 # precedent.
 #
-# Facade (`crates/synthia/`) is exempt by the same reasoning as the
-# glob gate: `pub use synthia_xxx::*;` is the documented propagation
+# Facade (`crates/elysper/`) is exempt by the same reasoning as the
+# glob gate: `pub use elysper_xxx::*;` is the documented propagation
 # pattern, and the surface budget lives on the underlying crates.
-# `synthia-server` and `synthia-mcp-server` are app / binary
+# `elysper-server` and `elysper-mcp-server` are app / binary
 # crates; their lib.rs is a thin wiring entry, not a curated
 # surface, so they're exempt too.
 .PHONY: check-pub-surface-strict paradigm-surface-audit
 
 paradigm-surface-audit: ## Print current per-crate pub-use counts (largest first)
-	@for c in crates/synthia-tool crates/synthia-harness crates/synthia-provider \
-	         crates/synthia-core crates/synthia-context crates/synthia-steering \
-	         crates/synthia-session; do \
+	@for c in crates/elysper-tool crates/elysper-harness crates/elysper-provider \
+	         crates/elysper-core crates/elysper-context crates/elysper-steering \
+	         crates/elysper-session; do \
 	  f="$$c/src/lib.rs"; \
 	  [ -f "$$f" ] || continue; \
 	  n=$$(grep -cE '^[[:space:]]*pub use ' "$$f" 2>/dev/null || echo 0); \
@@ -460,6 +466,33 @@ paradigm-surface-audit: ## Print current per-crate pub-use counts (largest first
 
 check-pub-surface-strict: ## Fail when a paradigm crate's pub-use count grows past its per-crate baseline
 	@bash scripts/check-pub-surface-strict.sh
+
+# ---- Frozen curated surface (public API freeze) ----
+# The two gates above police the *shape* of the curated surface (no
+# glob re-exports, no growth in the number of `pub use` statements).
+# This one pins its *identity*: every name a frozen crate re-exports
+# from its lib.rs is listed in `scripts/frozen-api/baseline`, and a
+# name appearing or disappearing without the baseline changing in the
+# same commit fails the gate. The human-readable side of the same
+# promise is `docs/api-frozen.md`; both change together, in one
+# reviewed commit.
+.PHONY: check-frozen-api frozen-api-audit
+
+frozen-api-audit: ## Print the current curated surface in baseline format
+	@bash scripts/check-frozen-api.sh --print
+
+check-frozen-api: ## Fail when a frozen crate's curated surface moved without docs/api-frozen.md and the baseline changing
+	@bash scripts/check-frozen-api.sh --self-test
+	@bash scripts/check-frozen-api.sh
+
+# ---- Publishability gate ----
+# `cargo package` 是 "可安装" 的唯一硬证据: 它检查每个 crate 的
+# manifest 是否带版本号、README 是否在包内、依赖是否可被 registry
+# 解析. `cargo build` / `cargo test` 看不到这些 —— path 依赖缺版本
+# 在 workspace 内完全正常, 只有在打包那一刻才暴露.
+.PHONY: check-publishable
+check-publishable: ## Fail when a publishable crate cannot be packaged
+	@bash scripts/check-publishable.sh
 
 # ---- License / source / bans gate ----
 # `cargo-deny` 是 R161 三件套里的公告 + 许可证检查; 与 `cargo-audit`
@@ -481,10 +514,10 @@ check-deny: ## Run cargo deny (license / bans / sources)
 	cargo deny check licenses bans sources
 
 bench: ## Run the hot-path benchmarks (hot_paths, dependency-free harness)
-	cargo bench -p synthia-harness --bench hot_paths
+	cargo bench -p elysper-harness --bench hot_paths
 
 bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
-	cargo bench -p synthia-harness --bench hot_paths -- --check
+	cargo bench -p elysper-harness --bench hot_paths -- --check
 
 # Note: `otel_collector_mock` is a long-running server that only
 # exits after a companion client POSTs to it; there is no client
@@ -524,7 +557,7 @@ examples: ## Run every example plus all three consumer proofs (each prints a pro
 	  && echo "tokio in tree: $$n" \
 	  && [ "$$n" = "0" ] || { \
 	    echo "FAIL: the harness closure pulls tokio into a consumer that"; \
-	    echo "      depends only on synthia-harness (AGENTS.md: libraries are"; \
+	    echo "      depends only on elysper-harness (AGENTS.md: libraries are"; \
 	    echo "      runtime-neutral). Remove it from the library."; \
 	    exit 1; }
 	@echo "== docs/examples/harness-only-consumer"
@@ -532,9 +565,9 @@ examples: ## Run every example plus all three consumer proofs (each prints a pro
 
 # ---- Wall-clock discipline gate ----
 # AGENTS.md §3.8: library code reads the wall clock through
-# `synthia_core::Clock`, never `chrono::Utc::now()`. Only *code* counts
+# `elysper_core::Clock`, never `chrono::Utc::now()`. Only *code* counts
 # here — a line whose first characters are `//` is a comment (the docs
-# legitimately mention the call they forbid) — and `synthia-server`
+# legitimately mention the call they forbid) — and `elysper-server`
 # is the **app** crate (AGENTS.md §3.1: libs use thiserror, apps use
 # anyhow) so its 4 production reads are exempt. After excluding
 # comments, `#[cfg(test)]` blocks, and the app crate, the count is 0;
@@ -546,14 +579,14 @@ CLOCK_BASELINE := 0
 
 clock-audit: ## List every chrono::Utc::now() call left in library code
 	# Same scope as `check-clock`: lib crates only (app crate
-	# synthia-server is exempt); inside libs we still exclude
+	# elysper-server is exempt); inside libs we still exclude
 	# `#[cfg(test)]` blocks. Run this to see which lines contributed
 	# to the count.
 	@for f in $$(find crates -name '*.rs' -path '*/src/*' \
 	              ! -name 'clock.rs' \
 	              ! -name 'tests.rs' \
 	              ! -path '*/tests/*' \
-	              ! -path '*/synthia-server/src/*'); do \
+	              ! -path '*/elysper-server/src/*'); do \
 	  awk -v F="$$f" '\
 	    /^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
 	    /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
@@ -563,7 +596,7 @@ clock-audit: ## List every chrono::Utc::now() call left in library code
 	done
 
 check-clock: ## Fail when chrono::Utc::now() calls in library code grow
-	# Scope: lib crates only — `synthia-server` is the **app** crate
+	# Scope: lib crates only — `elysper-server` is the **app** crate
 	# (AGENTS.md §3.1: libs use thiserror, apps use anyhow), and apps
 	# legitimately read wall-clock time directly. Inside libs we still
 	# exclude `#[cfg(test)]` blocks (test code uses real time, not the
@@ -572,7 +605,7 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	                   ! -name 'clock.rs' \
 	                   ! -name 'tests.rs' \
 	                   ! -path '*/tests/*' \
-	                   ! -path '*/synthia-server/src/*'); do \
+	                   ! -path '*/elysper-server/src/*'); do \
 	  awk '/^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
 	       /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
 	       /Utc::now/{ stripped=$$0; sub(/^[ \t]+/, "", stripped); \
@@ -580,23 +613,23 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	       END{print c+0}' "$$f"; \
 	done | awk '{s+=$$1} END{print s+0}'); \
 	if [ "$$n" -gt $(CLOCK_BASELINE) ]; then \
-	  echo "FAIL: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate synthia-server is exempt, cfg(test) is exempt)"; \
-	  echo "Wall-clock reads in library code must go through synthia_core::Clock — run 'make clock-audit'."; \
+	  echo "FAIL: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-server is exempt, cfg(test) is exempt)"; \
+	  echo "Wall-clock reads in library code must go through elysper_core::Clock — run 'make clock-audit'."; \
 	  exit 1; \
 	fi; \
-	echo "OK: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate synthia-server is exempt, cfg(test) is exempt)"
+	echo "OK: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-server is exempt, cfg(test) is exempt)"
 
 # ---- Harness shape (R122) ----
 # `clippy.toml` sets `cognitive-complexity-threshold = 20`, but
 # `clippy::cognitive_complexity` is allow-by-default and its own docs
 # now say it no longer measures what its name suggests: it counts
 # decisions only (no nesting, no loops, no `?`), so at R122 the whole
-# `synthia-harness` loop maxed out at 8/20 and the threshold was inert.
+# `elysper-harness` loop maxed out at 8/20 and the threshold was inert.
 # The properties this harness actually maintains are **flat nesting and
 # short functions**, and neither was measured. These two lints are what
 # clippy recommends in its place.
 #
-# Scoped to `synthia-harness`'s **production** code on purpose: a
+# Scoped to `elysper-harness`'s **production** code on purpose: a
 # workspace-wide run of `too_many_lines` at this threshold reports 24
 # sites (14 of them production), and this round touched none of them,
 # so enforcing the budget everywhere would be an unrequested refactor.
@@ -610,7 +643,7 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 # makes `excessive_nesting` able to fire at all (default 0 = disabled).
 .PHONY: check-harness-shape
 
-check-harness-shape: ## Fail when a synthia-harness production fn grows past the length / nesting budget
+check-harness-shape: ## Fail when a elysper-harness production fn grows past the length / nesting budget
 	@bash scripts/check-harness-shape.sh
 
 # ---- Harness comment budget ----
@@ -618,8 +651,16 @@ check-harness-shape: ## Fail when a synthia-harness production fn grows past the
 # the signature or narrate the next three lines; the ones recording
 # a non-obvious constraint are the payload and stay. The gate fails
 # on growth so a later round cannot quietly put the tax back.
-check-harness-docs: ## Fail when synthia-harness private-item doc comments grow past the budget
+check-harness-docs: ## Fail when elysper-harness private-item doc comments grow past the budget
 	@bash scripts/check-harness-docs.sh
+
+# ---- Public docs ratchet ----
+# `[workspace.lints] missing_docs` only reaches a crate that opts in
+# with `[lints] workspace = true`, and none does, so the frozen
+# crates' public surface is kept honest by this ratchet instead:
+# per-crate counts of undocumented `pub` items that only go down.
+check-public-docs: ## Fail when a frozen crate grows an undocumented public item
+	@bash scripts/check-public-docs.sh
 
 # ---- Single writer per session ----
 # A session's log has exactly one writer: the session crate's
@@ -636,9 +677,9 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 	@bash scripts/check-single-writer.sh
 
 # ---- Plugin shape (R-G) ----
-# Plugin tool crates (`synthia-tool-read` / `-write` / `-shell` /
+# Plugin tool crates (`elysper-tool-read` / `-write` / `-shell` /
 # `-todo` / `-web` / `-task` / `-scheduler` / `-search` plus
-# `synthia-mcp` / `-skill` / `-attachment`) ship one tool (or one
+# `elysper-mcp` / `-skill` / `-attachment`) ship one tool (or one
 # tool-like facade) per crate and stay flat — `lib.rs` plus focused
 # siblings. Long-file drift hurts the same way it did in the harness,
 # so the gate is a sibling of `check-harness-shape` but scoped at the
@@ -654,10 +695,10 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 .PHONY: plugin-shape-audit check-plugin-shape
 
 plugin-shape-audit: ## List plugin-crate production files and their line counts (largest first)
-	@for root in crates/synthia-tool-read crates/synthia-tool-write crates/synthia-tool-shell \
-	             crates/synthia-tool-todo crates/synthia-tool-web crates/synthia-tool-task \
-	             crates/synthia-tool-scheduler crates/synthia-tool-search crates/synthia-mcp \
-	             crates/synthia-skill crates/synthia-attachment; do \
+	@for root in crates/elysper-tool-read crates/elysper-tool-write crates/elysper-tool-shell \
+	             crates/elysper-tool-todo crates/elysper-tool-web crates/elysper-tool-task \
+	             crates/elysper-tool-scheduler crates/elysper-tool-search crates/elysper-mcp \
+	             crates/elysper-skill crates/elysper-attachment; do \
 	  [[ -d "$$root/src" ]] || continue; \
 	  find "$$root/src" -maxdepth 1 -name '*.rs' ! -name 'tests.rs' -exec wc -l {} +; \
 	done | sort -rn | head -20
@@ -669,17 +710,8 @@ check-plugin-shape: ## Fail when a plugin-crate production file grows past the b
 # No production file may grow an inline `#[cfg(test)] mod` block to
 # the hard limit, and the 300-line band may only shrink. New test
 # modules go in sibling `tests.rs` files, next to the module they test.
-#
-# TEMPORARY (R2026-09-19 restructure): the 30+ module-test pairs being
-# inlined back into single .rs files temporarily push the inline test
-# block past the original 400-line / 300-band ceiling. The limits are
-# relaxed here to admit those merges; both numbers MUST snap back to
-# the originals once the restructure is complete (search for "RESTORE
-# HERE" below for the exact values).
-# RESTORE HERE: TEST_BLOCK_LIMIT := 400
-TEST_BLOCK_LIMIT := 1500
-# RESTORE HERE: TEST_BLOCK_BASELINE := 0
-TEST_BLOCK_BASELINE := 1500
+TEST_BLOCK_LIMIT := 400
+TEST_BLOCK_BASELINE := 0
 .PHONY: test-layout-audit check-test-layout
 
 test-layout-audit: ## List every inline test module >=300 lines in a production file
@@ -721,19 +753,19 @@ IMAGE_TARGETS := server web mcp
 
 image-build: image-build-server image-build-web image-build-mcp ## Build all three container images (server + web + mcp)
 
-image-build-server: ## Build synthia-server image (Dockerfile.server, multi-stage cargo-chef)
+image-build-server: ## Build elysper-server image (Dockerfile.server, multi-stage cargo-chef)
 	bash scripts/images.sh build server
 
-image-build-web: ## Build synthia-web image (Dockerfile.web, Vite + nginx with envsubst)
+image-build-web: ## Build elysper-web image (Dockerfile.web, Vite + nginx with envsubst)
 	bash scripts/images.sh build web
 
-image-build-mcp: ## Build synthia-mcp-server image (Dockerfile.mcp, stdio binary)
+image-build-mcp: ## Build elysper-mcp-server image (Dockerfile.mcp, stdio binary)
 	bash scripts/images.sh build mcp
 
-server-artifact: ## Export Linux musl binary to ./dist/synthia-server (matches ci.yml cross-linux-musl)
+server-artifact: ## Export Linux musl binary to ./dist/elysper-server (matches ci.yml cross-linux-musl)
 	bash scripts/images.sh artifact server
 
-windows-artifact: ## Export Windows PE to ./dist/synthia-server.exe (matches ci.yml cross-windows)
+windows-artifact: ## Export Windows PE to ./dist/elysper-server.exe (matches ci.yml cross-windows)
 	bash scripts/images.sh artifact windows
 
 image-push: ## Push all three images to the configured registry (REGISTRY / TAG)

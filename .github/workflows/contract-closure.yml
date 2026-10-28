@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 10
     # Advisory until §6 of `docs/interface-contract/` (contract-closure
     # spec) is closed: the three jobs all `continue-on-error: true`.
-    # Tracking: `synthia-interface-contract-closure` spec; the
+    # Tracking: `elysper-interface-contract-closure` spec; the
     # gate-flip is in CHANGELOG.md `[Unreleased]` under "Contract
     # closure: promotion to gating".
     continue-on-error: true
@@ -100,6 +100,6 @@ jobs:
         run: npm test -- --reporter=basic
 
   # The Playwright sub-suite that used to live here drove the removed
-  # `synthia-web/tests/` tree. Frontend verification is now
+  # `elysper-web/tests/` tree. Frontend verification is now
   # Playwright-MCP against the running app (AGENTS.md §4.2); this
   # workflow keeps the three browser-free contract jobs above.

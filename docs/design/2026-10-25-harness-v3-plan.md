@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 `synthia-harness` 变成“日志真源 + 可撤销接缝 + 按调用高风险审批”的薄循环，并让 `synthia-server` 端到端满足完整 agent 对话的验收剧本。
+**Goal:** 把 `elysper-harness` 变成“日志真源 + 可撤销接缝 + 按调用高风险审批”的薄循环，并让 `elysper-server` 端到端满足完整 agent 对话的验收剧本。
 
-**Architecture:** 模型历史由 `synthia-session` 的 `fold_surface` 派生；harness 只保留循环与接缝，所有插件注册返回可撤销句柄；审批由循环内的 `ApprovalPolicy` 在派发前强制，挂起写显式日志行，resume 由日志派生；`synthia-server` 用 `follow` 基线、`resume`、`compact` 和会话级 usage 暴露这套语义。
+**Architecture:** 模型历史由 `elysper-session` 的 `fold_surface` 派生；harness 只保留循环与接缝，所有插件注册返回可撤销句柄；审批由循环内的 `ApprovalPolicy` 在派发前强制，挂起写显式日志行，resume 由日志派生；`elysper-server` 用 `follow` 基线、`resume`、`compact` 和会话级 usage 暴露这套语义。
 
 **Tech Stack:** Rust 1.98、edition 2024、`futures`、`serde_json`、`thiserror`（库）/`anyhow`（server）。不新增依赖，不新增 cargo feature。
 
@@ -13,12 +13,12 @@
 
 ## Global Constraints
 
-- 库 crate 只用 `thiserror`；`synthia-server` 是 app crate，用 `anyhow`。
+- 库 crate 只用 `thiserror`；`elysper-server` 是 app crate，用 `anyhow`。
 - 依赖版本一律 `major.minor`；新依赖只能来自根 `Cargo.toml` 的 `[workspace.dependencies]`。
-- `max_width = 80`；禁通配符导入；`synthia-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
-- 库代码不得直接 `chrono::Utc::now()`；墙钟走 `synthia_core::Clock`，ID 走 `synthia_core::IdGen`。
+- `max_width = 80`；禁通配符导入；`elysper-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
+- 库代码不得直接 `chrono::Utc::now()`；墙钟走 `elysper_core::Clock`，ID 走 `elysper_core::IdGen`。
 - 库 crate 的公开 API 不得出现具体运行时类型（`tokio::` 等）。
-- `synthia-harness` 不得有 `[features]` 表，不得依赖 tokio。
+- `elysper-harness` 不得有 `[features]` 表，不得依赖 tokio。
 - 测试按 crate 分批执行，禁止 `cargo test --workspace`。
 - 破坏性 API 一次切干净，不留 shim、别名或兼容分支。
 - 每个任务结束：工作区能编译、`cargo +nightly fmt --all` 干净、该 crate 测试绿。
@@ -36,7 +36,7 @@
 
 ## File Structure
 
-**synthia-session**
+**elysper-session**
 
 - Create `src/history.rs`：`derive_history`、`HistoryError`、行解析。
 - Modify `src/events.rs`：`UserMessage.source`、审批/挂起/请求快照/插件事件变体与 builders。
@@ -44,7 +44,7 @@
 - Modify `src/lib.rs`：导出 `derive_history`、`HistoryError`。
 - Test `src/history/tests.rs` 或内联 `#[cfg(test)]`（<400 行）。
 
-**synthia-harness**
+**elysper-harness**
 
 - Create `src/agent/history.rs`：`HistoryProjection`（seq 水位缓存）。
 - Create `src/agent/host.rs`：`Host`、`Registration`、`PluginHandle`、能力 trait、`Plugin`。
@@ -58,18 +58,18 @@
 - Modify `src/lib.rs`、`src/agent/mod.rs`：导出。
 - Tests `src/agent/re_act/tests/lifecycle/{steer,approval}.rs`。
 
-**synthia-steering**
+**elysper-steering**
 
 - Modify `src/hook_map.rs`：`HookEvent::{BeforeStep, BeforeRequest}`、`HookDecision::{Ask, ReplaceParams, ReplaceResult}`。
 - Modify `src/steering.rs` / `src/hook.rs`：派发返回决策，修注释漂移。
 
-**synthia-tool**
+**elysper-tool**
 
 - Modify `src/traits.rs`：`Risk`、`Tool::risk(&self, input: &Value) -> Risk`。
 - Modify `src/lib.rs`：导出 `Risk`。
-- Modify `crates/synthia-tool-shell/src/lib.rs`（或工具实现文件）：覆盖 `risk`。
+- Modify `crates/elysper-tool-shell/src/lib.rs`（或工具实现文件）：覆盖 `risk`。
 
-**synthia-server**
+**elysper-server**
 
 - Create `src/routes/follow.rs`：`follow` / `resume` / `compact` / `usage`。
 - Modify `src/routes/chat.rs`：`delivery` 字段；`send_message` 的 steer 路径。
@@ -78,7 +78,7 @@
 - Modify `src/state/app_state/sessions.rs`：审批策略与 follow 基线。
 - Test `src/routes/tests/follow.rs`、`src/routes/tests/approval.rs`。
 
-**synthia-web**
+**elysper-web**
 
 - Modify `src/api/chat-stream.ts`、`src/api/chat-message.ts`、`src/api/types.ts`。
 - Modify `src/pages/ChatPage.tsx`。
@@ -95,11 +95,11 @@
 ### Task 1: Remove dead public surface
 
 **Files:**
-- Modify: `crates/synthia-harness/src/lib.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/agent.rs`
-- Modify: `crates/synthia-harness/src/agent/checkpoint.rs`
-- Modify: `crates/synthia-harness/src/agent/registry/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/caps.rs`
+- Modify: `crates/elysper-harness/src/lib.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/agent.rs`
+- Modify: `crates/elysper-harness/src/agent/checkpoint.rs`
+- Modify: `crates/elysper-harness/src/agent/registry/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/caps.rs`
 - Test: shell assertions in the task
 
 **Interfaces:**
@@ -111,13 +111,13 @@
 Run:
 
 ```bash
-grep -rn "with_run_inbox\|MpscInbox\|run_inbox\|with_clock\|with_tool_registry\|with_model_hint\|fn list_keys\|InMemoryCheckpointer::new\|fn names\|fn to_message\|fn as_str" crates/synthia-harness/src
+grep -rn "with_run_inbox\|MpscInbox\|run_inbox\|with_clock\|with_tool_registry\|with_model_hint\|fn list_keys\|InMemoryCheckpointer::new\|fn names\|fn to_message\|fn as_str" crates/elysper-harness/src
 ```
 
 Expected: the command prints only private / crate-internal items. For each `pub` item, run:
 
 ```bash
-grep -rn "<name>" crates --include='*.rs' | grep -v "crates/synthia-harness/src"
+grep -rn "<name>" crates --include='*.rs' | grep -v "crates/elysper-harness/src"
 ```
 
 Expected: no hits outside the harness. If a hit exists, keep the item and record it in the commit message.
@@ -128,7 +128,7 @@ Write the verified names into the commit message body. The check is a shell asse
 
 ```bash
 for name in with_run_inbox MpscInbox with_tool_registry; do
-  ! grep -rn "$name" crates/synthia-harness/src
+  ! grep -rn "$name" crates/elysper-harness/src
  done
 ```
 
@@ -141,7 +141,7 @@ Delete the re-exports, builder methods, fields, and any test-only modules that e
 Run:
 
 ```bash
-cargo test -p synthia-harness --lib
+cargo test -p elysper-harness --lib
 make check-harness-docs
 make check-harness-features
 make check-harness-shape
@@ -152,18 +152,18 @@ Expected: all pass; the docs baseline does not increase.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/synthia-harness
+git add crates/elysper-harness
 git commit -m "refactor(harness): remove zero-reference public surface"
 ```
 
 ---
 
-### Task 2: `derive_history` in `synthia-session`
+### Task 2: `derive_history` in `elysper-session`
 
 **Files:**
-- Create: `crates/synthia-session/src/history.rs`
-- Modify: `crates/synthia-session/src/lib.rs`
-- Test: `crates/synthia-session/src/history/tests.rs` or inline `#[cfg(test)]`
+- Create: `crates/elysper-session/src/history.rs`
+- Modify: `crates/elysper-session/src/lib.rs`
+- Test: `crates/elysper-session/src/history/tests.rs` or inline `#[cfg(test)]`
 
 **Interfaces:**
 - Consumes: `surface::fold_surface(&[SessionEvent]) -> Result<FoldedSurface, FoldError>`.
@@ -204,16 +204,16 @@ fn derive_history_applies_replace_provenance() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p synthia-session --lib derive_history`
+Run: `cargo test -p elysper-session --lib derive_history`
 Expected: FAIL with `derive_history` not found.
 
 - [ ] **Step 3: Implement**
 
-Parse each row with `serde_json::from_value::<SessionEvent>`, skipping rows that are metadata headers (reuse the existing helper used by `LogWriter::seed_ledger`). Call `fold_surface`. Deserialize each `FoldedSurface.messages` entry into `synthia_provider::Message`. Map errors into `HistoryError`.
+Parse each row with `serde_json::from_value::<SessionEvent>`, skipping rows that are metadata headers (reuse the existing helper used by `LogWriter::seed_ledger`). Call `fold_surface`. Deserialize each `FoldedSurface.messages` entry into `elysper_provider::Message`. Map errors into `HistoryError`.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p synthia-session --lib derive_history`
+Run: `cargo test -p elysper-session --lib derive_history`
 Expected: PASS.
 
 - [ ] **Step 5: Add the determinism test**
@@ -229,7 +229,7 @@ fn derive_history_is_deterministic() {
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/synthia-session
+git add crates/elysper-session
 git commit -m "feat(session): derive model history from the log"
 ```
 
@@ -238,15 +238,15 @@ git commit -m "feat(session): derive model history from the log"
 ### Task 3: Loop reads the projection
 
 **Files:**
-- Create: `crates/synthia-harness/src/agent/history.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/prepare.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/state.rs`
-- Modify: `crates/synthia-harness/src/input.rs`
-- Test: `crates/synthia-harness/src/agent/re_act/tests/lifecycle/persistence.rs`
+- Create: `crates/elysper-harness/src/agent/history.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/prepare.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/state.rs`
+- Modify: `crates/elysper-harness/src/input.rs`
+- Test: `crates/elysper-harness/src/agent/re_act/tests/lifecycle/persistence.rs`
 
 **Interfaces:**
-- Consumes: `synthia_session::derive_history(&[Value])`.
+- Consumes: `elysper_session::derive_history(&[Value])`.
 - Produces:
 
 ```rust
@@ -285,7 +285,7 @@ async fn a_writer_backed_run_does_not_duplicate_the_input() {
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p synthia-harness --lib a_writer_backed_run_ignores_input_history conflicting_input_history_ends_the_run a_writer_backed_run_does_not_duplicate_the_input`
+Run: `cargo test -p elysper-harness --lib a_writer_backed_run_ignores_input_history conflicting_input_history_ends_the_run a_writer_backed_run_does_not_duplicate_the_input`
 Expected: FAIL (history still comes from `input.history`).
 
 - [ ] **Step 3: Implement**
@@ -300,13 +300,13 @@ In `drive_one_iteration`, before `sample`, call `projection.refresh(&writer.read
 
 - [ ] **Step 5: Run the tests**
 
-Run: `cargo test -p synthia-harness --lib`
+Run: `cargo test -p elysper-harness --lib`
 Expected: PASS, including existing lifecycle tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/synthia-harness
+git add crates/elysper-harness
 git commit -m "feat(harness): derive the transcript from the session log"
 ```
 
@@ -315,13 +315,13 @@ git commit -m "feat(harness): derive the transcript from the session log"
 ### Task 4: Steer at the step boundary
 
 **Files:**
-- Modify: `crates/synthia-session/src/events.rs` (`UserMessage.source`)
-- Modify: `crates/synthia-session/src/typed_event_builders.rs`
-- Modify: `crates/synthia-harness/src/agent/history.rs` (refresh already covers it)
-- Modify: `crates/synthia-server/src/routes/chat.rs`
-- Modify: `crates/synthia-server/src/session/controller/run_task.rs`
-- Test: `crates/synthia-server/src/routes/tests/steer.rs`
-- Test: `crates/synthia-harness/src/agent/re_act/tests/lifecycle/steer.rs`
+- Modify: `crates/elysper-session/src/events.rs` (`UserMessage.source`)
+- Modify: `crates/elysper-session/src/typed_event_builders.rs`
+- Modify: `crates/elysper-harness/src/agent/history.rs` (refresh already covers it)
+- Modify: `crates/elysper-server/src/routes/chat.rs`
+- Modify: `crates/elysper-server/src/session/controller/run_task.rs`
+- Test: `crates/elysper-server/src/routes/tests/steer.rs`
+- Test: `crates/elysper-harness/src/agent/re_act/tests/lifecycle/steer.rs`
 
 **Interfaces:**
 - Consumes: `LogWriter::append_event(&SessionEvent) -> Result<u64, SessionError>`, `LogWriter::flush()`.
@@ -374,9 +374,9 @@ async fn steer_is_durable_before_the_response() {
 Run:
 
 ```bash
-cargo test -p synthia-session --lib an_old_user_row_without_source_still_deserializes
-cargo test -p synthia-harness --lib a_steer_row_is_in_the_next_request
-cargo test -p synthia-server --lib steer_is_durable_before_the_response
+cargo test -p elysper-session --lib an_old_user_row_without_source_still_deserializes
+cargo test -p elysper-harness --lib a_steer_row_is_in_the_next_request
+cargo test -p elysper-server --lib steer_is_durable_before_the_response
 ```
 
 Expected: FAIL.
@@ -390,7 +390,7 @@ In the session event, add `source`. In `send_message`, branch on `delivery`:
 
 Do not add an in-memory steer queue. The loop's `HistoryProjection::refresh` is the only consumer.
 
-The shared projection (`synthia-session`'s `derive_history` / `surface_to_messages`) is **pairing-aware**: a steer that lands while a tool call is pending is held back until the matching tool results, so the transcript reads `[User, Assistant(tool_use), Tool(result), User(steer)]`. A user message between an assistant's tool call and its result is a transcript every provider rejects.
+The shared projection (`elysper-session`'s `derive_history` / `surface_to_messages`) is **pairing-aware**: a steer that lands while a tool call is pending is held back until the matching tool results, so the transcript reads `[User, Assistant(tool_use), Tool(result), User(steer)]`. A user message between an assistant's tool call and its result is a transcript every provider rejects.
 
 - [ ] **Step 4: Handle the settlement race**
 
@@ -401,9 +401,9 @@ The `steer_gate` serialises the decision against BOTH the run task's `Running` �
 - [ ] **Step 5: Run the tests**
 
 ```bash
-cargo test -p synthia-session --lib user_message
-cargo test -p synthia-harness --lib steer
-cargo test -p synthia-server --lib steer
+cargo test -p elysper-session --lib user_message
+cargo test -p elysper-harness --lib steer
+cargo test -p elysper-server --lib steer
 ```
 
 Expected: PASS.
@@ -411,7 +411,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/synthia-session crates/synthia-harness crates/synthia-server
+git add crates/elysper-session crates/elysper-harness crates/elysper-server
 git commit -m "feat: add durable in-run steering"
 ```
 
@@ -420,14 +420,14 @@ git commit -m "feat: add durable in-run steering"
 ### Task 5: Host, registrations, and hook decisions
 
 **Files:**
-- Create: `crates/synthia-harness/src/agent/host.rs`
-- Create: `crates/synthia-harness/src/agent/approval.rs` (`Risk` re-export, `ApprovalRequest`)
-- Modify: `crates/synthia-tool/src/traits.rs`, `crates/synthia-tool/src/lib.rs` (`Risk`)
-- Modify: `crates/synthia-steering/src/hook_map.rs`
-- Modify: `crates/synthia-steering/src/steering.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/agent.rs` (`with_host`)
-- Modify: `crates/synthia-harness/src/agent/caps.rs`
-- Test: `crates/synthia-harness/src/agent/host/tests.rs`
+- Create: `crates/elysper-harness/src/agent/host.rs`
+- Create: `crates/elysper-harness/src/agent/approval.rs` (`Risk` re-export, `ApprovalRequest`)
+- Modify: `crates/elysper-tool/src/traits.rs`, `crates/elysper-tool/src/lib.rs` (`Risk`)
+- Modify: `crates/elysper-steering/src/hook_map.rs`
+- Modify: `crates/elysper-steering/src/steering.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/agent.rs` (`with_host`)
+- Modify: `crates/elysper-harness/src/agent/caps.rs`
+- Test: `crates/elysper-harness/src/agent/host/tests.rs`
 
 **Interfaces:**
 - Consumes: existing `Steering`, `ToolRegistry`, `ToolAnnotations`.
@@ -469,11 +469,11 @@ impl Host {
 }
 ```
 
-`synthia-steering` owns the hook vocabulary, so it cannot name harness types. The decisions
+`elysper-steering` owns the hook vocabulary, so it cannot name harness types. The decisions
 therefore carry only what the steering layer can express; the harness owns the richer shapes:
 
 ```rust
-// synthia-steering
+// elysper-steering
 pub enum HookDecision {
     Allow,
     Block { reason: String },
@@ -483,14 +483,14 @@ pub enum HookDecision {
 }
 ```
 
-- `RequestParams` lives in `synthia-steering` (it names only provider types: model, temperature,
+- `RequestParams` lives in `elysper-steering` (it names only provider types: model, temperature,
   max_tokens, tool_choice, tools, and a read-only `&[Message]` view). It has **no** `system` field
   and the messages are not mutable — that is how "T2 cannot rewrite the system prompt" is
   guaranteed by the type, not by a convention.
 - The approval *request* (call id, tool, arguments hash, risk) is a harness type: the gate site
   builds it from the tool call, so `HookDecision::Ask` carries a reason only.
 - Tool-result rewriting is a harness-side trait (`ResultTransformer` takes `&mut ToolOutput`),
-  not a steering decision variant — `synthia-steering` does not depend on `synthia-tool`.
+  not a steering decision variant — `elysper-steering` does not depend on `elysper-tool`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -510,7 +510,7 @@ fn unsupported_decision_at_a_point_is_a_noop_with_a_diagnostic() { /* ... */ }
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p synthia-harness --lib host::`
+Run: `cargo test -p elysper-harness --lib host::`
 Expected: FAIL (module absent).
 
 - [ ] **Step 3: Implement the registry and arbitration**
@@ -524,8 +524,8 @@ Add `BeforeStep`, `BeforeRequest`; add the decision variants above. Dispatch thr
 - [ ] **Step 5: Run the tests**
 
 ```bash
-cargo test -p synthia-steering --lib
-cargo test -p synthia-harness --lib
+cargo test -p elysper-steering --lib
+cargo test -p elysper-harness --lib
 ```
 
 Expected: PASS.
@@ -533,7 +533,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/synthia-steering crates/synthia-harness
+git add crates/elysper-steering crates/elysper-harness
 git commit -m "feat(harness): add reversible plugin host and hook arbitration"
 ```
 
@@ -542,12 +542,12 @@ git commit -m "feat(harness): add reversible plugin host and hook arbitration"
 ### Task 6: `DelegatingTool`
 
 **Files:**
-- Rename: `crates/synthia-harness/src/agent/re_act/synthetic.rs` → `delegation.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/tools/route.rs`
-- Modify: `crates/synthia-harness/src/agent/host.rs` (`Host::delegator`)
-- Modify: `crates/synthia-tool-task/src/**`
-- Modify: `crates/synthia-server/src/server/agent_assembly.rs` (or the assembly file)
-- Test: existing `crates/synthia-harness/src/agent/re_act/tests/synthetic_*`
+- Rename: `crates/elysper-harness/src/agent/re_act/synthetic.rs` → `delegation.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/tools/route.rs`
+- Modify: `crates/elysper-harness/src/agent/host.rs` (`Host::delegator`)
+- Modify: `crates/elysper-tool-task/src/**`
+- Modify: `crates/elysper-server/src/server/agent_assembly.rs` (or the assembly file)
+- Test: existing `crates/elysper-harness/src/agent/re_act/tests/synthetic_*`
 
 **Interfaces:**
 - Consumes: `DelegationCall`, `ToolContext`, `ExecutionMode`, `ToolAnnotations`.
@@ -573,19 +573,19 @@ fn delegator_is_found_by_name_not_by_linear_claims_scan() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p synthia-harness --lib delegator_is_found_by_name`
+Run: `cargo test -p elysper-harness --lib delegator_is_found_by_name`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
 
-Replace `claims()` scanning with a name-keyed map. Keep `emit` / `cancel` / `depth`; add `context`, `mode`, `annotations`. Migrate `synthia-tool-task` in the same commit; update the server assembly.
+Replace `claims()` scanning with a name-keyed map. Keep `emit` / `cancel` / `depth`; add `context`, `mode`, `annotations`. Migrate `elysper-tool-task` in the same commit; update the server assembly.
 
 - [ ] **Step 4: Run the tests**
 
 ```bash
-cargo test -p synthia-harness --lib
-cargo test -p synthia-tool-task --lib
-cargo test -p synthia-server --lib
+cargo test -p elysper-harness --lib
+cargo test -p elysper-tool-task --lib
+cargo test -p elysper-server --lib
 ```
 
 Expected: PASS.
@@ -593,7 +593,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/synthia-harness crates/synthia-tool-task crates/synthia-server
+git add crates/elysper-harness crates/elysper-tool-task crates/elysper-server
 git commit -m "refactor(harness): replace SyntheticTool with DelegatingTool"
 ```
 
@@ -602,18 +602,18 @@ git commit -m "refactor(harness): replace SyntheticTool with DelegatingTool"
 ### Task 7: Per-call risk, suspension, and resume
 
 **Files:**
-- Modify: `crates/synthia-tool/src/traits.rs`
-- Modify: `crates/synthia-tool/src/lib.rs`
-- Modify: `crates/synthia-tool-shell/src/**`
-- Modify: `crates/synthia-harness/src/agent/approval.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/tools/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/mod.rs`
-- Modify: `crates/synthia-harness/src/events/mod.rs`
-- Modify: `crates/synthia-harness/src/input.rs`
-- Modify: `crates/synthia-session/src/events.rs`
-- Modify: `crates/synthia-session/src/repair.rs`
-- Test: `crates/synthia-harness/src/agent/re_act/tests/lifecycle/approval.rs`
-- Test: `crates/synthia-session/src/repair/tests.rs`
+- Modify: `crates/elysper-tool/src/traits.rs`
+- Modify: `crates/elysper-tool/src/lib.rs`
+- Modify: `crates/elysper-tool-shell/src/**`
+- Modify: `crates/elysper-harness/src/agent/approval.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/tools/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/mod.rs`
+- Modify: `crates/elysper-harness/src/events/mod.rs`
+- Modify: `crates/elysper-harness/src/input.rs`
+- Modify: `crates/elysper-session/src/events.rs`
+- Modify: `crates/elysper-session/src/repair.rs`
+- Test: `crates/elysper-harness/src/agent/re_act/tests/lifecycle/approval.rs`
+- Test: `crates/elysper-session/src/repair/tests.rs`
 
 **Interfaces:**
 - Consumes: `Risk`, `ApprovalRequest` (Task 5), `ToolAnnotations`, `LogWriter::flush`, `SessionEvent`.
@@ -664,7 +664,7 @@ async fn a_changed_tool_schema_blocks_resume_with_config_drift() { /* allow_drif
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p synthia-harness --lib approval::`
+Run: `cargo test -p elysper-harness --lib approval::`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement risk and policy**
@@ -704,9 +704,9 @@ Add `AgentInput::resume_decisions(token, decisions)`; the convenience `resume_ap
 - [ ] **Step 7: Run the tests**
 
 ```bash
-cargo test -p synthia-tool --lib
-cargo test -p synthia-harness --lib approval
-cargo test -p synthia-session --lib repair
+cargo test -p elysper-tool --lib
+cargo test -p elysper-harness --lib approval
+cargo test -p elysper-session --lib repair
 ```
 
 Expected: PASS.
@@ -714,7 +714,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/synthia-tool crates/synthia-tool-shell crates/synthia-harness crates/synthia-session
+git add crates/elysper-tool crates/elysper-tool-shell crates/elysper-harness crates/elysper-session
 git commit -m "feat: suspend high-risk tool calls for approval"
 ```
 
@@ -723,15 +723,15 @@ git commit -m "feat: suspend high-risk tool calls for approval"
 ### Task 8: Compaction seam
 
 **Files:**
-- Create: `crates/synthia-session/src/compaction.rs`
-- Modify: `crates/synthia-session/src/lib.rs`
-- Modify: `crates/synthia-session/src/tool_pairing.rs`
-- Modify: `crates/synthia-harness/src/agent/caps.rs` (`compactor`)
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/loop/prepare.rs`
-- Modify: `crates/synthia-harness/src/events/mod.rs`
-- Modify: `crates/synthia-harness/src/agent/re_act/agent.rs` (`with_compactor`)
-- Test: `crates/synthia-session/src/compaction/tests.rs`
+- Create: `crates/elysper-session/src/compaction.rs`
+- Modify: `crates/elysper-session/src/lib.rs`
+- Modify: `crates/elysper-session/src/tool_pairing.rs`
+- Modify: `crates/elysper-harness/src/agent/caps.rs` (`compactor`)
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/loop/prepare.rs`
+- Modify: `crates/elysper-harness/src/events/mod.rs`
+- Modify: `crates/elysper-harness/src/agent/re_act/agent.rs` (`with_compactor`)
+- Test: `crates/elysper-session/src/compaction/tests.rs`
 
 **Interfaces:**
 - Consumes: `Message`, `TokenBudget`, `SessionEvent::Compaction`, `fold_surface`, `tool_pairing`.
@@ -780,7 +780,7 @@ fn pruner_runs_before_the_summary_call() { /* order assertion */ }
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p synthia-session --lib compaction::`
+Run: `cargo test -p elysper-session --lib compaction::`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the trait and the default compactor**
@@ -800,8 +800,8 @@ not suspended, run `plan` → `summarize` → append `SessionEvent::Compaction` 
 - [ ] **Step 5: Run the tests**
 
 ```bash
-cargo test -p synthia-session --lib compaction
-cargo test -p synthia-harness --lib compaction
+cargo test -p elysper-session --lib compaction
+cargo test -p elysper-harness --lib compaction
 ```
 
 Expected: PASS.
@@ -809,7 +809,7 @@ Expected: PASS.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/synthia-session crates/synthia-harness
+git add crates/elysper-session crates/elysper-harness
 git commit -m "feat: add compaction seam with provenance and tool pairing"
 ```
 
@@ -818,15 +818,15 @@ git commit -m "feat: add compaction seam with provenance and tool pairing"
 ### Task 9: Server follow, resume, compact, usage
 
 **Files:**
-- Create: `crates/synthia-server/src/routes/follow.rs`
-- Modify: `crates/synthia-server/src/routes/mod.rs`
-- Modify: `crates/synthia-server/src/routes/chat.rs`
-- Modify: `crates/synthia-server/src/session/controller/ops.rs`
-- Modify: `crates/synthia-server/src/session/controller/run_task.rs`
-- Modify: `crates/synthia-server/src/state/app_state/sessions.rs`
-- Modify: `crates/synthia-harness/src/input.rs` and `crates/synthia-harness/src/agent/approval.rs`
+- Create: `crates/elysper-server/src/routes/follow.rs`
+- Modify: `crates/elysper-server/src/routes/mod.rs`
+- Modify: `crates/elysper-server/src/routes/chat.rs`
+- Modify: `crates/elysper-server/src/session/controller/ops.rs`
+- Modify: `crates/elysper-server/src/session/controller/run_task.rs`
+- Modify: `crates/elysper-server/src/state/app_state/sessions.rs`
+- Modify: `crates/elysper-harness/src/input.rs` and `crates/elysper-harness/src/agent/approval.rs`
   (`ResumeDecision { id, status, payload }`; `AgentInput::resume_decisions(..)`)
-- Test: `crates/synthia-server/src/routes/tests/follow.rs`
+- Test: `crates/elysper-server/src/routes/tests/follow.rs`
 
 **Interfaces:**
 - Consumes: `LogWriter::read`, `derive_history`, `ResumeToken`, `ApprovalRequest`.
@@ -872,7 +872,7 @@ async fn session_usage_is_scoped_to_the_session() { /* not global */ }
 
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `cargo test -p synthia-server --lib follow_`
+Run: `cargo test -p elysper-server --lib follow_`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -882,7 +882,7 @@ Add `SessionState::AwaitingApproval` (derived from the log on open). `maybe_star
 - [ ] **Step 4: Run the tests**
 
 ```bash
-cargo test -p synthia-server --lib
+cargo test -p elysper-server --lib
 ```
 
 Expected: PASS.
@@ -890,7 +890,7 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/synthia-server
+git add crates/elysper-server
 git commit -m "feat(server): add follow baseline, resume, compact, and session usage"
 ```
 
@@ -899,13 +899,13 @@ git commit -m "feat(server): add follow baseline, resume, compact, and session u
 ### Task 10: Web cutover
 
 **Files:**
-- Modify: `synthia-web/src/api/chat-stream.ts`
-- Modify: `synthia-web/src/api/chat-message.ts`
-- Modify: `synthia-web/src/api/types.ts`
-- Modify: `synthia-web/src/pages/ChatPage.tsx`
-- Create: `synthia-web/src/components/chat/ApprovalCard.tsx`
-- Create: `synthia-web/src/components/chat/SteerChip.tsx`
-- Create: `synthia-web/src/components/chat/CompactionMarker.tsx`
+- Modify: `elysper-web/src/api/chat-stream.ts`
+- Modify: `elysper-web/src/api/chat-message.ts`
+- Modify: `elysper-web/src/api/types.ts`
+- Modify: `elysper-web/src/pages/ChatPage.tsx`
+- Create: `elysper-web/src/components/chat/ApprovalCard.tsx`
+- Create: `elysper-web/src/components/chat/SteerChip.tsx`
+- Create: `elysper-web/src/components/chat/CompactionMarker.tsx`
 
 **Interfaces:**
 - Consumes: `follow` baseline + delta frames; `resume`; `delivery`.
@@ -936,7 +936,7 @@ Insert a timeline marker with the summary and shadowed range; footer shows sessi
 Run:
 
 ```bash
-cd synthia-web && npm run build
+cd elysper-web && npm run build
 make check-web
 ```
 
@@ -945,7 +945,7 @@ Then use Playwright MCP to walk the acceptance script A–G. No test files are a
 - [ ] **Step 7: Commit**
 
 ```bash
-git add synthia-web
+git add elysper-web
 git commit -m "feat(web): follow baseline, approval card, steer states, compaction marker"
 ```
 

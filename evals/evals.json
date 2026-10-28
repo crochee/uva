@@ -1,0 +1,25 @@
+{
+  "suite": "pr-description-from-diff",
+  "limits": {
+    "max_cases": 20,
+    "max_wall_seconds": 120,
+    "max_output_bytes": 8000
+  },
+  "tasks": [
+    {
+      "id": "t01-json-flag",
+      "diff": "fixtures/t01-json-flag.diff",
+      "facts": ["--json", "CLI"]
+    },
+    {
+      "id": "t02-empty-input-panic",
+      "diff": "fixtures/t02-empty-input-panic.diff",
+      "facts": ["empty input", "panic"]
+    },
+    {
+      "id": "t03-log-env-rename",
+      "diff": "fixtures/t03-log-env-rename.diff",
+      "facts": ["ELYSPER_LOG", "ELYSPER_LOG_LEVEL"]
+    }
+  ]
+}

@@ -706,6 +706,806 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
+name = "elysper"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-attachment",
+ "elysper-budget",
+ "elysper-context",
+ "elysper-core",
+ "elysper-eval",
+ "elysper-harness",
+ "elysper-harness-tokio",
+ "elysper-hpc-batch",
+ "elysper-macros",
+ "elysper-mcp",
+ "elysper-plugin-host",
+ "elysper-plugin-protocol",
+ "elysper-provider",
+ "elysper-reflection",
+ "elysper-resilience",
+ "elysper-scheduler",
+ "elysper-search",
+ "elysper-semantic-cache",
+ "elysper-session",
+ "elysper-skill",
+ "elysper-steering",
+ "elysper-strategy-best-of-n",
+ "elysper-strategy-cot",
+ "elysper-strategy-plan-execute",
+ "elysper-telemetry",
+ "elysper-test-support",
+ "elysper-tool",
+ "elysper-tool-memo",
+ "elysper-tool-read",
+ "elysper-tool-scheduler",
+ "elysper-tool-search",
+ "elysper-tool-shell",
+ "elysper-tool-task",
+ "elysper-tool-todo",
+ "elysper-tool-web",
+ "elysper-tool-write",
+ "elysper-workflow",
+ "futures",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-attachment"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "hex",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "elysper-budget"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-context"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-session",
+ "futures",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "elysper-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "ulid",
+]
+
+[[package]]
+name = "elysper-eval"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-harness"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-context",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-session",
+ "elysper-steering",
+ "elysper-telemetry",
+ "elysper-test-support",
+ "elysper-tool",
+ "elysper-tool-read",
+ "elysper-tool-shell",
+ "elysper-tool-todo",
+ "elysper-tool-write",
+ "futures",
+ "hex",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-harness-tokio"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-tool",
+ "futures",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-hpc-batch"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-search",
+ "futures",
+ "parking_lot",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-macros"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-macros",
+ "elysper-tool",
+ "proc-macro2",
+ "quote",
+ "schemars",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-tool",
+ "futures",
+ "hex",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "elysper-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "elysper-core",
+ "elysper-mcp",
+ "elysper-provider",
+ "elysper-scheduler",
+ "elysper-search",
+ "elysper-tool",
+ "elysper-tool-read",
+ "elysper-tool-scheduler",
+ "elysper-tool-search",
+ "elysper-tool-shell",
+ "elysper-tool-todo",
+ "elysper-tool-web",
+ "elysper-tool-write",
+ "futures",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-plugin-host"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-context",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-plugin-protocol",
+ "elysper-provider",
+ "elysper-session",
+ "elysper-steering",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "elysper-plugin-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "elysper-provider"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "elysper-core",
+ "elysper-telemetry",
+ "futures",
+ "parking_lot",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "elysper-reflection"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-context",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-steering",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-resilience"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-scheduler"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cron",
+ "elysper-core",
+ "futures",
+ "libc",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
+name = "elysper-search"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "futures",
+ "hnsw_rs",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-semantic-cache"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-search",
+ "elysper-test-support",
+ "hex",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "dashmap",
+ "dotenvy",
+ "elysper",
+ "elysper-server",
+ "futures",
+ "hex",
+ "http-body-util",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "prometheus",
+ "redis",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http 0.7.1",
+ "tracing",
+ "uuid",
+ "validator",
+]
+
+[[package]]
+name = "elysper-session"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-provider",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
+name = "elysper-skill"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-tool",
+ "futures",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-steering"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-context",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-telemetry",
+ "futures",
+ "parking_lot",
+ "regex",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-strategy-best-of-n"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-context",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-session",
+ "elysper-test-support",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-strategy-cot"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-context",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-session",
+ "elysper-test-support",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-strategy-plan-execute"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-context",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-session",
+ "elysper-steering",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-telemetry"
+version = "0.1.0"
+dependencies = [
+ "elysper-core",
+ "futures",
+ "lazy_static",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry-semantic-conventions",
+ "opentelemetry_sdk",
+ "parking_lot",
+ "prometheus",
+ "tempfile",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-tool"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-provider",
+ "elysper-telemetry",
+ "elysper-test-support",
+ "futures",
+ "parking_lot",
+ "schemars",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "elysper-tool-memo"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "blake3",
+ "chrono",
+ "elysper-core",
+ "elysper-tool",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-tool-read"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-tool",
+ "schemars",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-tool-scheduler"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "elysper-scheduler",
+ "elysper-tool",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "elysper-tool-search"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-search",
+ "elysper-tool",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-tool-shell"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-provider",
+ "elysper-tool",
+ "libc",
+ "schemars",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-tool-task"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-test-support",
+ "elysper-tool",
+ "futures",
+ "opentelemetry",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+]
+
+[[package]]
+name = "elysper-tool-todo"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-provider",
+ "elysper-tool",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-tool-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-core",
+ "elysper-tool",
+ "reqwest",
+ "schemars",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "elysper-tool-write"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "elysper-tool",
+ "schemars",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "elysper-workflow"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-core",
+ "futures",
+ "hex",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2811,827 +3611,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "synthia"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde_json",
- "synthia-attachment",
- "synthia-budget",
- "synthia-context",
- "synthia-core",
- "synthia-eval",
- "synthia-harness",
- "synthia-hpc-batch",
- "synthia-macros",
- "synthia-mcp",
- "synthia-plugin-host",
- "synthia-plugin-protocol",
- "synthia-provider",
- "synthia-reflection",
- "synthia-resilience",
- "synthia-safety",
- "synthia-scheduler",
- "synthia-search",
- "synthia-semantic-cache",
- "synthia-session",
- "synthia-skill",
- "synthia-steering",
- "synthia-strategy-best-of-n",
- "synthia-strategy-cot",
- "synthia-strategy-plan-execute",
- "synthia-telemetry",
- "synthia-test-support",
- "synthia-tool",
- "synthia-tool-memo",
- "synthia-tool-read",
- "synthia-tool-scheduler",
- "synthia-tool-search",
- "synthia-tool-shell",
- "synthia-tool-task",
- "synthia-tool-todo",
- "synthia-tool-web",
- "synthia-tool-write",
- "synthia-workflow",
- "tokio",
-]
-
-[[package]]
-name = "synthia-attachment"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "hex",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "synthia-core",
- "synthia-provider",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "synthia-budget"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "synthia-tool",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-context"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "synthia-session",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "synthia-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "futures",
- "parking_lot",
- "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "ulid",
-]
-
-[[package]]
-name = "synthia-eval"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-harness"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "hex",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "synthia-context",
- "synthia-core",
- "synthia-provider",
- "synthia-session",
- "synthia-steering",
- "synthia-telemetry",
- "synthia-test-support",
- "synthia-tool",
- "synthia-tool-read",
- "synthia-tool-shell",
- "synthia-tool-task",
- "synthia-tool-todo",
- "synthia-tool-write",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-harness-tokio"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "synthia-core",
- "synthia-harness",
- "synthia-provider",
- "synthia-tool",
- "tokio",
-]
-
-[[package]]
-name = "synthia-hpc-batch"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "synthia-core",
- "synthia-provider",
- "synthia-search",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-macros"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "proc-macro2",
- "quote",
- "schemars",
- "serde",
- "serde_json",
- "syn 2.0.119",
- "synthia-macros",
- "synthia-tool",
- "tokio",
-]
-
-[[package]]
-name = "synthia-mcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "hex",
- "parking_lot",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "synthia-core",
- "synthia-provider",
- "synthia-tool",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "wiremock",
-]
-
-[[package]]
-name = "synthia-mcp-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "futures",
- "serde_json",
- "synthia-core",
- "synthia-mcp",
- "synthia-provider",
- "synthia-scheduler",
- "synthia-search",
- "synthia-tool",
- "synthia-tool-read",
- "synthia-tool-scheduler",
- "synthia-tool-search",
- "synthia-tool-shell",
- "synthia-tool-todo",
- "synthia-tool-web",
- "synthia-tool-write",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-plugin-host"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-harness",
- "synthia-plugin-protocol",
- "synthia-provider",
- "synthia-session",
- "synthia-steering",
- "synthia-tool",
- "tempfile",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "synthia-plugin-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "synthia-provider"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "futures",
- "parking_lot",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "synthia-core",
- "synthia-telemetry",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "ulid",
- "url",
- "wiremock",
-]
-
-[[package]]
-name = "synthia-reflection"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-context",
- "synthia-core",
- "synthia-provider",
- "synthia-steering",
- "synthia-tool",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-resilience"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "synthia-tool",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-safety"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "synthia",
- "synthia-core",
- "synthia-steering",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-scheduler"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cron",
- "futures",
- "libc",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "synthia-search"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "hnsw_rs",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-semantic-cache"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "hex",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "synthia-core",
- "synthia-provider",
- "synthia-search",
- "synthia-test-support",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "chrono",
- "clap",
- "dashmap",
- "dotenvy",
- "futures",
- "hex",
- "http-body-util",
- "opentelemetry",
- "opentelemetry_sdk",
- "parking_lot",
- "prometheus",
- "redis",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "synthia",
- "synthia-server",
- "tempfile",
- "tokio",
- "toml",
- "tower",
- "tower-http 0.7.1",
- "tracing",
- "uuid",
- "validator",
-]
-
-[[package]]
-name = "synthia-session"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "ulid",
-]
-
-[[package]]
-name = "synthia-skill"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "serde_yaml",
- "synthia-core",
- "synthia-tool",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-steering"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "regex",
- "serde_json",
- "synthia-context",
- "synthia-core",
- "synthia-provider",
- "synthia-telemetry",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-strategy-best-of-n"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "synthia-context",
- "synthia-core",
- "synthia-harness",
- "synthia-provider",
- "synthia-session",
- "synthia-test-support",
- "synthia-tool",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-strategy-cot"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "synthia-context",
- "synthia-core",
- "synthia-harness",
- "synthia-provider",
- "synthia-session",
- "synthia-test-support",
- "synthia-tool",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-strategy-plan-execute"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-context",
- "synthia-core",
- "synthia-harness",
- "synthia-provider",
- "synthia-session",
- "synthia-steering",
- "synthia-tool",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-telemetry"
-version = "0.1.0"
-dependencies = [
- "futures",
- "lazy_static",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry-semantic-conventions",
- "opentelemetry_sdk",
- "parking_lot",
- "prometheus",
- "synthia-core",
- "tempfile",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-test-support"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "synthia-tool",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "synthia-tool"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "parking_lot",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-provider",
- "synthia-telemetry",
- "synthia-test-support",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "synthia-tool-memo"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "blake3",
- "chrono",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-tool",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-tool-read"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "synthia-tool",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "synthia-tool-scheduler"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-scheduler",
- "synthia-tool",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "synthia-tool-search"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-search",
- "synthia-tool",
- "tokio",
-]
-
-[[package]]
-name = "synthia-tool-shell"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "libc",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "synthia-provider",
- "synthia-tool",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "synthia-tool-task"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "opentelemetry",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-harness",
- "synthia-provider",
- "synthia-telemetry",
- "synthia-test-support",
- "synthia-tool",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "ulid",
-]
-
-[[package]]
-name = "synthia-tool-todo"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "schemars",
- "serde",
- "serde_json",
- "synthia-provider",
- "synthia-tool",
- "tokio",
-]
-
-[[package]]
-name = "synthia-tool-web"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "reqwest",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "synthia-core",
- "synthia-tool",
- "tokio",
- "url",
-]
-
-[[package]]
-name = "synthia-tool-write"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "synthia-tool",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "synthia-workflow"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "futures",
- "hex",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2",
- "synthia-core",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "ulid",
 ]
 
 [[package]]

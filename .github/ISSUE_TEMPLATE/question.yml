@@ -13,7 +13,7 @@ body:
     attributes:
       label: 问题
       placeholder: |
-        `synthia-tool-shell` 的 `BwrapBackend` 在 macOS 下是 no-op 吗？
+        `elysper-tool-shell` 的 `BwrapBackend` 在 macOS 下是 no-op 吗？
         我看 `with_sandbox` 在 OS != "linux" 分支返回 None，但 README 没
         写。
     validations:

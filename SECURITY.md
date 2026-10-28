@@ -1,13 +1,13 @@
 # Security Policy
 
-Synthia 项目按 CNCF 社区通行做法处理安全问题：私下报告 + 修复发布 +
+Elysper 项目按 CNCF 社区通行做法处理安全问题：私下报告 + 修复发布 +
 公开披露协调。**请勿在公开 issue / PR / 讨论区披露未修复的安全漏洞。**
 
 ## 支持的版本
 
 | 版本  | 状态                           |
 | :---- | :----------------------------- |
-| 最新 release (`crates/synthia` facade 的 `Cargo.toml` 版本) | **支持** |
+| 最新 release (`crates/elysper` facade 的 `Cargo.toml` 版本) | **支持** |
 | 之前版本 | 不支持 —— 升级到最新 release |
 
 `Cargo.toml` 的 `[workspace.package] version` 是单一真源；发布 tag 与
@@ -17,12 +17,12 @@ Synthia 项目按 CNCF 社区通行做法处理安全问题：私下报告 + 修
 ## 报告漏洞
 
 通过 GitHub 的
-[私有漏洞报告](https://github.com/crochee/synthia/security/advisories/new)
+[私有漏洞报告](https://github.com/crochee/elysper/security/advisories/new)
 提交；若不可用，联系维护者（见 [MAINTAINERS.md](MAINTAINERS.md)）。
 
 报告里请包含：
 
-- 受影响版本 / commit（`Cargo.lock` 中的 `synthia` 系列 entry 即可）；
+- 受影响版本 / commit（`Cargo.lock` 中的 `elysper` 系列 entry 即可）；
 - 复现步骤或 PoC（最小化的 `cargo` 命令 / 模型请求片段 / 配置文件均可）；
 - 影响面评估（执行能力？数据外泄？拒绝服务？）；
 - 你倾向的披露时间表。
@@ -32,9 +32,9 @@ Synthia 项目按 CNCF 社区通行做法处理安全问题：私下报告 + 修
 
 ## 威胁模型
 
-Synthia 是一个**运行时无关的 Rust AI Agent 框架**，核心通过
-[`synthia_core::CancelToken`](crates/synthia-core/src/cancel.rs) 与
-[`synthia_core::spawn::Spawner`](crates/synthia-core/src/spawn.rs)
+Elysper 是一个**运行时无关的 Rust AI Agent 框架**，核心通过
+[`elysper_core::CancelToken`](crates/elysper-core/src/cancel.rs) 与
+[`elysper_core::spawn::Spawner`](crates/elysper-core/src/spawn.rs)
 抽象把工具 / 模型 / 调度逻辑与宿主运行时隔开。范围内外的判定与
 `AGENTS.md` §3.7 的"可作为 lib"原则保持一致。
 
@@ -42,25 +42,25 @@ Synthia 是一个**运行时无关的 Rust AI Agent 框架**，核心通过
 
 - 公开 API 中**可观察**的内存安全 / 数据完整性缺陷（崩溃、use-after-free
   、越权写入、任意代码执行路径）；
-- `synthia-tool-shell` 的 `ShellCommands.json` 等配置文件解析路径的
-  panic / 无界资源消耗（`synthia-tool-shell::sandbox` 是 OS 执行策略
+- `elysper-tool-shell` 的 `ShellCommands.json` 等配置文件解析路径的
+  panic / 无界资源消耗（`elysper-tool-shell::sandbox` 是 OS 执行策略
   的单一收口，`AGENTS.md` §3.7）；
-- 公开 crate 暴露的 HTTP / IPC 表面（如 `synthia-server` 的 axum 路由、
-  `synthia-mcp` 的 MCP transport）的拒绝服务 / 注入；
+- 公开 crate 暴露的 HTTP / IPC 表面（如 `elysper-server` 的 axum 路由、
+  `elysper-mcp` 的 MCP transport）的拒绝服务 / 注入；
 - 凭据 / 密钥在源代码、release artifact、文档、CI 日志里的泄漏。
 
 ### 范围外（设计使然，文档已声明）
 
 - 宿主应用把 `Arc<ModelProvider>` 装到 `ReActAgent::new(provider, …)`
-  之后，由该 provider 自身的能力边界决定 —— Synthia 不替宿主裁决
+  之后，由该 provider 自身的能力边界决定 —— Elysper 不替宿主裁决
   "是否应该让模型执行 X"，`AGENTS.md` §3.7 的"七大组件每一件都是
   可换的 trait + 默认实现"是这一点的设计依据；
 - 上游依赖（`reqwest` / `axum` / `tokio` / 模型 SDK）的漏洞 —— 请同时
   向上游报告；
-- 模型输出内容的"安全性"（prompt injection / 模型行为对齐）—— Synthia
-  把这层视作宿主责任，提供 `synthia-steering` 的 `Guard` / `Hint` /
+- 模型输出内容的"安全性"（prompt injection / 模型行为对齐）—— Elysper
+  把这层视作宿主责任，提供 `elysper-steering` 的 `Guard` / `Hint` /
   `Hook` 机制让宿主接入，但不在框架内做对齐；
-- 配置文件（如 `config.yaml`）由宿主应用解释 —— Synthia 不解析它。
+- 配置文件（如 `config.yaml`）由宿主应用解释 —— Elysper 不解析它。
 
 ## 凭据与密钥
 
@@ -80,7 +80,7 @@ Synthia 是一个**运行时无关的 Rust AI Agent 框架**，核心通过
 
 ## CVE 编号与公开披露协调
 
-Synthia 项目按 [CNCF Security](https://github.com/cncf/tag-security) +
+Elysper 项目按 [CNCF Security](https://github.com/cncf/tag-security) +
 [GitHub Advisory Database](https://github.com/advisories) 的流程处理：
 
 1. **CVE / GHSA 编号**：通过 GitHub 私有漏洞报告提交后，维护者负责与
@@ -89,7 +89,7 @@ Synthia 项目按 [CNCF Security](https://github.com/cncf/tag-security) +
    CVE Numbering Authority（CNA）授权。编号由维护者持有，**不**对
    报告者可见直至公开披露。
 2. **修复发布**：GHSA / CVE 编号在补丁随 release tag 发布后同步
-   公开；release notes 引述 GHSA 链接（`https://github.com/crochee/synthia/security/advisories/GHSA-…`）。
+   公开；release notes 引述 GHSA 链接（`https://github.com/crochee/elysper/security/advisories/GHSA-…`）。
 3. **公开披露时间线**：与报告者协商，默认 **90 天**（与 Google
    Project Zero 等业界共识一致）。如需推迟或加速，提供理由。
 4. **致谢名单**：披露时显式列出报告者（除非要求匿名），含修复版本

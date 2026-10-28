@@ -124,7 +124,7 @@ jobs:
           #   - the public docs/QUICKSTART.md example key block.
           # Everything else reports and fails the build.
           [allowlist]
-          description = "Synthia v0.1.0 — per-path allowlist for non-production fixtures"
+          description = "Elysper v0.1.0 — per-path allowlist for non-production fixtures"
           paths = [
             # Test fixtures: only files inside a `test` or `fixture`
             # directory tree; the rule still flags any high-entropy

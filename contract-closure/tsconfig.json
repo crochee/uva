@@ -12,5 +12,10 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["contract-closure/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "lib/**/*.ts",
+    "test/**/*.ts",
+    "*.ts",
+    "__fixtures__/**/*.ts"
+  ]
 }

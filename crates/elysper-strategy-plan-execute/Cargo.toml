@@ -1,0 +1,44 @@
+[package]
+name = "elysper-strategy-plan-execute"
+description = "Plan-and-Execute reasoning strategy: decompose the prompt into numbered steps, run each step through the model's tool loop, re-plan between iterations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+elysper-core.workspace = true
+elysper-harness.workspace = true
+elysper-context.workspace = true
+elysper-provider = { workspace = true, default-features = false }
+elysper-tool.workspace = true
+elysper-steering.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+default = []
+# Reserved name: the harness has no `safety` feature (its scan
+# points are always-on, wired by the consumer); the flag is kept
+# so downstream feature graphs that mention it still resolve.
+safety = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+chrono.workspace = true
+elysper-context.workspace = true
+# The session's writer, for the test that reads back the rows a run
+# leaves in the log. Dev-only: the production dependency graph is
+# unchanged.
+elysper-session.workspace = true

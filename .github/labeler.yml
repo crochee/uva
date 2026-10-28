@@ -8,25 +8,25 @@
 # 命中规则从上到下; 先命中先生效.
 
 # ── 路径驱动 ────────────────────────────────────────────────────────────
-"area: crates/synthia-core":
+"area: crates/elysper-core":
   - files:
-      - "crates/synthia-core/**"
+      - "crates/elysper-core/**"
 
-"area: crates/synthia-harness":
+"area: crates/elysper-harness":
   - files:
-      - "crates/synthia-harness/**"
+      - "crates/elysper-harness/**"
 
-"area: crates/synthia-tool":
+"area: crates/elysper-tool":
   - files:
-      - "crates/synthia-tool/**"
+      - "crates/elysper-tool/**"
 
-"area: crates/synthia-server":
+"area: crates/elysper-server":
   - files:
-      - "crates/synthia-server/**"
+      - "crates/elysper-server/**"
 
-"area: synthia-web":
+"area: elysper-web":
   - files:
-      - "synthia-web/**"
+      - "elysper-web/**"
 
 "area: docs":
   - files:
@@ -56,61 +56,61 @@
 # ── 路径驱动 (按主题) ─────────────────────────────────────────────────
 provider:
   - files:
-      - "crates/synthia-provider/**"
+      - "crates/elysper-provider/**"
 
 tool:
   - files:
-      - "crates/synthia-tool-*/**"
+      - "crates/elysper-tool-*/**"
 
 search:
   - files:
-      - "crates/synthia-search/**"
-      - "crates/synthia-tool-search/**"
+      - "crates/elysper-search/**"
+      - "crates/elysper-tool-search/**"
 
 scheduler:
   - files:
-      - "crates/synthia-scheduler/**"
-      - "crates/synthia-tool-scheduler/**"
+      - "crates/elysper-scheduler/**"
+      - "crates/elysper-tool-scheduler/**"
 
 workflow:
   - files:
-      - "crates/synthia-workflow/**"
+      - "crates/elysper-workflow/**"
 
 mcp:
   - files:
-      - "crates/synthia-mcp/**"
+      - "crates/elysper-mcp/**"
 
 telemetry:
   - files:
-      - "crates/synthia-telemetry/**"
+      - "crates/elysper-telemetry/**"
 
 session:
   - files:
-      - "crates/synthia-session/**"
+      - "crates/elysper-session/**"
 
 context:
   - files:
-      - "crates/synthia-context/**"
+      - "crates/elysper-context/**"
 
 steering:
   - files:
-      - "crates/synthia-steering/**"
+      - "crates/elysper-steering/**"
 
 attachment:
   - files:
-      - "crates/synthia-attachment/**"
+      - "crates/elysper-attachment/**"
 
 eval:
   - files:
-      - "crates/synthia-eval/**"
+      - "crates/elysper-eval/**"
 
 macros:
   - files:
-      - "crates/synthia-macros/**"
+      - "crates/elysper-macros/**"
 
 skill:
   - files:
-      - "crates/synthia-skill/**"
+      - "crates/elysper-skill/**"
 
 # ── 标题驱动 (Conventional Commits) ─────────────────────────────────
 "type: feature":

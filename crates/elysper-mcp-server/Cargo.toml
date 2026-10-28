@@ -1,0 +1,61 @@
+[package]
+name = "elysper-mcp-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT"
+description = "stdio MCP server exposing elysper's plugin-brick tools; spawnable by any MCP client (e.g. pi)"
+readme = "README.md"
+
+# This crate ships an executable binary and the library it wraps.
+# The binary speaks MCP over stdio, so a foreign MCP client (the pi
+# coding agent, a Claude Code plugin, …) can launch
+# `elysper-mcp-server` as a subprocess and immediately have the full
+# `read` / `write` / `shell` / `todo` / `web_fetch` / `schedule` /
+# `search` / `elysper` tool surface under its existing JSON-RPC
+# stack — no Rust in the caller's process. A consumer that wants the
+# transport itself links the library and drives `run` over its own
+# reader and writer.
+#
+# The wire side is delegated to `elysper-mcp` (the loopback transport
+# + the in-process server core), so a successful call here is also
+# a successful end-to-end proof of those seams.
+
+[[bin]]
+name = "elysper-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+# Stdio transport + the protocol types (`McpClient`, naming policy,
+# loopback / in-process server) all live in elysper-mcp. Default
+# features: HTTP transport is gated behind a flag, so a default
+# build here still ships no `reqwest` dependency.
+elysper-mcp.workspace = true
+# The plugin-brick tool crates this binary registers into the
+# in-process registry. `tool-web` is the only one that needs an HTTP
+# client — it carries `reqwest` (its own dep, not this crate's).
+elysper-core.workspace = true
+elysper-provider.workspace = true
+elysper-tool.workspace = true
+elysper-tool-read.workspace = true
+elysper-tool-write.workspace = true
+elysper-tool-shell.workspace = true
+elysper-tool-todo.workspace = true
+elysper-tool-web.workspace = true
+elysper-tool-scheduler.workspace = true
+elysper-tool-search.workspace = true
+elysper-scheduler.workspace = true
+elysper-search.workspace = true
+
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "io-util", "io-std", "sync", "process"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+anyhow.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+# Integration tests need the stdio transport factory to spawn the
+# binary under test; tokio lives only on the test side.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-util", "io-std", "sync", "process", "time"] }
+tempfile.workspace = true

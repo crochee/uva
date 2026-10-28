@@ -163,11 +163,11 @@ jobs:
           node-version: 20
           cache: npm
           # The single frontend lock (R72 consolidated four into this
-          # one; `synthia-web` is no longer an npm workspace member).
-          cache-dependency-path: synthia-web/package-lock.json
+          # one; `elysper-web` is no longer an npm workspace member).
+          cache-dependency-path: elysper-web/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: synthia-web
+        working-directory: elysper-web
         run: npm ci
 
       # No browser needed: AGENTS.md §4 requires 0 lint and formatting,

@@ -54,6 +54,20 @@ export interface Endpoint {
   notes?: string;
   sse_events?: SseEventSpec[];
   status?: EndpointStatus;
+  /**
+   * Whether the web client in `elysper-web` calls this endpoint.
+   *
+   * `false` marks an endpoint the backend serves on purpose for a
+   * consumer that is not this web app — an Anthropic-compatible
+   * client, an ops probe, the attachment store's own API. Such an
+   * endpoint is not contract drift: the check compares the two sides
+   * of the *web* contract, and a deliberately web-free endpoint has
+   * no frontend call to pair with.
+   *
+   * The flag is curated in `docs/interface-contract/contract.yaml` and
+   * survives a re-scan (the scanner preserves hand-written entries).
+   */
+  frontend_consumed?: boolean;
 }
 
 export interface ContractFile {

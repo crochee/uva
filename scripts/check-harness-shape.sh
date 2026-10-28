@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Harness shape gate: no `synthia-harness` production function may exceed the
+# Harness shape gate: no `elysper-harness` production function may exceed the
 # length / nesting budget in `scripts/harness-shape/clippy.toml`.
 #
 # Why this exists (R122): `clippy.toml` has always set
@@ -12,7 +12,7 @@
 # this codebase actually holds are **flat nesting** and **short functions**;
 # these two lints are what clippy's docs recommend in place of the inert one.
 #
-# Scoped to `synthia-harness`'s production code on purpose: the rest of the
+# Scoped to `elysper-harness`'s production code on purpose: the rest of the
 # workspace has long functions this round did not touch, and making those
 # hard errors would be an unrequested refactor. The scoping is why the
 # thresholds live in their own `clippy.toml` (see that file) rather than the
@@ -47,14 +47,14 @@ fi
 
 # cargo does NOT fingerprint clippy.toml, so a threshold change alone would
 # replay a cached verdict. Touching the crate root forces a real re-lint.
-touch crates/synthia-harness/src/lib.rs
+touch crates/elysper-harness/src/lib.rs
 
 report=$(mktemp)
 trap 'rm -f "$report"' EXIT
 
 set +e
 CLIPPY_CONF_DIR="$conf_dir" \
-  cargo clippy -p synthia-harness --lib --all-features -- \
+  cargo clippy -p elysper-harness --lib --all-features -- \
   -W clippy::too_many_lines \
   -W clippy::excessive_nesting \
   >"$report" 2>&1
@@ -67,7 +67,7 @@ set -e
 # nothing to report, and a shape-only check would pass vacuously on a broken
 # tree.
 if [[ $status -ne 0 ]]; then
-  echo "FAIL: 'cargo clippy -p synthia-harness --lib' exited $status" >&2
+  echo "FAIL: 'cargo clippy -p elysper-harness --lib' exited $status" >&2
   echo "      the shape budget cannot be evaluated on a tree that does not build:" >&2
   grep -E '^error(\[|:)' "$report" | head -5 >&2 || true
   exit 1
@@ -77,14 +77,14 @@ fi
 # many lines". Match the message, then keep only the location lines that
 # point into the crate's production sources.
 sites=$(grep -A3 -E 'is too nested|has too many lines' "$report" \
-  | grep -E '^\s+--> crates/synthia-harness/src/' || true)
+  | grep -E '^\s+--> crates/elysper-harness/src/' || true)
 
 if [[ -n "$sites" ]]; then
-  echo "FAIL: synthia-harness production code broke the harness shape budget"
+  echo "FAIL: elysper-harness production code broke the harness shape budget"
   echo "      (max $line_limit lines, max $nest_limit nesting levels)"
   echo "$sites"
   echo "Extract a named helper — each location above names the function."
   exit 1
 fi
 
-echo "OK: no synthia-harness production fn exceeds $line_limit lines or nesting $nest_limit"
+echo "OK: no elysper-harness production fn exceeds $line_limit lines or nesting $nest_limit"

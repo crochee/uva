@@ -1,0 +1,32 @@
+[package]
+name = "elysper-test-support"
+description = "Test-only fakes and stubs for elysper (FakeProvider, etc.) — the in-process test surface consumers reuse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+elysper-core.workspace = true
+elysper-provider.workspace = true
+elysper-tool.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# `sync` = the fake provider's channel/mutex; the fakes never spawn
+# and never touch the filesystem. `time` = `ReplayProvider`'s optional
+# `pace`, which sleeps between replayed chunks — the lib compiles
+# without a caller supplying a timer, so the feature must be declared
+# here rather than left to whichever consumer enables it.
+tokio = { workspace = true, features = ["sync", "time"] }
+futures.workspace = true
+
+[dev-dependencies]
+# The `replay_provider` example drives a run with `#[tokio::main]`.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

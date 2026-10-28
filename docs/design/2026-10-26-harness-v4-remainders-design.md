@@ -32,11 +32,11 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 ## 3. 非目标
 
 - **不新增能力。** 本轮不引入新工具、新协议字段、新 provider。
-- **不给 harness 加 re-export。** `Spawner` / `ModelProvider` / `Tool` 不从 `synthia-harness` 转出 ——
+- **不给 harness 加 re-export。** `Spawner` / `ModelProvider` / `Tool` 不从 `elysper-harness` 转出 ——
   理由不是会加依赖（harness 本来就依赖 core/provider/tool），而是：被承诺的那张面应该是 harness 自己的面，而它零运行时的承诺不应该被别的 crate 的 feature 集绑住。改文档（见 G 项）。
 - **不给旧会话日志做迁移。** 见 §5 的"我的决定"。
 - **不冻结 server 的 HTTP 表面。** `/api/v1` 的 URL 本身就是版本；冻结清单只覆盖库 crate 的精选公开面。
-- **不改插件协议的 wire。** `synthia-plugin-protocol` 的方法集与能力协商本轮不动。
+- **不改插件协议的 wire。** `elysper-plugin-protocol` 的方法集与能力协商本轮不动。
 
 ## 4. 反目标（做到这些也仍然算失败）
 
@@ -53,7 +53,7 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 来自仓库既有规范（`AGENTS.md`）与本分支已建立的基线：
 
 - 库用 `thiserror`、应用用 `anyhow`；`max_width = 80`；禁通配符导入。
-- `synthia-harness` 不得有 `[features]`，闭包内不得出现 tokio，库的公开面不得出现运行时类型
+- `elysper-harness` 不得有 `[features]`，闭包内不得出现 tokio，库的公开面不得出现运行时类型
   （`make check-no-runtime` / `make check-harness-features` / `make check-public-api-runtime`）。
 - harness 私有项的 `///` 预算**正好 50/50**（`make check-harness-docs`）—— 新增任何一行都要先删一行。
 - 公开面已有的两条门禁是本轮冻结清单的落脚点：`make check-pub-surface`（禁 glob re-export）、
@@ -69,7 +69,7 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 1. **日志格式不做向后迁移。** crate 还在 0.1，老会话日志数量有限；迁移代码比"重开一个会话"更容易出新
    bug。本轮把"格式变了、老日志不保证"写在明处。版本号**现在就埋**（G2），所以以后再改格式有路可走。
 2. **公开 API 冻结只覆盖库 crate 的精选面**（外部能写下的那些名字），**不覆盖深路径**。具体到
-   `synthia-harness` 是那 **59 个** 精选名字；走深路径才够得着的另外 **64 个** `pub` 名
+   `elysper-harness` 是那 **60 个** 精选名字；走深路径才够得着的另外 **64 个** `pub` 名
    **不在承诺内**，将来可动。不冻结 server 的 HTTP 面（`/api/v1` 的 URL 本身就是版本）。
 3. **冻结清单的形态是"人可读的承诺 + 机器可读的门禁"两份**，不是一份。承诺写进文档并说明变更流程；
    门禁是脚本，失败信息直接指向"你新增了哪个公开名"。
@@ -89,10 +89,10 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 
 | 事实 | 出处 | 对计划的影响 |
 |---|---|---|
-| `schema_version` 在**文件头行**的 `_meta` 里，一个文件一个；无头的旧文件按 v0 读 | `synthia-session/src/jsonl.rs:104,117` | 版本号是文件级，不是行级；混版本文件在打开时就能发现 |
+| `schema_version` 在**文件头行**的 `_meta` 里，一个文件一个；无头的旧文件按 v0 读 | `elysper-session/src/jsonl.rs:104,117` | 版本号是文件级，不是行级；混版本文件在打开时就能发现 |
 | v1 日志**本轮不迁移**；读端对旧版本**明确拒绝**（v0/v1 都拒），只有"比 2 新"才走另一条理由的同类错误 | 维护者已定："以后改格式有明确的兼容路径，而不是重开日志" + 拒绝旧版本 | 版本号的存在意义就在这显出来；代价是现存 v1 会话打不开、仓库 fixture 要重造 |
-| 行的 `seq` 在**入队时**就分配并盖戳（`alloc_seq` → `stamp`），spill 里保留 `StampedRow { seq, value }` | `synthia-session/src/writer/mod.rs:302,459` | **A 不需要改格式**：重试认的就是那个已盖戳的 `seq`。只有 C 改行形状（assistant 行多一个 ledger key），所以只有 C 升版本 |
-| `spawn_gates`（`state/app_state/mod.rs:135`）与 session controller（`session/controller/`）**同在 `synthia-server`** | 仓库现状 | **E 是本 crate 内的局部改动**，不跨 crate 边界，不动任何库 crate 的公开面 |
+| 行的 `seq` 在**入队时**就分配并盖戳（`alloc_seq` → `stamp`），spill 里保留 `StampedRow { seq, value }` | `elysper-session/src/writer/mod.rs:302,459` | **A 不需要改格式**：重试认的就是那个已盖戳的 `seq`。只有 C 改行形状（assistant 行多一个 ledger key），所以只有 C 升版本 |
+| `spawn_gates`（`state/app_state/mod.rs:135`）与 session controller（`session/controller/`）**同在 `elysper-server`** | 仓库现状 | **E 是本 crate 内的局部改动**，不跨 crate 边界，不动任何库 crate 的公开面 |
 | "旧 park 行" = `SessionEvent::ParkedPrompt` 在 `park_id` 存在之前写的行（`park_id: String` 见 `events.rs:653`，消费方是 `ParkConsumed`，`events.rs:674`） | 仓库现状 | H 的范围确定：这些行只能按序号认，是"弃用 + 明说"还是"补一个升级过程" |
 | `make test-crates` = 逐 crate 跑 `cargo test -p <crate> -q`（默认 feature，**含 doctest**），无 feature 矩阵 | `Makefile` | F 的判据明确；把它加进 `make ci` 是一行 |
 
@@ -113,7 +113,7 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 
 ```
 第一波（改格式）   C 压缩写 durable 事件  →  A writer 不重复写行
-        │                       同一批：synthia-session 的 writer + ledger
+        │                       同一批：elysper-session 的 writer + ledger
         ▼
 第二波（语义，可并行） B awaiting_approval 不吞错
                         D stale_resume 拆成三个码
@@ -189,7 +189,7 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 - 冻结清单的**具体名字**、承诺的**版本口径**、门禁脚本的**落点与失败信息格式**。
 - 交接面三份的**篇幅与位置**（哪些进 crate README、哪些进 `docs/`、哪些进 `MINIMAL.md`）。
 - F 四个 crate 的**根因修法**（`tokio::time` feature、过期 doctest 签名、doctest 参数个数与 feature
-  各不相同；`synthia-resilience` 与 `synthia-tool-memo` 是同一个错，别的 crate 可能还有同类）。
+  各不相同；`elysper-resilience` 与 `elysper-tool-memo` 是同一个错，别的 crate 可能还有同类）。
 - 验收记录**怎么补**：现有那份是"一次运行的机械记录"，本轮要变成"按项列出的收口记录"。
 
 ## 8. 明确的未知
@@ -207,6 +207,6 @@ harness v4 的重构本身已经做完并通过验收（依赖计数 0/0/0，`ma
 | F（四个 crate 在 master 上就红） | 也在这轮做，但**单独成波、单独有门禁** | 它和 harness 无关，混进重构 diff 里最容易被漏看 |
 | 这一轮的定位 | **交出去 + 补齐"基座"该有的承诺**（公开 API 冻结、格式版本化、交接面） | 冻结意味着以后想改公开面要先改承诺 |
 | 日志格式向后迁移 | **不迁移**；版本号现在就埋，以后改格式有路 | 现存 v1 会话在本轮之后打不开（见 §6.3 的后果） |
-| 公开 API 冻结锁到哪一层 | **只锁精选面**（harness 59 个名字）；深路径不承诺 | 用深路径的人没有预告 |
+| 公开 API 冻结锁到哪一层 | **只锁精选面**（harness 60 个名字）；深路径不承诺 | 用深路径的人没有预告 |
 | 老日志（v0/v1）怎么读 | **明确拒绝**，报可操作的错误；不尽力读 | 现存会话立刻打不开，仓库 fixture 要重造，验收要重跑 |
 

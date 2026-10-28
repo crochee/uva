@@ -1,6 +1,6 @@
-# Synthia .dockerignore — exhaustive list, mirrors the build
+# Elysper .dockerignore — exhaustive list, mirrors the build
 # context's actual needs (Cargo + Cargo.lock + crates/ +
-# config.yaml + nginx.conf + synthia-web/) and nothing else.
+# config.yaml + nginx.conf + elysper-web/) and nothing else.
 #
 # Anything not listed here gets shipped to the daemon when a
 # `docker build` starts, which inflates the build context to many
@@ -23,10 +23,10 @@ target/
 
 # ---- Node / web build artefacts ----
 **/node_modules
-synthia-web/node_modules
-synthia-web/dist
-synthia-web/tsconfig.tsbuildinfo
-synthia-web/.vite
+elysper-web/node_modules
+elysper-web/dist
+elysper-web/tsconfig.tsbuildinfo
+elysper-web/.vite
 contract-closure/node_modules
 contract-closure/dist
 
@@ -46,7 +46,7 @@ server.local.*
 .dev/
 .omc/
 .omp/
-.synthia/
+.elysper/
 .trae/
 .worktrees/
 .attachments/

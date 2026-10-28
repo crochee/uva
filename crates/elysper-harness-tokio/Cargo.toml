@@ -1,0 +1,45 @@
+[package]
+name = "elysper-harness-tokio"
+description = "Tokio-backed Spawner implementation for elysper-harness; opt-in companion crate that bridges the runtime-neutral agent loop onto a tokio executor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+# `elysper-core` is the only lib dependency: the adapter implements
+# the runtime-neutral `Spawner` trait and needs nothing from the
+# harness itself. The harness types appear only in docs, examples,
+# and rustdoc prose — all dev-side.
+elysper-core = { workspace = true }
+# `rt` provides the runtime handle behind `tokio::spawn` and the
+# blocking pool behind `tokio::task::spawn_blocking`; `time` provides
+# `tokio::time::sleep` for `TokioSleeper`. The crate avoids `full` so
+# a build of this crate never pulls `tokio::process` / `tokio::fs` /
+# `tokio::net`.
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+# The example composes a real `ReActAgent` with this spawner; the
+# lib itself never imports the harness.
+elysper-harness = { workspace = true }
+# The example uses `#[tokio::main]` to spin a runtime the spawner
+# can attach to; the seam tests use `#[tokio::test]`,
+# `tokio::sync::oneshot`, and `tokio::time::sleep` to hold a future
+# unpolled.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+# `Stream::next` over the agent event stream.
+futures.workspace = true
+# `#[async_trait]` for the scripted provider.
+async-trait.workspace = true
+# The scripted provider / tool registry the example composes.
+elysper-provider.workspace = true
+elysper-tool.workspace = true
+
+[[example]]
+name = "tokio_spawner"

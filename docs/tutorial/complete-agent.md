@@ -1,6 +1,6 @@
-# 从空仓库到完整对话：synthia-server + synthia-web 教程
+# 从空仓库到完整对话：elysper-server + elysper-web 教程
 
-本教程从一个新 clone 开始，启动 `synthia-server` 与 `synthia-web`，配置 provider，
+本教程从一个新 clone 开始，启动 `elysper-server` 与 `elysper-web`，配置 provider，
 然后按 A–G 剧本走完一次完整的 agent 对话，并用**日志**核对每一步真的发生了。
 文末的「验收记录」是这条路径的实测表。
 
@@ -8,7 +8,7 @@
 > 会话日志、附件、skills 都落在它下面，不污染仓库。
 
 ```bash
-export DIR=/tmp/synthia-tutorial
+export DIR=/tmp/elysper-tutorial
 mkdir -p "$DIR"
 ```
 
@@ -34,7 +34,7 @@ mkdir -p "$DIR"
 
 先确认前后端接线。`demo` 是一个回显 provider：它把最后一条用户消息
 原样回显，不调用工具，也不需要网络或 API key。它由
-`crates/synthia-server/src/state/app_state/demo_provider.rs` 提供，
+`crates/elysper-server/src/state/app_state/demo_provider.rs` 提供，
 编译期门控在 `test-utils` feature 后，所以启动时必须带该 feature：
 
 ```bash
@@ -55,7 +55,7 @@ agents:
       Keyless demo agent.
 YAML
 
-cargo run -p synthia-server --features test-utils -- \
+cargo run -p elysper-server --features test-utils -- \
   --directory "$DIR/demo" --config "$DIR/demo/config.yaml"
 ```
 
@@ -63,7 +63,7 @@ cargo run -p synthia-server --features test-utils -- \
 另开终端：
 
 ```bash
-cd synthia-web
+cd elysper-web
 npm ci
 npm run dev -- --port 5173
 ```
@@ -123,12 +123,12 @@ YAML
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo run -p synthia-server -- \
+cargo run -p elysper-server -- \
   --directory "$DIR/real" --config "$DIR/real/config.yaml"
 ```
 
 > 也可以直接用 `make dev-server` / `make dev`：它们跑
-> `cargo run -p synthia-server -- --config config.yaml`，workspace root
+> `cargo run -p elysper-server -- --config config.yaml`，workspace root
 > 是仓库根目录，会话日志落在 `./sessions/`。本教程用 `--directory`
 > 是为了让日志路径稳定、可清理。
 
@@ -162,7 +162,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 
 **动作**
 
-1. 准备一个可读文件：`printf 'synthia tutorial\n' > "$DIR/real/notes.txt"`。
+1. 准备一个可读文件：`printf 'elysper tutorial\n' > "$DIR/real/notes.txt"`。
 2. 打开 <http://localhost:5173/chat>，URL 会自动变成 `/chat/<uuid>`。
 3. 发送：
 
@@ -180,7 +180,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 - 若模型返回 reasoning，消息里有可折叠的 thinking 段。
 - 两个工具卡片按调用顺序出现，运行中显示“运行中/调用中”，结束后
   显示参数与结果（`notes.txt` 内容、目录列表）。
-- 最终文本引用 `synthia tutorial` 和目录列表。
+- 最终文本引用 `elysper tutorial` 和目录列表。
 - 刷新后同一会话从 `follow` 基线**整窗重建**：恰好一条 assistant 回复、
   两个工具块，正文中的同一句话只出现一次，没有“前半段重复”。
 
@@ -246,7 +246,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 
    ```text
    Use the shell tool to run exactly:
-   echo synthia-approval-probe > /tmp/synthia-approval.txt
+   echo elysper-approval-probe > /tmp/elysper-approval.txt
    then report the command's output and exit status.
    ```
 
@@ -304,7 +304,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 2. 杀掉 server（模拟崩溃，不是 Ctrl+C 的优雅退出）：
 
    ```bash
-   pkill -9 -f 'synthia-server.*--directory'
+   pkill -9 -f 'elysper-server.*--directory'
    ```
 
 3. 用 2.2 的同一条命令重启 server，刷新同一个会话页。
@@ -362,7 +362,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 要在一次短会话里亲手看到压缩，**临时**把 `context_window` 调到
 12,000（高于固定提示成本，又能被几轮长回答跨过 11,200 的触发线）；
 不要用 3,000 这类低于固定提示成本的窗口——它会让每一轮都压缩，
-3,000 只作为 `synthia-context` 的回归测试值保留。
+3,000 只作为 `elysper-context` 的回归测试值保留。
 
 **动作**
 
@@ -497,16 +497,16 @@ drop 或 `uninstall()` 就撤销**（只影响后续 dispatch，不打断在途�
 
 ```toml
 [dependencies]
-synthia = { version = "0.1", features = ["provider", "tool", "harness"] }
+elysper = { version = "0.1", features = ["provider", "tool", "harness"] }
 serde_json = "1"
 ```
 
 ```rust,ignore
 use std::sync::Arc;
 
-use synthia::async_trait;
-use synthia::harness::{Host, Plugin, PluginHandle, ReActAgent};
-use synthia::tool::{
+use elysper::async_trait;
+use elysper::harness::{Host, Plugin, PluginHandle, ReActAgent};
+use elysper::tool::{
     Context, ExecutionMode, Risk, Tool, ToolAnnotations, ToolOutput,
     ToolRegistry,
 };
@@ -572,7 +572,7 @@ impl Plugin for LookupPlugin {
 }
 
 fn assemble(
-    provider: Arc<dyn synthia::provider::ModelProvider>,
+    provider: Arc<dyn elysper::provider::ModelProvider>,
 ) -> (ReActAgent, PluginHandle) {
     let mut host = Host::new();
     // 绑定到 agent 时，host 里已经注册的工具进入同一个 registry；
@@ -594,7 +594,7 @@ fn assemble(
   不会覆盖核心工具。
 - **进程内动态加载（`.so` / WASM）不在本仓范围**：静态插件是编译期依赖，
   宿主（例如你自己的服务）在组装 agent 时安装它。需要不重编就能上线的第三方
-  插件，走 §7 的**进程**通道（`synthia-plugin-protocol` + `synthia-plugin-host`），
+  插件，走 §7 的**进程**通道（`elysper-plugin-protocol` + `elysper-plugin-host`），
   那不是加载 `.so`，而是起一个进程说 JSON。
 - 同一个 crate 也可以只做宿主侧的观察：`host.observe(...)` 拿到
   `BeforeTool` / `AfterTool` / `BeforeRequest` 等事件，看到的是只读视图；
@@ -605,7 +605,7 @@ fn assemble(
 ## 6. 写一个静态插件（编译进宿主）
 
 §5 讲的是宿主侧的接缝：`Host` 收注册，`PluginHandle` 拥有它们。本节从
-**空目录**写一个真正的插件 crate，然后把它装进 `synthia-server`。
+**空目录**写一个真正的插件 crate，然后把它装进 `elysper-server`。
 
 静态插件是编译期依赖：换插件要重编宿主。换来的是零 IPC、零握手——工具的
 每次调用都是进程内直调，插件与宿主共享同一个 registry 与同一个错误类型。
@@ -629,9 +629,9 @@ edition = "2021"
 
 [dependencies]
 # 本仓尚未发布到 crates.io。指向本仓的一份 checkout：
-synthia = { path = "/path/to/synthia/crates/synthia" }
+elysper = { path = "/path/to/elysper/crates/elysper" }
 # 发布后写成：
-# synthia = { version = "0.1", features = ["provider", "tool", "harness"] }
+# elysper = { version = "0.1", features = ["provider", "tool", "harness"] }
 serde_json = "1"
 ```
 
@@ -640,9 +640,9 @@ serde_json = "1"
 ```rust,ignore
 use std::sync::Arc;
 
-use synthia::async_trait;
-use synthia::harness::{Host, Plugin, PluginHandle};
-use synthia::tool::{Context, Risk, Tool, ToolAnnotations, ToolOutput};
+use elysper::async_trait;
+use elysper::harness::{Host, Plugin, PluginHandle};
+use elysper::tool::{Context, Risk, Tool, ToolAnnotations, ToolOutput};
 
 /// 一个只读工具：按 id 查一条记录。
 pub struct LookupTool;
@@ -722,7 +722,7 @@ pub fn factory() -> Arc<dyn Plugin> {
 
 ```rust,ignore
 use lookup_plugin::factory;
-use synthia::harness::Host;
+use elysper::harness::Host;
 
 fn main() {
     let mut host = Host::new();
@@ -752,9 +752,9 @@ cargo run -q
 （`Cargo.toml` 里加 `[[bin]] name = "lookup-demo", path = "src/main.rs"`。
 上面的输出是在本仓当前 checkout 上实跑的。）
 
-### 6.3 部署侧：把工厂注册进 synthia-server
+### 6.3 部署侧：把工厂注册进 elysper-server
 
-`synthia-server` 的静态表在 `crates/synthia-server/src/state/app_state/boot.rs`，
+`elysper-server` 的静态表在 `crates/elysper-server/src/state/app_state/boot.rs`，
 出厂是空的：
 
 ```rust,ignore
@@ -763,7 +763,7 @@ let static_plugins = crate::composition::StaticPlugins::new();
 
 一个 fork 要做两件事：
 
-1. 把插件 crate 加进 `crates/synthia-server/Cargo.toml` 的依赖；
+1. 把插件 crate 加进 `crates/elysper-server/Cargo.toml` 的依赖；
 2. 在那一行上注册工厂，`one line per plugin`：
 
 ```rust,ignore
@@ -807,7 +807,7 @@ plugins:
 
 > **未实跑的部分**：6.1/6.2 的代码与输出是在本机实跑的；6.3 的 fork 编译
 > 与启动没跑（需要一个改了 `boot.rs` 的 binary）。`StaticPlugins::register`
-> 到 `Composition` 的这条线由 `synthia-server` 的回归测试覆盖
+> 到 `Composition` 的这条线由 `elysper-server` 的回归测试覆盖
 > （`src/routes/plugins/tests.rs` 用同一张表装了一个静态插件）。
 
 ## 7. 写一个动态插件（任意语言的一个进程）
@@ -831,16 +831,16 @@ plugins:
 5. **`gate` 是提权**。只有 `authority: full` **且**握手声明 `gate` 时才启用；
    声明了 `gate` 但配置没提权，插件看不到任何 gate 请求。
 
-方法集合（来自 `synthia-plugin-protocol` 的 `methods`，字符串不要手写）：
+方法集合（来自 `elysper-plugin-protocol` 的 `methods`，字符串不要手写）：
 
 | 方法 | 宿主发 | 插件回 |
 |---|---|---|
-| `synthia/initialize` | 初始化请求 | `PluginCapabilities`：`{"tools":bool,"observe":bool,"transform":bool,"gate":bool}`，缺省键按 `false` |
-| `synthia/tools/list` | 列表请求 | `ToolSpec` 数组：`{"name","description","input_schema"}`（`input_schema` 是 JSON Schema 对象） |
-| `synthia/tools/call` | `{"name":…,"arguments":{…}}` | 工具结果：字符串就原样作为文本，其他 JSON 就序列化成文本给模型 |
-| `synthia/transform` | 要改写的工具结果 | 改写后的 JSON（`transform` 能力，reduced 也有） |
-| `synthia/event` | `PluginEvent` | 不回（notification，没有 `id`） |
-| `synthia/gate` | 待裁决的调用 | `PluginDecision`（只有 full 权限才出现） |
+| `elysper/initialize` | 初始化请求 | `PluginCapabilities`：`{"tools":bool,"observe":bool,"transform":bool,"gate":bool}`，缺省键按 `false` |
+| `elysper/tools/list` | 列表请求 | `ToolSpec` 数组：`{"name","description","input_schema"}`（`input_schema` 是 JSON Schema 对象） |
+| `elysper/tools/call` | `{"name":…,"arguments":{…}}` | 工具结果：字符串就原样作为文本，其他 JSON 就序列化成文本给模型 |
+| `elysper/transform` | 要改写的工具结果 | 改写后的 JSON（`transform` 能力，reduced 也有） |
+| `elysper/event` | `PluginEvent` | 不回（notification，没有 `id`） |
+| `elysper/gate` | 待裁决的调用 | `PluginDecision`（只有 full 权限才出现） |
 
 ### 7.2 一个 Python 插件（只用标准库）
 
@@ -848,7 +848,7 @@ plugins:
 
 ```python
 #!/usr/bin/env python3
-"""records plugin: synthia-plugin-protocol over stdio."""
+"""records plugin: elysper-plugin-protocol over stdio."""
 
 import json
 import sys
@@ -878,11 +878,11 @@ def call_tool(name, arguments):
 
 def handle(request):
     method = request.get("method")
-    if method == "synthia/initialize":
+    if method == "elysper/initialize":
         return capabilities()
-    if method == "synthia/tools/list":
+    if method == "elysper/tools/list":
         return TOOLS
-    if method == "synthia/tools/call":
+    if method == "elysper/tools/call":
         params = request.get("params") or {}
         return call_tool(params.get("name"), params.get("arguments") or {})
     raise ValueError(f"unknown method {method}")
@@ -894,7 +894,7 @@ def main():
         if not line:
             continue
         request = json.loads(line)
-        # `synthia/event` 是 notification：没有 id，不回。
+        # `elysper/event` 是 notification：没有 id，不回。
         if "id" not in request:
             continue
         try:
@@ -922,9 +922,9 @@ if __name__ == "__main__":
 ```bash
 chmod +x records_plugin.py
 printf '%s\n%s\n%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"synthia/initialize","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"synthia/tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"synthia/tools/call","params":{"name":"records_lookup","arguments":{"id":"r-1"}}}' \
+  '{"jsonrpc":"2.0","id":1,"method":"elysper/initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"elysper/tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"elysper/tools/call","params":{"name":"records_lookup","arguments":{"id":"r-1"}}}' \
   | python3 records_plugin.py
 ```
 
@@ -936,16 +936,16 @@ printf '%s\n%s\n%s\n' \
 {"jsonrpc": "2.0", "id": 3, "result": {"record": "r-1", "body": "(your data here)"}}
 ```
 
-再用真实宿主装一遍（一个临时 crate：依赖 `synthia-harness` +
-`synthia-plugin-host` + `synthia-plugin-protocol` + `synthia-tool` + `futures`，
+再用真实宿主装一遍（一个临时 crate：依赖 `elysper-harness` +
+`elysper-plugin-host` + `elysper-plugin-protocol` + `elysper-tool` + `futures`，
 `futures::executor::block_on` 驱动，无需 tokio）：
 
 ```rust,ignore
 use futures::executor::block_on;
-use synthia_harness::Host;
-use synthia_plugin_host::{Authority, RemotePlugin, RemotePluginConfig, TransportKind};
-use synthia_plugin_protocol::PluginCapabilities;
-use synthia_tool::{Context, Risk};
+use elysper_harness::Host;
+use elysper_plugin_host::{Authority, RemotePlugin, RemotePluginConfig, TransportKind};
+use elysper_plugin_protocol::PluginCapabilities;
+use elysper_tool::{Context, Risk};
 
 let config = RemotePluginConfig {
     name: "records".to_string(),
@@ -1002,6 +1002,13 @@ plugins:
   `reduced`/`full`、`low`/`high`/`unknown`）。
 - `transport: http` 在配置里合法，但当前 host 没有实现这个 transport：
   安装会以 `UnsupportedTransport` 失败，条目进 `skipped`。
+- `call_timeout_ms` 是**每个插件各自**的单次调用上限（毫秒，可省）：省略
+  就是宿主自己的默认值。写它是因为一个插件的慢不该拖垮另一个——每个插件
+  单独计时。超时的**那一次调用**失败，插件本身继续活着：只有插件连自己的
+  输入都不再读（真正卡死）时，宿主才会杀掉进程、关掉这条通道。
+- `risk: unknown`（默认）按**失败关闭**解读：宿主把这个插件的工具按
+  `high` 判风险，所以调用会先被挂起等审批。写明 `low` 或 `high` 才按你
+  写的来。
 
 ### 7.4 观察它
 
@@ -1027,7 +1034,7 @@ curl -s localhost:8080/api/v1/plugins \
 }
 ```
 
-（形状来自 `synthia-server` 的路由回归测试 `routes/plugins/tests.rs`；
+（形状来自 `elysper-server` 的路由回归测试 `routes/plugins/tests.rs`；
 在真机上跑就是同一份 JSON，只是内容取决于你的部署。）
 
 `skipped` 里最常见的一条是"进程起不来"：
@@ -1085,12 +1092,14 @@ turn        { kind: "end", reason: "interrupted" }
    `is_error` 工具结果；
 4. `turn/start` 继续。
 
-校验失败分三种，客户端要做的动作各不相同：token 指向的决定**已经
-应用过**（日志里已有对应的 `approval_decided`）不算失败，返回
-`200 OK`——重试是幂等的，不会变成同一次调用的第二次决定；日志已经
-被推进（`last_seq` 落后或 `pending` 对不上）返回 `409 resume_conflict`，
-客户端重新拉状态、再让用户决定；日志里根本没有请求快照返回
-`409 resume_no_snapshot`，这一轮不能续，建议重开会话。
+resume 的结局分三种，客户端要做的动作各不相同：token 指向的决定**已经
+应用过**（日志里已有对应的 `approval_decided`，且本次请求与日志里的
+决定一致）不算失败，返回 `200 OK`——重试是幂等的，不会变成同一次调用
+的第二次决定；日志已经推进（`last_seq` 落后、`pending` 对不上，或
+请求把一个日志已决定的调用改成了另一种决定）返回
+`409 resume_conflict`，客户端重新拉状态、再让用户决定；日志里根本
+没有请求快照返回 `409 resume_no_snapshot`，这一轮不能续，建议重开
+会话。
 
 手工恢复（浏览器已经做了这件事）：
 
@@ -1105,8 +1114,8 @@ curl -s -X POST localhost:8080/api/v1/sessions/$SESSION/resume \
     },
     "interrupts": [{ "id": "approval-call_00_xxx", "status": "resolved" }]
   }' | jq .
-# 202 Accepted（决定已应用过的重试 → 200 OK）
-# 409 resume_conflict / resume_no_snapshot / config_drift / session_busy
+# 409 resume_conflict / resume_no_snapshot / config_drift / session_busy /
+#    remote_session（会话由其他节点持有）
 # 422 incomplete_resume（未覆盖所有未决调用）
 ```
 
@@ -1137,7 +1146,7 @@ host 的工具 schema、system prompt、采样参数与审批策略再算一次�
 `Never` 全放行；策略可按工具覆盖：
 
 ```rust,ignore
-use synthia::harness::{ApprovalMode, ApprovalPolicy, ReActAgent};
+use elysper::harness::{ApprovalMode, ApprovalPolicy, ReActAgent};
 use std::collections::BTreeMap;
 
 let mut overrides = BTreeMap::new();
@@ -1179,7 +1188,7 @@ Playwright MCP 验收），所以真实观察记录在下一节。
 
 ## 11. 只依赖 harness 的消费方（不跑 server）
 
-只想用 harness 这个循环、不跑 server：依赖不是只有 `synthia-harness`
+只想用 harness 这个循环、不跑 server：依赖不是只有 `elysper-harness`
 一个 crate。harness 把 `Spawner` / `ModelProvider` / `Tool` 这些 trait
 **不** re-export 出来 —— re-export 会把不属于 harness 的名字放进它承诺
 的公开面，也会把 harness 的零运行时承诺绑到别的 crate 的 feature 上 ——
@@ -1187,27 +1196,27 @@ Playwright MCP 验收），所以真实观察记录在下一节。
 
 | crate | 消费方拿它做什么 |
 |---|---|
-| `synthia-harness` | 循环、接缝、事件流 |
-| `synthia-core` | `CancelToken`、`Spawner`、`Clock` |
-| `synthia-provider` | `ModelProvider` trait 与消息类型 |
-| `synthia-tool` | `Tool` trait 与 `ToolRegistry` |
+| `elysper-harness` | 循环、接缝、事件流 |
+| `elysper-core` | `CancelToken`、`Spawner`、`Clock` |
+| `elysper-provider` | `ModelProvider` trait 与消息类型 |
+| `elysper-tool` | `Tool` trait 与 `ToolRegistry` |
 
 外加 `async-trait`（这些 trait 声明时用的 proc macro）。上面那三个 trait
 crate 本来就在 harness 自己的依赖闭包里（harness 的签名里就写着它们），
 写进自己的 `Cargo.toml` 说明的是“你实现哪些 trait”，不会让依赖树变大。
 
-这句话有一个前提，就落在 `synthia-provider` 上：它的默认 feature 集
+这句话有一个前提，就落在 `elysper-provider` 上：它的默认 feature 集
 （`default = ["anthropic", "openai"]`）会打开两个出厂的 HTTP adapter，
 每个 adapter 都带着 `reqwest`、`tokio` 和 `tokio-util`。消费方如果照
-crates.io 的默认写法写 `synthia-provider = "0.1"`，这三样全都进树。
+crates.io 的默认写法写 `elysper-provider = "0.1"`，这三样全都进树。
 harness 自己就是关着默认 feature 取 provider 的，消费方想要同一棵树就写
 同一行：
 
 ```toml
-synthia-provider = { version = "0.1", default-features = false }
+elysper-provider = { version = "0.1", default-features = false }
 ```
 
-`synthia-tool` 根本没有 feature 表，这个 flag 对它是空操作 —— 前提只落在
+`elysper-tool` 根本没有 feature 表，这个 flag 对它是空操作 —— 前提只落在
 provider 上。
 
 参考消费方 `docs/examples/harness-only-consumer` 的 `Cargo.toml` 里有
@@ -1223,13 +1232,13 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 
 公开面分两层：
 
-- **精选面**：crate 根上 re-export 出来的 59 个名字 —— 这是承诺过的稳定面，
+- **精选面**：crate 根上 re-export 出来的 60 个名字 —— 这是承诺过的稳定面，
   依赖它就不会被下一次发布挪走。
-- **深路径**：`synthia_harness::agent::…` 与 `synthia_harness::events::…`
-  底下只能走深路径才够得到的 64 项。rustdoc 在那两个模块下记录了 117 条
-  公开路径，其中 54 条是那 59 个名字在它们定义处的路径（第 59 个
-  `AgentDescriptor` 定义在 `synthia-core`），剩下 63 项；再加上从
-  `synthia-tool` 转出来的 `Risk`（它在 harness 里没有自己的路径），共 64 项。
+- **深路径**：`elysper_harness::agent::…` 与 `elysper_harness::events::…`
+  底下只能走深路径才够得到的 57 项。rustdoc 在那两个模块下记录了 109 条
+  公开路径，其中 53 条是那 60 个名字在它们定义处的路径（第 60 个
+  `AgentDescriptor` 定义在 `elysper-core`），剩下 56 项；再加上从
+  `elysper-tool` 转出来的 `Risk`（它在 harness 里没有自己的路径），共 57 项。
   深路径上的名字不在承诺内，将来可动。
 
 ---
@@ -1262,7 +1271,7 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 | E 断线重连 | 流式中 F5 | 基线整窗替换，无重复/缺失，live 继续 | 刷新后窗口整窗替换；最终段落只一次；Task 10 的重连测试 0 重叠样本 | 通过 |
 | F 压缩 | 长会话后点 Compact | `committed: true`，时间线标记 + 摘要/范围，四类日志行齐全 | Task 10 round 2 观察到已提交的压缩标记（范围 `#2–#3`）与摘要；手动 Compact 按钮未单独点 | 部分（自动已观察） |
 | G fork | `/sessions` 点 Fork | 子会话可续聊，父会话不变 | API `POST /sessions/{id}/fork` 返回 `rows: 60`；子会话 `66802f3c-831f-4cf2-9475-3506f04333f8` 的 `events.jsonl` 存在 | 通过（API） |
-| G 导出 | 下载 `.jsonl` | byte-faithful，`seq` 连续 | `GET /sessions/{id}/export` 返回 `synthia_session_meta` + 按序行；未做崩溃前后逐字节 diff | 通过（NDJSON 结构） |
+| G 导出 | 下载 `.jsonl` | byte-faithful，`seq` 连续 | `GET /sessions/{id}/export` 返回 `elysper_session_meta` + 按序行；未做崩溃前后逐字节 diff | 通过（NDJSON 结构） |
 | G 用量 | footer + `/usage` | 会话级 token/turn 与接口一致 | 验收配置（128k）下 `context_used: 1040 / 128000`；`input/output/turns` 为 0 是因为该 provider 的 `usage` 行报告 0，不是聚合缺失 | 通过（附注） |
 
 > 首次 Playwright 验证时注意两件事：
@@ -1270,7 +1279,7 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 >    那是正确行为但测不到注入路径；
 > 2. 想在一次短会话里复现 F 步的压缩，需要临时调小 `context_window`
 >    （建议 12,000）；3,000 这类低于固定提示成本的窗口会让每一轮都压缩，
->    只作为 `synthia-context` 的回归测试值保留。
+>    只作为 `elysper-context` 的回归测试值保留。
 >
 > 未走路径（B stop、D 挂起跨重启、C 浏览器拒绝、F 手动按钮）由
 > harness/server 回归测试覆盖，但没有浏览器实测；上表按实际观察标注，

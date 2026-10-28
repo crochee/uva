@@ -1,102 +1,100 @@
 [workspace]
 members = [
-    "crates/synthia",
-    "crates/synthia-core",
-    "crates/synthia-telemetry",
-    "crates/synthia-provider",
-    "crates/synthia-context",
-    "crates/synthia-tool",
-    "crates/synthia-tool-read",
-    "crates/synthia-tool-write",
-    "crates/synthia-tool-shell",
-    "crates/synthia-tool-todo",
-    "crates/synthia-tool-web",
-    "crates/synthia-tool-scheduler",
-    "crates/synthia-tool-search",
-    "crates/synthia-skill",
-    "crates/synthia-session",
-    "crates/synthia-steering",
-    "crates/synthia-tool-task",
-    "crates/synthia-harness",
-    "crates/synthia-harness-tokio",
-    "crates/synthia-server",
-    "crates/synthia-strategy-cot",
-    "crates/synthia-strategy-best-of-n",
-    "crates/synthia-test-support",
-    "crates/synthia-mcp",
-    "crates/synthia-mcp-server",
-    "crates/synthia-search",
-    "crates/synthia-scheduler",
-    "crates/synthia-macros",
-    "crates/synthia-eval",
-    "crates/synthia-workflow",
-    "crates/synthia-safety",
-    "crates/synthia-semantic-cache",
-    "crates/synthia-tool-memo",
-    "crates/synthia-resilience",
-    "crates/synthia-strategy-plan-execute",
-    "crates/synthia-reflection",
-    "crates/synthia-budget",
-    "crates/synthia-hpc-batch",
-    "crates/synthia-plugin-protocol",
-    "crates/synthia-plugin-host",
+    "crates/elysper",
+    "crates/elysper-core",
+    "crates/elysper-telemetry",
+    "crates/elysper-provider",
+    "crates/elysper-context",
+    "crates/elysper-tool",
+    "crates/elysper-tool-read",
+    "crates/elysper-tool-write",
+    "crates/elysper-tool-shell",
+    "crates/elysper-tool-todo",
+    "crates/elysper-tool-web",
+    "crates/elysper-tool-scheduler",
+    "crates/elysper-tool-search",
+    "crates/elysper-skill",
+    "crates/elysper-session",
+    "crates/elysper-steering",
+    "crates/elysper-tool-task",
+    "crates/elysper-harness",
+    "crates/elysper-harness-tokio",
+    "crates/elysper-server",
+    "crates/elysper-strategy-cot",
+    "crates/elysper-strategy-best-of-n",
+    "crates/elysper-test-support",
+    "crates/elysper-mcp",
+    "crates/elysper-mcp-server",
+    "crates/elysper-search",
+    "crates/elysper-scheduler",
+    "crates/elysper-macros",
+    "crates/elysper-eval",
+    "crates/elysper-workflow",
+    "crates/elysper-semantic-cache",
+    "crates/elysper-tool-memo",
+    "crates/elysper-resilience",
+    "crates/elysper-strategy-plan-execute",
+    "crates/elysper-reflection",
+    "crates/elysper-budget",
+    "crates/elysper-hpc-batch",
+    "crates/elysper-plugin-protocol",
+    "crates/elysper-plugin-host",
 ]
 resolver = "2"
 
 [workspace.dependencies]
 # The facade crate: one dependency, one prelude. It re-exports the
 # pieces below and is never depended on by them (one-way, no cycle).
-synthia = { path = "crates/synthia" }
-synthia-core = { path = "crates/synthia-core" }
-synthia-tool-read = { path = "crates/synthia-tool-read" }
-synthia-tool-write = { path = "crates/synthia-tool-write" }
-synthia-tool-shell = { path = "crates/synthia-tool-shell" }
-synthia-tool-todo = { path = "crates/synthia-tool-todo" }
-synthia-tool-web = { path = "crates/synthia-tool-web" }
-synthia-telemetry = { path = "crates/synthia-telemetry", default-features = false }
-synthia-provider = { path = "crates/synthia-provider", default-features = false }
-synthia-context = { path = "crates/synthia-context" }
-synthia-tool = { path = "crates/synthia-tool", default-features = false }
-synthia-skill = { path = "crates/synthia-skill" }
- synthia-steering = { path = "crates/synthia-steering" }
-synthia-session = { path = "crates/synthia-session" }
-synthia-harness = { path = "crates/synthia-harness" }
-synthia-harness-tokio = { path = "crates/synthia-harness-tokio" }
-synthia-server = { path = "crates/synthia-server" }
-synthia-strategy-cot = { path = "crates/synthia-strategy-cot" }
-synthia-strategy-best-of-n = { path = "crates/synthia-strategy-best-of-n" }
-synthia-attachment = { path = "crates/synthia-attachment" }
-synthia-mcp = { path = "crates/synthia-mcp" }
-synthia-mcp-server = { path = "crates/synthia-mcp-server" }
-synthia-tool-task = { path = "crates/synthia-tool-task" }
-synthia-tool-scheduler = { path = "crates/synthia-tool-scheduler" }
-synthia-tool-search = { path = "crates/synthia-tool-search" }
-synthia-scheduler = { path = "crates/synthia-scheduler" }
-synthia-search = { path = "crates/synthia-search" }
-synthia-test-support = { path = "crates/synthia-test-support" }
-synthia-macros = { path = "crates/synthia-macros" }
-synthia-eval = { path = "crates/synthia-eval" }
-synthia-workflow = { path = "crates/synthia-workflow" }
-synthia-safety = { path = "crates/synthia-safety" }
-synthia-semantic-cache = { path = "crates/synthia-semantic-cache" }
-synthia-tool-memo = { path = "crates/synthia-tool-memo" }
-synthia-resilience = { path = "crates/synthia-resilience" }
-synthia-strategy-plan-execute = { path = "crates/synthia-strategy-plan-execute" }
-synthia-reflection = { path = "crates/synthia-reflection" }
-synthia-budget = { path = "crates/synthia-budget" }
+elysper = { path = "crates/elysper", version = "0.1" }
+elysper-core = { path = "crates/elysper-core", version = "0.1" }
+elysper-tool-read = { path = "crates/elysper-tool-read", version = "0.1" }
+elysper-tool-write = { path = "crates/elysper-tool-write", version = "0.1" }
+elysper-tool-shell = { path = "crates/elysper-tool-shell", version = "0.1" }
+elysper-tool-todo = { path = "crates/elysper-tool-todo", version = "0.1" }
+elysper-tool-web = { path = "crates/elysper-tool-web", version = "0.1" }
+elysper-telemetry = { path = "crates/elysper-telemetry", version = "0.1", default-features = false }
+elysper-provider = { path = "crates/elysper-provider", version = "0.1", default-features = false }
+elysper-context = { path = "crates/elysper-context", version = "0.1" }
+elysper-tool = { path = "crates/elysper-tool", version = "0.1", default-features = false }
+elysper-skill = { path = "crates/elysper-skill", version = "0.1" }
+ elysper-steering = { path = "crates/elysper-steering", version = "0.1" }
+elysper-session = { path = "crates/elysper-session", version = "0.1" }
+elysper-harness = { path = "crates/elysper-harness", version = "0.1" }
+elysper-harness-tokio = { path = "crates/elysper-harness-tokio", version = "0.1" }
+elysper-server = { path = "crates/elysper-server", version = "0.1" }
+elysper-strategy-cot = { path = "crates/elysper-strategy-cot", version = "0.1" }
+elysper-strategy-best-of-n = { path = "crates/elysper-strategy-best-of-n", version = "0.1" }
+elysper-attachment = { path = "crates/elysper-attachment", version = "0.1" }
+elysper-mcp = { path = "crates/elysper-mcp", version = "0.1" }
+elysper-mcp-server = { path = "crates/elysper-mcp-server", version = "0.1" }
+elysper-tool-task = { path = "crates/elysper-tool-task", version = "0.1" }
+elysper-tool-scheduler = { path = "crates/elysper-tool-scheduler", version = "0.1" }
+elysper-tool-search = { path = "crates/elysper-tool-search", version = "0.1" }
+elysper-scheduler = { path = "crates/elysper-scheduler", version = "0.1" }
+elysper-search = { path = "crates/elysper-search", version = "0.1" }
+elysper-test-support = { path = "crates/elysper-test-support", version = "0.1" }
+elysper-macros = { path = "crates/elysper-macros", version = "0.1" }
+elysper-eval = { path = "crates/elysper-eval", version = "0.1" }
+elysper-workflow = { path = "crates/elysper-workflow", version = "0.1" }
+elysper-semantic-cache = { path = "crates/elysper-semantic-cache", version = "0.1" }
+elysper-tool-memo = { path = "crates/elysper-tool-memo", version = "0.1" }
+elysper-resilience = { path = "crates/elysper-resilience", version = "0.1" }
+elysper-strategy-plan-execute = { path = "crates/elysper-strategy-plan-execute", version = "0.1" }
+elysper-reflection = { path = "crates/elysper-reflection", version = "0.1" }
+elysper-budget = { path = "crates/elysper-budget", version = "0.1" }
 # R-OPT-HPC: batched embedder/completer plug-in. Default
 # zero-dep; the new crate's `make check-mvp-deps` segment
 # asserts that.
-synthia-hpc-batch = { path = "crates/synthia-hpc-batch" }
+elysper-hpc-batch = { path = "crates/elysper-hpc-batch", version = "0.1" }
 # The dynamic plugin channel's wire contract. serde-only on purpose:
 # a third-party plugin author depends on this alone, so it must never
 # grow a harness or runtime dependency.
-synthia-plugin-protocol = { path = "crates/synthia-plugin-protocol" }
+elysper-plugin-protocol = { path = "crates/elysper-plugin-protocol", version = "0.1" }
 # The dynamic plugin channel's host half: it turns a plugin *process*
 # speaking the wire protocol into `Host` registrations. Runtime-free
 # on purpose (std process + the `Blocking`/`Sleeper` seams), which is
-# why it cannot reuse `synthia-mcp`'s tokio transport stack.
-synthia-plugin-host = { path = "crates/synthia-plugin-host" }
+# why it cannot reuse `elysper-mcp`'s tokio transport stack.
+elysper-plugin-host = { path = "crates/elysper-plugin-host", version = "0.1" }
 syn = "2.0"
 quote = "1.0"
 proc-macro2 = "1.0"
@@ -131,7 +129,7 @@ validator = { version = "0.21", features = ["derive"] }
 # Utilities
 ulid = { version = "3.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-# Cron parsing is opt-in: only `synthia-scheduler`'s `cron` feature
+# Cron parsing is opt-in: only `elysper-scheduler`'s `cron` feature
 # pulls this in, and it does so behind `dep:cron`, so no default build
 # grows a parser dependency.
 cron = "0.17"
@@ -140,14 +138,14 @@ indexmap = "2.14"
 parking_lot = "0.12"
 rand = "0.8"
 # `bundled` compiles SQLite from the amalgamation (FTS5 enabled) so the
-# build needs no system libsqlite3; only the optional `synthia-context`
+# build needs no system libsqlite3; only the optional `elysper-context`
 # `sqlite` feature pulls this in.
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-# Optional cluster bus backend (`synthia-server` feature
+# Optional cluster bus backend (`elysper-server` feature
 # `cluster-redis`): pub/sub + `SET NX EX` leases. Only the
 # tokio async command surface is needed (multiplexed connections),
 # so the client's extra capabilities stay off.
@@ -166,7 +164,7 @@ reqwest = { version = "0.13", features = ["json", "stream"] }
 #                TLS for `https://` gRPC endpoints; metrics/logs signals off)
 #   - metrics  → prometheus (text exposition only; protobuf / push off)
 # Crate-level feature gates (`otel`, `metrics`) live in
-# `crates/synthia-telemetry/Cargo.toml` and re-export through downstream
+# `crates/elysper-telemetry/Cargo.toml` and re-export through downstream
 # crates that opt into observability.
 tracing = { version = "0.1", default-features = false, features = [
   "std",
@@ -230,9 +228,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-repository = "https://github.com/crochee/synthia"
-homepage = "https://github.com/crochee/synthia"
-documentation = "https://docs.rs/synthia"
+repository = "https://github.com/crochee/elysper"
+homepage = "https://github.com/crochee/elysper"
+documentation = "https://docs.rs/elysper"
 readme = "README.md"
 keywords = ["ai", "agent", "llm", "plugin", "orchestration"]
 categories = ["asynchronous", "development-tools"]

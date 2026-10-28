@@ -1,0 +1,46 @@
+[package]
+name = "elysper-telemetry"
+description = "Telemetry facade for elysper: tracing + OTLP exporter + Prometheus text exposition, feature-gated"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+elysper-core.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+
+# Optional halves. `metrics` is the Prometheus text-exposition surface
+# (`/metrics`, tool counters); `otlp` is the trace exporter. Both are
+# on by default so a deployment gets the full stack; a library
+# consumer turns off what it does not want and stops compiling it.
+prometheus = { workspace = true, optional = true }
+lazy_static = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[features]
+default = ["metrics", "otlp"]
+metrics = ["dep:prometheus", "dep:lazy_static"]
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-semantic-conventions",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+redact = ["otlp"]
+
+[dev-dependencies]
+tempfile.workspace = true
+futures.workspace = true

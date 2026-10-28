@@ -8,8 +8,8 @@
 #   - `make doc-check` 已经在 rust-quality.yml 的 `gates` job 跑过;
 #     本 workflow 只负责**部署**, 不再 lint (lint 失败会 lint 红灯, 不会
 #     到这里).
-#   - 启用 --all-features 让所有 opt-in feature (synthia-search 的 provider,
-#     synthia-tool-scheduler 的 cron 等) 都生成文档 —— 用户读 docs 才是
+#   - 启用 --all-features 让所有 opt-in feature (elysper-search 的 provider,
+#     elysper-tool-scheduler 的 cron 等) 都生成文档 —— 用户读 docs 才是
 #     完整视角.
 name: docs
 
@@ -66,22 +66,22 @@ jobs:
           set -euo pipefail
           for crate in $(cargo metadata --no-deps --format-version 1 \
                          | jq -r '.packages[].name' \
-                         | grep -E '^synthia'); do
+                         | grep -E '^elysper'); do
             echo "── rustdoc $crate ──"
             cargo doc --no-deps --all-features -p "$crate"
           done
 
       - name: Flatten into doc/<crate>/
         # 默认 cargo doc 输出在 target/doc/, 所有 crate 平铺, 多个
-        # crate 会撞名 (synthia / synthia-core / ...). 重新组织成
-        # doc/synthia/, doc/synthia-core/...
+        # crate 会撞名 (elysper / elysper-core / ...). 重新组织成
+        # doc/elysper/, doc/elysper-core/...
         run: |
           set -euo pipefail
           rm -rf doc
           mkdir -p doc
           for crate in $(cargo metadata --no-deps --format-version 1 \
                          | jq -r '.packages[].name' \
-                         | grep -E '^synthia'); do
+                         | grep -E '^elysper'); do
             if [ -d "target/doc/$crate" ]; then
               mv "target/doc/$crate" "doc/$crate"
             fi
@@ -93,10 +93,10 @@ jobs:
             '<!doctype html>' \
             '<html><head>' \
             '<meta charset="utf-8">' \
-            '<meta http-equiv="refresh" content="0; url=synthia/index.html">' \
-            '<title>Synthia — rustdoc</title>' \
+            '<meta http-equiv="refresh" content="0; url=elysper/index.html">' \
+            '<title>Elysper — rustdoc</title>' \
             '</head><body>' \
-            '<p>Redirecting to <a href="synthia/index.html">synthia</a>…</p>' \
+            '<p>Redirecting to <a href="elysper/index.html">elysper</a>…</p>' \
             '</body></html>' \
             > doc/index.html
 

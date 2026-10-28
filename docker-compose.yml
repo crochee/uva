@@ -1,11 +1,11 @@
-# Docker Compose for synthia development.
+# Docker Compose for elysper development.
 #
 # Spins up:
-#   - server: synthia-server (Rust) on :8080
-#   - web: synthia-web (React/Vite dev server with HMR) on :5173
+#   - server: elysper-server (Rust) on :8080
+#   - web: elysper-web (React/Vite dev server with HMR) on :5173
 #
 # The web service proxies /api, /v1 and /readyz + /livez to the
-# server (see synthia-web/vite.config.ts), so the browser can
+# server (see elysper-web/vite.config.ts), so the browser can
 # call the backend on the same origin.
 
 services:
@@ -13,14 +13,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
-    image: synthia-server:dev
-    container_name: synthia-server-dev
+    image: elysper-server:dev
+    container_name: elysper-server-dev
     ports:
       - "8080:8080"
     environment:
       - RUST_LOG=info
-      - SYNTHIA_HOST=0.0.0.0
-      - SYNTHIA_PORT=8080
+      - ELYSPER_HOST=0.0.0.0
+      - ELYSPER_PORT=8080
     volumes:
       # Mount source for live cargo rebuild
       - ./crates:/app/crates:ro
@@ -36,15 +36,15 @@ services:
       context: .
       dockerfile: Dockerfile.web
       target: builder
-    image: synthia-web:dev
-    container_name: synthia-web-dev
+    image: elysper-web:dev
+    container_name: elysper-web-dev
     ports:
       - "5173:5173"
     environment:
       - VITE_API_URL=http://server:8080
       - VITE_CHAT_URL=/api/v1/chat
     volumes:
-      - ./synthia-web:/app:ro
+      - ./elysper-web:/app:ro
       - /app/node_modules
     command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
     depends_on:

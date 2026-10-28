@@ -5,11 +5,11 @@ acceptance run. Every number and every quoted line was produced by a
 command on this branch in this worktree; nothing here is copied from
 the design or the plan.
 
-* Worktree: `/home/crochee/workspace/synthia/.worktrees/harness-v4`
+* Worktree: `/home/crochee/workspace/elysper/.worktrees/harness-v4`
 * Branch: `feature/harness-v4`, HEAD `e0892c50` at the start of the run
-* Server binary: `target/debug/synthia-server` (`cargo build -p
-  synthia-server`)
-* Acceptance workspace: `/tmp/synthia-accept-t18` (server configs, the
+* Server binary: `target/debug/elysper-server` (`cargo build -p
+  elysper-server`)
+* Acceptance workspace: `/tmp/elysper-accept-t18` (server configs, the
   Python plugin, and the session logs live there and are **not**
   committed)
 * Model provider: a real OpenAI-compatible endpoint
@@ -17,28 +17,59 @@ the design or the plan.
   from `DEEPSEEK_API_KEY`. The harness, the server, the tools, the log
   and the HTTP surface under test are this repo's; only the model is
   external.
-* Web: assets built with `npm run build` in `synthia-web/`.
+* Web: assets built with `npm run build` in `elysper-web/`.
 
-`$DIR` below means `/tmp/synthia-accept-t18`; `$API` means
+`$DIR` below means `/tmp/elysper-accept-t18`; `$API` means
 `http://127.0.0.1:8099/api/v1`; a session log is
 `$DIR/ws/sessions/dev/<session-id>/events.jsonl`.
 
-**Status at a glance.** The three dependency counts are `0`. `make ci`,
-`make check-web`, `make examples` and `make bench-check` each exit `0`.
-`make test-crates` is red in four crates this branch does not touch, all
-four red on `master` too (§4). Scenarios B–I pass end to end; scenario A
-failed at the time of the run and **passes after the fix recorded in §6**
-— the run that produced this file is not retroactively edited. The
-remaining open items, with their mechanisms, are in §5.
+**Status at a glance (after the remainders round, 2026-10-27).** All
+five gates exit `0` — `make ci` (which now includes `test-crates`),
+`make check-web`, `make examples`, `make bench-check`, and
+`make test-crates` on its own. Scenarios A–I were rerun end to end on
+the v2 log format and all pass, including scenario A at the
+tutorial's own `context_window: 3000` with the compaction surface now
+durable and replay-equal. The remainders items are closed one by one
+in §0 below; the original run's evidence (§1–§6) is kept unchanged
+because it is the discovery record — §0's "now" column is the current
+state.
+
+## 0. Remainders closure (2026-10-27)
+
+One row per plan task. "Evidence" names the test or command that
+proves the invariant; the original discovery evidence stays in the
+section named in the last column.
+
+| # | item | invariant | evidence | result | was |
+|---|---|---|---|---|---|
+| 1 | Writer retry never double-writes | a batch the backend already wrote is not written again on retry, barrier or not | commit `a2b04375` + `5becc27d`; `writer/tests.rs`: `a_retry_after_a_failed_flush_does_not_duplicate_a_row`, `a_row_the_log_already_holds_is_not_written_again`, `a_flush_never_writes_past_a_reserved_row`, `a_failed_barrier_leaves_the_rows_written`; `make test-crates` exit 0 | CLOSED | §4 item 3 |
+| 2 | Every shadowable row has a durable identity | the ledger can name every row a compaction replaces, assistant rows included | commit `7a386858`; `ledger_key/tests.rs` (`key_of`), `compaction_keys.rs` | CLOSED | §5 |
+| 3 | Compaction writes a durable event; replay == live | the `SessionEvent::Compaction` row lands and a cold `follow` folds the same surface the live session shows | scenario F rerun: baseline 58 rows == log 58 rows, `compaction` rows 1 == 1; scenario A rerun: turn `completed`, baseline rows 62 == log rows 62 | CLOSED | §5, §6 |
+| 4 | Log format v2; older/newer logs refused with an operator-actionable error | a v1 log is refused, never migrated, and the error names both versions and the way out | hand-crafted v1 log → `HTTP 500 {"code":"session_log_read", … "schema version 1 is older than this build reads (this build supports 2); export the session with a build that reads v1, or reopen it there after migrating the log"}` (§7) | CLOSED | — |
+| 5 | Resume outcomes split and idempotent | `resume_conflict` / `resume_no_snapshot` are distinct codes; a replayed resume decision returns `200 OK` and never dispatches twice | commit `16824317` + `c36253d7`; `follow::a_resume_conflict_names_a_log_that_moved_on`, `…_a_pending_set_the_log_does_not_hold`, `a_resume_without_a_request_snapshot_is_refused`; scenarios C/D rerun: second identical `POST …/resume` → `HTTP 200`, dispatches still 1 | CLOSED | §5 |
+| 6 | The spawn gate dies with its controller | `spawn_gates` holds no entry for a controller that is gone | commit `22d30024`; `sessions::the_spawn_gate_map_does_not_outlive_the_controllers_it_belongs_to` | CLOSED | §5 |
+| 7 | Docs state the real dependency and public surface | consumer-facing counts match `cargo tree` and the curated re-exports | commits `dd0f9dd3`, `c2c46f7b`, `46265448`, `42b67d17`, `797d30b6`; `docs_truth` 9/9 green | CLOSED | §5 |
+| 8 | One turn-boundary rule; keyless park rows retired | `follow` asks the harness's `suspended_segment`, and a `parked_prompt` without `park_id` is warned and skipped, not guessed by position | commit `42889677`; `the_window_folds_the_harnesss_suspended_segment`; `a_keyless_park_row_is_warned_once_and_skipped` | CLOSED | §5 |
+| 9 | `elysper-resilience` / `elysper-tool-memo` green | the two crates compile and their suites pass | commit `0e0978f5`; `make test-crates` exit 0 (§7) | CLOSED | §4 item 3 |
+| 10 | `elysper-budget` / `elysper-semantic-cache` doctests green | both crates' doctests compile against the real signatures | commit `6b6b80d3` + `8d895820`; `make test-crates` exit 0 (§7) | CLOSED | §4 item 3 |
+| 11 | Curated public API frozen | a name appearing or disappearing without the baseline changing fails the gate (`scripts/check-frozen-api.sh` compares the live curated surface against `scripts/frozen-api/baseline`; moving `docs/api-frozen.md` in the same commit is the review convention the script's header states, not something the gate itself enforces) | commit `aec2999d`; `make check-frozen-api` exit 0; 435 frozen names | CLOSED | — |
+| 12 | Handover docs exist | `docs/api-frozen.md`, `docs/api-surface.md`, `docs/log-format.md`, `docs/contributing/first-steps.md` all present and current | the four files on this branch; added by `aec2999d` (`docs/api-frozen.md`) and `bb5203b5` (the other three) | CLOSED | — |
+| 13 | Acceptance rerun, record closed | five gates exit 0 and scenarios A–I rerun on the v2 format | §7 (this round) | CLOSED (this document) | — |
+
+The design's eighth leftover — `awaiting_approval` swallowing errors —
+was already fixed on this branch before the remainders plan
+(`inner.rs` uses `try_open_interrupts().await?`; the status-only
+`open_interrupts` has no error channel by design), so it is not a row
+here; see the plan's self-check.
 
 ## 1. The three dependency counts
 
 ```
-$ cargo tree -p synthia-harness -e normal | grep -c tokio
+$ cargo tree -p elysper-harness -e normal | grep -c tokio
 0
-$ cargo tree -p synthia-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"
+$ cargo tree -p elysper-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"
 0
-$ cargo tree -p synthia-plugin-protocol -e normal | grep -c tokio
+$ cargo tree -p elysper-plugin-protocol -e normal | grep -c tokio
 0
 ```
 
@@ -57,11 +88,11 @@ status.
 
 | target | exit | what it said |
 |---|---|---|
-| `make ci` (first run) | 2 | Stopped in `doc-check`: `error: unresolved link to \`GATE\`` at `crates/synthia-plugin-protocol/src/wire.rs:34` |
-| `make ci` (second run) | 2 | `doc-check` then reported two further branch-added links: `Tool::risk` at `crates/synthia-server/src/composition.rs:194` and `ControllerInner::awaiting_approval` at `crates/synthia-server/src/session/controller/mod.rs:441` |
+| `make ci` (first run) | 2 | Stopped in `doc-check`: `error: unresolved link to \`GATE\`` at `crates/elysper-plugin-protocol/src/wire.rs:34` |
+| `make ci` (second run) | 2 | `doc-check` then reported two further branch-added links: `Tool::risk` at `crates/elysper-server/src/composition.rs:194` and `ControllerInner::awaiting_approval` at `crates/elysper-server/src/session/controller/mod.rs:441` |
 | `make ci` (final run) | 0 | `fmt-check`, `lint-rust`, `doc-check`, `test-guides` (default and the seven-feature subset), all 15 check targets, and `cargo deny` (`bans ok, licenses ok, sources ok`) |
 | `make check-web` | 0 | `tsc --noEmit`, `eslint`, `prettier --check` all clean (`All matched files use Prettier code style!`) |
-| `make test-crates` | 2 | Stopped at `synthia-budget`: its crate-level doctest does not compile (see §4) |
+| `make test-crates` | 2 | Stopped at `elysper-budget`: its crate-level doctest does not compile (see §4) |
 | `make examples` | 0 | 55 example/consumer targets; the harness-only consumer printed `tokio in tree: 0` and `HARNESS-ONLY: OK` |
 | `make bench-check` | 0 | `all performance invariants hold` (7 invariants OK; e.g. `descriptors_cached vs descriptors 1713.9x (min 100.0x)`) |
 
@@ -70,8 +101,10 @@ check-mvp-deps check-no-runtime check-harness-features
 check-public-api-runtime check-pub-surface check-pub-surface-strict
 check-claim-language check-clock check-harness-shape
 check-harness-docs check-single-writer check-plugin-shape
-check-test-layout check-deny`. It does **not** run `make test-crates`,
-which is why the doctest failures below are invisible to it.
+check-test-layout check-deny`. It did **not** run `make test-crates`,
+which is why the doctest failures below were invisible to it.
+*(Changed in the remainders round: `ci` now ends with `test-crates` —
+§0 row 13, §7.1.)*
 
 Because the first `make ci` stopped at `doc-check`, the stages after it
 were also run one at a time so each has its own status:
@@ -101,47 +134,47 @@ stopped at the third crate. The remaining crates were run one at a
 time with the same command:
 
 ```
-synthia                          EXIT=0   (from make test-crates)
-synthia-attachment               EXIT=0   (from make test-crates)
-synthia-budget                   EXIT=101 (from make test-crates; doctest)
-synthia-context                  EXIT=0
-synthia-core                     EXIT=0
-synthia-eval                     EXIT=0
-synthia-harness                  EXIT=0
-synthia-harness-tokio            EXIT=0
-synthia-hpc-batch                EXIT=0
-synthia-macros                   EXIT=0
-synthia-mcp                      EXIT=0
-synthia-mcp-server               EXIT=0
-synthia-plugin-host              EXIT=0
-synthia-plugin-protocol          EXIT=0
-synthia-provider                 EXIT=0
-synthia-reflection               EXIT=0
-synthia-resilience               EXIT=101 (compile error in the lib test)
-synthia-safety                   EXIT=0
-synthia-scheduler                EXIT=0
-synthia-search                   EXIT=0
-synthia-semantic-cache           EXIT=101 (crate-level doctest)
-synthia-session                  EXIT=0
-synthia-skill                    EXIT=0
-synthia-steering                 EXIT=0
-synthia-strategy-best-of-n       EXIT=0
-synthia-strategy-cot             EXIT=0
-synthia-strategy-plan-execute    EXIT=0
-synthia-telemetry                EXIT=0
-synthia-test-support             EXIT=0
-synthia-tool                     EXIT=0
-synthia-tool-memo                EXIT=101 (compile error in the lib test)
-synthia-tool-read                EXIT=0
-synthia-tool-scheduler           EXIT=0
-synthia-tool-search              EXIT=0
-synthia-tool-shell               EXIT=0
-synthia-tool-task                EXIT=0
-synthia-tool-todo                EXIT=0
-synthia-tool-web                 EXIT=0
-synthia-tool-write               EXIT=0
-synthia-workflow                 EXIT=0
-synthia-server                   EXIT=0
+elysper                          EXIT=0   (from make test-crates)
+elysper-attachment               EXIT=0   (from make test-crates)
+elysper-budget                   EXIT=101 (from make test-crates; doctest)
+elysper-context                  EXIT=0
+elysper-core                     EXIT=0
+elysper-eval                     EXIT=0
+elysper-harness                  EXIT=0
+elysper-harness-tokio            EXIT=0
+elysper-hpc-batch                EXIT=0
+elysper-macros                   EXIT=0
+elysper-mcp                      EXIT=0
+elysper-mcp-server               EXIT=0
+elysper-plugin-host              EXIT=0
+elysper-plugin-protocol          EXIT=0
+elysper-provider                 EXIT=0
+elysper-reflection               EXIT=0
+elysper-resilience               EXIT=101 (compile error in the lib test)
+elysper-safety                   EXIT=0
+elysper-scheduler                EXIT=0
+elysper-search                   EXIT=0
+elysper-semantic-cache           EXIT=101 (crate-level doctest)
+elysper-session                  EXIT=0
+elysper-skill                    EXIT=0
+elysper-steering                 EXIT=0
+elysper-strategy-best-of-n       EXIT=0
+elysper-strategy-cot             EXIT=0
+elysper-strategy-plan-execute    EXIT=0
+elysper-telemetry                EXIT=0
+elysper-test-support             EXIT=0
+elysper-tool                     EXIT=0
+elysper-tool-memo                EXIT=101 (compile error in the lib test)
+elysper-tool-read                EXIT=0
+elysper-tool-scheduler           EXIT=0
+elysper-tool-search              EXIT=0
+elysper-tool-shell               EXIT=0
+elysper-tool-task                EXIT=0
+elysper-tool-todo                EXIT=0
+elysper-tool-web                 EXIT=0
+elysper-tool-write               EXIT=0
+elysper-workflow                 EXIT=0
+elysper-server                   EXIT=0
 ```
 
 The three failures are reproduced and explained in §4. None of the
@@ -186,16 +219,16 @@ carried the `tool_use` blocks in place:
 {"seq":6,"parts":{"text":12,"tool_use":2}}                                                     # the assistant message it left behind
 ```
 
-That is the same shape the tutorial's own `synthia-session`
+That is the same shape the tutorial's own `elysper-session`
 `tool_pairing` module exists to prevent: a replace that straddles an
 `assistant/tool_use` ↔ `tool/result` boundary produces an orphan call.
-The automatic path lives in `synthia-context`'s summariser, which
+The automatic path lives in `elysper-context`'s summariser, which
 splices only the tool-result run ("The assistant turn that contained
 the original `tool_use` blocks stays untouched", `manager.rs:346`);
-the manual/harness path in `synthia-session` applies
+the manual/harness path in `elysper-session` applies
 `balanced_cut_at_or_before` instead. The two rules disagree.
 
-This is **not** caused by this branch: `crates/synthia-context` is
+This is **not** caused by this branch: `crates/elysper-context` is
 unchanged except for the removal of one unused constructor, and the
 splice comment is present on `master`.
 
@@ -204,7 +237,7 @@ other setting identical), the scenario passes:
 
 ```
 {"type":"turn","data":{"kind":"end","turn":0,"reason":"completed"}}
-tool_result #1: "   1 synthia tutorial\n"
+tool_result #1: "   1 elysper tutorial\n"
 tool_result #2: "stdout:\ntotal 4\ndrwxr-xr-x 5 … notes.txt …\n\n[exit code: 0]"
 baseline: {"rows":16,"cursor":16,"live":"object","context":{"used":9801,"window":128000},"pending":0,"rsh":71,"header_state":"idle"}
 ```
@@ -241,6 +274,19 @@ answer:      "The token you asked me to include is `queue-marker`."
 The queued message is an ordinary `UserInput` row at `seq` 16, after
 the first turn's `end` at 15, and the `sleep` it did not interrupt
 returned normally. **PASS.**
+
+> **Update — 2026-10-28 (Elysper v5, task 8 "durable parks").** The
+> evidence above is the frozen pre-task-8 observation and stays as it
+> was recorded. The *row shape* it observed has since moved: a queued
+> message is now parked durably before it is queued, so the same
+> message writes **three** rows — `parked_prompt` (16), the
+> `park_consumed` row that spends the park (17), and the turn's own
+> `UserInput` (18) — where this record shows a single `UserInput` at
+> 16. The turn boundary itself did not move: the queued message is
+> still answered as its own turn, after the first turn's `end`, and
+> the `sleep` it did not interrupt still returns normally. The rows
+> the parked turn writes are what a takeover replays from, so the
+> ordinals after 16 shift by two.
 
 **Steer.**
 
@@ -282,7 +328,7 @@ this run only proves the API side.
 
 ```bash
 curl -s -X POST $API/chat/sessions/$SID/messages -H 'content-type: application/json' \
-  -d '{"text":"Use the shell tool to run exactly: echo synthia-approval-probe > /tmp/synthia-approval.txt ; then report the command'\''s output and exit status."}'
+  -d '{"text":"Use the shell tool to run exactly: echo elysper-approval-probe > /tmp/elysper-approval.txt ; then report the command'\''s output and exit status."}'
 ```
 
 Rows, in order:
@@ -313,8 +359,8 @@ resume HTTP 202
 {"type":"approval_decided","seq":13,"id":"approval-call_00_OI2…","call_id":"call_00_OI2…","status":"approved","by":"resume"}
 {"type":"tool_dispatch","seq":14,"call_id":"call_00_OI2…","tool":"shell","arguments_hash":"sha256:acc956…"}
 dispatches for that call: 1
-$ cat /tmp/synthia-approval.txt
-synthia-approval-probe
+$ cat /tmp/elysper-approval.txt
+elysper-approval-probe
 ```
 
 The turn then completes with an answer that correctly explains the
@@ -327,8 +373,8 @@ resume HTTP 202
 {"type":"approval_decided","seq":13,"call_id":"call_00_PfxYc9uQJZBNLVbhLgee4180","status":"denied","by":"resume"}
 tool_dispatch rows: 0
 {"type":"tool_result","seq":14,…,"is_error":true}
-$ ls /tmp/synthia-deny.txt
-ls: cannot access '/tmp/synthia-deny.txt': No such file or directory
+$ ls /tmp/elysper-deny.txt
+ls: cannot access '/tmp/elysper-deny.txt': No such file or directory
 ```
 
 The answer acknowledges the denial ("Since a denial just came through
@@ -339,7 +385,7 @@ from the operator …"), and no side effect happened. **PASS.**
 ```bash
 # sleep 20 in flight; snapshot the log; kill -9; restart the same command
 cp "$LOG" /tmp/before-crash.jsonl          # 9 lines
-pkill -9 -f 'synthia-server.*--directory'
+pkill -9 -f 'elysper-server.*--directory'
 curl -s "$API/sessions/$SID/follow" --max-time 4 -N   # cold open → repair
 ```
 
@@ -369,7 +415,7 @@ approval is pending, restart, open the session:
 resume HTTP 202
 {"type":"approval_decided","seq":13,"call_id":"call_00_dcnQ0eJNvz4OenAll4by6656","status":"approved","by":"resume"}
 {"type":"tool_dispatch","seq":14,"call_id":"call_00_dcnQ0eJNvz4OenAll4by6656","tool":"shell"}
-$ cat /tmp/synthia-restart-approval.txt
+$ cat /tmp/elysper-restart-approval.txt
 restart-approval
 ```
 
@@ -506,7 +552,7 @@ The export is byte-faithful NDJSON:
 
 ```
 $ head -1 export-G.jsonl
-{"_meta":{"kind":"synthia_session_meta","schema_version":1,"id":"d7adff13-…"}}
+{"_meta":{"kind":"elysper_session_meta","schema_version":1,"id":"d7adff13-…"}}
 $ wc -l export-G.jsonl     → 16   (log: 16)
 $ cmp export-G.jsonl "$LOG"                        → identical
 $ jq -r '.seq' | awk 'NR>1 && $1!=p+1 {print "gap"}' → (no gap)
@@ -516,9 +562,9 @@ $ jq -r '.seq' | awk 'NR>1 && $1!=p+1 {print "gap"}' → (no gap)
 
 ### H. A remote plugin from a non-Rust process
 
-A 60-line Python 3 plugin (`/tmp/synthia-accept-t18/records_plugin.py`,
-stdlib only, not committed) answers `synthia/initialize`,
-`synthia/tools/list` and `synthia/tools/call` over stdio. It was first
+A 60-line Python 3 plugin (`/tmp/elysper-accept-t18/records_plugin.py`,
+stdlib only, not committed) answers `elysper/initialize`,
+`elysper/tools/list` and `elysper/tools/call` over stdio. It was first
 checked frame by frame without the host:
 
 ```
@@ -534,7 +580,7 @@ It is then configured in the deployment:
 plugins:
   - name: records
     kind: remote
-    command: ["python3", "/tmp/synthia-accept-t18/records_plugin.py"]
+    command: ["python3", "/tmp/elysper-accept-t18/records_plugin.py"]
     transport: stdio
     capabilities: [tools]
     authority: reduced
@@ -571,7 +617,7 @@ The result text is the Python process's object, serialised by the host.
 curl -s -X POST $API/chat/sessions/$SID/messages -d '{"text":"Use the shell tool to run exactly: sleep 25; echo hold. Then report the output."}'
 curl -s -X POST $API/chat/sessions/$SID/messages -d '{"text":"Reply with exactly the token parked-marker-18 and nothing else.","agent_name":"code"}'
 # wait for the durable park, then crash and restart
-pkill -9 -f 'synthia-server.*--directory'
+pkill -9 -f 'elysper-server.*--directory'
 ```
 
 The park is durable before the crash:
@@ -609,7 +655,7 @@ it cannot be spent twice. **PASS.**
 This repo verifies the UI in a browser, not with component specs, and
 the browser check is not part of this record. What was checked here:
 
-* `npm run build` in `synthia-web/` exits 0 (`✓ built in 685ms`).
+* `npm run build` in `elysper-web/` exits 0 (`✓ built in 685ms`).
 * The built bundle carries the surfaces the scenarios exercise:
   `dist/assets/index-DRinsAsH.js` contains `历史已压缩`, `批准一次`,
   `拒绝`, `已注入 step`, `下一回合`, `/follow`, `/resume`, `/compact`;
@@ -647,10 +693,10 @@ regression of this branch (§A). It was fixed after this run; §6 records
 the fix and the re-run.
 
 **2. `doc-check` was red on this branch, in three branch-added places.**
-`crates/synthia-plugin-protocol/src/wire.rs:34` linked `[`GATE`]`
-without the disambiguating target; `crates/synthia-server/src/composition.rs:194`
+`crates/elysper-plugin-protocol/src/wire.rs:34` linked `[`GATE`]`
+without the disambiguating target; `crates/elysper-server/src/composition.rs:194`
 linked `[`Tool::risk`]` where `Tool` is not in scope;
-`crates/synthia-server/src/session/controller/mod.rs:441` linked a
+`crates/elysper-server/src/session/controller/mod.rs:441` linked a
 `pub(super)` method through a private module. The first stopped the
 first `make ci`; the other two only appeared once it got past that
 crate. All three were edited to resolve (two code spans, one explicit
@@ -660,18 +706,18 @@ edits `make ci` exited 2.
 **3. `make test-crates` is red, in four crates this branch does not
 touch.**
 
-* `synthia-budget` — its crate-level doctest still calls
+* `elysper-budget` — its crate-level doctest still calls
   `LatencyBudget::new(one_arg)` and passes `Arc<Arc<StaticPricingTable>>`
   where `Arc<dyn PricingTable>` is wanted; both signatures already have
   that shape on `master`.
-* `synthia-resilience` — the lib test does not compile:
+* `elysper-resilience` — the lib test does not compile:
   `error[E0433]: cannot find \`time\` in \`tokio\`` at
   `src/provider.rs:393`, while the crate declares `tokio` with
   `features = ["macros", "rt", "rt-multi-thread"]`.
-* `synthia-tool-memo` — the same compile error, at
+* `elysper-tool-memo` — the same compile error, at
   `src/tests.rs:304`, with the same feature list on its `tokio`.
-* `synthia-semantic-cache` — its crate-level doctest imports
-  `synthia_provider::AnthropicProvider` under a feature set that has it
+* `elysper-semantic-cache` — its crate-level doctest imports
+  `elysper_provider::AnthropicProvider` under a feature set that has it
   off and calls `SemanticCacheProvider::new` with four of five
   arguments (`Arc<dyn Clock>` is missing).
 
@@ -679,59 +725,67 @@ For all four the branch's diff to the crate and to the workspace
 `tokio` entry is empty, so these are red on `master` as well. They are
 reported, not repaired, because they are outside this branch's change.
 `make ci` cannot see any of them: it does not run doctests, and
-`test-crates` is not part of it. `synthia-server` itself is green
-(`cargo test -p synthia-server -q` → `EXIT=0`).
+`test-crates` is not part of it. `elysper-server` itself is green
+(`cargo test -p elysper-server -q` → `EXIT=0`).
 
-## 5. What remains
+## 5. What remained at the time of the original run
 
-Known open items on this branch, deferred by the design:
+(Every item below is closed by the remainders round — see §0 for the
+per-item closure with evidence. This list is kept as it stood.)
 
 * **M7 — the duplicated turn-boundary rule. Resolved by §6.** The
-  automatic pass (`synthia-context::summarizing`) used to splice tool
+  automatic pass (`elysper-context::summarizing`) used to splice tool
   results without their call while the manual/harness pass
-  (`synthia-session::compaction` + `tool_pairing`) balanced the cut;
+  (`elysper-session::compaction` + `tool_pairing`) balanced the cut;
   scenario A was that disagreement, observed end to end. The automatic
   pass now calls `tool_pairing::balanced_prefix` (the prefix half of
   `balanced_message_cut`) and widens its range to the tool-call group,
   so one predicate decides the boundary for both paths.
-* **M8 — a distinct resume error code.** `stale_resume` currently
-  covers three different causes: a token whose `last_seq` is behind the
+* **M8 — a distinct resume error code.** *(Closed: commit `16824317`;
+  `resume_conflict` and `resume_no_snapshot` are distinct codes, and a
+  replayed decision now answers `200 OK` without re-dispatching —
+  commit `c36253d7`, §7 scenarios C/D.)* `stale_resume` previously
+  covered three different causes: a token whose `last_seq` is behind the
   tail, a token whose `pending` set disagrees with the log, and a log
   that carries no request snapshot at all. The client cannot tell them
   apart.
 * **`spawn_gates` / `active_sessions` share the session's lifetime.**
-  Both maps are keyed by `(user_id, session_id)` and both are evicted by
-  the one function `AppState::forget_session`; a session that leaves
-  `active_sessions` for good must take its gate with it, or the gate map
-  grows one entry per session the process ever opened. A later
-  `Weak`-keyed refactor (gate owned by the controller) is meant to
-  replace that function, not its call sites.
-* **`LogWriter`'s flush-retry duplication.** `flush` and
-  `append_copied` each drain the spill, write one batch and put refused
-  rows back. A backend whose `fsync` fails after the bytes were written
-  can therefore write a row twice on the retry, and the two paths have
-  to stay in step by hand.
-* **The automatic path's splice is in-memory only.** The durable
-  `SessionEvent::Compaction` row is not written for it: its
-  `source_keys` need one key per replaced message, and an assistant row
-  has no ledger key, so `SurfaceLedger::resolve` returns `MissingKey`,
-  the checkpoint parks and drops the record, and a replay folds the
-  **un-compacted** (still valid) history. No provider error follows,
-  because the pairing rule keeps both halves — but live and replay see
-  different contexts, which is the divergence to close next. Giving
-  assistant rows a durable ledger key is the prerequisite.
-* **The pre-link `parked_prompt` upgrade re-run.** A park row written
-  before the `park_consumed` link existed carries no `park_id`, so
-  `repair::parked_prompts` keys it by its ordinal (`park_key`). Rewriting
-  such rows to carry a real id — an explicit upgrade pass over old logs
-  — is deferred; until then those parks are identified by position.
+  *(Closed: commit `22d30024` — the gate is owned by the controller.)*
+  Both maps used to be keyed by `(user_id, session_id)` and evicted by
+  the one function `AppState::forget_session`; a session that left
+  `active_sessions` for good had to take its gate with it, or the gate
+  map grew one entry per session the process ever opened.
+* **`LogWriter`'s flush-retry duplication.** *(Closed: commits
+  `a2b04375` + `5becc27d` — the fs layer reports whether a refused
+  batch's bytes landed, and the writer skips rows it already wrote.)*
+  `flush` and `append_copied` each used to drain the spill, write one
+  batch and put refused rows back; a backend whose `fsync` failed after
+  the bytes were written could write a row twice on the retry.
+* **The automatic path's splice is in-memory only.** *(Closed: commit
+  `7a386858` — every shadowable row has a durable ledger key, so the
+  compaction checkpoint resolves and the durable `Compaction` row
+  lands; the §7 rerun replays it: baseline rows == log rows with the
+  compaction surface folded in both.)* The durable
+  `SessionEvent::Compaction` row used not to be written: its
+  `source_keys` needed one key per replaced message, an assistant row
+  had no ledger key, `SurfaceLedger::resolve` returned `MissingKey`,
+  and the checkpoint parked and dropped the record, so a replay folded
+  the **un-compacted** history while the live surface showed the
+  splice.
+* **The pre-link `parked_prompt` upgrade re-run.** *(Closed as
+  "retired, not migrated": commit `42889677` — a keyless park row is
+  warned once and skipped, never guessed by position; v1 logs are
+  refused outright by the v2 gate, so no pre-link row can reach the
+  repair path on this build.)* A park row written before the
+  `park_consumed` link existed carried no `park_id` and was keyed by
+  its ordinal; rewriting such rows was deferred.
 
 ## 6. Follow-up (2026-10-26): the automatic compaction boundary is fixed
 
-The summarising manager in `synthia-context` no longer splices the
+The summarising manager in `elysper-context` no longer splices the
 tool-result run alone. Each run is widened into its tool-call group
 before the splice: the start moves back to the nearest cut whose prefix
-holds no unanswered `tool_use` — `synthia_session::tool_pairing::
+holds no unanswered `tool_use` — `elysper_session::tool_pairing::
 balanced_prefix`, the prefix half of the same `balanced_message_cut`
 the manual path applies — and the end moves forward until the range
 answers every call inside it. The assistant turn the widening swallows
@@ -740,7 +794,7 @@ is archived (text and thinking) as a `ToolCallRecord` with
 `start`/`end`/`source_indices` cover the extended span.
 
 Re-run of scenario A, exactly as §3.A, in a fresh workspace
-(`/tmp/synthia-accept-t19b`, `context_window: 3000`, `reserve_tokens:
+(`/tmp/elysper-accept-t19b`, `context_window: 3000`, `reserve_tokens:
 800`, `compaction.enabled: true`, provider `openai` at
 `https://api.deepseek.com/v1` with model `deepseek-flash`), same two
 curl commands, on the rebuilt binary that carries the fix:
@@ -764,3 +818,138 @@ checkpoint parks and drops the record and the durable surface stays
 foldable — the log replays the un-compacted (still valid) history.
 That is safer than inventing provenance, but it means the automatic
 path's splice is in-memory only for now.
+
+*(Superseded: as of the remainders round every shadowable row has a
+durable ledger key, the checkpoint resolves, and the durable
+`Compaction` row lands — §0 row 3, §7.2 A/F.)*
+
+## 7. Remainders acceptance rerun (2026-10-27)
+
+HEAD before this round's commits: `bb5203b5`. This section's
+workspace is `/tmp/elysper-accept-t20` — §3's `$DIR` (the original
+run) was `/tmp/elysper-accept-t18`; the two are distinct and each
+section's paths are its own. Two deployments: `ws` at
+`context_window: 128000` for B–I, `ws-a` at `context_window: 3000`
+for A and F; the Python plugin was recreated from the record — the
+original is not committed — and its frame-by-frame smoke test answered
+`elysper/initialize`, `elysper/tools/list`, `elysper/tools/call`.
+Same provider and model as the original run. A mid-run `/tmp` wipe
+after scenario H destroyed that deployment's logs: the B–H lines
+below survive as quotes captured at run time, while A, F and I were
+run (for A and F, rerun from scratch) on the recreated workspace and
+are quoted from that state. Everything below was produced by a
+command on this branch in this worktree.
+
+### 7.1 Gates
+
+| target | exit | what it said |
+|---|---|---|
+| `make test-crates` | 0 | every member crate green, the four §4 item 3 crates included |
+| `make ci` (run 1) | 2 | `doc-check`: `fs.rs:33`/`:130` linked private items (`AppendFailure`, `Self::append_owned`) — committed code, caught by the gate |
+| `make ci` (run 2) | 2 | `doc-check`: `harness_tokio.rs:3-6` linked unresolved `elysper::core::…` paths |
+| `make ci` (final) | 0 | after the two doc-link fixes (plain code spans / correct `crate::core::…` paths); `test-crates` is now one of its prerequisites (Makefile `ci:` target) |
+| `make check-web` | 0 | tsc / eslint / prettier clean |
+| `make examples` | 0 | 55 targets + the three consumer proofs; `tokio in tree: 0`, `HARNESS-ONLY: OK` |
+| `make bench-check` | 0 | `all performance invariants hold` |
+
+The two non-zero `make ci` runs were real defects in committed doc
+comments (Task 1's and the facade feature's); both were fixed in the
+source, and no gate was edited to go green. `make ci` now lists
+`test-crates` among its prerequisites (Makefile `ci:` target), so the
+four red crates of §4 item 3 can no longer hide from it.
+
+### 7.2 Scenarios A–I (v2 log format throughout)
+
+A (two tools, `context_window: 3000`): turn end
+`{"kind":"end","turn":0,"reason":"completed"}`; the log's rows by
+type: 9 `tool_result`, 5 `compaction` (with 5 each of
+`compaction_start` / `compaction_summary` / `compaction_end` — five
+compaction passes under the 3000-token window); the `follow`
+baseline holds **62 rows == the log's 62 rows**; the answer quotes
+both outputs.
+
+B (queue / steer / stop): queued message lands as `UserInput` at the
+seq after the first turn's end and is answered (`queue-marker`);
+steer lands as `user_message` with `source:"steer"` inside the turn
+and the answer carries `steer-marker`; cancel during `sleep 30`
+answers `204`, the turn ends `cancelled`, both steer rows durable.
+
+> **Update — 2026-10-28 (Elysper v5, task 8 "durable parks").** The
+> scenario is unchanged; the *row shape* it observed has moved. A
+> queued message now writes three rows — `parked_prompt`, then the
+> `park_consumed` row that spends the park, then the turn's own
+> `UserInput` — where the frozen evidence in §B shows one `UserInput`
+> at `seq` 16 (so the turn's `UserInput` is now at 18). The queued
+> message is still its own turn, still answered, and still lands
+> after the first turn's end.
+
+C (approval): high-risk shell call suspends (`approval_asked`,
+`risk:"high"`, turn `suspended`, baseline `awaiting_approval`);
+`resume` with `status:"resolved"` → `202`, `approval_decided …
+status:"approved"`, exactly one `tool_dispatch`,
+`/tmp/elysper-approval.txt` written, turn `completed`; **the same
+resume body replayed → `200`, still one dispatch.** Deny
+(`status:"rejected"`) → `202`, zero dispatches, `is_error:true` tool
+result, `/tmp/elysper-deny.txt` absent. (`status:"approved"` is not a
+wire variant — the 422 lists `resolved|cancelled|rejected`.)
+
+D (crash and restart): `kill -9` mid-`sleep 20`; cold `follow` after
+restart — pre-crash prefix byte-identical (`cmp` clean), only closing
+rows appended (`TOOL_OUTCOME_UNKNOWN`, `interrupted:true`; step end;
+turn end `interrupted`); a later message completes normally with no
+seq gaps. Suspension across restart: baseline still
+`awaiting_approval` after the crash, `resume` → `202`, decided once,
+one dispatch, file written; the same resume body replayed → `200`,
+still one dispatch.
+
+E (reconnect): mid-run baseline `state:"running"` with the live keys;
+after the turn `rows == cursor == log max seq` (15/15/15); the window
+is replaced whole, nothing duplicated.
+
+F (compaction, `context_window: 3000`): six long turns then manual
+`POST …/compact` → `200 {"committed":true,"start":0,"end":11,
+"shadowed_messages":11,"shadowed_tokens":4057,…}`; the log carries
+the four-row lifecycle (`compaction_start`/`compaction_summary`/
+`compaction`/`compaction_end`, outcome `committed`); a follow-up
+question is answered from the summary; replay == live (baseline 58
+rows == log 58 rows, one `compaction` row on each side). Both mutexes
+hold: `compact` while running → `409 session_busy`; while suspended →
+`409 session_suspended`.
+
+G (usage, fork, export): usage reports token counts, turns and the
+live window; `fork` from index 12 and whole-log both return
+`forked_from` + rows, the child's first rows are byte-identical to
+the parent's (`cmp` clean), the child answers a follow-up (rows grow)
+while the parent's log does not move; the export is byte-identical to
+the log (`cmp` clean), `_meta` at `schema_version: 2`, seq-continuous.
+
+H (remote Python plugin): `GET /plugins` resolves `records` with
+`authority:"reduced"`, `risk:"unknown"`, `tools:["records_lookup"]`;
+`GET /tools` advertises it; a model turn dispatches it and the answer
+reports the Python process's object (`r-1`, `acceptance-record-body`,
+`python3`).
+
+I (stateless restart of a parked prompt): the park is durable before
+the crash (`parked_prompt` with `park_id`); after `kill -9` and
+restart, opening the session re-queues it (`takeover: re-queued the
+prompts a previous owner parked … restored=1`), the crashed turn is
+repaired (`TOOL_OUTCOME_UNKNOWN`, turn end `interrupted`), and the
+park is spent by id (`park_consumed` naming that `park_id`) before
+its `UserInput` runs; the final answer is exactly the parked token.
+
+### 7.3 v1 log refusal (Task 4's acceptance point)
+
+A hand-crafted `schema_version: 1` log under the sessions dir:
+
+```
+HTTP 500
+{"code":"session_log_read","message":"session error: read session log: session log schema version 1 is older than this build reads (this build supports 2); export the session with a build that reads v1, or reopen it there after migrating the log"}
+```
+
+The error names the version read, the version this build supports,
+and both ways out (export with an older build / reopen there after
+migrating) — operator-actionable, and the log is refused, not
+migrated. The refusal in the other direction is locked by
+`jsonl.rs`'s tests: `jsonl_sink_refuses_a_v1_log`,
+`jsonl_sink_refuses_a_newer_log` and
+`jsonl_sink_refuses_a_headerless_v0_log`.

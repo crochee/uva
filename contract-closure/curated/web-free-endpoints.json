@@ -1,0 +1,62 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/v1/sessions/{key}/events",
+    "notes": "SSE tail of one session's events. The web app follows `/api/v1/sessions/{key}/follow` instead (one reader per log); this route is the API surface for external clients that poll a session's event stream."
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/chat/usage",
+    "notes": "Deployment-wide token usage. The web app reads the per-session usage (`GET /api/v1/sessions/{key}/usage`); this one serves operators, not the chat page."
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/chat/sessions",
+    "notes": "Explicit session creation. The web app lets the server mint the session on the first turn (`POST /api/v1/chat/sessions/{key}/messages` creates it on demand), so the web client never calls this route; external clients may."
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/sessions/search",
+    "notes": "Full-text search over session logs. The web app searches the unified index (`GET /api/v1/search`); this route is the session-scoped variant for API clients."
+  },
+  {
+    "method": "POST",
+    "path": "/api/v1/attachments",
+    "notes": "Attachment store upload (`kind = \"attachment_ref\"` payloads). The web composer sends attachment bytes inline with the turn; the store's own API is for clients that upload first and reference later."
+  },
+  {
+    "method": "GET",
+    "path": "/api/v1/attachments/{key}",
+    "notes": "Attachment store read-back. The web composer keeps the bytes in the turn, so it never reads the store."
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/v1/attachments/{key}",
+    "notes": "Attachment store delete. The web composer keeps the bytes in the turn, so it never deletes from the store."
+  },
+  {
+    "method": "POST",
+    "path": "/chat/sessions/{key}/operation",
+    "notes": "The R29 operation endpoint, mounted only when `[operations] enabled = true`. The web client uses the chat message route; the operation wire is for clients that drive the gated operation surface."
+  },
+  {
+    "method": "GET",
+    "path": "/livez",
+    "notes": "Liveness probe for orchestrators. The web app polls `/api/health`."
+  },
+  {
+    "method": "GET",
+    "path": "/version",
+    "notes": "Build identity for probes and clients. The web app reads its version from the bundle, not from this route."
+  },
+  {
+    "method": "GET",
+    "path": "/metrics",
+    "notes": "Prometheus metrics. Scraped by operators, never by the web app."
+  },
+  {
+    "method": "POST",
+    "path": "/v1/messages",
+    "notes": "Anthropic-compatible surface for external Anthropic clients (the web app uses `/api/v1/chat/*`)."
+  }
+]

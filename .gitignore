@@ -25,9 +25,9 @@ dist
 .sdd/
 .worktrees/
 
-# Synthia runtime files
+# Elysper runtime files
 **/.agents/
-**/.synthia/
+**/.elysper/
 # Content-addressed attachment store the server writes at boot
 # (`AttachmentStore::new_fs(workspace_root.join(".attachments"))`).
 # Runtime state, like the session logs above.

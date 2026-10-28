@@ -7,14 +7,14 @@
 # surface grows until it's indistinguishable from a glob.
 #
 # Why this exists: AGENTS.md §3.7 says the lib.rs of each
-# `synthia-*` crate is the single place that decides what is public.
+# `elysper-*` crate is the single place that decides what is public.
 # A count-only ratchet pins that decision so a future "let's also
 # export this" doesn't sneak past review — the same way
 # `check-plugin-shape` ratchets plugin-crate file length.
 #
-# Scope: same as `check-pub-surface` minus the facade — `crates/synthia/`
-# is exempt (it propagates curated surfaces wholesale), `synthia-server`
-# and `synthia-mcp-server` are app / binary crates and their lib.rs is
+# Scope: same as `check-pub-surface` minus the facade — `crates/elysper/`
+# is exempt (it propagates curated surfaces wholesale), `elysper-server`
+# and `elysper-mcp-server` are app / binary crates and their lib.rs is
 # a wiring entry, not a curated surface.
 #
 # Per-crate baselines live in `scripts/paradigm-surface/baselines/<crate>`.
@@ -31,13 +31,13 @@ cd "$(dirname "$0")/.."
 # Crates whose lib.rs participates in the ratchet. Kept explicit so
 # a new crate's lib.rs doesn't silently get budgeted at 0.
 PARADIGM_CRATES=(
-  crates/synthia-tool
-  crates/synthia-harness
-  crates/synthia-provider
-  crates/synthia-core
-  crates/synthia-context
-  crates/synthia-steering
-  crates/synthia-session
+  crates/elysper-tool
+  crates/elysper-harness
+  crates/elysper-provider
+  crates/elysper-core
+  crates/elysper-context
+  crates/elysper-steering
+  crates/elysper-session
 )
 
 baseline_dir="scripts/paradigm-surface/baselines"

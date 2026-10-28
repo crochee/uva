@@ -1,7 +1,7 @@
-# Synthia Deployment Guide
+# Elysper Deployment Guide
 
 This document describes how to build, run, and deploy the
-full Synthia stack — `synthia-server` (Rust), `synthia-web`
+full Elysper stack — `elysper-server` (Rust), `elysper-web`
 (React + Vite), and the supporting Nginx reverse proxy.
 
 ## Table of Contents
@@ -27,18 +27,19 @@ fronted by Nginx.
 ┌──────────────────────────────────────────────────────────┐
 │   Nginx (:80)                                            │
 │   - Serves the built React app from `/`                  │
-│   - Proxies `/api/*` to synthia-server                   │
+│   - Proxies `/api/*` to elysper-server                   │
 │   - Proxies `/v1/*` (Anthropic Messages) to server       │
-│   - Proxies `/api/v1/chat/stream` (SSE) to synthia-server│
+│   - Proxies `/api/v1/sessions/{id}/follow` (SSE)         │
 └────────────────────┬─────────────────────────────────────┘
                      │
                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│   synthia-server (Rust + Axum, :8080 internal)           │
+│   elysper-server (Rust + Axum, :8080 internal)           │
 │   - Chat surface at `/api/v1/chat`                       │
+│   - Session event stream at `/api/v1/sessions/{id}/follow`│
 │   - Anthropic Messages at `/v1/messages`                 │
 │   - Management API at `/api/v1/*`                        │
-│   - Health check at `/health`                            │
+│   - Probes at `/livez`, `/readyz`, `/version`            │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -82,7 +83,7 @@ The frontend has **no automated test suite** by design (R72). The
 former Playwright e2e tree took 13 minutes per run and needed
 `cargo build` + Vite + Chromium, while its mocks rotted unnoticed. It is
 gone, along with `playwright.config.ts`, `.github/workflows/e2e.yml`,
-and an ad-hoc browser-script harness under `synthia-web/scripts/e2e/`.
+and an ad-hoc browser-script harness under `elysper-web/scripts/e2e/`.
 
 What runs in CI is `make check-web` — `tsc --noEmit`, `eslint`, and
 `prettier --check`. Behaviour is verified by driving the running app
@@ -93,14 +94,14 @@ make dev            # backend :8080 + Vite :5173
 # then open the app through the MCP browser and exercise the change
 ```
 
-The MCP browser is supplied by the harness, not by `synthia-web`'s
+The MCP browser is supplied by the harness, not by `elysper-web`'s
 dependencies — it keeps working with `playwright` uninstalled.
 
 ## Production deployment (separate)
 
 The recommended deployment is **split**: Nginx serves the
 compiled React app and reverse-proxies `/api/*` and `/v1/*` to
-`synthia-server`. This lets the two parts scale and ship
+`elysper-server`. This lets the two parts scale and ship
 independently.
 
 `/v1/*` is the Anthropic Messages surface (`POST /v1/messages`).
@@ -115,8 +116,8 @@ make build-release
 ```
 
 This produces:
-- `target/release/synthia-server` — the server binary
-- `synthia-web/dist/` — the React app's static bundle
+- `target/release/elysper-server` — the server binary
+- `elysper-web/dist/` — the React app's static bundle
 
 ### 2. Containerize (recommended)
 
@@ -126,8 +127,8 @@ make docker-prod-up # starts the production compose stack
 ```
 
 The container topology:
-- `synthia-server` listens on internal port 8080 (no host port)
-- `synthia-web` (Nginx) listens on host port 80 and proxies
+- `elysper-server` listens on internal port 8080 (no host port)
+- `elysper-web` (Nginx) listens on host port 80 and proxies
   `/api/*` and `/v1/*` to the server over the docker network
 
 ### 3. Bare-metal deployment
@@ -138,7 +139,7 @@ the React bundle in the configured `root` directory and run
 the server directly:
 
 ```bash
-./target/release/synthia-server &
+./target/release/elysper-server &
 nginx -g "daemon off;"
 ```
 
@@ -151,7 +152,7 @@ URL a client is given is the deployment root — no path component:
 # through Nginx (compose prod, or a bare-metal nginx on :80)
 export ANTHROPIC_BASE_URL=http://localhost
 
-# or straight to synthia-server, bypassing the proxy
+# or straight to elysper-server, bypassing the proxy
 export ANTHROPIC_BASE_URL=http://localhost:8080
 
 # the SDKs insist on a key; which values the server accepts
@@ -187,34 +188,34 @@ make clean-docker         # remove all containers + images
 
 ## Environment variables
 
-`synthia-server` reads:
+`elysper-server` reads:
 
 | Var                    | Default       | Meaning                          |
 |------------------------|---------------|----------------------------------|
-| `SYNTHIA_HOST`         | `0.0.0.0`     | bind address                     |
-| `SYNTHIA_PORT`         | `8080`        | listen port                      |
+| `ELYSPER_HOST`         | `0.0.0.0`     | bind address                     |
+| `ELYSPER_PORT`         | `8080`        | listen port                      |
 | `RUST_LOG`             | `info`        | log level (`debug`/`info`/...)   |
 
-Precedence for the address: `--host`/`--port` → `SYNTHIA_HOST`/
-`SYNTHIA_PORT` → `host`/`port` in the deployment config → the binary's
+Precedence for the address: `--host`/`--port` → `ELYSPER_HOST`/
+`ELYSPER_PORT` → `host`/`port` in the deployment config → the binary's
 own defaults (`127.0.0.1:8080`). The container images set the two
 variables to `0.0.0.0:8080`, because a container that binds loopback is
 unreachable through a published port.
 
-`synthia-web` (Vite dev server only):
+`elysper-web` (Vite dev server only):
 
 | Var                    | Default               | Meaning                |
 |------------------------|-----------------------|------------------------|
 | `VITE_API_URL`         | `/api` (proxied)      | REST base URL          |
 | `VITE_CHAT_URL`        | `/api/v1/chat`        | Chat surface URL       |
-| `VITE_WS_URL`          | `/ws` (proxied)       | WebSocket approvals    |
+| `VITE_STREAM_URL`      | `/api/v1` (proxied)   | Session follow stream  |
 
 Both services can also be configured through their
 respective `config.toml` files in the workspace root.
 
 ### The deployment configuration file
 
-`synthia-server --config <path>` names the file that configures the
+`elysper-server --config <path>` names the file that configures the
 boot: `providers` (base_url / api_key / models), `agents`
 (`max_steps`, `compaction`, `strategy`), `[tools]`, `[plugins]`,
 `auth`, `cors`, `operations`, and `mcp_servers`. **The whole file
@@ -226,11 +227,11 @@ the deployment file `.yaml`; a TOML document does not load.
 
 ```bash
 # everything from this file: providers, agents, tools, cors, mcp, …
-synthia-server --directory /srv/synthia --config /etc/synthia/deploy.yaml
+elysper-server --directory /srv/elysper --config /etc/elysper/deploy.yaml
 ```
 
 Without `--config` the server tries `<directory>/config.toml`, then
-`<directory>/.synthia/config.toml`, then its defaults, and the provider
+`<directory>/.elysper/config.toml`, then its defaults, and the provider
 additionally falls back to `<directory>/.agents/config.toml` and
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. A named file that is missing or
 malformed is logged at `warn` and the next candidate is tried — a config
@@ -346,9 +347,9 @@ check names while the server is not ready to serve traffic.
 ### SSE streaming cuts off mid-response
 
 The Nginx config **must** include `proxy_buffering off;` for
-the `/api/v1/chat/stream` location. Buffered responses will
-hold frames until the SSE stream closes, defeating the
-streaming UX.
+the `/api/v1/sessions/` location (the `/{id}/follow` stream).
+Buffered responses will hold frames until the SSE stream closes,
+defeating the streaming UX.
 
 The same applies to the `/v1/` block: a `POST /v1/messages`
 whose body sets `"stream": true` is answered with SSE, so that
@@ -371,7 +372,7 @@ origins require a server restart.
 
 ### Container cannot reach the server
 
-The `synthia-server` container in `docker-compose.prod.yml`
+The `elysper-server` container in `docker-compose.prod.yml`
 does not expose a host port — Nginx reaches it over the
 internal docker network. If you stop the server, Nginx health
 checks will fail.

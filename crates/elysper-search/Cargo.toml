@@ -1,0 +1,67 @@
+[package]
+name = "elysper-search"
+description = "Generic multi-domain search engine: BM25 + vector hybrid, pluggable tokenizer / embedder / vector store / filter / reranker, thread-safe, cross-T registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+provider = ["dep:elysper-provider"]
+# : HNSW-backed vector index. Pulls in `hnsw_rs`
+# (a small, pure-Rust HNSW with no runtime / HTTP deps). The
+# default build stays zero-dep; `make check-mvp-deps`'s hnsw
+# section asserts this feature also stays offline.
+hnsw = ["dep:hnsw_rs"]
+# : arch-specific SIMD dot product. Zero new
+# dep (the `simd` feature only flips the dot-product
+# dispatch on `cfg(target_arch)` routes inside the crate).
+# Stable toolchain only—`std::simd` requires nightly and
+# is intentionally NOT enabled; `make check-mvp-deps`'s
+# search section asserts no new external crate.
+simd = []
+
+[dependencies]
+elysper-core.workspace = true
+elysper-provider = { workspace = true, default-features = false, optional = true }
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+# `ErasedEngine::search_erased` is async trait method so adapter
+# engines over async retrievers (session full-text, memory recall)
+# join the cross-domain `Registry::search` without a blocking
+# bridge. Runtime-neutral: no executor, no runtime types.
+async-trait.workspace = true
+# : optional HNSW vector index. `hnsw_rs` is
+# offline (serde + rand + rayon only—none of reqwest / hyper /
+# h2 / tower), so the `hnsw` feature keeps the crate's
+# runtime-neutral / offline guarantees.
+hnsw_rs = { version = "0.3", optional = true, default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
+chrono.workspace = true
+tempfile.workspace = true
+
+# The bench needs the HNSW backend; without the feature cargo
+# skips it instead of failing the build.
+[[example]]
+name = "hnsw_bench"
+required-features = ["hnsw"]
+
+# The bench proves the SIMD speedup over the scalar
+# baseline on the same dataset. Without `simd` the
+# example is meaningless (both paths would be scalar).
+[[example]]
+name = "simd_bench"
+required-features = ["simd"]

@@ -85,6 +85,16 @@ function scanConstStringBindings(src: string): Map<string, string> {
     const lit = m[3] ?? m[4] ?? m[5] ?? '';
     if (lit.startsWith('/')) out.set(m[1], lit);
   }
+  // Arrow-function URL helpers: `const FOLLOW_URL = (id: string) =>
+  // `/api/v1/sessions/${encodeURIComponent(id)}/follow``. The single-
+  // template body becomes the binding's value; the call site's argument
+  // list (`FOLLOW_URL(sessionId)`) is trailing noise the path extractor
+  // already ignores — it keeps the last `/…` segment it finds.
+  const arrow =
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[A-Za-z_$][\w$<>,\[\]\s]*)?=>\s*`([^`]*)`/g;
+  while ((m = arrow.exec(src)) !== null) {
+    if (m[2].startsWith('/') && !out.has(m[1])) out.set(m[1], m[2]);
+  }
   return out;
 }
 
@@ -195,7 +205,7 @@ function findHelperCalls(src: string, consts: Map<string, string>, filePath: str
   // - the object prefix is optional so bare hook calls like
   //   `useCursorList<T>('/api/v1/…')` are matched too (the method set is
   //   small enough that a bare `get(`/`post(` mis-match is unlikely).
-  const re = /\b(?:([A-Za-z_$][\w$]*)\s*\.)?(get|post|put|del|delete|patch|sendMessage|sendMessageStream|useCursorList)\s*(?:<[^>]*>+)?\s*\(\s*([`'"`])/g;
+  const re = /\b(?:([A-Za-z_$][\w$]*)\s*\.)?(get|getRaw|post|put|del|delete|patch|sendMessage|sendMessageStream|useCursorList)\s*(?:<[^>]*>+)?\s*\(\s*([`'"`])/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src)) !== null) {
     const methodName = m[2];
@@ -261,6 +271,9 @@ function findHelperCalls(src: string, consts: Map<string, string>, filePath: str
     // Map helper method to canonical HTTP verb.
     const map: Record<string, HttpMethod> = {
       get: 'GET',
+      // `api.getRaw(path)` fetches the path and hands back the raw
+      // `Response` (the export download does) — still a GET.
+      getRaw: 'GET',
       post: 'POST',
       put: 'PUT',
       del: 'DELETE',

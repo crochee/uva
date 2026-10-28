@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Synthia 双侧契约对齐检查（CI 闸门）
+ * Elysper 双侧契约对齐检查（CI 闸门）
  * 退出码:
  *   - 0 双侧完全对齐
  *   - 1 有 frontend-only 或 backend-only
@@ -13,6 +13,8 @@ import { parse as parseYaml } from 'yaml';
 
 import { scanBackendRouter } from './lib/backend-scanner.js';
 import { scanFrontendDir } from './lib/frontend-scanner.js';
+import { loadCuratedWebFree, withoutDeclarations } from './lib/curated.js';
+import { relativizePaths } from './lib/paths.js';
 import { checkContract } from './lib/unifier.js';
 import type { ContractFile, Endpoint } from './lib/types.js';
 
@@ -20,11 +22,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const BACKEND_ROUTER = resolve(
   ROOT,
-  process.env.BACKEND_ROUTER ?? 'crates/synthia-server/src/server/router.rs',
+  process.env.BACKEND_ROUTER ?? 'crates/elysper-server/src/server/router.rs',
 );
 const FRONTEND_ROOT = resolve(
   ROOT,
-  process.env.FRONTEND_ROOT ?? 'synthia-web/src',
+  process.env.FRONTEND_ROOT ?? 'elysper-web/src',
 );
 const IN_YAML = resolve(
   ROOT,
@@ -51,9 +53,17 @@ function loadPreserved(path: string): Endpoint[] {
 }
 
 function main() {
-  const preserved = loadPreserved(IN_YAML);
-  const be = scanBackendRouter(BACKEND_ROUTER);
-  const fe = scanFrontendDir(FRONTEND_ROOT);
+  // The artifact is the thing being checked: it may carry the
+  // fix-card `status` markers, but it may **not** carry a
+  // suppression. The curated file is the single source of those, so
+  // a stale (or tampered) artifact cannot silence the check that
+  // reads it — and a broken curated file silences nothing.
+  const preserved = [
+    ...withoutDeclarations(loadPreserved(IN_YAML)),
+    ...loadCuratedWebFree(ROOT),
+  ];
+  const be = relativizePaths(scanBackendRouter(BACKEND_ROUTER), ROOT);
+  const fe = relativizePaths(scanFrontendDir(FRONTEND_ROOT), ROOT);
   const res = checkContract(be, fe, preserved);
 
   console.log(

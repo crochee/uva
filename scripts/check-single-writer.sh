@@ -3,7 +3,7 @@
 #
 # Why this exists: the invariant this branch is named after is "one
 # writer per session, one ordinal source". The writer lives in
-# `synthia-session`, and every row a session gains — the model's
+# `elysper-session`, and every row a session gains — the model's
 # turns, the tool results, the user's prompts, the feedback, the
 # compaction rows, a fork's inherited rows — must go through it. A
 # direct call to `SessionSink::append` / `append_many` outside the
@@ -36,7 +36,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # The writer itself: the one place a session sink is written.
-WRITER_DIR="crates/synthia-session/src/writer"
+WRITER_DIR="crates/elysper-session/src/writer"
 
 # The production files: a crate's `src/` and its `examples/`. The
 # integration tests under `crates/*/tests/` are not production code.

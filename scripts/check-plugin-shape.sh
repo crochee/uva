@@ -8,17 +8,17 @@
 #
 # Why this exists: `check-harness-shape` already pins the
 # harness crate's function length / nesting budget; plugin crates
-# (`synthia-tool-read` / `-write` / `-shell` / `-todo` / `-web`
-# / `-task` / `-scheduler` / `-search` plus `synthia-mcp` /
-# `synthia-skill` / `synthia-attachment`) ship as a `lib.rs` plus
+# (`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-web`
+# / `-task` / `-scheduler` / `-search` plus `elysper-mcp` /
+# `elysper-skill` / `elysper-attachment`) ship as a `lib.rs` plus
 # focused siblings, and the same long-file drift that motivated the
 # harness budget shows up there too. The gate is intentionally
 # file-grained (not function-grained): plugins are small and the
 # natural remediation is splitting the file, not extracting helpers
 # inline.
 #
-# Scoped to plugin crates on purpose: `synthia-harness` is governed
-# by `check-harness-shape`; `synthia-server` and `synthia-mcp-server`
+# Scoped to plugin crates on purpose: `elysper-harness` is governed
+# by `check-harness-shape`; `elysper-server` and `elysper-mcp-server`
 # are app / binary crates and their file layout is deployment-driven.
 #
 # Exit 0 with an `OK:` line, or exit 1 with the offending files.
@@ -30,17 +30,17 @@ cd "$(dirname "$0")/.."
 # Plugin-crate roots whose production source files participate in
 # the gate. Each root is the leaf crate directory under `crates/`.
 PLUGIN_CRATE_ROOTS=(
-  crates/synthia-tool-read
-  crates/synthia-tool-write
-  crates/synthia-tool-shell
-  crates/synthia-tool-todo
-  crates/synthia-tool-web
-  crates/synthia-tool-task
-  crates/synthia-tool-scheduler
-  crates/synthia-tool-search
-  crates/synthia-mcp
-  crates/synthia-skill
-  crates/synthia-attachment
+  crates/elysper-tool-read
+  crates/elysper-tool-write
+  crates/elysper-tool-shell
+  crates/elysper-tool-todo
+  crates/elysper-tool-web
+  crates/elysper-tool-task
+  crates/elysper-tool-scheduler
+  crates/elysper-tool-search
+  crates/elysper-mcp
+  crates/elysper-skill
+  crates/elysper-attachment
 )
 
 # Baseline cap: highest current line count across the scanned file

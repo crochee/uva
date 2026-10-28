@@ -1,4 +1,4 @@
-# markdown-lint.yml — Synthia
+# markdown-lint.yml — Elysper
 #
 # 与 .markdownlint.json 配对使用（单一真源）：
 #   - 锁每个 crate 顶层 README.md 的 markdown 格式；
@@ -7,7 +7,7 @@
 #   - 与 `make fmt-check` / `make check-web` 互不重叠（rustfmt + 前端
 #     prettier）；组成 "rustfmt + prettier + markdownlint" 三件套。
 #
-# scope 决定：显式列举 26 个 crate README + 顶层 CONTRIBUTORS.md（不是
+# scope 决定：显式列举 41 个 crate README + 顶层 CONTRIBUTORS.md（不是
 # glob 排除模式）— 这样新加一个目录不会"无意中"进入 lint 范围，而是
 # 显式决策后才加。这是 rust-lang/tokio 的同一做法。
 #
@@ -44,30 +44,43 @@ jobs:
           config: .markdownlint.json
           globs: |
             CONTRIBUTORS.md
-            crates/synthia/README.md
-            crates/synthia-core/README.md
-            crates/synthia-provider/README.md
-            crates/synthia-context/README.md
-            crates/synthia-session/README.md
-            crates/synthia-tool/README.md
-            crates/synthia-harness/README.md
-            crates/synthia-telemetry/README.md
-            crates/synthia-attachment/README.md
-            crates/synthia-mcp/README.md
-            crates/synthia-scheduler/README.md
-            crates/synthia-workflow/README.md
-            crates/synthia-eval/README.md
-            crates/synthia-search/README.md
-            crates/synthia-skill/README.md
-            crates/synthia-steering/README.md
-            crates/synthia-test-support/README.md
-            crates/synthia-server/README.md
-            crates/synthia-tool-read/README.md
-            crates/synthia-tool-write/README.md
-            crates/synthia-tool-shell/README.md
-            crates/synthia-tool-todo/README.md
-            crates/synthia-tool-web/README.md
-            crates/synthia-tool-task/README.md
-            crates/synthia-tool-scheduler/README.md
-            crates/synthia-tool-search/README.md
-            crates/synthia-hpc-batch/README.md
+            crates/elysper/README.md
+            crates/elysper-core/README.md
+            crates/elysper-provider/README.md
+            crates/elysper-context/README.md
+            crates/elysper-session/README.md
+            crates/elysper-tool/README.md
+            crates/elysper-harness/README.md
+            crates/elysper-telemetry/README.md
+            crates/elysper-attachment/README.md
+            crates/elysper-mcp/README.md
+            crates/elysper-scheduler/README.md
+            crates/elysper-workflow/README.md
+            crates/elysper-eval/README.md
+            crates/elysper-search/README.md
+            crates/elysper-skill/README.md
+            crates/elysper-steering/README.md
+            crates/elysper-test-support/README.md
+            crates/elysper-server/README.md
+            crates/elysper-tool-read/README.md
+            crates/elysper-tool-write/README.md
+            crates/elysper-tool-shell/README.md
+            crates/elysper-tool-todo/README.md
+            crates/elysper-tool-web/README.md
+            crates/elysper-tool-task/README.md
+            crates/elysper-tool-scheduler/README.md
+            crates/elysper-tool-search/README.md
+            crates/elysper-hpc-batch/README.md
+            crates/elysper-budget/README.md
+            crates/elysper-harness-tokio/README.md
+            crates/elysper-macros/README.md
+            crates/elysper-mcp-server/README.md
+            crates/elysper-plugin-host/README.md
+            crates/elysper-plugin-protocol/README.md
+            crates/elysper-reflection/README.md
+            crates/elysper-resilience/README.md
+            crates/elysper-semantic-cache/README.md
+            crates/elysper-strategy-best-of-n/README.md
+            crates/elysper-strategy-cot/README.md
+            crates/elysper-strategy-plan-execute/README.md
+            crates/elysper-tool-memo/README.md

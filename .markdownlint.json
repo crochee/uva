@@ -1,5 +1,5 @@
 {
-  "_comment": "markdownlint — Synthia",
+  "_comment": "markdownlint — Elysper",
   "_note": "Lock Markdown formatting to the AGENTS.md / CONTRIBUTING.md prose conventions. Scoped to **explicit** include lists (not exclude patterns) so the gate is deterministic and a new directory tree cannot accidentally enter the lint scope.",
   "default": true,
   "MD003": { "style": "atx" },

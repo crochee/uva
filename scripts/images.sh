@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# synthia image build entry — Docker only, no cluster interaction.
+# elysper image build entry — Docker only, no cluster interaction.
 #
 #   scripts/images.sh build             # build server + web + mcp
 #   scripts/images.sh build server      # build only the server
@@ -44,14 +44,14 @@ usage() {
 
 build_server() {
     need docker
-    echo "== build synthia-server:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build elysper-server:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
-        --build-arg "SYNTHIA_GIT_SHA=${GIT_SHA}" \
-        --build-arg "SYNTHIA_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
+        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
-        --build-arg "SYNTHIA_VERSION=${TAG}" \
+        --build-arg "ELYSPER_VERSION=${TAG}" \
         -f "${REPO_ROOT}/Dockerfile.server" \
-        -t "${REGISTRY}/synthia-server:${TAG}" \
+        -t "${REGISTRY}/elysper-server:${TAG}" \
         "${REPO_ROOT}"
 }
 
@@ -63,10 +63,10 @@ build_server_artifact() {
     need docker
     ARTIFACT_DIR=${ARTIFACT_DIR:-./dist}
     mkdir -p "${ARTIFACT_DIR}"
-    echo "== artifact synthia-server (musl, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/synthia-server =="
+    echo "== artifact elysper-server (musl, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-server =="
     docker buildx build --target artifact \
-        --build-arg "SYNTHIA_GIT_SHA=${GIT_SHA}" \
-        --build-arg "SYNTHIA_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
+        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
         --output "type=local,dest=${ARTIFACT_DIR}" \
         -f "${REPO_ROOT}/Dockerfile.server" \
@@ -74,15 +74,15 @@ build_server_artifact() {
 }
 
 # 走 Dockerfile.server.windows 的 `--target artifact` 阶段出 Windows PE;
-# 与 ci.yml 的 cross-windows 走同一条路径. 输出 synthia-server.exe.
+# 与 ci.yml 的 cross-windows 走同一条路径. 输出 elysper-server.exe.
 build_server_windows() {
     need docker
     ARTIFACT_DIR=${ARTIFACT_DIR:-./dist}
     mkdir -p "${ARTIFACT_DIR}"
-    echo "== artifact synthia-server (windows gnu, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/synthia-server.exe =="
+    echo "== artifact elysper-server (windows gnu, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-server.exe =="
     docker buildx build --target artifact \
-        --build-arg "SYNTHIA_GIT_SHA=${GIT_SHA}" \
-        --build-arg "SYNTHIA_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
+        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
         --output "type=local,dest=${ARTIFACT_DIR}" \
         -f "${REPO_ROOT}/Dockerfile.server.windows" \
         "${REPO_ROOT}"
@@ -90,36 +90,36 @@ build_server_windows() {
 
 build_web() {
     need docker
-    echo "== build synthia-web:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build elysper-web:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
-        --build-arg "SYNTHIA_VERSION=${TAG}" \
-        --build-arg "SYNTHIA_GIT_SHA=${GIT_SHA}" \
-        --build-arg "SYNTHIA_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "ELYSPER_VERSION=${TAG}" \
+        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
+        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "NODE_VERSION=${NODE_VERSION}" \
         -f "${REPO_ROOT}/Dockerfile.web" \
-        -t "${REGISTRY}/synthia-web:${TAG}" \
+        -t "${REGISTRY}/elysper-web:${TAG}" \
         "${REPO_ROOT}"
 }
 
 build_mcp() {
     need docker
-    echo "== build synthia-mcp-server:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build elysper-mcp-server:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
-        --build-arg "SYNTHIA_GIT_SHA=${GIT_SHA}" \
-        --build-arg "SYNTHIA_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
+        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
-        --build-arg "SYNTHIA_VERSION=${TAG}" \
+        --build-arg "ELYSPER_VERSION=${TAG}" \
         -f "${REPO_ROOT}/Dockerfile.mcp" \
-        -t "${REGISTRY}/synthia-mcp-server:${TAG}" \
+        -t "${REGISTRY}/elysper-mcp-server:${TAG}" \
         "${REPO_ROOT}"
 }
 
 maybe_push() {
     if [ "${PUSH:-0}" = "1" ]; then
         echo "== push =="
-        docker push "${REGISTRY}/synthia-server:${TAG}"
-        docker push "${REGISTRY}/synthia-web:${TAG}"
-        docker push "${REGISTRY}/synthia-mcp-server:${TAG}"
+        docker push "${REGISTRY}/elysper-server:${TAG}"
+        docker push "${REGISTRY}/elysper-web:${TAG}"
+        docker push "${REGISTRY}/elysper-mcp-server:${TAG}"
     fi
 }
 

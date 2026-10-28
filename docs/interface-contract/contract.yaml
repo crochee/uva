@@ -1,0 +1,606 @@
+version: 1
+generated_at: 2026-10-28T05:57:21.006Z
+endpoints:
+  - id: DELETE /api/v1/agents/{key}
+    method: DELETE
+    path: /api/v1/agents/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:241
+      frontend:
+        - elysper-web/src/pages/AgentsPage.tsx:163
+  - id: DELETE /api/v1/attachments/{key}
+    method: DELETE
+    path: /api/v1/attachments/{key}
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:361
+      frontend: []
+    frontend_consumed: false
+    notes: Attachment store delete. The web composer keeps the bytes in the turn, so
+      it never deletes from the store.
+  - id: DELETE /api/v1/evals/{key}
+    method: DELETE
+    path: /api/v1/evals/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:345
+      frontend:
+        - elysper-web/src/api/evals.ts:28
+  - id: DELETE /api/v1/schedules/{key}
+    method: DELETE
+    path: /api/v1/schedules/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:286
+      frontend:
+        - elysper-web/src/api/schedules.ts:39
+  - id: DELETE /api/v1/sessions/{key}
+    method: DELETE
+    path: /api/v1/sessions/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:150
+      frontend:
+        - elysper-web/src/pages/SessionsPage.tsx:114
+  - id: DELETE /api/v1/skills/{key}
+    method: DELETE
+    path: /api/v1/skills/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:246
+      frontend:
+        - elysper-web/src/pages/SkillsPage.tsx:135
+  - id: DELETE /api/v1/tools/{key}
+    method: DELETE
+    path: /api/v1/tools/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:270
+      frontend:
+        - elysper-web/src/pages/ToolsPage.tsx:150
+  - id: DELETE /api/v1/workflows/{key}
+    method: DELETE
+    path: /api/v1/workflows/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:317
+      frontend:
+        - elysper-web/src/api/workflows.ts:42
+  - id: GET /api/v1/agents
+    method: GET
+    path: /api/v1/agents
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:232
+      frontend:
+        - elysper-web/src/pages/AgentsPage.tsx:90
+        - elysper-web/src/pages/ChatPage.tsx:1149
+        - elysper-web/src/components/ui/CommandPalette.tsx:251
+  - id: GET /api/v1/agents/{key}
+    method: GET
+    path: /api/v1/agents/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:241
+      frontend:
+        - elysper-web/src/pages/AgentDetailPage.tsx:56
+  - id: GET /api/v1/agents/default
+    method: GET
+    path: /api/v1/agents/default
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:237
+      frontend:
+        - elysper-web/src/pages/ChatPage.tsx:779
+  - id: GET /api/v1/attachments/{key}
+    method: GET
+    path: /api/v1/attachments/{key}
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:361
+      frontend: []
+    frontend_consumed: false
+    notes: Attachment store read-back. The web composer keeps the bytes in the turn,
+      so it never reads the store.
+  - id: GET /api/v1/chat/usage
+    method: GET
+    path: /api/v1/chat/usage
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:199
+      frontend: []
+    frontend_consumed: false
+    notes: Deployment-wide token usage. The web app reads the per-session usage
+      (`GET /api/v1/sessions/{key}/usage`); this one serves operators, not the
+      chat page.
+  - id: GET /api/v1/evals
+    method: GET
+    path: /api/v1/evals
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:343
+      frontend:
+        - elysper-web/src/api/evals.ts:16
+  - id: GET /api/v1/evals/{key}
+    method: GET
+    path: /api/v1/evals/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:345
+      frontend:
+        - elysper-web/src/api/evals.ts:20
+  - id: GET /api/v1/models
+    method: GET
+    path: /api/v1/models
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:140
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:214
+  - id: GET /api/v1/plugins
+    method: GET
+    path: /api/v1/plugins
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:147
+      frontend:
+        - elysper-web/src/api/plugins.ts:51
+  - id: GET /api/v1/schedules
+    method: GET
+    path: /api/v1/schedules
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:282
+      frontend:
+        - elysper-web/src/pages/SchedulesPage.tsx:39
+        - elysper-web/src/api/schedules.ts:23
+  - id: GET /api/v1/schedules/{key}
+    method: GET
+    path: /api/v1/schedules/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:286
+      frontend:
+        - elysper-web/src/api/schedules.ts:27
+  - id: GET /api/v1/search
+    method: GET
+    path: /api/v1/search
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:254
+      frontend:
+        - elysper-web/src/pages/SessionsPage.tsx:221
+        - elysper-web/src/components/ui/CommandPalette.tsx:272
+  - id: GET /api/v1/sessions
+    method: GET
+    path: /api/v1/sessions
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:149
+      frontend:
+        - elysper-web/src/pages/SessionsPage.tsx:94
+        - elysper-web/src/components/ui/CommandPalette.tsx:250
+  - id: GET /api/v1/sessions/{key}
+    method: GET
+    path: /api/v1/sessions/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:150
+      frontend:
+        - elysper-web/src/pages/SessionDetailPage.tsx:199
+        - elysper-web/src/api/chat-stream.ts:192
+  - id: GET /api/v1/sessions/{key}/events
+    method: GET
+    path: /api/v1/sessions/{key}/events
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:163
+      frontend: []
+    frontend_consumed: false
+    notes: SSE tail of one session's events. The web app follows
+      `/api/v1/sessions/{key}/follow` instead (one reader per log); this route
+      is the API surface for external clients that poll a session's event
+      stream.
+  - id: GET /api/v1/sessions/{key}/export
+    method: GET
+    path: /api/v1/sessions/{key}/export
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:155
+      frontend:
+        - elysper-web/src/pages/SessionsPage.tsx:134
+  - id: GET /api/v1/sessions/{key}/follow
+    method: GET
+    path: /api/v1/sessions/{key}/follow
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:171
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:464
+  - id: GET /api/v1/sessions/{key}/status
+    method: GET
+    path: /api/v1/sessions/{key}/status
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:167
+      frontend:
+        - elysper-web/src/pages/SessionDetailPage.tsx:233
+  - id: GET /api/v1/sessions/{key}/usage
+    method: GET
+    path: /api/v1/sessions/{key}/usage
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:183
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:354
+  - id: GET /api/v1/sessions/search
+    method: GET
+    path: /api/v1/sessions/search
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:257
+      frontend: []
+    frontend_consumed: false
+    notes: Full-text search over session logs. The web app searches the unified
+      index (`GET /api/v1/search`); this route is the session-scoped variant for
+      API clients.
+  - id: GET /api/v1/skills
+    method: GET
+    path: /api/v1/skills
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:226
+      frontend:
+        - elysper-web/src/pages/SkillsPage.tsx:72
+  - id: GET /api/v1/skills/{key}
+    method: GET
+    path: /api/v1/skills/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:246
+      frontend:
+        - elysper-web/src/pages/SkillDetailPage.tsx:50
+  - id: GET /api/v1/tasks
+    method: GET
+    path: /api/v1/tasks
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:335
+      frontend:
+        - elysper-web/src/api/tasks.ts:17
+  - id: GET /api/v1/tasks/{key}
+    method: GET
+    path: /api/v1/tasks/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:336
+      frontend:
+        - elysper-web/src/api/tasks.ts:22
+  - id: GET /api/v1/tools
+    method: GET
+    path: /api/v1/tools
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:266
+      frontend:
+        - elysper-web/src/pages/ToolsPage.tsx:74
+  - id: GET /api/v1/tools/{key}
+    method: GET
+    path: /api/v1/tools/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:270
+      frontend:
+        - elysper-web/src/pages/ToolDetailPage.tsx:83
+  - id: GET /api/v1/workflows
+    method: GET
+    path: /api/v1/workflows
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:312
+      frontend:
+        - elysper-web/src/api/workflows.ts:26
+  - id: GET /api/v1/workflows/{key}
+    method: GET
+    path: /api/v1/workflows/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:317
+      frontend:
+        - elysper-web/src/api/workflows.ts:30
+  - id: GET /livez
+    method: GET
+    path: /livez
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:398
+      frontend: []
+    frontend_consumed: false
+    notes: Liveness probe for orchestrators. The web app polls `/api/health`.
+  - id: GET /metrics
+    method: GET
+    path: /metrics
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:410
+      frontend: []
+    frontend_consumed: false
+    notes: Prometheus metrics. Scraped by operators, never by the web app.
+  - id: GET /readyz
+    method: GET
+    path: /readyz
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:399
+      frontend:
+        - elysper-web/src/hooks/useServerHealth.ts:96
+  - id: GET /version
+    method: GET
+    path: /version
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:404
+      frontend: []
+    frontend_consumed: false
+    notes: Build identity for probes and clients. The web app reads its version from
+      the bundle, not from this route.
+  - id: PATCH /api/v1/schedules/{key}
+    method: PATCH
+    path: /api/v1/schedules/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:294
+      frontend:
+        - elysper-web/src/api/schedules.ts:35
+  - id: POST /api/v1/agents
+    method: POST
+    path: /api/v1/agents
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:232
+      frontend:
+        - elysper-web/src/pages/AgentsPage.tsx:145
+  - id: POST /api/v1/attachments
+    method: POST
+    path: /api/v1/attachments
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:357
+      frontend: []
+    frontend_consumed: false
+    notes: Attachment store upload (`kind = "attachment_ref"` payloads). The web
+      composer sends attachment bytes inline with the turn; the store's own API
+      is for clients that upload first and reference later.
+  - id: POST /api/v1/chat/messages/{key}/feedback
+    method: POST
+    path: /api/v1/chat/messages/{key}/feedback
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:216
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:173
+  - id: POST /api/v1/chat/sessions
+    method: POST
+    path: /api/v1/chat/sessions
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:200
+      frontend: []
+    frontend_consumed: false
+    notes: Explicit session creation. The web app lets the server mint the session
+      on the first turn (`POST /api/v1/chat/sessions/{key}/messages` creates it
+      on demand), so the web client never calls this route; external clients
+      may.
+  - id: POST /api/v1/chat/sessions/{key}/cancel
+    method: POST
+    path: /api/v1/chat/sessions/{key}/cancel
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:208
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:143
+  - id: POST /api/v1/chat/sessions/{key}/messages
+    method: POST
+    path: /api/v1/chat/sessions/{key}/messages
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:204
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:243
+  - id: POST /api/v1/chat/sessions/{key}/regenerate
+    method: POST
+    path: /api/v1/chat/sessions/{key}/regenerate
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:212
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:156
+  - id: POST /api/v1/evals
+    method: POST
+    path: /api/v1/evals
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:344
+      frontend:
+        - elysper-web/src/api/evals.ts:24
+  - id: POST /api/v1/evals/{key}/run
+    method: POST
+    path: /api/v1/evals/{key}/run
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:349
+      frontend:
+        - elysper-web/src/api/evals.ts:32
+  - id: POST /api/v1/schedules
+    method: POST
+    path: /api/v1/schedules
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:282
+      frontend:
+        - elysper-web/src/api/schedules.ts:31
+  - id: POST /api/v1/schedules/{key}/tick
+    method: POST
+    path: /api/v1/schedules/{key}/tick
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:298
+      frontend:
+        - elysper-web/src/api/schedules.ts:44
+  - id: POST /api/v1/sessions/{key}/compact
+    method: POST
+    path: /api/v1/sessions/{key}/compact
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:179
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:297
+  - id: POST /api/v1/sessions/{key}/fork
+    method: POST
+    path: /api/v1/sessions/{key}/fork
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:159
+      frontend:
+        - elysper-web/src/pages/SessionsPage.tsx:158
+  - id: POST /api/v1/sessions/{key}/resume
+    method: POST
+    path: /api/v1/sessions/{key}/resume
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:175
+      frontend:
+        - elysper-web/src/api/chat-stream.ts:278
+  - id: POST /api/v1/skills
+    method: POST
+    path: /api/v1/skills
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:226
+      frontend:
+        - elysper-web/src/pages/SkillsPage.tsx:117
+  - id: POST /api/v1/skills/reload
+    method: POST
+    path: /api/v1/skills/reload
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:230
+      frontend:
+        - elysper-web/src/pages/SkillsPage.tsx:151
+  - id: POST /api/v1/tools
+    method: POST
+    path: /api/v1/tools
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:266
+      frontend:
+        - elysper-web/src/pages/ToolsPage.tsx:132
+  - id: POST /api/v1/workflows
+    method: POST
+    path: /api/v1/workflows
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:313
+      frontend:
+        - elysper-web/src/api/workflows.ts:34
+  - id: POST /api/v1/workflows/{key}/run
+    method: POST
+    path: /api/v1/workflows/{key}/run
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:325
+      frontend:
+        - elysper-web/src/api/workflows.ts:52
+  - id: POST /chat/sessions/{key}/operation
+    method: POST
+    path: /chat/sessions/{key}/operation
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:371
+      frontend: []
+    frontend_consumed: false
+    notes: The R29 operation endpoint, mounted only when `[operations] enabled =
+      true`. The web client uses the chat message route; the operation wire is
+      for clients that drive the gated operation surface.
+  - id: POST /v1/messages
+    method: POST
+    path: /v1/messages
+    source: backend
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:427
+      frontend: []
+    frontend_consumed: false
+    notes: Anthropic-compatible surface for external Anthropic clients (the web app
+      uses `/api/v1/chat/*`).
+  - id: PUT /api/v1/workflows/{key}
+    method: PUT
+    path: /api/v1/workflows/{key}
+    source: both
+    source_files:
+      backend:
+        - crates/elysper-server/src/server/router.rs:321
+      frontend:
+        - elysper-web/src/api/workflows.ts:38

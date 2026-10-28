@@ -1,6 +1,6 @@
 # Code of Conduct
 
-Synthia 项目的所有交互渠道（GitHub Issues / PR / Discussions / 评论 /
+Elysper 项目的所有交互渠道（GitHub Issues / PR / Discussions / 评论 /
 邮件 / 私下接触）一律遵循本守则。本守则以
 [Contributor Covenant v2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/)
 为基础，并按本项目的语境（开源 + 商业化 + 多语言贡献者）做小幅裁剪。

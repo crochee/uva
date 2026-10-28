@@ -2,9 +2,9 @@
   - banner [ref=e5]:
     - generic [ref=e6]:
       - generic [ref=e7]:
-        - link "Synthia home" [ref=e8] [cursor=pointer]:
+        - link "Elysper home" [ref=e8] [cursor=pointer]:
           - /url: /chat
-          - img "Synthia" [ref=e9]
+          - img "Elysper" [ref=e9]
         - generic [aria-hidden] [ref=e10]: agent.runtime
         - navigation "Breadcrumb" [ref=e11]:
           - list [ref=e12]:
@@ -113,7 +113,7 @@
             - heading "System" [level=3] [ref=e116]
             - paragraph [ref=e118]:
               - text: Welcome to
-              - strong [ref=e119]: Synthia
+              - strong [ref=e119]: Elysper
               - text: ". Type a message below to start a chat. Session:"
               - code
           - generic [ref=e120]:
