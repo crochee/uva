@@ -1,7 +1,7 @@
 # Elysper full-stack Makefile
 #
 # Unified entry point for development, build, test, and deployment
-# of the elysper-server (Rust) and elysper-web (React/Vite) pair.
+# of the elysper-app-server (Rust) and elysper-web (React/Vite) pair.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -9,7 +9,7 @@ SHELL := /bin/bash
 # ---- Configuration ----
 SERVER_PORT       ?= 8080
 WEB_PORT          ?= 5173
-SERVER_CRATE      := elysper-server
+SERVER_CRATE      := elysper-app-server
 WEB_DIR           := elysper-web
 DOCKER_COMPOSE    := docker compose
 COMPOSE_FILE_DEV  := docker-compose.yml
@@ -27,11 +27,11 @@ help: ## Show this help
 .PHONY: dev dev-server dev-web dev-stop
 
 dev: ## Start backend (:8080) and frontend (:5173) in parallel
-	@echo "Starting elysper-server on :$(SERVER_PORT) and elysper-web on :$(WEB_PORT)"
+	@echo "Starting elysper-app-server on :$(SERVER_PORT) and elysper-web on :$(WEB_PORT)"
 	@$(MAKE) -j2 dev-server dev-web
 
-dev-server: ## Start backend only (cargo run with hot reload on file changes)
-	cargo run -p $(SERVER_CRATE) -- --config config.yaml
+dev-server: ## Start the App Server only (:8080; spawns the headless core)
+	cargo run -p $(SERVER_CRATE) -- serve --config config.yaml
 
 dev-web: ## Start frontend only (vite dev server)
 	cd $(WEB_DIR) && npm run dev -- --port $(WEB_PORT)
@@ -71,20 +71,6 @@ test-unit: ## Run every member's library unit tests in turn
 	  cargo test -p $$c -q --lib; \
 	done
 
-# --- Contract closure (双侧契约闭环) ---
-
-contract-scan: ## Scan backend router + frontend fetch calls into docs/interface-contract/
-	@mkdir -p docs/interface-contract
-	cd contract-closure && npm run scan
-
-contract-report: ## Render the scanned contract as Markdown
-	cd contract-closure && npm run report
-
-contract-check: ## Static dual-side contract check (no browser)
-	cd contract-closure && npm run check
-
-# --- end Contract closure ---
-
 # ---- Code quality ----
 
 .PHONY: fmt fmt-rust fmt-web lint lint-rust lint-web check-web
@@ -120,12 +106,65 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-single-writer.sh \
 	  scripts/check-frozen-api.sh \
 	  scripts/check-publishable.sh \
-	  scripts/check-public-docs.sh
+	  scripts/check-public-docs.sh \
+	  scripts/check-kernel-deps.sh \
+	  scripts/check-stdout.sh
 
 check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 	cd $(WEB_DIR) && npx tsc --noEmit
 	cd $(WEB_DIR) && npx eslint .
 	cd $(WEB_DIR) && npx prettier --check .
+
+# ---- Kernel dependency gate ----
+# The plugin kernel is the framework boundary, not an agent: its normal
+# dependency graph must never include a provider, tool, session,
+# harness, app-server, or UI / capability crate. The gate script is the
+# single source of truth for the crate list, so the boundary is stated
+# once and stays readable.
+.PHONY: check-kernel-deps
+
+check-kernel-deps: ## Assert the kernel's dependency graph contains no agent/UI crate
+	@bash scripts/check-kernel-deps.sh
+
+# ---- Wasm dependency gate ----
+# The Wasm component runtime is opt-in and carries `wasmtime` (a JIT
+# plus Cranelift). The default facade build must resolve no wasmtime
+# package at all; `--features wasm` must resolve one. The pattern is a
+# package-name prefix match, so `wasmtime`, `wasmtime-environ`, … are
+# all caught. The count is `wc -l` on the filtered list, so zero matches
+# are a zero count rather than grep's exit status 1.
+WASMTIME_PATTERN := ^wasmtime(-|$$)
+
+.PHONY: check-wasm-deps
+
+check-wasm-deps: ## Assert the default build has no wasmtime and `--features wasm` does
+	@count=$$(cargo tree -p elysper --no-default-features -e normal --prefix none 2>/dev/null \
+	  | cut -d' ' -f1 | sort -u | grep -E '$(WASMTIME_PATTERN)' | wc -l); \
+	if [ "$$count" -ne 0 ]; then \
+	  echo "FAIL: the default elysper build resolves $$count wasmtime package(s):"; \
+	  cargo tree -p elysper --no-default-features -e normal --prefix none 2>/dev/null \
+	    | cut -d' ' -f1 | sort -u | grep -E '$(WASMTIME_PATTERN)'; \
+	  exit 1; \
+	fi
+	@echo "OK: the default elysper build resolves no wasmtime package"
+	@enabled=$$(cargo tree -p elysper --no-default-features --features wasm -e normal --prefix none 2>/dev/null \
+	  | cut -d' ' -f1 | sort -u | grep -E '$(WASMTIME_PATTERN)' | wc -l); \
+	if [ "$$enabled" -eq 0 ]; then \
+	  echo "FAIL: '--features wasm' resolved no wasmtime package"; \
+	  exit 1; \
+	fi
+	@echo "OK: '--features wasm' resolves wasmtime"
+
+# ---- stdout discipline gate ----
+# The headless core's stdout is the JSON-RPC transport. A `println!`
+# in the binary reaches the peer as a non-frame and corrupts the
+# stream; logs go to stderr. The protocol writer in
+# `crates/elysper-app-server/src/rpc/stdio.rs` is the only stdout
+# caller and is outside the scanned binaries.
+.PHONY: check-stdout
+
+check-stdout: ## Assert the core's binaries never write to stdout directly
+	@bash scripts/check-stdout.sh
 
 # ---- MVP dependency gate ----
 # The smallest agent (MINIMAL.md) must not drag the deployment stack
@@ -143,15 +182,6 @@ MVP_FORBIDDEN := opentelemetry|tonic|axum|rusqlite|sqlx|reqwest|hyper|rustls|h2|
 # of the facade: `elysper-tool-web` is the only tool crate allowed an
 # HTTP client.
 OFFLINE_TOOL_CRATES := elysper-tool-read elysper-tool-write elysper-tool-shell elysper-tool-todo elysper-tool-task elysper-tool-scheduler elysper-tool-search elysper-tool-memo
-# R-OPT-HPC round (5-plug-in perf + concurrency set): every
-# new surface stays offline by default. `elysper-hpc-batch`
-# is the batched embedder / completer adapter — it carries
-# only the `elysper-provider` / `elysper-search` wire
-# traits, no HTTP stack. The `hpc-pool` / `hpc-simd` /
-# `hpc-coalesce` / `hpc-pipeline` features live inside
-# existing crates and pull no new external dep (the only
-# "new" dep each carries is already in the workspace graph).
-R_OPT_HPC_PLUGIN_CRATES := elysper-hpc-batch
 # R-OPT-HPC round (Tier 1 performance + concurrency, Tier 2 reasoning
 # + quality): six new opt-in plugin crates, all in the offline tier
 # (no HTTP/OTel/DB by default — proved by the `mvp-forbidden` check
@@ -197,16 +227,6 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  fi; \
 	done
 	@echo "OK: $(ROPT_PLUGIN_CRATES) pull no ($(MVP_FORBIDDEN))"
-	@for c in $(R_OPT_HPC_PLUGIN_CRATES); do \
-	  if cargo tree -p $$c -e normal --prefix none 2>/dev/null \
-	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: $$c (the R-OPT-HPC plugin) pulled a forbidden dependency:"; \
-	    cargo tree -p $$c -e normal --prefix none 2>/dev/null \
-	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
-	    exit 1; \
-	  fi; \
-	done
-	@echo "OK: $(R_OPT_HPC_PLUGIN_CRATES) pull no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features simd"; do \
 	  if cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
@@ -268,7 +288,8 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 # tokio entry instead of declaring features on it.
 RUNTIME_FREE := elysper-core elysper-scheduler elysper-macros elysper-eval \
 	elysper-workflow elysper-search elysper-session elysper-harness \
-	elysper-context elysper-steering elysper-plugin-protocol elysper-tool-task
+	elysper-context elysper-steering elysper-plugin-protocol elysper-tool-task \
+	elysper-kernel
 
 .PHONY: check-no-runtime
 
@@ -369,12 +390,12 @@ check-claim-language: ## Fail on absolute "paradigm only / default set" claims i
 # Makefile edit.
 CRATES := $(notdir $(wildcard crates/*))
 
-.PHONY: fmt-check ci test-crates test-sqlite bench examples
+.PHONY: fmt-check ci test-crates test-sqlite bench bench-wasm examples
 
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + clock + single-writer + publishability + license/ban invariants + every member's test suite
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-wasm-deps check-stdout check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + clock + single-writer + publishability + license/ban invariants + every member's test suite
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -449,7 +470,7 @@ check-pub-surface: ## Fail on a glob re-export inside a elysper-* crate
 # Facade (`crates/elysper/`) is exempt by the same reasoning as the
 # glob gate: `pub use elysper_xxx::*;` is the documented propagation
 # pattern, and the surface budget lives on the underlying crates.
-# `elysper-server` and `elysper-mcp-server` are app / binary
+# `elysper-app-server` and `elysper-mcp-server` are app / binary
 # crates; their lib.rs is a thin wiring entry, not a curated
 # surface, so they're exempt too.
 .PHONY: check-pub-surface-strict paradigm-surface-audit
@@ -513,11 +534,23 @@ check-deny: ## Run cargo deny (license / bans / sources)
 	}
 	cargo deny check licenses bans sources
 
-bench: ## Run the hot-path benchmarks (hot_paths, dependency-free harness)
+bench: ## Run the hot-path benchmarks (harness + kernel + app-server)
 	cargo bench -p elysper-harness --bench hot_paths
+	cargo bench -p elysper-kernel --bench hot_paths
+	cargo bench -p elysper-app-server --bench framing
 
 bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
 	cargo bench -p elysper-harness --bench hot_paths -- --check
+	cargo bench -p elysper-kernel --bench hot_paths -- --check
+	cargo bench -p elysper-app-server --bench framing -- --check
+
+# Opt-in: the Wasm runtime links wasmtime (a JIT plus Cranelift), so its
+# bench is not part of `bench-check`; the default bench job never runs it
+# (clippy --all-targets may still check-compile it in the lint job). Run it
+# when the call path changes; `-- --check` enforces the ratios the same
+# way the default gate does.
+bench-wasm: ## Run the Wasm call benchmarks (opt-in; compiles wasmtime)
+	cargo bench -p elysper-wasm-runtime --bench wasm_calls
 
 # Note: `otel_collector_mock` is a long-running server that only
 # exits after a companion client POSTs to it; there is no client
@@ -567,7 +600,7 @@ examples: ## Run every example plus all three consumer proofs (each prints a pro
 # AGENTS.md §3.8: library code reads the wall clock through
 # `elysper_core::Clock`, never `chrono::Utc::now()`. Only *code* counts
 # here — a line whose first characters are `//` is a comment (the docs
-# legitimately mention the call they forbid) — and `elysper-server`
+# legitimately mention the call they forbid) — and `elysper-app-server`
 # is the **app** crate (AGENTS.md §3.1: libs use thiserror, apps use
 # anyhow) so its 4 production reads are exempt. After excluding
 # comments, `#[cfg(test)]` blocks, and the app crate, the count is 0;
@@ -579,14 +612,14 @@ CLOCK_BASELINE := 0
 
 clock-audit: ## List every chrono::Utc::now() call left in library code
 	# Same scope as `check-clock`: lib crates only (app crate
-	# elysper-server is exempt); inside libs we still exclude
+	# elysper-app-server is exempt); inside libs we still exclude
 	# `#[cfg(test)]` blocks. Run this to see which lines contributed
 	# to the count.
 	@for f in $$(find crates -name '*.rs' -path '*/src/*' \
 	              ! -name 'clock.rs' \
 	              ! -name 'tests.rs' \
 	              ! -path '*/tests/*' \
-	              ! -path '*/elysper-server/src/*'); do \
+	              ! -path '*/elysper-app-server/src/*'); do \
 	  awk -v F="$$f" '\
 	    /^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
 	    /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
@@ -596,7 +629,7 @@ clock-audit: ## List every chrono::Utc::now() call left in library code
 	done
 
 check-clock: ## Fail when chrono::Utc::now() calls in library code grow
-	# Scope: lib crates only — `elysper-server` is the **app** crate
+	# Scope: lib crates only — `elysper-app-server` is the **app** crate
 	# (AGENTS.md §3.1: libs use thiserror, apps use anyhow), and apps
 	# legitimately read wall-clock time directly. Inside libs we still
 	# exclude `#[cfg(test)]` blocks (test code uses real time, not the
@@ -605,7 +638,7 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	                   ! -name 'clock.rs' \
 	                   ! -name 'tests.rs' \
 	                   ! -path '*/tests/*' \
-	                   ! -path '*/elysper-server/src/*'); do \
+	                   ! -path '*/elysper-app-server/src/*'); do \
 	  awk '/^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
 	       /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
 	       /Utc::now/{ stripped=$$0; sub(/^[ \t]+/, "", stripped); \
@@ -613,11 +646,11 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	       END{print c+0}' "$$f"; \
 	done | awk '{s+=$$1} END{print s+0}'); \
 	if [ "$$n" -gt $(CLOCK_BASELINE) ]; then \
-	  echo "FAIL: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-server is exempt, cfg(test) is exempt)"; \
+	  echo "FAIL: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-app-server is exempt, cfg(test) is exempt)"; \
 	  echo "Wall-clock reads in library code must go through elysper_core::Clock — run 'make clock-audit'."; \
 	  exit 1; \
 	fi; \
-	echo "OK: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-server is exempt, cfg(test) is exempt)"
+	echo "OK: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-app-server is exempt, cfg(test) is exempt)"
 
 # ---- Harness shape (R122) ----
 # `clippy.toml` sets `cognitive-complexity-threshold = 20`, but
@@ -753,7 +786,7 @@ IMAGE_TARGETS := server web mcp
 
 image-build: image-build-server image-build-web image-build-mcp ## Build all three container images (server + web + mcp)
 
-image-build-server: ## Build elysper-server image (Dockerfile.server, multi-stage cargo-chef)
+image-build-server: ## Build elysper-app-server image (Dockerfile.server, multi-stage cargo-chef)
 	bash scripts/images.sh build server
 
 image-build-web: ## Build elysper-web image (Dockerfile.web, Vite + nginx with envsubst)
@@ -762,10 +795,10 @@ image-build-web: ## Build elysper-web image (Dockerfile.web, Vite + nginx with e
 image-build-mcp: ## Build elysper-mcp-server image (Dockerfile.mcp, stdio binary)
 	bash scripts/images.sh build mcp
 
-server-artifact: ## Export Linux musl binary to ./dist/elysper-server (matches ci.yml cross-linux-musl)
+server-artifact: ## Export Linux musl binary to ./dist/elysper-app-server (matches ci.yml cross-linux-musl)
 	bash scripts/images.sh artifact server
 
-windows-artifact: ## Export Windows PE to ./dist/elysper-server.exe (matches ci.yml cross-windows)
+windows-artifact: ## Export Windows PE to ./dist/elysper-app-server.exe (matches ci.yml cross-windows)
 	bash scripts/images.sh artifact windows
 
 image-push: ## Push all three images to the configured registry (REGISTRY / TAG)

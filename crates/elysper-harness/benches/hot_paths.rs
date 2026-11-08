@@ -47,6 +47,7 @@ use elysper_core::{
     schema::validate_against_schema,
     token::estimate_token_count,
 };
+use elysper_kernel::{Context as KernelContext, EffectHandle};
 use elysper_provider::{
     BlockAssembler,
     Content,
@@ -132,6 +133,53 @@ fn ratio(
         slow_per * 1e9,
     );
     held
+}
+
+// ---------------------------------------------------------------------
+// Kernel seam rows (performance-budget spec)
+//
+// The plugin kernel is where a turn's repeated work now crosses a seam:
+// a plugin resolves the `Arc` handles it needs once, at fiber activation,
+// and event dispatch reads a snapshot built at registration time. These
+// helpers build the two fixtures the rows below compare against—the
+// per-call `Context::require` and the per-emit listener registration the
+// spec forbids.
+// ---------------------------------------------------------------------
+
+/// The shape of a resolved service handle: a small `Arc` payload the
+/// loop keeps for the life of its fiber.
+struct BenchService {
+    generation: usize,
+}
+
+/// A kernel context with one provided service, isolated so the bench
+/// does not touch another fixture's key space.
+fn resolved_service_fixture() -> (KernelContext, Arc<BenchService>, EffectHandle)
+{
+    let context = KernelContext::new().isolate("bench-service");
+    let service = Arc::new(BenchService { generation: 7 });
+    let effect = context
+        .provide_arc("bench.service", Arc::clone(&service))
+        .expect("provide the bench service");
+    (context, service, effect)
+}
+
+/// A root context whose event bus has `listeners` registered on
+/// `bench/ping` (through a child scope, so the caller emits from the
+/// root exactly as a plugin would).
+fn listened_events_fixture(
+    listeners: usize,
+) -> (KernelContext, Vec<EffectHandle>) {
+    let root = KernelContext::new();
+    let scope = root.isolate("bench-events");
+    let mut effects = Vec::with_capacity(listeners);
+    for _ in 0..listeners {
+        let effect = scope
+            .on("bench/ping", |_event| Ok(None))
+            .expect("register the bench listener");
+        effects.push(effect);
+    }
+    (root, effects)
 }
 
 // ---------------------------------------------------------------------
@@ -324,6 +372,191 @@ fn check_ratios() -> bool {
         // so the gate still fires if the loop ever goes back to
         // copying the bundle per run — that lands near 1x.
         20.0,
+    );
+
+    // ---- V5 closure: the real-harness rows ------------------------
+    //
+    // Four scenarios, each measured against a baseline in this
+    // process so the factor survives a different runner. The first
+    // slot always holds the *scenario* (the thing under test) and
+    // the second the *baseline* it is compared against.
+    //
+    // Two of them read backwards at first glance, so the rule is
+    // worth stating: when the baseline is the cheaper side the
+    // factor lands below 1, and the floor then acts as a ceiling on
+    // the scenario's cost *relative to* the baseline. The gate
+    // still fires when the scenario gets relatively more expensive —
+    // which is the regression these rows exist to catch — and it
+    // stays quiet when the scenario gets cheaper, which is the
+    // direction an optimisation moves it.
+    //
+    // Every floor below is the smallest factor observed over three
+    // runs of the whole benchmark, halved. That is the same
+    // discipline the rows above use.
+    let long_history = tool_heavy_history(100);
+    let history_agent = scripted_turn_agent();
+    ok &= ratio(
+        "ReActAgent turn: 401-message history vs empty history",
+        200,
+        || {
+            let input = history_input(long_history.clone());
+            black_box(run_turn(&history_agent, input));
+        },
+        200,
+        || {
+            let input = history_input(Vec::new());
+            black_box(run_turn(&history_agent, input));
+        },
+        // Observed 0.185x / 0.171x / 0.182x over three runs of the
+        // whole benchmark: the 401-message turn costs about 5.5x the
+        // empty one. The floor is half the observed minimum, so the
+        // scenario may grow to roughly twice that relative cost
+        // before the gate fires — which is what a reintroduced
+        // transcript copy would do.
+        0.08,
+    );
+
+    let workers =
+        Arc::new(futures::executor::ThreadPool::new().expect("thread pool"));
+    let mut parallel_registrations = Vec::new();
+    let parallel_agent = batch_agent(
+        20,
+        slow_tool_registry(20, Duration::from_millis(1), Arc::clone(&workers)),
+        None,
+        &mut parallel_registrations,
+    );
+    let mut serial_registrations = Vec::new();
+    let serial_agent = batch_agent(
+        20,
+        slow_tool_registry(20, Duration::from_millis(1), Arc::clone(&workers)),
+        Some(1),
+        &mut serial_registrations,
+    );
+    ok &= ratio(
+        "ReActAgent turn: 20 parallel tools vs the same batch capped at 1",
+        20,
+        || {
+            let input = history_input(Vec::new());
+            black_box(run_turn(&parallel_agent, input));
+        },
+        20,
+        || {
+            let input = history_input(Vec::new());
+            black_box(run_turn(&serial_agent, input));
+        },
+        // Observed 9.1x / 9.0x / 9.1x over three runs: 20 tools
+        // that each take a millisecond of wall time cost 2.6 ms
+        // together and 23.7 ms one after the other. The floor is
+        // half the observed minimum, so the batch must stay clearly
+        // more than serial — a change that serialised it lands near
+        // 1x and fails.
+        4.5,
+    );
+
+    let mut hook_registrations = Vec::new();
+    let hooked = hooked_agent(8, &mut hook_registrations);
+    let mut plain_registrations = Vec::new();
+    let plain = hooked_agent(0, &mut plain_registrations);
+    ok &= ratio(
+        "ReActAgent turn: 8 host hooks vs none",
+        2_000,
+        || {
+            let input = history_input(Vec::new());
+            black_box(run_turn(&hooked, input));
+        },
+        2_000,
+        || {
+            let input = history_input(Vec::new());
+            black_box(run_turn(&plain, input));
+        },
+        // Observed 0.925x / 0.945x / 0.931x over three runs: eight
+        // observers cost about 7% over a turn with none. The floor
+        // is half the observed minimum, so the observers may cost
+        // roughly twice their measured share before the gate fires.
+        0.46,
+    );
+
+    ok &= ratio(
+        "TruncatingContextManager over-window vs NoopContextManager",
+        2_000,
+        || {
+            let mut messages = long_history.clone();
+            let mut state = AgentState::with_window(2_000);
+            futures::executor::block_on(
+                TruncatingContextManager.prepare(&mut messages, &mut state),
+            );
+            black_box(messages.len());
+        },
+        2_000,
+        || {
+            let mut messages = long_history.clone();
+            let mut state = AgentState::with_window(2_000);
+            futures::executor::block_on(
+                elysper_context::NoopContextManager
+                    .prepare(&mut messages, &mut state),
+            );
+            black_box(messages.len());
+        },
+        // Observed 0.272x / 0.272x / 0.277x over three runs: the
+        // over-window prune costs about 3.7x the estimate-only
+        // baseline. The floor is half the observed minimum, so the
+        // prune may cost roughly twice its measured share before the
+        // gate fires.
+        0.13,
+    );
+
+    // ---- kernel seams -----------------------------------------------
+    // The service handle is resolved once at activation; a regression
+    // that reintroduces a per-call lookup collapses this factor toward
+    // the cost of `require` itself.
+    let (service_context, cached_service, _service_effect) =
+        resolved_service_fixture();
+    ok &= ratio(
+        "service handle: cached Arc vs Context::require per call",
+        5_000_000,
+        || {
+            let handle = black_box(Arc::clone(&cached_service));
+            black_box(handle.generation);
+        },
+        500_000,
+        || {
+            black_box(
+                service_context
+                    .require::<BenchService>(black_box("bench.service"))
+                    .expect("the fixture provides it"),
+            );
+        },
+        // Observed 45-57x across runs (the 3.3 ns fast side is where
+        // timer noise shows up). The floor stays far above 1x, which is
+        // what a per-call lookup would land at.
+        40.0,
+    );
+
+    // An empty dispatch must stay cheaper than one that clones a
+    // callback and drives a boxed future. A regression that makes the
+    // empty path build the chain lands near 1.0 and fails the floor.
+    let quiet = KernelContext::new();
+    let (listened, _listeners) = listened_events_fixture(1);
+    ok &= ratio(
+        "event dispatch: 0 listeners vs 1 listener",
+        500_000,
+        || {
+            quiet
+                .inner()
+                .emit(black_box("bench/ping"), [])
+                .expect("emit");
+        },
+        500_000,
+        || {
+            listened
+                .inner()
+                .emit(black_box("bench/ping"), [])
+                .expect("emit");
+        },
+        // The no-listener path skips the callback clone and the boxed
+        // future; observed 1.9-3.1x on this machine. The floor only has
+        // to catch "the empty path builds the chain anyway" (near 1.0).
+        1.5,
     );
     ok
 }
@@ -675,29 +908,126 @@ fn main() {
         ));
     });
 
-    // ---- : ToolProjectionMemo fingerprint ----
-    // v1 used a `Vec<String>` + `Hash` round; v2 hashes a
-    // single `u64` once and compares one integer on the
-    // hot path. Both apply to a 40-tool registry with no
-    // interceptors—the most common hot-path shape.
+    // ---- : real harness — R1: a turn over a long history ----
+    // G1: the request builder deep-copied the whole transcript
+    // every turn. The row reports what one turn over a
+    // 401-message history costs; the gate compares it against the
+    // same turn with an empty history.
+    let history_agent = scripted_turn_agent();
+    let long_history = tool_heavy_history(100);
     Bench {
-        label: "ToolProjectionMemo hit (u64 fingerprint)",
-        iters: 1_000_000,
+        label: "ReActAgent turn (401-message history)",
+        iters: 200,
     }
-    .run("v2", || {
-        black_box(projection_memo_hit_v2(&registry));
+    .run("one turn", || {
+        let input = history_input(long_history.clone());
+        black_box(run_turn(&history_agent, input));
     });
 
-    // ---- : close_iteration drain merge --------
-    // v1 drained twice (previous shape); v2 drains once
-    // after snapshot-first. The merged version is the
-    // shipping `phase::close_iteration`.
+    // ---- : real harness — R2: one batch of 20 parallel tools ----
+    // G3: the batch's concurrency. The tools take real time, so a
+    // cap on the concurrency is visible in the wall clock. The
+    // capped baseline lives in the `--check` gate, not in the table.
+    let workers =
+        Arc::new(futures::executor::ThreadPool::new().expect("thread pool"));
+    let mut registrations = Vec::new();
+    let parallel_agent = batch_agent(
+        20,
+        slow_tool_registry(20, Duration::from_millis(1), Arc::clone(&workers)),
+        None,
+        &mut registrations,
+    );
     Bench {
-        label: "close_iteration (single drain + snapshot)",
-        iters: 200_000,
+        label: "ReActAgent turn (20 parallel tool calls)",
+        iters: 20,
     }
-    .run("v2", || {
-        black_box(close_iteration_v2_cost());
+    .run("one turn", || {
+        black_box(run_turn(&parallel_agent, history_input(Vec::new())));
+    });
+
+    // ---- : real harness — R3: a turn with eight host hooks ----
+    // The observer itself does nothing; the row measures the
+    // dispatch around it. The hook-free baseline lives in the
+    // `--check` gate, not in the table.
+    let mut hook_registrations = Vec::new();
+    let hooked = hooked_agent(8, &mut hook_registrations);
+    Bench {
+        label: "ReActAgent turn (8 host hooks)",
+        iters: 2_000,
+    }
+    .run("one turn", || {
+        black_box(run_turn(&hooked, history_input(Vec::new())));
+    });
+
+    // ---- : real harness — R4: the over-window context prune ----
+    // G6: the ~305 µs the over-window path costs, unattributed
+    // until V4. The row drives the manager directly, with a window
+    // far below the estimate, so the whole prune is in view.
+    let over_window_history = tool_heavy_history(100);
+    Bench {
+        label: "TruncatingContextManager over-window (401 msgs)",
+        iters: 2_000,
+    }
+    .run("one prune", || {
+        let mut messages = over_window_history.clone();
+        let mut state = AgentState::with_window(2_000);
+        futures::executor::block_on(
+            TruncatingContextManager.prepare(&mut messages, &mut state),
+        );
+        black_box(messages.len());
+    });
+
+    // ---- kernel seams -----------------------------------------------
+    // A plugin caches the `Arc` it resolves at fiber activation; the row
+    // prices that cached read against the per-call `Context::require` it
+    // replaced. Element/handler dispatch is per tool call, so the
+    // difference is paid on every call of a turn.
+    let (context, service, _effect) = resolved_service_fixture();
+    Bench {
+        label: "service handle resolve (cached Arc)",
+        iters: 5_000_000,
+    }
+    .run("fiber activation, once", || {
+        let handle = black_box(Arc::clone(&service));
+        black_box(handle.generation);
+    });
+
+    Bench {
+        label: "service handle resolve (Context::require)",
+        iters: 500_000,
+    }
+    .run("per call, by key", || {
+        black_box(
+            context
+                .require::<BenchService>(black_box("bench.service"))
+                .expect("the fixture provides it"),
+        );
+    });
+
+    // The no-listener fast path: an event with no listeners must return
+    // without cloning a callback or boxing a future. The rows differ
+    // only in whether the bus has a registration.
+    let quiet = KernelContext::new();
+    let (listened, _listeners) = listened_events_fixture(1);
+    Bench {
+        label: "event emit (0 listeners)",
+        iters: 500_000,
+    }
+    .run("empty dispatch snapshot", || {
+        quiet
+            .inner()
+            .emit(black_box("bench/ping"), [])
+            .expect("emit");
+    });
+    Bench {
+        label: "event emit (1 listener)",
+        iters: 500_000,
+    }
+    .run("one callback + future", || {
+        listened
+            .inner()
+            .emit(black_box("bench/ping"), [])
+            .expect("emit");
     });
 
     println!();
@@ -913,46 +1243,6 @@ fn build_harness_registry(count: usize) -> Arc<elysper_tool::ToolRegistry> {
     Arc::new(tool_registry(count))
 }
 
-/// Step 5 reference: the legacy `ToolProjectionMemo` lookup.
-/// v1 hashed a `Vec<String>` (`promoted`) and one count; v2
-/// hashes one `u64`. The bench measures the memo-hit path,
-/// which is always the warm cache (post-warmup).
-fn projection_memo_hit_v2(registry: &elysper_tool::ToolRegistry) -> u64 {
-    // The shipped (`v2`) path reduces to a single `u64`
-    // composed of three mix-ins.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    let version = registry.version();
-    let descriptors = registry.descriptors_cached();
-    let _: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for d in descriptors.iter() {
-        let _ = d.exposure == elysper_tool::ToolExposure::Deferred;
-    }
-    // FNV-1a over the hot-path `version` integer (the
-    // promoted / interceptor counts are constant for an
-    // empty `called` set, so the bench measures the
-    // dominant fixed-cost path).
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    hash ^= version;
-    hash = hash.wrapping_mul(FNV_PRIME);
-    hash
-}
-
-/// Step 6 reference: the shipping `phase::close_iteration`
-/// stands in for `v2`. The bench exercises one
-/// `drain_steering` + one snapshot—the merged version.
-/// Pre-Step-6 the same iteration did two drains around the
-/// snapshot; merging removes a `[REDACTED]`-rewrite pass
-/// plus a `messages.push` per drained message, which is the
-/// observable cost on this hot path.
-fn close_iteration_v2_cost() -> u64 {
-    let mut messages: Vec<elysper_provider::Message> = Vec::with_capacity(8);
-    // simulate 1 drain + 1 snapshot for a 4-message history
-    for _ in 0..2 {
-        messages.push(elysper_provider::Message::user("snapshot body"));
-    }
-    black_box(messages.len() as u64)
-}
-
 fn scripted_turn_agent() -> elysper_harness::ReActAgent {
     let provider: Arc<dyn elysper_provider::ModelProvider> =
         Arc::new(ScriptedProvider {
@@ -968,13 +1258,22 @@ fn scripted_turn_agent() -> elysper_harness::ReActAgent {
 
 /// Drive one turn to completion and return the number of events seen.
 fn run_one_turn(agent: &elysper_harness::ReActAgent) -> usize {
+    run_turn(
+        agent,
+        elysper_harness::AgentInput::text("echo something, then answer"),
+    )
+}
+
+/// Drive one turn with a caller-built input.
+fn run_turn(
+    agent: &elysper_harness::ReActAgent,
+    input: elysper_harness::AgentInput,
+) -> usize {
     use elysper_core::{AtomicCancelToken, CancelToken};
-    use elysper_harness::{Agent as _, AgentInput};
+    use elysper_harness::Agent as _;
 
     let cancel: Arc<dyn CancelToken> = AtomicCancelToken::shared();
-    let mut stream = futures::executor::block_on(
-        agent.run(AgentInput::text("echo something, then answer"), cancel),
-    );
+    let mut stream = futures::executor::block_on(agent.run(input, cancel));
     let mut events = 0usize;
     futures::executor::block_on(async {
         while futures::StreamExt::next(&mut stream).await.is_some() {
@@ -982,4 +1281,267 @@ fn run_one_turn(agent: &elysper_harness::ReActAgent) -> usize {
         }
     });
     events
+}
+
+// ---------------------------------------------------------------------
+// Real-harness rows (V5 closure round)
+//
+// The rows above measure a *shape*: a token estimator, a projection
+// helper, a truncation primitive. Those are still worth a row each,
+// but they are not the turn.
+//
+// The rows below drive the shipping loop through its public API —
+// `ReActAgent::new(...).run(AgentInput, cancel)` — so the number
+// they report is the cost a real turn pays, not the cost of a
+// re-implementation that happens to live in this file. Each one has a
+// `--check` gate in `check_ratios` with the same discipline as the
+// rows above it: two measurements taken in this process, one factor,
+// one floor derived from the observed minimum.
+//
+// Four scenarios, one per gap the closure round set out to measure:
+//
+// | row   | isolates                                          |
+// |-------|---------------------------------------------------|
+// | R1    | G1 — the per-turn transcript copy                 |
+// | R2    | G3 — the tool batch's concurrency                 |
+// | R3    | the host's per-dispatch hook overhead             |
+// | R4    | G6 — the over-window context prune                |
+// ---------------------------------------------------------------------
+
+/// A provider that asks for `count` tools in its first response and
+/// answers in its second — one batch, one round trip.
+struct BatchProvider {
+    count: usize,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl elysper_provider::ModelProvider for BatchProvider {
+    async fn initialize(
+        &mut self,
+        _config: elysper_provider::ProviderConfig,
+    ) -> Result<(), elysper_core::Error> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "batch-bench"
+    }
+
+    fn model_config(&self) -> elysper_provider::ModelConfig {
+        elysper_provider::ModelConfig {
+            name: "batch-1".to_string(),
+            provider: "scripted".to_string(),
+            context_window: 8_192,
+            max_output_tokens: 1_024,
+            supports_tools: true,
+            supports_streaming: false,
+            supports_reasoning: false,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: elysper_provider::CompletionRequest,
+    ) -> Result<elysper_provider::CompletionResponse, elysper_core::Error> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // Every turn is one batch round trip: the tool batch, then the
+        // answer. The parity (not a one-shot) is what makes the second
+        // turn of a measured run ask for the batch again — a provider
+        // that only batched on its first call would leave every later
+        // iteration of the measurement with nothing to dispatch.
+        let content = if call.is_multiple_of(2) {
+            Content::parts(
+                (0..self.count)
+                    .map(|i| {
+                        ContentPart::ToolUse(elysper_provider::ToolUse {
+                            id: format!("batch-{i}"),
+                            name: format!("bench_{i}"),
+                            input: serde_json::json!({}),
+                        })
+                    })
+                    .collect(),
+            )
+        } else {
+            Content::text("done")
+        };
+        Ok(elysper_provider::CompletionResponse {
+            content,
+            ..elysper_provider::CompletionResponse::default()
+        })
+    }
+}
+
+/// An observer that decides nothing. The cost the R3 row measures is
+/// the *dispatch* — the read lock, the `Arc` clone and the call — not
+/// the observer's own work, so the observer does no work.
+struct EmptyHook;
+
+#[async_trait::async_trait]
+impl elysper_harness::Hook for EmptyHook {
+    fn name(&self) -> &str {
+        "empty"
+    }
+
+    async fn observe(
+        &self,
+        _event: &elysper_steering::HookEvent,
+        _ctx: &elysper_harness::HookContext<'_>,
+    ) -> elysper_steering::HookDecision {
+        elysper_steering::HookDecision::Allow
+    }
+}
+
+/// A tracker that caps the batch's concurrency.
+struct CappedTracker {
+    cap: usize,
+}
+
+impl elysper_steering::tracker::Tracker for CappedTracker {
+    fn on_iteration(&self, _state: &AgentState) {}
+
+    fn on_tool_call(
+        &self,
+        _name: &str,
+        _arguments: &serde_json::Value,
+        _state: &AgentState,
+    ) {
+    }
+
+    fn on_llm_response(
+        &self,
+        _usage: &elysper_provider::TokenUsage,
+        _state: &AgentState,
+    ) {
+    }
+
+    fn recommended_concurrency(&self, _state: &AgentState) -> usize {
+        self.cap
+    }
+}
+
+/// A tool whose call only completes after a worker thread has waited
+/// out a fixed delay.
+///
+/// The delay is what makes the batch's concurrency *observable*: on
+/// the bench's single-threaded executor two calls that never yield
+/// cost the same whether they run together or one after the other,
+/// so a concurrency cap would be invisible without a call that
+/// genuinely takes time. The workers are a thread pool, so the
+/// unbounded batch really does overlap.
+struct SlowTool {
+    name: String,
+    delay: Duration,
+    workers: Arc<futures::executor::ThreadPool>,
+}
+
+#[async_trait::async_trait]
+impl elysper_tool::Tool for SlowTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        "a tool that takes a fixed amount of wall time"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {}
+        })
+    }
+
+    async fn call(
+        &self,
+        _input: serde_json::Value,
+        _context: &elysper_tool::Context,
+    ) -> elysper_tool::ToolOutput {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let delay = self.delay;
+        self.workers.spawn_ok(async move {
+            std::thread::sleep(delay);
+            let _ = tx.send(());
+        });
+        let _ = rx.await;
+        elysper_tool::ToolOutput::text("ok")
+    }
+}
+
+/// The registry the R2 row drives: `count` tools that each take
+/// `delay` of wall time.
+fn slow_tool_registry(
+    count: usize,
+    delay: Duration,
+    workers: Arc<futures::executor::ThreadPool>,
+) -> elysper_tool::ToolRegistry {
+    let registry = elysper_tool::ToolRegistry::new();
+    for i in 0..count {
+        registry.register_entry(elysper_tool::ToolEntry::new(Arc::new(
+            SlowTool {
+                name: format!("bench_{i}"),
+                delay,
+                workers: Arc::clone(&workers),
+            },
+        )));
+    }
+    registry
+}
+
+/// The agent the R2 row drives, with the batch's concurrency capped
+/// when `cap` is `Some`.
+fn batch_agent(
+    count: usize,
+    registry: elysper_tool::ToolRegistry,
+    cap: Option<usize>,
+    registrations: &mut Vec<elysper_harness::Registration>,
+) -> elysper_harness::ReActAgent {
+    let provider: Arc<dyn elysper_provider::ModelProvider> =
+        Arc::new(BatchProvider {
+            count,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+    let mut host = elysper_harness::Host::new();
+    if let Some(cap) = cap {
+        registrations.push(host.tracker(Arc::new(CappedTracker { cap })));
+    }
+    elysper_harness::ReActAgent::new(provider, Arc::new(registry))
+        .with_workspace(".")
+        .with_spawner(Arc::new(ThreadSpawner::new())
+            as Arc<dyn elysper_core::spawn::Spawner>)
+        .with_max_iterations(4)
+        .with_host(host)
+        .expect("the bench host binds no conflicting tools")
+        .with_name("bench-batch")
+}
+
+/// The agent the R3 row drives, with `hooks` observers installed.
+fn hooked_agent(
+    hooks: usize,
+    registrations: &mut Vec<elysper_harness::Registration>,
+) -> elysper_harness::ReActAgent {
+    let provider: Arc<dyn elysper_provider::ModelProvider> =
+        Arc::new(ScriptedProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+    let mut host = elysper_harness::Host::new();
+    for _ in 0..hooks {
+        registrations.push(host.hook(Arc::new(EmptyHook)));
+    }
+    elysper_harness::ReActAgent::new(provider, Arc::new(tool_registry(40)))
+        .with_workspace(".")
+        .with_spawner(Arc::new(ThreadSpawner::new())
+            as Arc<dyn elysper_core::spawn::Spawner>)
+        .with_max_iterations(4)
+        .with_host(host)
+        .expect("the bench host binds no conflicting tools")
+        .with_name("bench-hooked")
+}
+
+/// The R1 input: a turn whose prior transcript is `history`.
+fn history_input(history: Vec<Message>) -> elysper_harness::AgentInput {
+    let mut input =
+        elysper_harness::AgentInput::text("echo something, then answer");
+    input.history = history;
+    input
 }

@@ -1,6 +1,6 @@
-# 从空仓库到完整对话：elysper-server + elysper-web 教程
+# 从空仓库到完整对话：elysper-app-server + elysper-web 教程
 
-本教程从一个新 clone 开始，启动 `elysper-server` 与 `elysper-web`，配置 provider，
+本教程从一个新 clone 开始，启动 `elysper-app-server` 与 `elysper-web`，配置 provider，
 然后按 A–G 剧本走完一次完整的 agent 对话，并用**日志**核对每一步真的发生了。
 文末的「验收记录」是这条路径的实测表。
 
@@ -34,28 +34,34 @@ mkdir -p "$DIR"
 
 先确认前后端接线。`demo` 是一个回显 provider：它把最后一条用户消息
 原样回显，不调用工具，也不需要网络或 API key。它由
-`crates/elysper-server/src/state/app_state/demo_provider.rs` 提供，
+`crates/elysper-app-server/src/state/app_state/demo_provider.rs` 提供，
 编译期门控在 `test-utils` feature 后，所以启动时必须带该 feature：
 
 ```bash
-mkdir -p "$DIR/demo"
+mkdir -p "$DIR/demo/.agents"
+# provider 只从 workspace 的 `.agents/config.toml`（或 profile 的
+# `model-adapter` 行）读取；config.yaml 的 `providers` 段已不再生效。
+cat > "$DIR/demo/.agents/config.toml" <<'TOML'
+default_provider = "demo"
+default_model = "demo"
+
+[providers.demo]
+type = "demo"
+default_model = "demo"
+TOML
+
 cat > "$DIR/demo/config.yaml" <<'YAML'
 version: "1.0"
 host: "127.0.0.1"
 port: 8080
 default_agent: code
-default_provider: demo
-providers:
-  demo:
-    type: demo
-    default_model: demo
 agents:
   code:
     description: |
       Keyless demo agent.
 YAML
 
-cargo run -p elysper-server --features test-utils -- \
+cargo run -p elysper-app-server --features test-utils -- serve \
   --directory "$DIR/demo" --config "$DIR/demo/config.yaml"
 ```
 
@@ -77,23 +83,25 @@ npm run dev -- --port 5173
 ### 2.2 真实 provider
 
 ```bash
-mkdir -p "$DIR/real"
+mkdir -p "$DIR/real/.agents"
+cat > "$DIR/real/.agents/config.toml" <<'TOML'
+default_provider = "anthropic"
+default_model = "deepseek-flash"
+
+[providers.anthropic]
+type = "anthropic"
+base_url = "https://api.deepseek.com/anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+default_model = "deepseek-flash"
+context_window = 128000  # 与模型实际窗口一致；3000 只留给压缩回归测试
+max_output_tokens = 2048
+TOML
+
 cat > "$DIR/real/config.yaml" <<'YAML'
 version: "1.0"
 host: "127.0.0.1"
 port: 8080
 default_agent: code
-default_provider: anthropic
-providers:
-  anthropic:
-    base_url: "https://api.deepseek.com/anthropic"
-    api_key_env: "ANTHROPIC_API_KEY"
-    models:
-      - name: "deepseek-flash"
-        description: "tutorial model"
-        context_window: 128000  # 与模型实际窗口一致；3000 只留给压缩回归测试
-        temperature: 0.3
-        max_tokens: 2048
 agents:
   code:
     description: |
@@ -112,7 +120,12 @@ YAML
 - `api_key_env` 是 provider 读取密钥的环境变量名。用内联
   `api_key: "sk-…"` 也可以，但不要把密钥写进提交的文件。
 - 未写 `default_provider` 时，`openai` 优先，否则取第一个 provider 名。
-  `models[0]` 是默认模型，它的 `context_window` / `max_tokens` 覆盖条目默认值。
+  `.agents/config.toml` 是 TOML 的 `ProviderEntry` 形状；把旧
+  `config.yaml` 的 legacy 形状（`api_key` / `models[]`）迁移过来时跑
+  `elysper-app-server translate --config config.yaml --out profile.toml`，
+  或手动改写成上面的形状。
+- 旧的 `config.yaml` `providers` / `cache` / `resilience` / `budget` 段
+  已不再读取（启动会警告并提示 `translate`）。
 - 每个 agent 的 `sandbox` 键目前**解析但不生效**（server 启动会警告
   `agent config keys are parsed but not applied`）；`ShellTool` 的默认执行
   策略本来就是 `danger-full-access`。需要约束时应在工具/沙箱层配置，
@@ -123,12 +136,12 @@ YAML
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo run -p elysper-server -- \
+cargo run -p elysper-app-server -- serve \
   --directory "$DIR/real" --config "$DIR/real/config.yaml"
 ```
 
 > 也可以直接用 `make dev-server` / `make dev`：它们跑
-> `cargo run -p elysper-server -- --config config.yaml`，workspace root
+> `cargo run -p elysper-app-server -- serve --config config.yaml`，workspace root
 > 是仓库根目录，会话日志落在 `./sessions/`。本教程用 `--directory`
 > 是为了让日志路径稳定、可清理。
 
@@ -136,10 +149,31 @@ cargo run -p elysper-server -- \
 
 ```bash
 curl -s localhost:8080/readyz            # 期望 200 / ready
-curl -s localhost:8080/api/v1/models | jq .
 ```
 
-`/api/v1/models` 应列出 `anthropic/deepseek-flash`。若该项缺席，
+管理面与对话面都在一条 JSON-RPC WebSocket（`ws://localhost:8080/rpc`）上，没有 REST 路径了。任何 WebSocket 客户端都能驱动它；本教程用最小的 `python3` 片段（`pip install websockets`）：
+
+```bash
+rpc() { # rpc <method> <params-json>
+  python3 - "$1" "${2:-{}}" <<'PY'
+import asyncio, json, sys, websockets
+async def main():
+    async with websockets.connect("ws://127.0.0.1:8080/rpc") as ws:
+        await ws.send(json.dumps({"jsonrpc": "2.0", "id": "c1",
+                                  "method": sys.argv[1],
+                                  "params": json.loads(sys.argv[2])}))
+        while True:
+            env = json.loads(await ws.recv())
+            if env.get("id") == "c1":
+                print(json.dumps(env.get("result", env), ensure_ascii=False, indent=2))
+                return
+asyncio.run(main())
+PY
+}
+rpc models/list | jq .
+```
+
+`models/list` 应列出 `anthropic/deepseek-flash`。若该项缺席，
 server 日志会有一行 `configured provider is not available` 并给出原因
 （通常是缺 `ANTHROPIC_API_KEY`）。
 
@@ -304,7 +338,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 2. 杀掉 server（模拟崩溃，不是 Ctrl+C 的优雅退出）：
 
    ```bash
-   pkill -9 -f 'elysper-server.*--directory'
+   pkill -9 -f 'elysper-app-server.*(serve|core).*--directory'
    ```
 
 3. 用 2.2 的同一条命令重启 server，刷新同一个会话页。
@@ -355,7 +389,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 
 ### F. 长会话压缩
 
-前置：`config.yaml` 里 `compaction.enabled: true`（见 2.2）。
+前置：`config.yaml` 的 `agents.code.compaction.enabled: true`（见 2.2）。
 压缩阈值 = `context_window - reserve_tokens`。默认窗口 128,000 下，
 固定提示（系统提示 + 工具 schema）约占 9,300 tokens，阈值约 127,200，
 教程里的几轮对话远达不到它，`POST /compact` 会诚实返回 `under_budget`。
@@ -401,7 +435,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 
 1. 任意会话底部 footer 显示 `上下文 N / 128,000` 和
    `会话 X in · Y out · Z turns`。
-2. `curl -s localhost:8080/api/v1/sessions/$SESSION/usage | jq .`
+2. `rpc sessions/usage "{\"session_id\": \"$SESSION\"}" | jq .`
    返回同一组数（`input_tokens` / `output_tokens` / `turns` /
    `context_used` / `context_window`）。
 
@@ -414,9 +448,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
    API 方式（可指定分叉点，省略 `from_stream_index` = 整份日志）：
 
    ```bash
-   curl -s -X POST localhost:8080/api/v1/sessions/$SESSION/fork \
-     -H 'content-type: application/json' \
-     -d '{"from_stream_index": 12}' | jq .
+   rpc sessions/fork "{\"id\": \"$SESSION\", \"from_stream_index\": 12}" | jq .
    # → { session_id, forked_from, rows }
    ```
 
@@ -425,7 +457,8 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 5. 在 `/sessions` 点导出（下载 `<id>.jsonl`），或：
 
    ```bash
-   curl -sOJ localhost:8080/api/v1/sessions/$SESSION/export
+   rpc sessions/export "{\"id\": \"$SESSION\"}" \
+     | jq -r '.content_base64' | base64 -d > "$SESSION.jsonl"
    wc -l "$SESSION.jsonl"
    jq -r '.seq // empty' "$SESSION.jsonl" | awk 'NR>1 && $1!=p+1 {print "gap", p, $1} {p=$1}'
    ```
@@ -605,7 +638,7 @@ fn assemble(
 ## 6. 写一个静态插件（编译进宿主）
 
 §5 讲的是宿主侧的接缝：`Host` 收注册，`PluginHandle` 拥有它们。本节从
-**空目录**写一个真正的插件 crate，然后把它装进 `elysper-server`。
+**空目录**写一个真正的插件 crate，然后把它装进 `elysper-app-server`。
 
 静态插件是编译期依赖：换插件要重编宿主。换来的是零 IPC、零握手——工具的
 每次调用都是进程内直调，插件与宿主共享同一个 registry 与同一个错误类型。
@@ -752,9 +785,9 @@ cargo run -q
 （`Cargo.toml` 里加 `[[bin]] name = "lookup-demo", path = "src/main.rs"`。
 上面的输出是在本仓当前 checkout 上实跑的。）
 
-### 6.3 部署侧：把工厂注册进 elysper-server
+### 6.3 部署侧：把工厂注册进 elysper-app-server
 
-`elysper-server` 的静态表在 `crates/elysper-server/src/state/app_state/boot.rs`，
+`elysper-app-server` 的静态表在 `crates/elysper-app-server/src/state/app_state/boot.rs`，
 出厂是空的：
 
 ```rust,ignore
@@ -763,7 +796,7 @@ let static_plugins = crate::composition::StaticPlugins::new();
 
 一个 fork 要做两件事：
 
-1. 把插件 crate 加进 `crates/elysper-server/Cargo.toml` 的依赖；
+1. 把插件 crate 加进 `crates/elysper-app-server/Cargo.toml` 的依赖；
 2. 在那一行上注册工厂，`one line per plugin`：
 
 ```rust,ignore
@@ -792,10 +825,10 @@ plugins:
 装了之后能观察到三件事：
 
 - 启动日志里没有 `plugin skipped; boot continues`；
-- `GET /api/v1/plugins` 的 `resolved` 里有它，`kind: "static"`，
+- `rpc plugins/list` 的 `resolved` 里有它，`kind: "static"`，
   `authority: "full"`（进程内代码本来就是全权），`risk` 是它注册的工具
   声明的上界（§6.1 的 `read_only_hint` → `"low"`）；
-- 插件的工具出现在 `GET /api/v1/tools`，模型可以调用。
+- 插件的工具出现在 `rpc tools/list`，模型可以调用。
 
 三种"配置了但没装上"的情形都会进 `skipped`，并带原因：
 
@@ -807,7 +840,7 @@ plugins:
 
 > **未实跑的部分**：6.1/6.2 的代码与输出是在本机实跑的；6.3 的 fork 编译
 > 与启动没跑（需要一个改了 `boot.rs` 的 binary）。`StaticPlugins::register`
-> 到 `Composition` 的这条线由 `elysper-server` 的回归测试覆盖
+> 到 `Composition` 的这条线由 `elysper-app-server` 的回归测试覆盖
 > （`src/routes/plugins/tests.rs` 用同一张表装了一个静态插件）。
 
 ## 7. 写一个动态插件（任意语言的一个进程）
@@ -1012,11 +1045,11 @@ plugins:
 
 ### 7.4 观察它
 
-插件装没装上是部署事实，不是日志考古。`GET /api/v1/plugins` 直接给出两组：
+插件装没装上是部署事实，不是日志考古。`plugins/list` 直接给出两组
+（`resolved` / `skipped`），外加布局发现的 `bundles`：
 
 ```bash
-curl -s localhost:8080/api/v1/plugins \
-  -H "Authorization: Bearer $KEY" | jq .
+rpc plugins/list | jq .
 ```
 
 ```json
@@ -1034,7 +1067,7 @@ curl -s localhost:8080/api/v1/plugins \
 }
 ```
 
-（形状来自 `elysper-server` 的路由回归测试 `routes/plugins/tests.rs`；
+（形状来自 `elysper-app-server` 的路由回归测试 `routes/plugins/tests.rs`；
 在真机上跑就是同一份 JSON，只是内容取决于你的部署。）
 
 `skipped` 里最常见的一条是"进程起不来"：
@@ -1104,16 +1137,11 @@ resume 的结局分三种，客户端要做的动作各不相同：token 指向�
 手工恢复（浏览器已经做了这件事）：
 
 ```bash
-curl -s -X POST localhost:8080/api/v1/sessions/$SESSION/resume \
-  -H 'content-type: application/json' \
-  -d '{
-    "resume_token": {
-      "last_seq": 17,
-      "pending": ["call_00_xxx"],
-      "request_snapshot_hash": "sha256:…"
-    },
-    "interrupts": [{ "id": "approval-call_00_xxx", "status": "resolved" }]
-  }' | jq .
+rpc sessions/resume "{
+  \"session_id\": \"$SESSION\",
+  \"resume_token\": {\"last_seq\": 17, \"pending\": [\"call_00_xxx\"], \"request_snapshot_hash\": \"sha256:…\"},
+  \"interrupts\": [{\"id\": \"approval-call_00_xxx\", \"status\": \"resolved\"}]
+}" | jq .
 # 409 resume_conflict / resume_no_snapshot / config_drift / session_busy /
 #    remote_session（会话由其他节点持有）
 # 422 incomplete_resume（未覆盖所有未决调用）
@@ -1138,7 +1166,7 @@ host 的工具 schema、system prompt、采样参数与审批策略再算一次�
 | 生效点 | 当前 run 结算后，新回合第一条 user 行 | 当前工具批次结束、下一次模型调用前 |
 | 日志 | `UserInput` | `user_message`，`source: "steer"` |
 | 不丢 | run 先结束时仍成为下一回合 | run 先结束时服务端把它转成 queued turn（chip 显示“下一回合”） |
-| 端点 | `POST /api/v1/chat/sessions/{id}/messages` body `delivery: "queue"` | 同端点，`delivery: "steer"`（仅文本） |
+| 端点 | `chat/message/send` body `delivery: "queue"` | 同方法，`delivery: "steer"`（仅文本） |
 
 审批：默认策略 `AskHighRisk`——只有工具按本次调用判为 `high` 才挂起；
 在该策略下 `read_only_hint: true`（`Risk::Low`）不问；无注解的调用
@@ -1232,11 +1260,11 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 
 公开面分两层：
 
-- **精选面**：crate 根上 re-export 出来的 60 个名字 —— 这是承诺过的稳定面，
+- **精选面**：crate 根上 re-export 出来的 64 个名字 —— 这是承诺过的稳定面，
   依赖它就不会被下一次发布挪走。
 - **深路径**：`elysper_harness::agent::…` 与 `elysper_harness::events::…`
   底下只能走深路径才够得到的 57 项。rustdoc 在那两个模块下记录了 109 条
-  公开路径，其中 53 条是那 60 个名字在它们定义处的路径（第 60 个
+  公开路径，其中 53 条是门面名字在它们定义处的路径（例如
   `AgentDescriptor` 定义在 `elysper-core`），剩下 56 项；再加上从
   `elysper-tool` 转出来的 `Risk`（它在 harness 里没有自己的路径），共 57 项。
   深路径上的名字不在承诺内，将来可动。

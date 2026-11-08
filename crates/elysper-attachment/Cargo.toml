@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 [dependencies]
 elysper-core.workspace = true
+elysper-kernel.workspace = true
 elysper-provider.workspace = true
 
 chrono.workspace = true

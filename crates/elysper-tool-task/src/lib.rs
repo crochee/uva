@@ -48,6 +48,8 @@
 //! crate consumes it, never re-defines it.
 
 pub mod gate;
+/// The `subagents` kernel service: the delegation backend as a plugin.
+pub mod plugin;
 pub mod task;
 pub mod worktree;
 
@@ -63,6 +65,7 @@ pub use gate::{
     run_gate,
     verdict_summary,
 };
+pub use plugin::{KEY_SUBAGENTS, SubagentPlugin};
 pub use task::{
     MAX_SUBAGENT_DEPTH,
     TASK_TOOL_NAME,

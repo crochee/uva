@@ -103,6 +103,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::skill::SKILL_FILE;
 
     fn write(
         dir: &std::path::Path,
@@ -111,7 +112,7 @@ mod tests {
     ) -> std::path::PathBuf {
         let d = dir.join(name);
         fs::create_dir(&d).unwrap();
-        fs::write(d.join("SKILL.md"), body).unwrap();
+        fs::write(d.join(SKILL_FILE), body).unwrap();
         d
     }
 
@@ -124,10 +125,10 @@ mod tests {
             "---\nname: transcribe\ndescription: Transcribe audio\n---\n\nBody text.\n",
         );
         let meta =
-            SkillLoader::parse_frontmatter(&skill.join("SKILL.md")).unwrap();
+            SkillLoader::parse_frontmatter(&skill.join(SKILL_FILE)).unwrap();
         assert_eq!(meta.name, "transcribe");
         assert_eq!(meta.description.as_deref(), Some("Transcribe audio"));
-        let body = SkillLoader::parse_body(&skill.join("SKILL.md")).unwrap();
+        let body = SkillLoader::parse_body(&skill.join(SKILL_FILE)).unwrap();
         assert_eq!(body, "Body text.");
     }
 
@@ -144,7 +145,7 @@ mod tests {
             "---\nname: transcribe\n---\n\n# Transcribe\n\nBody text.\n",
         );
         let meta =
-            SkillLoader::parse_frontmatter(&skill.join("SKILL.md")).unwrap();
+            SkillLoader::parse_frontmatter(&skill.join(SKILL_FILE)).unwrap();
         assert_eq!(meta.name, "transcribe");
         assert!(
             meta.description.is_none(),
@@ -165,7 +166,7 @@ mod tests {
             "---\nname: transcribe\ndescription: \"\"\n---\n\nBody text.\n",
         );
         let meta =
-            SkillLoader::parse_frontmatter(&skill.join("SKILL.md")).unwrap();
+            SkillLoader::parse_frontmatter(&skill.join(SKILL_FILE)).unwrap();
         assert!(
             meta.description.is_none(),
             "blank description must normalise to None; got {:?}",
@@ -177,7 +178,7 @@ mod tests {
     fn rejects_missing_frontmatter() {
         let dir = tempfile::tempdir().unwrap();
         let skill = write(dir.path(), "nofront", "no delimiters here\n");
-        let err = SkillLoader::parse_frontmatter(&skill.join("SKILL.md"))
+        let err = SkillLoader::parse_frontmatter(&skill.join(SKILL_FILE))
             .unwrap_err();
         assert!(err.contains("invalid SKILL.md format"));
     }
@@ -190,7 +191,7 @@ mod tests {
             "transcribe",
             "---\nname: other\ndescription: x\n---\n",
         );
-        let err = SkillLoader::parse_frontmatter(&skill.join("SKILL.md"))
+        let err = SkillLoader::parse_frontmatter(&skill.join(SKILL_FILE))
             .unwrap_err();
         assert!(err.contains("skill name mismatch"));
     }
@@ -199,7 +200,7 @@ mod tests {
     fn rejects_missing_name() {
         let dir = tempfile::tempdir().unwrap();
         let skill = write(dir.path(), "x", "---\nname: \"\"\n---\n");
-        let err = SkillLoader::parse_frontmatter(&skill.join("SKILL.md"))
+        let err = SkillLoader::parse_frontmatter(&skill.join(SKILL_FILE))
             .unwrap_err();
         assert!(err.contains("name"));
     }

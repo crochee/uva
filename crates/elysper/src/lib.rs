@@ -213,17 +213,27 @@
 //! | `budget` | `elysper::budget` | `elysper-budget` | no |
 //! | `hpc-pool` | `elysper::hpc_pool` | `elysper-provider/hpc-pool` | no |
 //! | `hpc-simd` | `elysper::hpc_simd` | `elysper-search/simd` | no |
-//! | `hpc-batch` | `elysper::hpc_batch` | `elysper-hpc-batch` | no |
 //! | `sqlite` | `elysper::context::memory` | `elysper-context/sqlite` | no |
 //! | `test-support` | `elysper::test_support` | `elysper-test-support` | no |
 //! | `plugin-host` | `elysper::plugin_host` | `elysper-plugin-host` | no |
 //! | `plugin-protocol` | `elysper::plugin_protocol` | `elysper-plugin-protocol` | no |
+//! | `kernel` | `elysper::kernel` | `elysper-kernel` | no |
 //! | `hnsw` | `elysper::hnsw` | `elysper-search/hnsw` | no |
+//! | `wasm` | `elysper::wasm` | `elysper-wasm-runtime` | no |
+//! | `runtime` | `elysper::runtime` | `elysper-runtime` | no |
 //!
 //! Enabling a feature enables the modules its types refer to, so a
 //! name from a sibling module is never left unnameable. The `prelude`
 //! is always present; its items appear as their features are enabled
 //! (see [`prelude`] for the collision decisions behind each name).
+//!
+//! The `kernel` feature re-exports `elysper-kernel`'s whole surface:
+//! `Plugin`, `PluginManifest`, `mount_all`, `MountHandle`, `Context`,
+//! `EffectHandle`, `PluginState`, and the `ui.` / core namespace
+//! boundary. The built-in plugin crates (`elysper-tool`,
+//! `elysper-skill`, `elysper-mcp`, …) publish kernel plugins from their
+//! own modules, so a consumer assembles a runtime through the same
+//! `mount_all` the app server uses.
 //!
 //! ## Layout
 //!
@@ -444,14 +454,6 @@ use elysper::hpc_simd::DotRoute;
 ```"#
 )]
 #![cfg_attr(
-    not(feature = "hpc-batch"),
-    doc = r#"```compile_fail
-// The `hpc-batch` feature is off: the batched embedder /
-// completer adapters must not exist.
-use elysper::hpc_batch::BatchEmbedder;
-```"#
-)]
-#![cfg_attr(
     not(feature = "harness-tokio"),
     doc = r#"```compile_fail
 // The `harness-tokio` feature is off: the tokio adapters must not
@@ -481,6 +483,8 @@ pub use async_trait::async_trait;
 #[doc = include_str!("../../../MINIMAL.md")]
 pub struct MinimalGuide;
 
+#[cfg(feature = "agents")]
+pub mod agents;
 #[cfg(feature = "attachment")]
 pub mod attachment;
 #[cfg(feature = "budget")]
@@ -497,12 +501,12 @@ pub mod harness;
 pub mod harness_tokio;
 #[cfg(feature = "hnsw")]
 pub mod hnsw;
-#[cfg(feature = "hpc-batch")]
-pub mod hpc_batch;
 #[cfg(feature = "hpc-pool")]
 pub mod hpc_pool;
 #[cfg(feature = "hpc-simd")]
 pub mod hpc_simd;
+#[cfg(feature = "kernel")]
+pub mod kernel;
 #[cfg(feature = "macros")]
 pub mod macros;
 #[cfg(feature = "mcp")]
@@ -518,6 +522,8 @@ pub mod provider;
 pub mod reflection;
 #[cfg(feature = "resilience")]
 pub mod resilience;
+#[cfg(feature = "runtime")]
+pub mod runtime;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 #[cfg(feature = "search")]
@@ -560,5 +566,7 @@ pub mod tool_todo;
 pub mod tool_web;
 #[cfg(feature = "tool-write")]
 pub mod tool_write;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 #[cfg(feature = "workflow")]
 pub mod workflow;

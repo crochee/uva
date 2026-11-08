@@ -5,9 +5,9 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
+use elysper_provider::Message;
 use parking_lot::RwLock;
 use serde_json::Value;
-use elysper_provider::Message;
 
 use super::{Memory, MemoryEntry, MemoryError};
 

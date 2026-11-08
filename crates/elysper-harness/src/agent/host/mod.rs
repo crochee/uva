@@ -48,8 +48,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::FutureExt;
-use parking_lot::{Mutex, RwLock};
 use elysper_context::AgentState;
 use elysper_core::CancelToken;
 use elysper_steering::{
@@ -81,6 +79,8 @@ use elysper_tool::{
     ToolOutput,
     ToolRegistry,
 };
+use futures::FutureExt;
+use parking_lot::{Mutex, RwLock};
 
 use super::re_act::delegation::DelegatingTool;
 use crate::agent::sink::EventSink;
@@ -342,6 +342,16 @@ impl PluginHandle {
 }
 
 /// The per-agent registry of plugin registrations.
+///
+/// # Deprecation direction
+///
+/// The kernel's effects — through `elysper-kernel`'s `Context` and the
+/// plugin crates' `Plugin` implementations — are the registration
+/// target. `Host` remains while the chat path still builds each run
+/// through the consumer's run assembly, which hands every agent a
+/// host clone; removing it before that path moves to the `agentLoop`
+/// service would break chat. New code should register through kernel
+/// effects, not this table.
 pub struct Host {
     inner: Arc<HostInner>,
     // One scope per install in progress: the registrations that
@@ -361,6 +371,9 @@ impl Clone for Host {
 }
 
 struct HostInner {
+    // The kernel chains the seam keys front for. One root context the
+    // chains (and their reversible registrations) live on.
+    seams: crate::seams::SeamChains,
     state: Mutex<HostState>,
     // The published dispatch tables. Rebuilt on every change.
     snapshot: RwLock<Arc<HostSnapshot>>,
@@ -551,6 +564,7 @@ impl Host {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(HostInner {
+                seams: crate::seams::SeamChains::new(),
                 state: Mutex::new(HostState::default()),
                 snapshot: RwLock::new(Arc::new(HostSnapshot::default())),
                 next_id: std::sync::atomic::AtomicU64::new(1),
@@ -558,6 +572,23 @@ impl Host {
             }),
             scopes: Vec::new(),
         }
+    }
+
+    #[must_use]
+    /// The kernel waterfall a seam key fronts for.
+    ///
+    /// `key` is one of the [`crate::seams`] chain names. A plugin
+    /// registers middleware on the returned chain and keeps the
+    /// [`elysper_kernel::EffectHandle`] for as long as it wants the
+    /// middleware to run; the chain dispatches before the host's own
+    /// registrations for that seam.
+    pub fn waterfall(&self, key: &str) -> Option<&elysper_kernel::Waterfall> {
+        self.inner.seams.get(key)
+    }
+
+    /// The root context the seam chains resolve services through.
+    pub(crate) fn seam_context(&self) -> elysper_kernel::Context {
+        self.inner.seams.context()
     }
 
     /// The production policy: defensive guards, budget / iteration /
@@ -1020,11 +1051,6 @@ impl Host {
             text = transformer.transform(text, tool_name, state).await;
         }
         text
-    }
-
-    /// The tracker table, for the loop's observation boundaries.
-    pub(crate) fn tracker_table(&self) -> Arc<HostSnapshot> {
-        self.snapshot()
     }
 
     /// Append every `AppendToToolResult` hint that names `tool_name`.

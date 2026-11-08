@@ -98,10 +98,10 @@
 pub mod store;
 mod wrapper;
 
-pub use store::{InMemoryMemoStore, MemoEntry, MemoKey, MemoScope, MemoStore};
 // Re-exports for ergonomic plumbing.
 pub use elysper_core::Clock;
 pub use elysper_tool::{Context, Tool, ToolEntry, ToolOutput};
+pub use store::{InMemoryMemoStore, MemoEntry, MemoKey, MemoScope, MemoStore};
 pub use wrapper::{MemoConfig, MemoizedTool};
 
 // No public `MemoError` or `Result` alias: the wrapper surfaces its

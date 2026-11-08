@@ -24,11 +24,11 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
 use elysper_core::SharedClock;
 use elysper_scheduler::{ScheduleStore, Scheduler};
 use elysper_tool::{Context, Tool, ToolOutput};
 use elysper_tool_scheduler::SchedulerTool;
+use serde_json::json;
 use tempfile::TempDir;
 
 /// The textual projection of a `ToolOutput`.

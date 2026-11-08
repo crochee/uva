@@ -54,13 +54,13 @@
 //! surface. A caller replaying a mixed log should feed the meter
 //! the same typed partition it feeds `fold_surface`.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use elysper_provider::{
     Message,
     TokenUsage,
     token_counter::estimate_messages_token_count,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{
     events::{ReplaceRange, SessionEvent, SurfaceOp},

@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use elysper_core::Clock;
 use elysper_provider::{Content, ContentPart, Message, Role};
 use elysper_session::{SessionLog, derive_history, try_fold_log_surface};
-use elysper_steering::{HookDecision, HookEvent, InjectionPoint};
+use elysper_steering::{HookDecision, InjectionPoint};
+use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use super::{
@@ -40,15 +40,15 @@ impl ReActLoop {
             return Err(SessionEndReason::Cancelled);
         }
         // The one interception point that can end the run before
-        // the first sample: a `before_run` `Terminate`.
-        let arbitration =
-            super::hooks::dispatch_hook(self, &self.run.agent_state, || {
-                HookEvent::BeforeRun {
-                    agent_name: self.caps.model.descriptor.name.clone(),
-                    run_idx: 0,
-                }
-            })
-            .await;
+        // the first sample: `run_started`.
+        let arbitration = {
+            let ctx = self.hook_context(&self.run.agent_state);
+            self.caps
+                .control
+                .seams
+                .run_started(&ctx, &self.caps.model.descriptor.name, 0)
+                .await
+        };
         if let HookDecision::Terminate { reason } = arbitration.decision {
             return Err(SessionEndReason::Error(reason));
         }
@@ -134,19 +134,94 @@ impl ReActLoop {
         session: &mut RunState,
         iteration: usize,
     ) -> Result<Transcript, SessionEndReason> {
+        let system = Message::system(session.system_prompt.clone());
+        // The context manager can say which messages of the
+        // transcript survive the window. When it can, the request
+        // copies only those: copying the whole transcript and then
+        // letting the manager prune the copy does the same work
+        // twice — once for every message the window is about to
+        // drop.
+        let projected = self.project_context(session, &system).await?;
         let mut messages = Vec::with_capacity(session.messages.len() + 4);
-        messages.push(Message::system(session.system_prompt.clone()));
-        messages.extend(session.messages.iter().cloned());
+        messages.push(system);
+        match &projected {
+            Some(indices) => {
+                for index in indices {
+                    messages.push(session.messages[*index].clone());
+                }
+            }
+            None => {
+                messages.extend(session.messages.iter().cloned());
+            }
+        }
         if !session.attachments.is_empty() {
             messages.push(Message::new(
                 Role::User,
                 Content::Multi(session.attachments.clone()),
             ));
         }
-        let mut request = apply_context(self, session, messages).await?;
+        let mut request = match projected {
+            // The manager pruned by projecting, so the list already
+            // holds exactly what `prepare` would have left behind.
+            Some(_) => Arc::new(messages),
+            None => apply_context(self, session, messages).await?,
+        };
         snapshot_runtime_context(self, session, &mut request);
         inject_hints(self, session, iteration, &mut request).await;
         Ok(request)
+    }
+
+    // Ask the context manager which messages of the transcript
+    // survive the window.
+    //
+    // `None` means "no projection": the caller copies the whole
+    // transcript and lets the manager prune the copy, exactly as
+    // before. The manager that projects saves the caller a copy of
+    // every message the window is about to drop — and the manager's
+    // own prune, which has to remove the dropped messages from a
+    // list it owns, becomes a decision instead of a rewrite.
+    async fn project_context(
+        &self,
+        session: &mut RunState,
+        system: &Message,
+    ) -> Result<Option<Vec<usize>>, SessionEndReason> {
+        // The attachments ride the request but not the transcript,
+        // and the manager's budget covers the whole request. A
+        // projection that ignored them would decide on a different
+        // list than the one the request carries, so a turn with
+        // attachments keeps the old shape.
+        if !session.attachments.is_empty() {
+            return Ok(None);
+        }
+        let mut state = std::mem::replace(
+            &mut session.agent_state,
+            elysper_context::AgentState::with_window(0),
+        );
+        let projected = crate::agent::re_act::panic::catching_panics(async {
+            self.caps
+                .control
+                .context_manager
+                .kept_indices(
+                    std::slice::from_ref(system),
+                    &session.messages,
+                    &mut state,
+                )
+                .await
+        })
+        .await;
+        let projected = match projected {
+            Ok(projection) => projection,
+            Err(message) => {
+                session.agent_state = state;
+                return Err(SessionEndReason::Error(format!(
+                    "context manager panicked: {message}"
+                )));
+            }
+        };
+        let pruned = state.last_truncated;
+        session.agent_state = state;
+        note_pruned(self, session, pruned).await;
+        Ok(projected)
     }
 }
 
@@ -341,38 +416,45 @@ pub(super) async fn apply_context(
     };
     let pruned = state.last_truncated;
     session.agent_state = state;
-    // The prune is request-local, so the same eviction would warn
-    // (and run the `OnCompaction` hook) once per LLM pass; one
-    // warning per run describes the whole run.
-    if pruned && !session.context_pruned {
-        session.context_pruned = true;
-        debug!(
-            estimated_tokens = session.agent_state.estimated_tokens,
-            context_window = session.agent_state.context_window,
-            "context manager pruned history"
-        );
-        this.sink.warn(
-            crate::events::WarningKind::ContextCompaction,
-            None,
-            format!(
-                "context window pruned: ~{} of {} tokens in use",
-                session.agent_state.estimated_tokens,
-                session.agent_state.context_window
-            ),
-        );
-        // `OnCompaction` is observational: the point accepts no
-        // decision, so a handler that returns one is recorded as a
-        // diagnostic and the run continues.
-        super::hooks::dispatch_hook(this, &session.agent_state, || {
-            HookEvent::OnCompaction {
-                start: 0,
-                end: session.agent_state.iteration_count,
-                summary: String::new(),
-            }
-        })
-        .await;
-    }
+    note_pruned(this, session, pruned).await;
     Ok(prepared)
+}
+
+// Report that the context window pruned the request's list.
+//
+// The prune is request-local, so the same eviction would warn (and
+// run the `OnCompaction` hook) once per LLM pass; one warning per
+// run describes the whole run. Both the pruning manager and the
+// projecting one report through here, so the notice does not depend
+// on which shape the manager took.
+async fn note_pruned(this: &ReActLoop, session: &mut RunState, pruned: bool) {
+    if !pruned || session.context_pruned {
+        return;
+    }
+    session.context_pruned = true;
+    debug!(
+        estimated_tokens = session.agent_state.estimated_tokens,
+        context_window = session.agent_state.context_window,
+        "context manager pruned history"
+    );
+    this.sink.warn(
+        crate::events::WarningKind::ContextCompaction,
+        None,
+        format!(
+            "context window pruned: ~{} of {} tokens in use",
+            session.agent_state.estimated_tokens,
+            session.agent_state.context_window
+        ),
+    );
+    // `compacted` is observational: the point accepts no decision, so a
+    // handler that returns one is recorded as a diagnostic and the run
+    // continues.
+    let ctx = this.hook_context(&session.agent_state);
+    this.caps
+        .control
+        .seams
+        .compacted(&ctx, 0, session.agent_state.iteration_count, "")
+        .await;
 }
 
 pub(super) async fn inject_hints(
@@ -381,7 +463,7 @@ pub(super) async fn inject_hints(
     iteration: usize,
     request: &mut Transcript,
 ) {
-    let hints = this.caps.control.host.hints(&session.agent_state);
+    let hints = this.caps.control.seams.hints(&session.agent_state);
     if hints.is_empty() {
         return;
     }
@@ -482,9 +564,9 @@ fn append_to_system_prompt(system_prompt: &mut String, addition: &str) {
 mod tests {
     use std::sync::Arc;
 
-    use futures::channel::mpsc;
     use elysper_context::AgentState;
     use elysper_core::AtomicCancelToken;
+    use futures::channel::mpsc;
 
     use super::{ReActLoop, request_snapshot_event};
     use crate::{
@@ -514,7 +596,7 @@ mod tests {
                 })
             })
             .collect();
-        caps.control.host = host;
+        caps.control.seams = crate::seams::Seams::new(host);
 
         let cfg = caps.model.provider.model_config();
         let prompt_context = caps.run_prompt_context(None);

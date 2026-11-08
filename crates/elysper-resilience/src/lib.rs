@@ -61,18 +61,18 @@ pub use classify::{
     Outcome as ClassifyOutcome,
     default_classifier,
 };
-pub use provider::{
-    Jitter,
-    ResiliencePolicy,
-    ResilientProvider,
-    retry_with_backoff,
-};
 pub use elysper_core::breaker::{
     BreakerConfig,
     BreakerObservation,
     BreakerPhase,
     BreakerState,
     Outcome,
+};
+pub use provider::{
+    Jitter,
+    ResiliencePolicy,
+    ResilientProvider,
+    retry_with_backoff,
 };
 use thiserror::Error;
 pub use tool::ResilientTool;

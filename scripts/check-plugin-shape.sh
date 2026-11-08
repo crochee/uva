@@ -18,7 +18,7 @@
 # inline.
 #
 # Scoped to plugin crates on purpose: `elysper-harness` is governed
-# by `check-harness-shape`; `elysper-server` and `elysper-mcp-server`
+# by `check-harness-shape`; `elysper-app-server` and `elysper-mcp-server`
 # are app / binary crates and their file layout is deployment-driven.
 #
 # Exit 0 with an `OK:` line, or exit 1 with the offending files.

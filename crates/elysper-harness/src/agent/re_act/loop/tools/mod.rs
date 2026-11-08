@@ -6,12 +6,12 @@ mod route;
 
 use commit::commit_all_results;
 pub(crate) use commit::commit_tool_result;
-pub(crate) use route::dispatch_tool_call;
 use elysper_context::AgentState;
-use elysper_core::sync::OwnedSemaphorePermit;
 use elysper_provider::ToolUse;
 use elysper_steering::tool_fingerprint;
 use elysper_tool::{ExecutionMode, ToolOutput};
+use futures::StreamExt;
+pub(crate) use route::dispatch_tool_call;
 use tracing::{debug, info, warn};
 
 use super::{
@@ -90,17 +90,10 @@ pub(super) async fn execute_tools(
     // 2. Bucket the runnable calls by ExecutionMode. The guarded call
     // is what executes, so its (possibly rewritten) name decides the
     // bucket — bucketing the raw batch would schedule a call by a name
-    // that never runs.
-    let (all_safe, all_unsafe, concurrency) =
+    // that never runs. The buckets already skip the calls the gate
+    // did not let through, so their indices are the runnable ones.
+    let (safe_indices, unsafe_indices, concurrency) =
         bucket_by_execution_mode(this, &runnable, agent_state_ref);
-    let safe_indices: Vec<usize> = all_safe
-        .into_iter()
-        .filter(|idx| runnable[*idx].is_some())
-        .collect();
-    let unsafe_indices: Vec<usize> = all_unsafe
-        .into_iter()
-        .filter(|idx| runnable[*idx].is_some())
-        .collect();
     // 3. Run both buckets; slots stay `None` for held calls (and for
     // calls a cancellation or abort never reached, which
     // `fill_unanswered` names). File activity returns with each
@@ -198,7 +191,7 @@ pub(in crate::agent::re_act) fn bucket_by_execution_mode(
         "tracker.recommended_concurrency",
         || {
             let mut bound = usize::MAX;
-            for tracker in &this.caps.control.host.tracker_table().trackers {
+            for tracker in &this.caps.control.seams.tracker_table() {
                 bound =
                     bound.min(tracker.recommended_concurrency(agent_state_ref));
             }
@@ -225,9 +218,7 @@ async fn run_one_parallel(
     idx: usize,
     call: &ToolUse,
     agent_state_ref: &AgentState,
-    permit: Option<OwnedSemaphorePermit>,
 ) -> (usize, ToolOutcome) {
-    let _permit = permit;
     let outcome = guard::execute_gated(this, call, agent_state_ref).await;
     (idx, outcome)
 }
@@ -240,46 +231,40 @@ async fn run_parallel_bucket(
     agent_state_ref: &AgentState,
     batch: &mut Batch,
 ) {
-    use elysper_core::sync::Semaphore;
-
     if safe_indices.is_empty() {
         return;
     }
-    // The common path: one call's batch (or a tracker that
-    // allows the whole batch at once) needs no semaphore —
-    // every permit would be acquired immediately anyway.
-    if concurrency >= safe_indices.len() {
-        let futs = safe_indices.iter().map(|&idx| {
+    // The batch runs under a concurrency bound, so a tracker that
+    // caps the parallelism is honoured by construction: at most
+    // `concurrency` calls are in flight, and the next one starts as
+    // soon as a slot frees. The bound is the batch's own size when
+    // no tracker caps it, so the common case is unbounded — the same
+    // shape the loop had before the bound existed.
+    let futs: Vec<_> = safe_indices
+        .iter()
+        .map(|&idx| {
             run_one_parallel(
                 this,
                 idx,
                 guarded[idx].as_ref().expect("the gate passed this call"),
                 agent_state_ref,
-                None,
             )
-        });
-        collect_parallel(futures::future::join_all(futs).await, batch);
-        return;
-    }
-    let semaphore = std::sync::Arc::new(Semaphore::new(concurrency));
-    let futs = safe_indices.iter().map(|&idx| {
-        let permit_source = std::sync::Arc::clone(&semaphore);
-        async move {
-            let permit = permit_source.acquire_owned().await;
-            run_one_parallel(
-                this,
-                idx,
-                guarded[idx].as_ref().expect("the gate passed this call"),
-                agent_state_ref,
-                Some(permit),
-            )
-            .await
-        }
-    });
-    collect_parallel(futures::future::join_all(futs).await, batch);
+        })
+        .collect();
+    let results: Vec<(usize, ToolOutcome)> = futures::stream::iter(futs)
+        .buffer_unordered(concurrency)
+        .collect()
+        .await;
+    collect_parallel(results, batch);
 }
 
-fn collect_parallel(results: Vec<(usize, ToolOutcome)>, batch: &mut Batch) {
+fn collect_parallel(mut results: Vec<(usize, ToolOutcome)>, batch: &mut Batch) {
+    // The bounded batch finishes in completion order, so the slots
+    // are filled by index and the terminal outcome is taken from the
+    // lowest-indexed call — the same one an unbounded batch would
+    // have reported. The rows themselves are committed in the
+    // assistant's source order (see `commit_all_results`).
+    results.sort_by_key(|(index, _)| *index);
     for (idx, outcome) in results {
         batch.outputs[idx] = Some(outcome.output);
         if batch.terminate.is_none() {

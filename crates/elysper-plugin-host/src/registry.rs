@@ -14,7 +14,7 @@
 
 use std::{collections::HashMap, fmt};
 
-use elysper_harness::{Host, PluginHandle};
+use elysper_harness::{Host, PluginHandle, Registration};
 
 use crate::{RemotePlugin, error::HostError};
 
@@ -133,6 +133,24 @@ impl PluginRegistry {
             .iter()
             .map(|installed| &installed.handle)
             .collect()
+    }
+
+    /// Move every installed registration out of the registry.
+    ///
+    /// The registry keeps its record (names, claims, publish
+    /// diagnostics) but no longer owns the handles, so dropping it no
+    /// longer uninstalls. This is how a composition hands the live
+    /// registrations to the kernel's `process-plugins` entry, whose
+    /// effect becomes their lifetime: a `Registration` withdraws only
+    /// when its last clone drops, and a lending copy would keep every
+    /// tool alive.
+    pub fn take_registrations(&mut self) -> Vec<Registration> {
+        let mut taken = Vec::new();
+        for installed in &mut self.installed {
+            taken.extend(installed.handle.registrations().iter().cloned());
+            installed.handle = PluginHandle::default();
+        }
+        taken
     }
 
     /// Which plugin claimed `tool`, if any.

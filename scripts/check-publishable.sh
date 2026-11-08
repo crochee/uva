@@ -39,23 +39,25 @@ cd "$(dirname "$0")/.."
 # crate is only publishable once everything it depends on is on the
 # registry.
 #
-# One member is package-only: `elysper-server` carries `publish =
+# One member is package-only: `elysper-app-server` carries `publish =
 # false` (its surface is a deployment contract, not a crates.io one),
 # so `cargo publish` refuses it. It is still packaged here — the gate
 # is about "installable", and a crate that cannot be packaged cannot
 # be installed either.
 ORDER=(
-  elysper-core elysper-telemetry elysper-provider elysper-attachment
+  elysper-core elysper-kernel elysper-agents elysper-telemetry elysper-provider
+  elysper-attachment
   elysper-tool elysper-budget elysper-session elysper-context elysper-eval
   elysper-steering elysper-harness elysper-harness-tokio elysper-search
-  elysper-hpc-batch elysper-macros elysper-mcp elysper-plugin-protocol
+  elysper-macros elysper-mcp elysper-plugin-protocol
   elysper-plugin-host elysper-reflection elysper-resilience
-  elysper-scheduler elysper-semantic-cache elysper-skill
+  elysper-scheduler elysper-semantic-cache elysper-skill elysper-runtime
   elysper-strategy-best-of-n elysper-strategy-cot elysper-strategy-plan-execute
   elysper-test-support elysper-tool-memo elysper-tool-read
   elysper-tool-scheduler elysper-tool-search elysper-tool-shell
   elysper-tool-task elysper-tool-todo elysper-tool-web elysper-tool-write
-  elysper-workflow elysper elysper-server elysper-mcp-server
+  elysper-wasm-runtime
+  elysper-workflow elysper elysper-app-server elysper-mcp-server
 )
 
 # The gate must cover every workspace member. A member missing from

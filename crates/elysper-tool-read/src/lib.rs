@@ -9,8 +9,6 @@
 //! BOM at the start of the file is stripped before rendering.
 
 use async_trait::async_trait;
-use schemars_derive::JsonSchema;
-use serde::Deserialize;
 use elysper_tool::{
     Context,
     Tool,
@@ -18,8 +16,15 @@ use elysper_tool::{
     ToolOutput,
     workspace::{check_path_safety, resolve_path},
 };
+use schemars_derive::JsonSchema;
+use serde::Deserialize;
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+
+/// The `read` tool brick as a native kernel plugin.
+pub mod plugin;
+
+pub use plugin::ReadToolPlugin;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[schemars(extend("additionalProperties" = false))]
@@ -181,8 +186,8 @@ impl Tool for ReadTool {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use serde_json::json;
     use elysper_tool::Context;
+    use serde_json::json;
 
     use super::*;
 

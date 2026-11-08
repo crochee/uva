@@ -24,7 +24,8 @@
  * - cancel / regenerate / feedback / session detail / model catalog.
  */
 
-import { api, resolveApiKey } from './client';
+import { api } from './client';
+import { RpcError, rpc } from './rpc';
 import type {
   ApprovalRequest,
   CompactResult,
@@ -343,144 +344,147 @@ export type FollowEvent =
   | { type: 'interrupts'; pending: ApprovalRequest[] };
 
 /**
- * A `follow` open that the server refused, carrying the status so the
+ * A `follow` open that the server refused, carrying the code so the
  * page can tell a transient drop (retry) from a permanent one
- * (`404`/`410`: retrying would hammer the same answer forever).
+ * (`not_found`/`follow_cursor_truncated`: retrying would hammer the
+ * same answer forever).
+ *
+ * `status` keeps the HTTP number the refusal used to travel as —
+ * call sites still branch on it — derived from the machine code.
  */
 export class FollowHttpError extends Error {
+  readonly code: string;
   readonly status: number;
 
-  constructor(status: number, message: string) {
+  constructor(code: string, status: number, message: string) {
     super(message);
     this.name = 'FollowHttpError';
+    this.code = code;
     this.status = status;
   }
 }
 
-const FOLLOW_URL = (sessionId: string): string =>
-  `/api/v1/sessions/${encodeURIComponent(sessionId)}/follow`;
+/** The HTTP number a refusal code used to travel as. */
+const REFUSAL_STATUS: Record<string, number> = {
+  not_found: 404,
+  follow_cursor_truncated: 410,
+};
 
-/**
- * The credential the rest of the app authenticates with, in both
- * spellings this server accepts: `x-api-key` is what an Anthropic
- * client sends, `Authorization` is what every other surface here
- * sends. The server resolves `Authorization` first, so the two can
- * never disagree — they are read from one source.
- */
-function credentialHeader(): Record<string, string> {
-  const key = resolveApiKey();
-  if (!key) return {};
-  return { 'x-api-key': key, Authorization: `Bearer ${key}` };
+/** The `session/event` fields the follow loop reads. */
+interface SessionEventParams {
+  kind?: unknown;
+  live?: unknown;
 }
 
 /**
- * Iterate one SSE stream into named events.
- *
- * Frames are delimited by a blank line (`\n\n`) and carry their name on
- * an `event:` line; `data:` holds one JSON payload. Comment lines (the
- * keep-alive heartbeat) are skipped. A malformed payload is dropped —
- * one bad frame must not tear down a session stream.
+ * Turn one notification into a [`FollowEvent`], or `null` when its
+ * shape fails validation — a malformed frame is dropped, never
+ * yielded, the same contract the SSE reader had.
  */
-async function* parseSseStream(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-): AsyncGenerator<{ event: string; data: unknown }> {
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx = buffer.indexOf('\n\n');
-    while (idx !== -1) {
-      const raw = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      let eventName = 'message';
-      let dataPayload: unknown = undefined;
-      let hasData = false;
-      for (const line of raw.split('\n')) {
-        if (line.startsWith(':')) continue; // keep-alive comment
-        if (line.startsWith('event:')) {
-          const trimmed = line.slice(6).trim();
-          if (trimmed) eventName = trimmed;
-        } else if (line.startsWith('data:')) {
-          const payload = line.slice(5).trim();
-          if (!payload || payload === '[DONE]') continue;
-          try {
-            dataPayload = JSON.parse(payload);
-            hasData = true;
-          } catch {
-            // Skip the malformed frame; the next one still flows.
-          }
-        }
-      }
-      if (hasData) yield { event: eventName, data: dataPayload };
-      idx = buffer.indexOf('\n\n');
-    }
+function frameFromNotification(params: SessionEventParams): FollowEvent | null {
+  if (params.kind === 'live' && params.live && typeof params.live === 'object') {
+    const live = readLiveTurn(params.live);
+    return live ? { type: 'live', live } : null;
   }
+  if (params.kind === 'row') {
+    return readRowFrame(params);
+  }
+  if (params.kind === 'interrupts') {
+    const pending = readInterrupts(params);
+    return pending ? { type: 'interrupts', pending } : null;
+  }
+  return null;
 }
 
 /**
  * Open the session's follow stream and yield its frames.
  *
- * The stream stays open across turns (a settled turn is not the end of
- * the session), so the caller owns its lifetime: abort the signal to
- * close it. A transport failure is thrown, not yielded — the caller
- * reconnects, and the next baseline replaces whatever it had.
+ * On the RPC wire the baseline is the `sessions/follow` **result**
+ * and every later change is a `session/event` notification. When the
+ * socket drops, in-flight requests reject; this loop waits for the
+ * reconnect and re-follows from the last row it saw — the fresh
+ * baseline rebuilds the window (the reconnect timeline rebuild), and
+ * the `from` cursor lets the server refuse a reconnect whose window
+ * has already scrolled past (`follow_cursor_truncated`).
+ *
+ * A refusal (`not_found`, truncation) ends the loop by throwing, as
+ * the SSE open did; the page decides what to tell the operator.
  */
 export async function* followSession(
   sessionId: string,
   options: { signal?: AbortSignal } = {},
 ): AsyncGenerator<FollowEvent> {
-  let response: Response;
-  try {
-    response = await fetch(FOLLOW_URL(sessionId), {
-      method: 'GET',
-      credentials: 'same-origin',
-      headers: credentialHeader(),
-      signal: options.signal,
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === 'AbortError') return;
-    throw err;
-  }
-  if (!response.ok || !response.body) {
-    throw new FollowHttpError(response.status, await errorBody(response, 'follow open failed'));
-  }
-  const reader = response.body.getReader();
-  try {
-    for await (const { event, data } of parseSseStream(reader)) {
-      switch (event) {
-        case 'baseline': {
-          const snapshot = readBaseline(data);
-          if (snapshot) yield { type: 'baseline', snapshot };
-          break;
-        }
-        case 'row': {
-          const frame = readRowFrame(data);
-          if (frame) yield frame;
-          break;
-        }
-        case 'live': {
-          const live = readLiveTurn(data);
-          if (live) yield { type: 'live', live };
-          break;
-        }
-        case 'interrupts': {
-          const pending = readInterrupts(data);
-          if (pending) yield { type: 'interrupts', pending };
-          break;
-        }
-        default:
-          // `ping` and any frame a future revision adds: never break
-          // the stream over an unknown event.
-          break;
+  const signal = options.signal;
+  let lastSeq = 0;
+  let openedOnce = false;
+  while (!signal?.aborted) {
+    const queue: FollowEvent[] = [];
+    let wake: (() => void) | null = null;
+    let reconnected: (() => void) | null = null;
+    const unsubscribe = rpc.on('session/event', (raw) => {
+      if (!raw || typeof raw !== 'object') return;
+      if (Reflect.get(raw, 'session_id') !== sessionId) return;
+      const frame = frameFromNotification(raw);
+      if (frame) {
+        queue.push(frame);
+        wake?.();
       }
-    }
-  } finally {
+    });
+    const unsubscribeConnection = rpc.onConnection((change) => {
+      if (change.state === 'open' && change.reopened) reconnected?.();
+    });
     try {
-      await reader.cancel();
-    } catch {
-      // already released
+      const baseline = readBaseline(
+        await rpc.request<unknown>(
+          'sessions/follow',
+          {
+            session_id: sessionId,
+            // The first open asks for the plain window; a reconnect
+            // asserts the cursor it left off at.
+            ...(openedOnce && lastSeq > 0 ? { from: lastSeq } : {}),
+          },
+          signal,
+        ),
+      );
+      if (!baseline) {
+        throw new Error('the follow baseline failed validation');
+      }
+      openedOnce = true;
+      lastSeq = Math.max(lastSeq, baseline.cursor);
+      yield { type: 'baseline', snapshot: baseline };
+      // Rows queued while the baseline was in flight may overlap it;
+      // the seq check below drops the ones the baseline already
+      // carries, so the window is never doubled.
+      for (;;) {
+        if (signal?.aborted) return;
+        const frame = queue.shift();
+        if (frame) {
+          if (frame.type === 'row') {
+            if (frame.seq <= lastSeq) continue;
+            lastSeq = frame.seq;
+          }
+          yield frame;
+          continue;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        wake = null;
+      }
+    } catch (error) {
+      if (signal?.aborted) return;
+      if (error instanceof RpcError) {
+        throw new FollowHttpError(error.code, REFUSAL_STATUS[error.code] ?? 500, error.message);
+      }
+      if (error instanceof DOMException && error.name === 'AbortError') return;
+      // The socket dropped: wait for the reconnect, then re-follow
+      // from `lastSeq` (a fresh baseline rebuilds the window).
+      await new Promise<void>((resolve) => {
+        reconnected = resolve;
+      });
+    } finally {
+      unsubscribe();
+      unsubscribeConnection();
     }
   }
 }
@@ -630,24 +634,4 @@ function readLiveTurn(data: unknown): LiveTurn | null {
     reasoning,
     tool_calls,
   };
-}
-
-/** Read the server's error envelope for a rejected request. */
-async function errorBody(response: Response, fallback: string): Promise<string> {
-  const text = await response.text().catch(() => '');
-  if (!text) return `${fallback}: HTTP ${response.status}`;
-  try {
-    const parsed = JSON.parse(text) as {
-      code?: string;
-      message?: string;
-      error?: { message?: string };
-    };
-    const message = parsed.error?.message ?? parsed.message;
-    if (typeof message === 'string' && message.length > 0) {
-      return `${message} (HTTP ${response.status})`;
-    }
-  } catch {
-    // Not JSON — fall through to the raw body.
-  }
-  return `${text} (HTTP ${response.status})`;
 }

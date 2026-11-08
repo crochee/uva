@@ -324,11 +324,11 @@ export function SessionsPage() {
           <div className="nt-vis-meta-cluster">
             <div className="nt-vis-meta-cluster__row">
               <span>List</span>
-              <span>/api/v1/sessions</span>
+              <span>sessions/list</span>
             </div>
             <div className="nt-vis-meta-cluster__row">
               <span>Search</span>
-              <span>/api/v1/search</span>
+              <span>search/all</span>
             </div>
           </div>
         }

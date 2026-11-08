@@ -13,6 +13,10 @@ categories.workspace = true
 
 [dependencies]
 elysper-tool.workspace = true
+# The `sandbox` plugin implements the kernel's `Plugin` contract. The
+# kernel depends only on the dependency-free `cordis` crate, so this
+# does not pull a runtime into the shell brick.
+elysper-kernel.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -59,8 +59,6 @@
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use serde_json::Value;
 use elysper_core::{CancelToken, Error};
 use elysper_provider::{
     CompletionRequest,
@@ -75,6 +73,8 @@ use elysper_provider::{
     TextContent,
     ToolUse,
 };
+use parking_lot::Mutex;
+use serde_json::Value;
 use thiserror::Error;
 
 /// Errors raised while building or checking a [`ReplayProvider`].

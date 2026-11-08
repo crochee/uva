@@ -62,23 +62,31 @@
 //!
 //! # The two public layers
 //!
-//! The crate root re-exports a curated facade of 60 names. That
+//! The crate root re-exports a curated facade of 64 names. That
 //! facade is the promised surface: depend on it, and a release will
 //! not move your names.
 //!
-//! The crate is public further down, under `elysper_harness::agent::…`
-//! and `elysper_harness::events::…`. Only a deep path reaches 57
-//! names: rustdoc records 109 public paths under those two modules,
-//! 53 of them being facade names at their defining path, which leaves
-//! 56 names the facade does not carry — plus `Risk`, re-exported from
-//! `elysper-tool` into the public `agent::approval` module, which has
-//! no path of its own inside the harness. None of these names is
-//! promised: they may move or change in any release.
+//! The crate is public further down too — under `elysper_harness::agent::…`
+//! and `elysper_harness::events::…`, plus the `plugin` module (the
+//! `agentLoop` kernel service) and the `seams` module (the loop's
+//! interception keys). The `agent` and `events` deep paths hold 57
+//! names the facade does not promise on its own: 53 of them are facade
+//! names at their defining path, so 56 are names the facade does not
+//! carry — plus `Risk`, re-exported from `elysper-tool` into the public
+//! `agent::approval` module, which has no path of its own inside the
+//! harness. None of these names is promised: they may move or change in
+//! any release.
 
 pub mod agent;
+/// The `approval` kernel service and the `tool/pre-execute` gate over it.
+pub mod approval_plugin;
 pub mod events;
 mod input;
+/// The `agentLoop` service: the per-run agent factory as a kernel plugin.
+pub mod plugin;
 mod prompt;
+/// The four loop interception seams, by their kernel keys.
+pub mod seams;
 
 pub use agent::{
     Agent,
@@ -137,6 +145,7 @@ pub use agent::{
         single_shot_request_shared,
     },
 };
+pub use approval_plugin::{ApprovalGate, ApprovalPlugin, KEY_APPROVAL, RiskOf};
 pub use events::{
     AgentEvent,
     AgentMeta,

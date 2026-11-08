@@ -81,14 +81,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use elysper_core::blocking::Blocking;
+use elysper_plugin_protocol::{PluginError, PluginPublish, methods};
 use futures::{
     channel::oneshot,
     future::{Either, select},
 };
 use parking_lot::{Condvar, Mutex};
 use serde_json::{Value, json};
-use elysper_core::blocking::Blocking;
-use elysper_plugin_protocol::{PluginError, PluginPublish, methods};
 
 use crate::{
     error::HostError,
@@ -255,10 +255,11 @@ impl Connection {
     pub(crate) fn spawn(
         plugin: &str,
         argv: &[String],
+        env: Option<&std::collections::HashMap<String, String>>,
         blocking: Arc<dyn Blocking>,
         timeout: Duration,
     ) -> Result<Self, HostError> {
-        let (process, stdin, stdout) = ChildProcess::spawn(argv)?;
+        let (process, stdin, stdout) = ChildProcess::spawn(argv, env)?;
         // The publish direction starts *pending*: the reader holds
         // publish frames until the handshake settles it, so a plugin
         // that publishes right after its `initialize` answer —

@@ -5,11 +5,11 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use elysper_core::SystemClock;
 use elysper_provider::{Content, ContentPart, ImageContent, Role};
 use elysper_session::{LogWriter, in_memory::InMemorySessionSink};
 use elysper_tool::ToolRegistry;
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::super::{support::*, *};
@@ -153,8 +153,8 @@ pub(super) async fn a_writer_backed_run_does_not_duplicate_the_input() {
 /// step boundary derives the assistant turn and the tool result the
 /// run just wrote, so the second request carries each exactly once.
 pub(super) async fn a_writer_backed_run_reads_its_turns_back_from_the_log() {
-    use serde_json::json;
     use elysper_provider::ToolUse;
+    use serde_json::json;
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![ToolUse {
@@ -349,8 +349,8 @@ pub(super) async fn a_writer_backed_run_sends_attachments_once_and_warns() {
 /// so every step re-derives and re-prunes — but it must be reported
 /// once per run, and every request must carry the same pruned head.
 pub(super) async fn a_writer_backed_prune_warns_once_per_run() {
-    use serde_json::json;
     use elysper_provider::ToolUse;
+    use serde_json::json;
 
     let sink = Arc::new(InMemorySessionSink::new("log"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));

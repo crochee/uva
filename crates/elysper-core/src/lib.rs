@@ -27,6 +27,7 @@
 //! | [`schema`] | JSON Schema validation helper | structured-output validation lives next to the wire types |
 //! | [`full_output`] | [`FullOutputStore`] (chunked full-output retention) | replaces eager string concatenation in long tool results |
 //! | [`judge_score`] | [`parse_judge_score`] | shared LLM-judge reply parser — `LlmJudgeMetric` and `LlmJudgeScorer` cannot drift |
+//! | [`layout`] | [`layout::sources`] — the two-layer `~/.agents/` definition layout and its precedence rules | every definition domain (skills, agents, tasks, MCP declarations) reads the same roots and the same precedence, so they cannot drift |
 //!
 //! ## What's deliberately **not** here
 //!
@@ -64,6 +65,8 @@ pub mod error;
 pub mod full_output;
 pub mod idgen;
 pub mod judge_score;
+/// The two-layer `~/.agents` definition layout.
+pub mod layout;
 pub mod panic;
 pub mod registry;
 pub mod schema;

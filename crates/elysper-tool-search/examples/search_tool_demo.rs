@@ -31,7 +31,6 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use serde_json::json;
 use elysper_search::{
     CjkTokenizer,
     Embedder,
@@ -51,6 +50,7 @@ use elysper_tool::{
     project_tool_definitions,
 };
 use elysper_tool_search::{SEARCH_TOOL_NAME, SearchTool, register_search_tool};
+use serde_json::json;
 
 /// The textual projection of a `ToolOutput` — the JSON the model reads.
 fn text_of(output: &ToolOutput) -> String {

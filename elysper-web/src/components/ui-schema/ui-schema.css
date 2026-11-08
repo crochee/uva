@@ -1,0 +1,97 @@
+/**
+ * UI schema panel layout.
+ *
+ * A schema component is a presentation card inside the section, so it
+ * follows the same surface tokens as the plugin rows rather than
+ * inventing a second card vocabulary.
+ */
+
+.nt-uischema__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.nt-uischema__slot {
+  display: block;
+}
+
+.nt-uischema__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.nt-uischema__card--unknown {
+  border-color: var(--accent-yellow, var(--border-subtle));
+  background: var(--bg-tertiary);
+}
+
+.nt-uischema__title {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+}
+
+.nt-uischema__body {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.nt-uischema__items {
+  margin: 0;
+  padding-left: var(--spacing-md);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+}
+
+.nt-uischema__pairs {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: var(--spacing-xs) var(--spacing-md);
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.nt-uischema__pair {
+  display: contents;
+}
+
+.nt-uischema__pair dt {
+  color: var(--text-muted);
+}
+
+.nt-uischema__pair dd {
+  margin: 0;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+.nt-uischema__muted {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+.nt-uischema__props {
+  margin: 0;
+  padding: var(--spacing-sm);
+  overflow-x: auto;
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.nt-uischema__error {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--accent-red);
+}

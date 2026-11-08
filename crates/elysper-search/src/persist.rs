@@ -326,8 +326,8 @@ fn io_persist(err: std::io::Error) -> SearchError {
 mod tests {
     use std::sync::Arc;
 
-    use serde::Serialize;
     use elysper_core::registry::RegistryItem;
+    use serde::Serialize;
 
     use crate::{
         CjkTokenizer,

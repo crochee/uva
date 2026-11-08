@@ -26,6 +26,7 @@
 
 use std::{sync::LazyLock, time::Duration};
 
+use elysper_core::Error;
 use opentelemetry::{
     KeyValue,
     global,
@@ -33,7 +34,6 @@ use opentelemetry::{
 };
 use opentelemetry_otlp::{MetricExporter, WithExportConfig};
 use opentelemetry_sdk::{Resource, metrics::SdkMeterProvider};
-use elysper_core::Error;
 
 use crate::tracer::{ELYSPER_OTLP_ENDPOINT_ENV, detect_protocol};
 

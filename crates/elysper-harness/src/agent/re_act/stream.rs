@@ -2,9 +2,9 @@
 //! The only module that knows chunk shapes.
 use std::sync::Arc;
 
+use elysper_provider::{BlockAssembler, ContentPart, StreamChunk};
 #[cfg(test)]
 use futures::channel::mpsc;
-use elysper_provider::{BlockAssembler, ContentPart, StreamChunk};
 
 use super::state::SampleOutcome;
 use crate::{agent::sink::EventSink, events::AgentEvent};

@@ -19,8 +19,8 @@ pub mod jsonl;
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use elysper_core::Clock as _;
+use serde::{Deserialize, Serialize};
 
 use crate::EvalError;
 

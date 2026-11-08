@@ -10,9 +10,9 @@
 //! `Tracker::on_tool_call` was declared but never invoked, and its
 //! interior-mutability counters that leaked state across runs.
 
-use serde_json::Value;
 use elysper_context::AgentState;
 use elysper_provider::TokenUsage;
+use serde_json::Value;
 
 /// Run-progress observer.
 pub trait Tracker: Send + Sync {

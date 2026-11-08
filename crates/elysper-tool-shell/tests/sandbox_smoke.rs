@@ -20,7 +20,6 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use serde_json::json;
 use elysper_tool::{Context, Tool, ToolOutput};
 use elysper_tool_shell::{
     BackendAvailability,
@@ -33,6 +32,7 @@ use elysper_tool_shell::{
     denial_marker,
     resolve_confined_command,
 };
+use serde_json::json;
 
 fn text_of(output: &ToolOutput) -> String {
     output

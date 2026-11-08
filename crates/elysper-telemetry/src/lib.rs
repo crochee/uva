@@ -105,6 +105,7 @@ pub fn record_tool_call(tool_name: &str, status: &str) {
     #[cfg(feature = "otlp")]
     otel_metrics::record_tool_call(tool_name, status);
 }
+use elysper_core::Error;
 #[cfg(feature = "otlp")]
 pub use propagation::{
     ExtractedTraceContext,
@@ -117,14 +118,34 @@ pub use propagation::{
     inject_trace_context,
 };
 pub use spans::{SpanKind, new_typed_span};
-use elysper_core::Error;
 #[cfg(feature = "otlp")]
 pub use tracer::{ELYSPER_OTEL_SAMPLER_ENV, ELYSPER_OTLP_ENDPOINT_ENV};
+
+/// Where the console tracing layer writes its lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogWriter {
+    /// Standard output — the default, and what a long-running server
+    /// wants when its supervisor captures both streams together.
+    #[default]
+    Stdout,
+    /// Standard error.
+    ///
+    /// A process that speaks a protocol on stdout must log to
+    /// stderr: a log line on stdout would be read as a malformed
+    /// protocol frame by the peer.
+    Stderr,
+}
 
 #[derive(Debug, Clone)]
 pub struct TelemetryConfig {
     pub service_name: String,
     pub log_level: String,
+    /// Where the console tracing layer writes.
+    ///
+    /// Defaults to [`LogWriter::Stdout`], which is what a server
+    /// whose supervisor captures both streams wants. A process that
+    /// owns stdout for a protocol picks [`LogWriter::Stderr`].
+    pub log_writer: LogWriter,
 }
 
 impl Default for TelemetryConfig {
@@ -132,6 +153,7 @@ impl Default for TelemetryConfig {
         Self {
             service_name: "elysper".to_string(),
             log_level: "info".to_string(),
+            log_writer: LogWriter::default(),
         }
     }
 }

@@ -466,6 +466,35 @@ impl McpSupervisor {
     /// Live clients of every healthy server, in registration
     /// order — the shape boot code retains for the process
     /// lifetime.
+    /// Stop every supervisor: withdraw each server's tool generation,
+    /// drop its live client (and with it the transport / child
+    /// process), and forget the server.
+    ///
+    /// This is the teardown the host runs when the `mcp` service is
+    /// unloaded. It is terminal: a shut-down supervisor supervises no
+    /// server, so [`Self::tick`] reports no health and
+    /// [`Self::healthy_clients`] is empty. Unregistering an absent tool
+    /// is a no-op, so calling it twice is safe.
+    pub async fn shutdown(&self, registry: &ToolRegistry) {
+        let mut servers = self.servers.lock().await;
+        let count = servers.len();
+        for server in servers.iter_mut() {
+            // Fail visible: the model must see the tools disappear
+            // rather than call into a dead server.
+            server.generation.unregister_from(registry);
+            server.generation = McpToolGeneration::default();
+            server.client = None;
+            server.next_attempt = None;
+            server.connected_since = None;
+        }
+        servers.clear();
+        tracing::info!(
+            target: "elysper.mcp",
+            servers = count,
+            "MCP supervisor shut down; every remote tool was withdrawn"
+        );
+    }
+
     pub async fn healthy_clients(&self) -> Vec<(String, Arc<McpClient>)> {
         self.servers
             .lock()

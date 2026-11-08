@@ -28,12 +28,12 @@
 
 use std::{borrow::Cow, time::Duration};
 
+use elysper_core::redact_partial_with;
 use opentelemetry::{StringValue, Value};
 use opentelemetry_sdk::{
     error::OTelSdkResult,
     trace::{SpanData, SpanExporter},
 };
-use elysper_core::redact_partial_with;
 use tracing::error;
 
 /// Attribute value that, when seen on a `sensitive_keys`

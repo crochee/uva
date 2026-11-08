@@ -6,7 +6,6 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
 use elysper_mcp::{
     InMemoryTransport,
     MCP_PROTOCOL_VERSION,
@@ -18,6 +17,7 @@ use elysper_mcp::{
     register_mcp_tools,
 };
 use elysper_tool::{Context, ToolRegistry, traits::Tool};
+use serde_json::json;
 
 #[tokio::test]
 async fn initialize_sends_handshake_then_initialized_notification() {

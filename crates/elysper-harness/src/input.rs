@@ -2,9 +2,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use elysper_provider::{Content, ContentPart, Message, Role, TextContent};
 use elysper_session::SessionLog;
+use futures::channel::mpsc;
 
 use crate::{
     agent::approval::{ResumeDecision, ResumeStatus, ResumeToken},

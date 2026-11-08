@@ -9,10 +9,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{Stream, channel::mpsc};
 use elysper_core::CancelToken;
 use elysper_provider::{Content, ContentPart, Message, Role, ToolDefinition};
 use elysper_session::{SessionError, SessionEvent, SessionLog};
+use futures::{Stream, channel::mpsc};
 
 use crate::{
     agent::{caps::AgentCaps, re_act::projection::tool_names_hash},

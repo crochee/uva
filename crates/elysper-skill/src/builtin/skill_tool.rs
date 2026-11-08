@@ -40,10 +40,10 @@
 use std::path::Path;
 
 use async_trait::async_trait;
-use serde_json::json;
 use elysper_tool::{Context, Tool, ToolEntry, ToolOutput, ToolRegistry};
+use serde_json::json;
 
-use crate::skill::{Skill, format_skill_content};
+use crate::skill::{SKILL_FILE, Skill, format_skill_content};
 
 /// Public name of the skill tool exposed to the LLM.
 pub const SKILL_TOOL_NAME: &str = "skill";
@@ -155,7 +155,7 @@ fn skill_md_path(workspace_root: &Path, name: &str) -> std::path::PathBuf {
         .join(".agents")
         .join("skills")
         .join(name)
-        .join("SKILL.md")
+        .join(SKILL_FILE)
 }
 
 /// Best-effort enumeration of available skill names for the
@@ -189,7 +189,7 @@ fn discover_available_names(
             else {
                 continue;
             };
-            if seen.insert(name.clone()) && path.join("SKILL.md").is_file() {
+            if seen.insert(name.clone()) && path.join(SKILL_FILE).is_file() {
                 names.push(name);
             }
         }
@@ -232,7 +232,7 @@ mod tests {
     use elysper_tool::{Context, Tool, ToolOutput};
 
     use super::{SkillTool, register_skill_tool};
-    use crate::seed::seed_default_skills;
+    use crate::{seed::seed_default_skills, skill::SKILL_FILE};
 
     fn make_context(root: PathBuf) -> Context {
         Context::new("s1".to_string(), root)
@@ -433,7 +433,7 @@ mod tests {
         let skill_dir = dir.path().join(".agents").join("skills").join("nodoc");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
-            skill_dir.join("SKILL.md"),
+            skill_dir.join(SKILL_FILE),
             "---\nname: nodoc\n---\n\n# No description skill\n\nBody.\n",
         )
         .unwrap();

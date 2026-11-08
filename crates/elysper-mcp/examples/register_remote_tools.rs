@@ -21,7 +21,6 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::json;
 use elysper_mcp::{
     InMemoryTransport,
     InMemoryTransportFactory,
@@ -33,6 +32,7 @@ use elysper_mcp::{
     resolve_prefix,
 };
 use elysper_tool::{Context, ToolRegistry};
+use serde_json::json;
 
 /// A `sh` responder that answers the MCP handshake, one
 /// `tools/list`, and one `tools/call` — all for the server

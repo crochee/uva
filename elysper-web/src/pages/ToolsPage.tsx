@@ -189,7 +189,7 @@ export function ToolsPage() {
             </div>
             <div className="nt-vis-meta-cluster__row">
               <span>API</span>
-              <span>/api/v1/tools</span>
+              <span>tools/list</span>
             </div>
           </div>
         }
@@ -448,10 +448,9 @@ export function ToolsPage() {
  * gives the tools page a "what the agents are actually doing"
  * glance without forcing the user to navigate to `/tasks` first.
  *
- * The reconstruction fans out one GET per session (bounded by
- * `?limit=50` on the outer session query). When a dedicated
- * `/api/v1/tasks` endpoint ships, this collapses to a single
- * list call.
+ * The list is the backend's own — one call, already ordered
+ * newest-first — so the 5 most recent are the first 5 of the
+ * first page.
  */
 function RecentTaskDelegations() {
   const [delegations, setDelegations] = useState<TaskDelegation[]>([]);
@@ -461,8 +460,8 @@ function RecentTaskDelegations() {
     const controller = new AbortController();
     setLoading(true);
     tasksApi
-      .listAll(controller.signal)
-      .then((result) => setDelegations(result.data.slice(0, 5)))
+      .list({ limit: 5 }, controller.signal)
+      .then((result) => setDelegations(result.data))
       .catch(() => {
         // Swallow — the section is decorative on the tools page;
         // a failure here should not replace the user's main

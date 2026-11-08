@@ -2,7 +2,6 @@
 //! (wiremock): JSON bodies, SSE-framed responses, the
 //! `Mcp-Session-Id` handshake, and status-error mapping.
 
-use serde_json::{Value, json};
 use elysper_core::Error;
 use elysper_mcp::{
     HttpTransportFactory,
@@ -12,6 +11,7 @@ use elysper_mcp::{
     StreamableHttpTransport,
     TransportFactory,
 };
+use serde_json::{Value, json};
 use wiremock::{
     Mock,
     MockServer,

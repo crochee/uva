@@ -13,7 +13,7 @@
 # `check-plugin-shape` ratchets plugin-crate file length.
 #
 # Scope: same as `check-pub-surface` minus the facade — `crates/elysper/`
-# is exempt (it propagates curated surfaces wholesale), `elysper-server`
+# is exempt (it propagates curated surfaces wholesale), `elysper-app-server`
 # and `elysper-mcp-server` are app / binary crates and their lib.rs is
 # a wiring entry, not a curated surface.
 #

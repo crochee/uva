@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::Value;
 use elysper_core::validate_against_schema;
+use serde_json::Value;
 
 use crate::{Context, Tool, ToolOutput, traits::ExecutionMode};
 

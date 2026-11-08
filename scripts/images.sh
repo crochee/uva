@@ -44,14 +44,14 @@ usage() {
 
 build_server() {
     need docker
-    echo "== build elysper-server:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build elysper-app-server:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
         --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
         --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
         --build-arg "ELYSPER_VERSION=${TAG}" \
         -f "${REPO_ROOT}/Dockerfile.server" \
-        -t "${REGISTRY}/elysper-server:${TAG}" \
+        -t "${REGISTRY}/elysper-app-server:${TAG}" \
         "${REPO_ROOT}"
 }
 
@@ -63,7 +63,7 @@ build_server_artifact() {
     need docker
     ARTIFACT_DIR=${ARTIFACT_DIR:-./dist}
     mkdir -p "${ARTIFACT_DIR}"
-    echo "== artifact elysper-server (musl, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-server =="
+    echo "== artifact elysper-app-server (musl, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-app-server =="
     docker buildx build --target artifact \
         --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
         --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
@@ -74,12 +74,12 @@ build_server_artifact() {
 }
 
 # 走 Dockerfile.server.windows 的 `--target artifact` 阶段出 Windows PE;
-# 与 ci.yml 的 cross-windows 走同一条路径. 输出 elysper-server.exe.
+# 与 ci.yml 的 cross-windows 走同一条路径. 输出 elysper-app-server.exe.
 build_server_windows() {
     need docker
     ARTIFACT_DIR=${ARTIFACT_DIR:-./dist}
     mkdir -p "${ARTIFACT_DIR}"
-    echo "== artifact elysper-server (windows gnu, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-server.exe =="
+    echo "== artifact elysper-app-server (windows gnu, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-app-server.exe =="
     docker buildx build --target artifact \
         --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
         --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
@@ -117,7 +117,7 @@ build_mcp() {
 maybe_push() {
     if [ "${PUSH:-0}" = "1" ]; then
         echo "== push =="
-        docker push "${REGISTRY}/elysper-server:${TAG}"
+        docker push "${REGISTRY}/elysper-app-server:${TAG}"
         docker push "${REGISTRY}/elysper-web:${TAG}"
         docker push "${REGISTRY}/elysper-mcp-server:${TAG}"
     fi

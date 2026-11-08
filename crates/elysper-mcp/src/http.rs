@@ -21,12 +21,12 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use elysper_core::Error;
 use reqwest::{
     StatusCode,
     header::{ACCEPT, CONTENT_TYPE},
 };
 use serde_json::Value;
-use elysper_core::Error;
 
 use crate::{
     MCP_PROTOCOL_VERSION,

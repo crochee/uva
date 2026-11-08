@@ -1,4 +1,3 @@
-use serde_json::json;
 use elysper_plugin_protocol::{
     PluginCapabilities,
     PluginDecision,
@@ -7,6 +6,7 @@ use elysper_plugin_protocol::{
     PluginPublish,
     ToolSpec,
 };
+use serde_json::json;
 
 #[test]
 fn capabilities_round_trip() {

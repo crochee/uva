@@ -854,3 +854,36 @@ async fn make_request_succeeds_for_well_formed_request() {
     // primary contract.
     drop(builder);
 }
+
+/// The `/v1/messages` request carries exactly one `content-type`
+/// header. `.json()` sets it; an explicit `.header("content-type", …)`
+/// on top *appends* a second one, and at least one
+/// Anthropic-compatible proxy (DeepSeek) answers that with
+/// `415 Expected request with Content-Type: application/json` — found
+/// live while driving the real endpoint, not in a fixture.
+#[tokio::test]
+async fn messages_request_carries_one_content_type_header() {
+    let provider = make_provider();
+    let req = make_request_no_policy();
+    let body = provider.transform_request(&req);
+    let built = provider
+        .messages_request(&body)
+        .build()
+        .expect("the builder is complete without a network");
+    let content_types = built
+        .headers()
+        .get_all(reqwest::header::CONTENT_TYPE)
+        .iter()
+        .count();
+    assert_eq!(
+        content_types, 1,
+        "a duplicated content-type gets the request a 415 from \
+         strict Anthropic-compatible proxies"
+    );
+    assert_eq!(
+        built.headers().get(reqwest::header::CONTENT_TYPE),
+        Some(&reqwest::header::HeaderValue::from_static(
+            "application/json"
+        )),
+    );
+}

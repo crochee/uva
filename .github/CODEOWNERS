@@ -20,7 +20,7 @@
 /crates/elysper-tool-*/              @crochee
 
 # HTTP / SSE / config.yaml —— 公开面 / 安全敏感。
-/crates/elysper-server/              @crochee
+/crates/elysper-app-server/         @crochee
 /elysper-web/                        @crochee
 /config.yaml                         @crochee
 

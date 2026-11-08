@@ -1,9 +1,9 @@
 //! The streaming types: [`StreamChunk`] (one event on the SSE
 //! stream) and [`SamplingResult`] (the final aggregated response).
 
+use elysper_core::Error;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use elysper_core::Error;
 
 use super::{
     completion::CompletionResponse,

@@ -345,7 +345,7 @@ fn save_provider_env() -> Vec<(String, Option<String>)> {
         .map(|k| ((*k).to_string(), std::env::var(k).ok()))
         .collect();
 
-    // Catch any injected API key (e.g. from `elysper_server::config::yaml_bridge`)
+    // Catch any injected API key (e.g. from an operator's env)
     // so a hermetic test doesn't accidentally observe one left behind
     // by a previous test in the same process.
     for (k, v) in std::env::vars() {

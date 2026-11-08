@@ -34,8 +34,8 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use elysper_core::Clock;
+use futures::StreamExt;
 
 use crate::{
     EvalError,

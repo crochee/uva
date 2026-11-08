@@ -36,8 +36,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use parking_lot::Mutex;
 use elysper_core::{AtomicCancelToken, CancelToken};
 use elysper_harness::{Agent, AgentEvent, AgentInput, ReActAgent};
 use elysper_provider::{
@@ -56,6 +54,8 @@ use elysper_strategy_best_of_n::{
     LlmJudgeScorer,
 };
 use elysper_tool::ToolRegistry;
+use futures::StreamExt;
+use parking_lot::Mutex;
 
 /// A scripted provider that splits its script between **candidate**
 /// replies (for `BestOfNStrategy`'s sampling) and **judge** replies

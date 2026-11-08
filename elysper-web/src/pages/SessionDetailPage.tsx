@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { DeploymentPlugins } from '../components/plugins/DeploymentPlugins';
+import { UiSchemaPanel } from '../components/ui-schema/UiSchemaPanel';
 import { SkeletonList } from '../components/ui/SkeletonList';
 import { ChatMessageList, type ChatMessageViewItem } from '../components/chat/ChatMessageView';
 import {
@@ -538,6 +539,10 @@ export function SessionDetailPage() {
               per-session: a skipped plugin is the one fact no other
               surface reports. */}
           <DeploymentPlugins />
+
+          {/* Schema-rendered extension points. Deployment-wide, like
+              the plugin composition: a [ui] row is not per-session. */}
+          <UiSchemaPanel />
 
           <Section
             title="History"

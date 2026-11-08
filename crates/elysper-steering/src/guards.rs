@@ -8,8 +8,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use regex::Regex;
 use elysper_context::AgentState;
+use regex::Regex;
 
 use crate::{
     action::Action,

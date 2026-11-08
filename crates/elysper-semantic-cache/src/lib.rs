@@ -76,6 +76,10 @@
 pub mod store;
 mod wrapper;
 
+// `Clock` re-exports surface the trait and the two shipped impls so
+// callers do not have to remember which crate owns them. Internal
+// callers reach them through `elysper_core` directly.
+pub use elysper_core::{Clock, FixedClock, SharedClock, SystemClock};
 pub use store::{
     CachedCompletion,
     EmbeddingKey,
@@ -83,10 +87,6 @@ pub use store::{
     SemanticCacheStats,
     SemanticCacheStore,
 };
-// `Clock` re-exports surface the trait and the two shipped impls so
-// callers do not have to remember which crate owns them. Internal
-// callers reach them through `elysper_core` directly.
-pub use elysper_core::{Clock, FixedClock, SharedClock, SystemClock};
 use thiserror::Error;
 pub use wrapper::{SemanticCacheConfig, SemanticCacheProvider};
 

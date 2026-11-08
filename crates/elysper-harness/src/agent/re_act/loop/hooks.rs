@@ -1,18 +1,14 @@
-//! Loop-wide dispatch: every interception point goes through the
-//! agent's one [`Host`](crate::agent::host::Host).
+//! Loop-wide interception: every point goes through the agent's
+//! [`Seams`](crate::seams::Seams) layer.
 //!
-//! The host is the only registry. A point that has no registration
-//! returns before building its event, so a run with no policy pays
-//! nothing for the seams it does not use.
+//! This module keeps the two things the seam layer cannot know: how to
+//! build a registration's context from the run's state, and the
+//! cancellation reporting shared by the boundaries.
 
 use elysper_context::AgentState;
-use elysper_steering::HookEvent;
 
 use super::ReActLoop;
-use crate::{
-    agent::host::{Arbitration, HookContext},
-    events::SystemEvent,
-};
+use crate::{agent::host::HookContext, events::SystemEvent};
 
 impl ReActLoop {
     /// The context a registration sees at this boundary.
@@ -26,42 +22,6 @@ impl ReActLoop {
             cancel: &self.run.cancel,
         }
     }
-}
-
-/// Fire one event at the host's observers.
-pub(super) async fn dispatch_hook(
-    this: &ReActLoop,
-    state: &AgentState,
-    event: impl FnOnce() -> HookEvent,
-) -> Arbitration {
-    let host = &this.caps.control.host;
-    if !host.has_event_registrations() {
-        return Arbitration::default();
-    }
-    let event = event();
-    host.dispatch_hooks(&event, &this.hook_context(state)).await
-}
-
-/// Fire the tool gate point: the observers, then the gates.
-///
-/// A gate is the security capability, so it gets the last word — but
-/// only when nothing before it vetoed.
-pub(super) async fn dispatch_tool_gate(
-    this: &ReActLoop,
-    state: &AgentState,
-    event: impl FnOnce() -> HookEvent,
-) -> Arbitration {
-    let host = &this.caps.control.host;
-    if !host.has_event_registrations() {
-        return Arbitration::default();
-    }
-    let event = event();
-    let ctx = this.hook_context(state);
-    let mut arbitration = host.dispatch_hooks(&event, &ctx).await;
-    if !arbitration.decided() {
-        arbitration.merge(host.dispatch_gates(&event, &ctx).await);
-    }
-    arbitration
 }
 
 pub(crate) fn cancelled(

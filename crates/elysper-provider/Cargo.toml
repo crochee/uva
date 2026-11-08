@@ -16,6 +16,11 @@ categories.workspace = true
 # convenience (see `[dev-dependencies]`), so the normal build does not
 # carry it into the harness closure.
 elysper-core.workspace = true
+# The `llm` service is a native kernel plugin, so this crate implements
+# the kernel's `Plugin` contract. The kernel itself is runtime-free
+# (`cordis-rs` has an empty dependency table), so this does not change
+# what the crate compiles with when the HTTP adapters are off.
+elysper-kernel.workspace = true
 async-trait.workspace = true
 # `rc` feature enables `Serialize`/`Deserialize` for `Arc<T>` so that
 # `CompletionRequest`'s `Arc<Vec<T>>` fields derive serde impls that

@@ -27,8 +27,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use serde_json::Value;
 use elysper_provider::{ContentPart, Message, Role};
+use serde_json::Value;
 
 use crate::events::{ReplaceRange, SessionEvent, SurfaceOp};
 
@@ -369,8 +369,8 @@ fn extract_tool_use_id(data: &Value) -> Option<String> {
 }
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use elysper_provider::{Content, ToolUse};
+    use serde_json::json;
 
     use super::*;
     use crate::events::ReplaceRange;

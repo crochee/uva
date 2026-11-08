@@ -89,13 +89,13 @@ async fn rewrite_output(
     let mut text = this
         .caps
         .control
-        .host
-        .transform_output(text, &call.name, &session.agent_state)
+        .seams
+        .output_transformer(text, &call.name, &session.agent_state)
         .await;
     for reminder in this
         .caps
         .control
-        .host
+        .seams
         .tool_result_hints(&call.name, &session.agent_state)
     {
         text.push_str("\n\n[reminder] ");

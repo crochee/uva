@@ -124,9 +124,10 @@ impl ScheduleStore {
     }
 
     /// Revision of this store's contents: every mutating route
-    /// (`load` / `add` / `update` / `remove` / `gc_completed`)
-    /// advances it exactly once per change of state — a `gc_completed`
-    /// sweep of three rows advances it three times — while read-only
+    /// (`add` / `update` / `remove` / `gc_completed`) advances it
+    /// exactly once per change of state — a `gc_completed` sweep of
+    /// three rows advances it three times. `load` advances it only
+    /// when the reloaded snapshot differs from the cached one. Read-only
     /// routes (`list` / `get` / `has_name`) never touch it. It is the
     /// value a wheel cache watches: compare a remembered reading to
     /// learn, without scanning a single job, that its projection is
@@ -172,49 +173,62 @@ impl ScheduleStore {
     /// (the lock was stale and reaped between writes) and
     /// logs a `warn!` for each such drop so operators can
     /// see the recovery.
+    ///
+    /// The revision advances only when the reloaded snapshot
+    /// differs from the cached one. A watcher that reloads before
+    /// every pass (the scheduler leader) would otherwise see a new
+    /// revision on each pass and rebuild its whole wheel for nothing.
     pub fn load(&self) -> Result<usize, ScheduleStoreError> {
         let dir = self.root.join("schedules");
-        if !dir.exists() {
-            return Ok(0);
-        }
-        let mut loaded = 0;
+        // Hold the cache lock across the scan and the swap. A mutation
+        // that completes between an unlocked scan and the lock would
+        // have its committed cache edit reverted by the stale snapshot
+        // (an `add`/`update` disappears, a `remove` resurrects a row).
+        // The scan only reads the filesystem and parses JSON — it never
+        // calls back into this store — so the lock cannot re-enter.
         let mut cache = self.cache.lock();
-        cache.clear();
-        let entries = fs::read_dir(&dir).map_err(ScheduleStoreError::io)?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !name.ends_with(".json") {
-                continue;
-            }
-            let raw = match fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(err) => {
-                    warn!(
-                        schedule_file = %path.display(),
-                        error = %err,
-                        "schedule_store: skipping unreadable file",
-                    );
+        let mut next = std::collections::HashMap::new();
+        if dir.exists() {
+            let entries = fs::read_dir(&dir).map_err(ScheduleStoreError::io)?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str())
+                else {
+                    continue;
+                };
+                if !name.ends_with(".json") {
                     continue;
                 }
-            };
-            match serde_json::from_str::<Job>(&raw) {
-                Ok(job) => {
-                    cache.insert(job.id.clone(), job);
-                    loaded += 1;
-                }
-                Err(err) => {
-                    warn!(
-                        schedule_file = %path.display(),
-                        error = %err,
-                        "schedule_store: skipping malformed JSON",
-                    );
+                let raw = match fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(err) => {
+                        warn!(
+                            schedule_file = %path.display(),
+                            error = %err,
+                            "schedule_store: skipping unreadable file",
+                        );
+                        continue;
+                    }
+                };
+                match serde_json::from_str::<Job>(&raw) {
+                    Ok(job) => {
+                        next.insert(job.id.clone(), job);
+                    }
+                    Err(err) => {
+                        warn!(
+                            schedule_file = %path.display(),
+                            error = %err,
+                            "schedule_store: skipping malformed JSON",
+                        );
+                    }
                 }
             }
         }
-        self.bump_version();
+        let loaded = next.len();
+        if *cache != next {
+            *cache = next;
+            self.bump_version();
+        }
         Ok(loaded)
     }
 
@@ -612,10 +626,53 @@ mod tests {
         let after_remove = store.version();
         assert!(after_remove > after_update, "remove must advance it");
 
+        let before_load = store.version();
+        store.load().unwrap();
+        assert_eq!(
+            store.version(),
+            before_load,
+            "a reload that finds the same snapshot is a no-op"
+        );
+    }
+
+    /// The leader reloads before every pass; a revision that moved on
+    /// a no-op reload would rebuild the scheduler's wheel every time.
+    /// Only an actual content change may advance it.
+    #[test]
+    fn load_advances_only_when_contents_change() {
+        let dir = TempDir::new().unwrap();
+        let store = ScheduleStore::new(dir.path());
+        let peer = ScheduleStore::new(dir.path());
+        let job = sample_job("peer", JobKind::Once);
+        peer.add(job.clone()).unwrap();
+
+        let before = store.version();
+        assert_eq!(store.load().unwrap(), 1);
+        let after_first = store.version();
+        assert!(
+            after_first > before,
+            "the first load changed this store's view"
+        );
+        assert_eq!(store.get(&job.id), Some(job.clone()));
+
+        store.load().unwrap();
+        assert_eq!(
+            store.version(),
+            after_first,
+            "reloading an unchanged directory must not move the revision"
+        );
+
+        peer.update(&job.id, |j| j.description = "peer edit".into())
+            .unwrap();
         store.load().unwrap();
         assert!(
-            store.version() > after_remove,
-            "a reload can change what this process sees, so it advances it"
+            store.version() > after_first,
+            "a peer's edit is a real change"
+        );
+        assert_eq!(
+            store.get(&job.id).unwrap().description,
+            "peer edit",
+            "the reloaded snapshot carries the peer's edit"
         );
     }
 

@@ -22,8 +22,8 @@
 
 use std::sync::Arc;
 
-use parking_lot::Mutex;
 use elysper_core::CancelToken;
+use parking_lot::Mutex;
 
 /// State of an `EffectGate`.
 ///

@@ -32,8 +32,10 @@
 
 pub mod agent_action;
 pub mod job;
+pub mod plugin;
 pub mod scheduler;
 pub mod store;
+pub mod task_file;
 pub mod trigger;
 pub mod wheel;
 
@@ -58,6 +60,7 @@ pub use job::{
     MAX_INTERVAL_SECS,
     ScheduleError,
 };
+pub use plugin::{KEY_SCHEDULER, SchedulerPlugin, SchedulerService};
 pub use scheduler::{ScheduleTick, Scheduler};
 pub use store::{ScheduleStore, ScheduleStoreError};
 #[cfg(feature = "cron")]

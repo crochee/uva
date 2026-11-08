@@ -8,8 +8,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use serde_json::json;
 use elysper_context::{AgentState, ContextManager};
 use elysper_core::{Error, SystemClock};
 use elysper_provider::{
@@ -31,6 +29,8 @@ use elysper_session::{
     in_memory::InMemorySessionSink,
 };
 use elysper_tool::ToolRegistry;
+use futures::StreamExt;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::{support::*, *};

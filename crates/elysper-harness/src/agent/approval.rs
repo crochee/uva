@@ -11,9 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use elysper_tool::Risk;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-pub use elysper_tool::Risk;
 
 /// One held tool call, waiting for an approval decision.
 ///

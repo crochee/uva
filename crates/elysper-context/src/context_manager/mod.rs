@@ -284,6 +284,15 @@ impl<T: ContextManager + ?Sized> ContextManager for Arc<T> {
         (**self).prepare_arc(messages, state).await
     }
 
+    async fn kept_indices(
+        &self,
+        prefix: &[Message],
+        body: &[Message],
+        state: &mut AgentState,
+    ) -> Option<Vec<usize>> {
+        (**self).kept_indices(prefix, body, state).await
+    }
+
     fn estimate_tokens(&self, messages: &[Message]) -> usize {
         (**self).estimate_tokens(messages)
     }
@@ -341,6 +350,36 @@ pub trait ContextManager: Send + Sync {
     /// decisions matter.
     fn estimate_tokens(&self, messages: &[Message]) -> usize {
         elysper_provider::token_counter::estimate_messages_token_count(messages)
+    }
+
+    /// The messages of `body` that survive the window, as indices
+    /// into `body`, ascending.
+    ///
+    /// `prefix` is the request's leading messages — the assembled
+    /// system prompt — which precede `body` in the list the manager
+    /// prunes and are never dropped. The contract:
+    ///
+    /// - the projection names exactly the messages
+    ///   [`ContextManager::prepare`] keeps when it is handed
+    ///   `prefix ++ body`, in the same order;
+    /// - `state` carries the same values `prepare` would have left
+    ///   behind — the estimate of the surviving list and whether
+    ///   anything was dropped;
+    /// - `None` means "no projection known": the caller keeps every
+    ///   message and lets `prepare` do the pruning.
+    ///
+    /// The projection exists so a caller that owns the transcript can
+    /// copy only what survives. Copying the whole transcript and then
+    /// pruning the copy does the same work twice — once for every
+    /// message the window is about to drop.
+    async fn kept_indices(
+        &self,
+        prefix: &[Message],
+        body: &[Message],
+        state: &mut AgentState,
+    ) -> Option<Vec<usize>> {
+        let _ = (prefix, body, state);
+        None
     }
 }
 
@@ -404,6 +443,129 @@ impl ContextManager for NoopContextManager {
 /// summariser.
 pub struct TruncatingContextManager;
 
+// ---------------------------------------------------------------------
+// The drop plan
+//
+// The pairwise drop needs two facts about a message: its role (what
+// the rule looks at) and its own token estimate (what the budget is
+// made of). Both fit in a slot, so the decision can be taken over a
+// list the caller does not own — the plan is computed over slots,
+// never over the messages themselves.
+//
+// The estimator is additive: `estimate_messages_token_count` converts
+// each message's units once and sums the results, so a message's slot
+// carries exactly the share of the list's estimate that belongs to
+// it. That is what lets the plan subtract a dropped message instead of
+// re-summing the survivors.
+// ---------------------------------------------------------------------
+
+/// One message's drop-relevant facts.
+#[derive(Clone, Copy)]
+struct Slot {
+    /// The message's role — the drop rule looks at it.
+    role: Role,
+    /// The message's own share of the list's token estimate.
+    tokens: usize,
+}
+
+/// The slots of `messages`.
+fn slots_of(messages: &[Message]) -> Vec<Slot> {
+    messages
+        .iter()
+        .map(|message| Slot {
+            role: message.role,
+            tokens: estimate_messages_token_count(std::slice::from_ref(
+                message,
+            )),
+        })
+        .collect()
+}
+
+/// The messages the window does not fit, as indices into `slots`.
+///
+/// The rule is the pairwise drop: the oldest user message and the
+/// assistant reply that follows it go together, and the scan repeats
+/// until the tail fits. The leading system messages are never
+/// dropped.
+///
+/// `whole_tokens` is the estimate of the *whole* list — the system
+/// prefix included — and it is the entry condition, which is
+/// deliberately stricter than the tail-only budget the loop settles
+/// on: a system prompt that alone exceeds the window must still let
+/// the tail be evicted rather than short-circuiting the loop before
+/// it drops anything (pinned by `truncating_never_drops_system_
+/// messages`).
+fn drop_plan(slots: &[Slot], whole_tokens: usize, window: usize) -> Vec<usize> {
+    // The leading system prefix: preserved verbatim, never reordered.
+    let mut in_system = true;
+    let mut sys_end = 0;
+    for (index, slot) in slots.iter().enumerate() {
+        if in_system && slot.role == Role::System {
+            sys_end = index + 1;
+        } else {
+            in_system = false;
+        }
+    }
+    // The tail's own total, and the messages it holds. The scan
+    // works on the *surviving* indices, so a drop shifts the next
+    // message into the freed slot exactly as `Vec::remove` does.
+    let mut tail: Vec<usize> = (sys_end..slots.len()).collect();
+    let mut tail_tokens: usize =
+        tail.iter().map(|index| slots[*index].tokens).sum();
+    let mut dropped: Vec<usize> = Vec::new();
+    let mut over_budget = whole_tokens;
+    let mut i = 0;
+    while over_budget > window && i < tail.len() {
+        let index = tail[i];
+        if slots[index].role == Role::User {
+            // Drop the user turn. Re-check before deciding whether
+            // the following assistant turn also has to go (the
+            // assistant turn is the answer to this question; keeping
+            // it without the question is incoherent).
+            tail_tokens = tail_tokens.saturating_sub(slots[index].tokens);
+            dropped.push(index);
+            tail.remove(i);
+            over_budget = tail_tokens;
+
+            if i < tail.len() && slots[tail[i]].role == Role::Assistant {
+                let index = tail[i];
+                tail_tokens = tail_tokens.saturating_sub(slots[index].tokens);
+                dropped.push(index);
+                tail.remove(i);
+                over_budget = tail_tokens;
+            }
+            // Cursor does not advance: the next element has shifted
+            // into the slot we just freed.
+        } else {
+            i += 1;
+        }
+    }
+    dropped
+}
+
+/// Remove the messages the plan drops, in one pass.
+///
+/// The old shape removed each dropped message from the vector as the
+/// scan went, which is a memmove of the whole tail per drop — so a
+/// long history paid a quadratic number of moves. The plan knows
+/// every drop up front, so one pass does.
+fn apply_plan(messages: &mut Vec<Message>, dropped: &[usize]) {
+    if dropped.is_empty() {
+        return;
+    }
+    let mut kept: Vec<Message> =
+        Vec::with_capacity(messages.len() - dropped.len());
+    let mut drops = dropped.iter().peekable();
+    for (index, message) in messages.drain(..).enumerate() {
+        if drops.peek() == Some(&&index) {
+            drops.next();
+            continue;
+        }
+        kept.push(message);
+    }
+    *messages = kept;
+}
+
 #[async_trait]
 impl ContextManager for TruncatingContextManager {
     async fn prepare(
@@ -423,83 +585,24 @@ impl ContextManager for TruncatingContextManager {
             return;
         }
 
-        // Partition into leading system prefix + mutable tail.
-        // ReActLoop always injects the assembled system prompt
-        // first, so this prefix is guaranteed non-empty under
-        // production code paths. We `debug_assert!` rather than
-        // `return` so a malformed caller surfaces as a test
-        // failure instead of silent bypass.
-        let mut tail: Vec<Message> = Vec::with_capacity(messages.len());
-        let mut sys_prefix: Vec<Message> = Vec::new();
-        let mut in_system = true;
-        for msg in messages.drain(..) {
-            if in_system && msg.role == Role::System {
-                sys_prefix.push(msg);
-            } else {
-                in_system = false;
-                tail.push(msg);
-            }
-        }
+        // The system prefix is guaranteed non-empty under production
+        // code paths: ReActLoop always injects the assembled system
+        // prompt first. We `debug_assert!` rather than `return` so a
+        // malformed caller surfaces as a test failure instead of
+        // silent bypass.
+        let slots = slots_of(messages);
         debug_assert!(
-            !sys_prefix.is_empty(),
+            slots.first().is_some_and(|slot| slot.role == Role::System),
             "ReActLoop must inject at least one System message before ContextManager::prepare"
         );
 
-        // Pairwise drop. The cursor `i` advances only when the
-        // current slot is not a user message we can evict, so we
-        // never re-evaluate an already-visited slot.
-        //
-        // The running total is maintained by *subtracting* what a drop
-        // removed instead of re-estimating the whole tail after every
-        // pair. The estimator is a sum over messages
-        // (`estimate_messages_token_count`), so subtracting a dropped
-        // message's own estimate is exactly equal to re-summing the
-        // survivors — and the previous shape was quadratic: on a
-        // 200-message history that does not fit the window it re-walked
-        // (and re-serialised every tool call in) the tail once per
-        // dropped pair. The `hot_paths` benchmark measures it.
-        let mut tail_tokens = estimate_messages_token_count(&tail);
-        // The entry condition is the *whole-list* estimate (`state` was
-        // filled above), while every later iteration compares the
-        // tail-only sum. That hybrid is deliberate and pinned by
-        // `truncating_never_drops_system_messages`: a system prompt that
-        // alone exceeds the window must still let the tail be evicted
-        // rather than short-circuiting the loop before it drops anything.
-        let mut over_budget = state.estimated_tokens;
-        let mut i = 0;
-        while over_budget > state.context_window && i < tail.len() {
-            if tail[i].role == Role::User {
-                // Drop the user turn. Re-check before deciding
-                // whether the following assistant turn also has
-                // to go (the assistant turn is the answer to this
-                // question; keeping it without the question is
-                // incoherent).
-                let dropped = tail.remove(i);
-                tail_tokens =
-                    tail_tokens.saturating_sub(estimate_messages_token_count(
-                        std::slice::from_ref(&dropped),
-                    ));
-                over_budget = tail_tokens;
-                state.last_truncated = true;
-
-                if i < tail.len() && tail[i].role == Role::Assistant {
-                    let dropped = tail.remove(i);
-                    tail_tokens = tail_tokens.saturating_sub(
-                        estimate_messages_token_count(std::slice::from_ref(
-                            &dropped,
-                        )),
-                    );
-                    over_budget = tail_tokens;
-                }
-                // Cursor does not advance: the next element has
-                // shifted into the slot we just freed.
-            } else {
-                i += 1;
-            }
+        let dropped =
+            drop_plan(&slots, state.estimated_tokens, state.context_window);
+        if dropped.is_empty() {
+            return;
         }
-
-        messages.extend(sys_prefix);
-        messages.extend(tail);
+        apply_plan(messages, &dropped);
+        state.last_truncated = true;
         state.estimated_tokens = self.estimate_tokens(messages);
     }
 
@@ -533,6 +636,66 @@ impl ContextManager for TruncatingContextManager {
                 Arc::new(copy)
             }
         }
+    }
+
+    /// The pairwise drop, decided without owning the messages.
+    ///
+    /// The projection is the same decision `prepare` makes — the
+    /// same plan, over the same view (`prefix ++ body`) — so a
+    /// caller that copies only the projected messages sends the model
+    /// exactly the list `prepare` would have left behind. The
+    /// contract test in this module pins that equality.
+    async fn kept_indices(
+        &self,
+        prefix: &[Message],
+        body: &[Message],
+        state: &mut AgentState,
+    ) -> Option<Vec<usize>> {
+        let mut slots = Vec::with_capacity(prefix.len() + body.len());
+        slots.extend(slots_of(prefix));
+        let body_start = slots.len();
+        slots.extend(slots_of(body));
+
+        // The whole view's estimate: the prefix's share plus the
+        // body's. The estimator is additive, so the slots carry the
+        // same number `estimate_tokens` would have returned.
+        let whole_tokens: usize = slots.iter().map(|slot| slot.tokens).sum();
+        state.estimated_tokens = whole_tokens;
+        state.last_truncated = false;
+
+        let dropped = if whole_tokens <= state.context_window {
+            Vec::new()
+        } else {
+            drop_plan(&slots, whole_tokens, state.context_window)
+        };
+        if dropped.is_empty() {
+            // Nothing was dropped: every message of the body
+            // survives, and the estimate is the whole view's.
+            return Some((0..body.len()).collect());
+        }
+
+        // The survivors, in order. The dropped indices are ascending,
+        // so one walk over the body answers both which messages
+        // survive and what they cost.
+        let mut kept: Vec<usize> = Vec::with_capacity(body.len());
+        let mut kept_tokens = 0usize;
+        let mut drops = dropped.iter().peekable();
+        for (offset, slot) in slots[body_start..].iter().enumerate() {
+            let index = body_start + offset;
+            if drops.peek() == Some(&&index) {
+                drops.next();
+                continue;
+            }
+            kept_tokens += slot.tokens;
+            kept.push(offset);
+        }
+        // The surviving list's estimate: the prefix (never dropped)
+        // plus the messages of the body that survived.
+        let prefix_tokens: usize =
+            slots[..body_start].iter().map(|slot| slot.tokens).sum();
+        state.estimated_tokens = prefix_tokens + kept_tokens;
+        state.last_truncated = true;
+        Some(kept)
     }
 }
 

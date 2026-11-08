@@ -16,8 +16,8 @@
 
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
 use elysper_provider::pool::{PoolConfig, PooledHttpClient, ReqwestBackend};
+use reqwest::Client;
 use wiremock::{
     Mock,
     MockServer,

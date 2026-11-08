@@ -2,6 +2,7 @@
 members = [
     "crates/elysper",
     "crates/elysper-core",
+    "crates/elysper-kernel",
     "crates/elysper-telemetry",
     "crates/elysper-provider",
     "crates/elysper-context",
@@ -14,12 +15,13 @@ members = [
     "crates/elysper-tool-scheduler",
     "crates/elysper-tool-search",
     "crates/elysper-skill",
+    "crates/elysper-agents",
     "crates/elysper-session",
     "crates/elysper-steering",
     "crates/elysper-tool-task",
     "crates/elysper-harness",
     "crates/elysper-harness-tokio",
-    "crates/elysper-server",
+    "crates/elysper-app-server",
     "crates/elysper-strategy-cot",
     "crates/elysper-strategy-best-of-n",
     "crates/elysper-test-support",
@@ -36,9 +38,10 @@ members = [
     "crates/elysper-strategy-plan-execute",
     "crates/elysper-reflection",
     "crates/elysper-budget",
-    "crates/elysper-hpc-batch",
     "crates/elysper-plugin-protocol",
     "crates/elysper-plugin-host",
+    "crates/elysper-wasm-runtime",
+    "crates/elysper-runtime",
 ]
 resolver = "2"
 
@@ -47,6 +50,7 @@ resolver = "2"
 # pieces below and is never depended on by them (one-way, no cycle).
 elysper = { path = "crates/elysper", version = "0.1" }
 elysper-core = { path = "crates/elysper-core", version = "0.1" }
+elysper-kernel = { path = "crates/elysper-kernel", version = "0.1" }
 elysper-tool-read = { path = "crates/elysper-tool-read", version = "0.1" }
 elysper-tool-write = { path = "crates/elysper-tool-write", version = "0.1" }
 elysper-tool-shell = { path = "crates/elysper-tool-shell", version = "0.1" }
@@ -57,11 +61,12 @@ elysper-provider = { path = "crates/elysper-provider", version = "0.1", default-
 elysper-context = { path = "crates/elysper-context", version = "0.1" }
 elysper-tool = { path = "crates/elysper-tool", version = "0.1", default-features = false }
 elysper-skill = { path = "crates/elysper-skill", version = "0.1" }
+elysper-agents = { path = "crates/elysper-agents", version = "0.1" }
  elysper-steering = { path = "crates/elysper-steering", version = "0.1" }
 elysper-session = { path = "crates/elysper-session", version = "0.1" }
 elysper-harness = { path = "crates/elysper-harness", version = "0.1" }
 elysper-harness-tokio = { path = "crates/elysper-harness-tokio", version = "0.1" }
-elysper-server = { path = "crates/elysper-server", version = "0.1" }
+elysper-app-server = { path = "crates/elysper-app-server", version = "0.1" }
 elysper-strategy-cot = { path = "crates/elysper-strategy-cot", version = "0.1" }
 elysper-strategy-best-of-n = { path = "crates/elysper-strategy-best-of-n", version = "0.1" }
 elysper-attachment = { path = "crates/elysper-attachment", version = "0.1" }
@@ -82,10 +87,7 @@ elysper-resilience = { path = "crates/elysper-resilience", version = "0.1" }
 elysper-strategy-plan-execute = { path = "crates/elysper-strategy-plan-execute", version = "0.1" }
 elysper-reflection = { path = "crates/elysper-reflection", version = "0.1" }
 elysper-budget = { path = "crates/elysper-budget", version = "0.1" }
-# R-OPT-HPC: batched embedder/completer plug-in. Default
-# zero-dep; the new crate's `make check-mvp-deps` segment
-# asserts that.
-elysper-hpc-batch = { path = "crates/elysper-hpc-batch", version = "0.1" }
+elysper-runtime = { path = "crates/elysper-runtime", version = "0.1" }
 # The dynamic plugin channel's wire contract. serde-only on purpose:
 # a third-party plugin author depends on this alone, so it must never
 # grow a harness or runtime dependency.
@@ -95,6 +97,13 @@ elysper-plugin-protocol = { path = "crates/elysper-plugin-protocol", version = "
 # on purpose (std process + the `Blocking`/`Sleeper` seams), which is
 # why it cannot reuse `elysper-mcp`'s tokio transport stack.
 elysper-plugin-host = { path = "crates/elysper-plugin-host", version = "0.1" }
+# The opt-in Wasm component runtime. Only the facade's `wasm` feature
+# reaches it, so the default dependency graph stays wasmtime-free.
+elysper-wasm-runtime = { path = "crates/elysper-wasm-runtime", version = "0.1" }
+# Once per Wasm runtime crate: pinned to the current stable minor. No
+# default features — the crate enables exactly the component model, the
+# runtime, Cranelift, std, and the WAT parser.
+wasmtime = { version = "50", default-features = false }
 syn = "2.0"
 quote = "1.0"
 proc-macro2 = "1.0"
@@ -112,6 +121,15 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
 async-trait = "0.1"
 futures = "0.3"
+
+# The plugin kernel's framework. The package is `cordis-rs`; the lib
+# target is `cordis`, which is why the rename is mandatory — a bare
+# `cordis = "0.6"` does not resolve to this package. Pinned to 0.6
+# (pre-1.0): do not cross a minor without re-reading `spike-notes.md`.
+cordis = { package = "cordis-rs", version = "0.6" }
+
+# The `async_stream!` macro: the test fixtures build scripted
+# event streams with it. No production path uses it.
 async-stream = "0.3"
 
 # Serialization
@@ -144,13 +162,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
-tower = "0.5"
-# Optional cluster bus backend (`elysper-server` feature
+# Optional cluster bus backend (`elysper-app-server` feature
 # `cluster-redis`): pub/sub + `SET NX EX` leases. Only the
 # tokio async command surface is needed (multiplexed connections),
 # so the client's extra capabilities stay off.
-redis = { version = "1.7", default-features = false, features = ["tokio-comp", "script"] }
-tower-http = { version = "0.7", features = ["trace", "cors", "fs"] }
+tower-http = { version = "0.7", features = ["fs"] }
 http = "1.5"
 
 # HTTP client
@@ -210,15 +226,17 @@ dashmap = "6.2"
 regex = "1.13"
 sha2 = "0.10"
 hex = "0.4"
-tokio-tungstenite = "0.29"
 libc = "0.2"
 tempfile = "3.8"
 wiremock = "0.6"
 dotenvy = "0.15"
-http-body-util = "0.1"
 
 # CLI
 clap = { version = "4.6", features = ["derive", "env"] }
+
+# Static assets baked into the binary (the `embed-web` feature of
+# `elysper-app-server`).
+rust-embed = "8.7"
 
 # YAML parsing
 serde_yaml = "0.9"

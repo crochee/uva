@@ -27,6 +27,14 @@ use std::path::Path;
 
 use crate::loader::SkillLoader;
 
+/// The file a skill's definition lives in.
+///
+/// One constant for the whole workspace: the discovery walk, the
+/// loader, the seeder and the skill tool all name the same file,
+/// and a rename that missed one of them would leave a skill
+/// invisible to half the surfaces.
+pub const SKILL_FILE: &str = "SKILL.md";
+
 /// One resolved skill — the canonical value type the runtime
 /// passes between discovery, prompt assembly, and tool
 /// dispatch.

@@ -1,20 +1,19 @@
 # Docker Compose for elysper development.
 #
 # Spins up:
-#   - server: elysper-server (Rust) on :8080
-#   - web: elysper-web (React/Vite dev server with HMR) on :5173
+#   - app-server: elysper-app-server (Rust) in `serve` mode on :8080
 #
-# The web service proxies /api, /v1 and /readyz + /livez to the
-# server (see elysper-web/vite.config.ts), so the browser can
-# call the backend on the same origin.
+# The gateway spawns one headless core subprocess and serves it over
+# a WebSocket at `/rpc`; the web front-end talks to that socket. The
+# probes (`/livez`, `/readyz`) live on the same port.
 
 services:
-  server:
+  app-server:
     build:
       context: .
       dockerfile: Dockerfile.server
-    image: elysper-server:dev
-    container_name: elysper-server-dev
+    image: elysper-app-server:dev
+    container_name: elysper-app-server-dev
     ports:
       - "8080:8080"
     environment:
@@ -30,23 +29,3 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  web:
-    build:
-      context: .
-      dockerfile: Dockerfile.web
-      target: builder
-    image: elysper-web:dev
-    container_name: elysper-web-dev
-    ports:
-      - "5173:5173"
-    environment:
-      - VITE_API_URL=http://server:8080
-      - VITE_CHAT_URL=/api/v1/chat
-    volumes:
-      - ./elysper-web:/app:ro
-      - /app/node_modules
-    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
-    depends_on:
-      server:
-        condition: service_healthy

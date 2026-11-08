@@ -55,3 +55,6 @@ reqwest = ["dep:reqwest"]
 # place the crate's own tree sees tokio. `macros` = `#[tokio::test]`,
 # `rt` = `tokio::spawn`, `time` = the cancellation test's sleep.
 tokio = { workspace = true, features = ["macros", "rt", "time"] }
+# The layout tests need a throwaway directory tree; nothing else in
+# the crate touches the filesystem.
+tempfile.workspace = true

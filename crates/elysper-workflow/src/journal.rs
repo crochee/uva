@@ -67,9 +67,9 @@
 use std::{collections::BTreeMap, fs::OpenOptions, io::Write, path::Path};
 
 use chrono::{DateTime, Utc};
+use elysper_core::Clock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use elysper_core::Clock;
 
 /// One settled agent call, as replayed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use elysper_core::{AtomicCancelToken, CancelToken, Error};
 use elysper_harness::{
     Agent,
@@ -36,6 +35,7 @@ use elysper_provider::{
     TextContent,
 };
 use elysper_strategy_cot::ChainOfThoughtStrategy;
+use futures::StreamExt;
 
 /// A scripted provider that answers a single streaming call with
 /// a three-step chain plus a final answer, matching the format

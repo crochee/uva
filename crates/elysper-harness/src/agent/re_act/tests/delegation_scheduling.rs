@@ -4,11 +4,11 @@
 
 use std::sync::Arc;
 
-use futures::channel::mpsc;
 use elysper_context::AgentState;
 use elysper_core::AtomicCancelToken;
 use elysper_provider::{ModelProvider, ToolUse};
 use elysper_tool::{ExecutionMode, ToolEntry, ToolRegistry};
+use futures::channel::mpsc;
 
 use super::state::RunState;
 use crate::agent::{

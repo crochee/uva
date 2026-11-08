@@ -16,10 +16,10 @@ use crate::{
     ReasoningStrategy,
     agent::{
         approval::ApprovalPolicy,
-        host::Host,
         re_act::{ReActStrategy, delegation::DelegatingTool},
     },
     prompt::PromptContext,
+    seams::Seams,
 };
 
 #[derive(Clone)]
@@ -43,14 +43,14 @@ pub struct ToolCaps {
 }
 
 #[derive(Clone)]
-/// How the loop is steered and bounded: the host, iteration cap, context manager, approval policy and compactor.
+/// How the loop is steered and bounded: the seam layer, iteration cap, context manager, approval policy and compactor.
 pub struct ControlCaps {
     pub max_iterations: usize,
     pub context_manager: Arc<dyn ContextManager>,
-    /// The agent's plugin host: the registrations a plugin installed
-    /// and the arbitration they run through. One host belongs to one
-    /// agent — there is no global one.
-    pub host: Host,
+    /// The agent's seam layer: the registrations a plugin installed and
+    /// the four interception points the loop dispatches through. One
+    /// seam layer belongs to one agent — there is no global one.
+    pub seams: Seams,
     /// Which calls the run stops to ask about. The default holds
     /// high-risk calls; a low-risk call never waits.
     pub approval: ApprovalPolicy,
@@ -121,7 +121,7 @@ impl AgentCaps {
                 context_manager: Arc::new(
                     elysper_context::TruncatingContextManager,
                 ),
-                host: Host::new(),
+                seams: Seams::new(crate::agent::host::Host::new()),
                 approval: ApprovalPolicy::default(),
                 compactor: None,
             },
@@ -167,7 +167,7 @@ impl AgentCaps {
         dispatch: Option<&Arc<PromptContext>>,
     ) -> Arc<PromptContext> {
         let base = dispatch.unwrap_or(&self.model.prompt_context);
-        let sections = self.control.host.prompt_sections();
+        let sections = self.control.seams.prompt_sections();
         if sections.is_empty() {
             return Arc::clone(base);
         }

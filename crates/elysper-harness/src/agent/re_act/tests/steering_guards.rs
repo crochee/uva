@@ -5,12 +5,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
 use elysper_context::AgentState;
 use elysper_provider::{ContentPart, TokenUsage};
 use elysper_steering::{GuardResult, HookDecision, HookEvent};
 use elysper_test_support::FakeTool;
 use elysper_tool::ToolRegistry;
+use serde_json::{Value, json};
 
 use super::{support::*, *};
 use crate::agent::host::{Hook, HookContext, Host};

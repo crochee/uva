@@ -1,8 +1,8 @@
 //! [`ProviderProfile`] — the closed enum + the surface
 //! (build / resolve / model_config).
 
-use serde::{Deserialize, Serialize};
 use elysper_core::{Error, Sensitive};
+use serde::{Deserialize, Serialize};
 
 use super::{
     DEFAULT_OPENAI_CONTEXT_WINDOW,

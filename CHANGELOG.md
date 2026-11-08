@@ -12,6 +12,262 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Added (plugin-spine stage 1: everything-a-plugin assembly)
+
+- **`elysper-runtime`, the config-driven assembly crate.** The
+  provider catalogue (`ProviderCatalogue`, tier-1 wrapping chain
+  `wrap_tier1_providers`, `ModelAdapterConfig`) and the agent-loop
+  factory (`server_agent_loop`, `AgentLoopDefaults`) move out of the
+  app server into a library the facade exposes as the non-default
+  `runtime` feature.
+- **The `model-adapter` plugin is config-driven.** A profile row with
+  a `ModelAdapterConfig` builds its own catalogue; the plugin
+  publishes `llm` (the catalogue) and the new `llm.default` service
+  key (the tier-1-wrapped default handle). An empty row config falls
+  back to the deployment's `.agents/config.toml` catalogue. Boot no
+  longer statically constructs the provider surface: `AppState`'s
+  provider fields are backfilled from the mounted services and
+  re-synced on every profile reload.
+- **The `agent-loop` plugin is solidified.** All four assembly sites
+  (the boot default agent, session run streams, registered agents,
+  self-mcp) build through the mounted `agentLoop` factory; the
+  deployment knobs (strategy, tool restriction, context manager,
+  compactor, spawner, delegators) resolve in one place.
+  `AgentAssembly` exists only inside the runtime crate now.
+- **Profile reloads cascade to injectors.** A changed or removed
+  provider remounts every plugin that injects its services,
+  transitively — a provider swap reaches new runs without
+  restarting, while in-flight turns keep their handles. Disposing
+  `model-adapter` parks `agent-loop` until a remount recovers it.
+- **`elysper-app-server translate`** migrates a legacy `config.yaml`
+  into a profile TOML's `model-adapter` row, reporting the sections
+  it maps and the ones it leaves on `ServerConfig::load`.
+
+### Changed (breaking)
+
+- **The `config.yaml` translation layer is gone.** Its
+  `[providers]` / `[agents]` / `[tools]` / `[plugins]` sections no
+  longer translate into profile rows — run `translate` to migrate the
+  provider sections. `.agents/config.toml` remains the fallback
+  provider input for deployments without a profile row; a config
+  change now requires a restart (HMR owns profile documents only).
+
+### Added (the app-server boots through the kernel)
+- **The native plugin set is mounted, not hand-wired.** Boot builds a
+  `elysper::kernel::Context`, registers the built-in factories
+  (`tool-registry`, `model-adapter`, `session-store`, `sandbox`,
+  `subagent-backend`, `context-compactor`, `approval`, `skills`,
+  `agent-loop`, `mcp`, `eval`, `scheduler`, `schedule-tool`,
+  `attachments`) in a `PluginFactories` directory over real host
+  objects, and calls `build_plugins` → `mount_all`. `AppState` keeps the
+  context and the `MountHandle`; `AppState::unload_plugin(id)` unloads
+  one plugin, and `shutdown_kernel` unloads the rest on shutdown.
+- **`MountHandle::dispose_plugin(id)` and `PluginState`** land in
+  `elysper-kernel`: one plugin's tracked effects and fiber are disposed
+  in place, consumers that injected its services park as `Pending`, and
+  every sibling keeps running. Disposal is idempotent.
+- **The prompt builder reads the `skills` service.** Boot no longer
+  registers the `skill` Core tool; `SkillPlugin` owns that token-scoped
+  registration, and `<available_skills>` disappears with the service.
+- **The MCP tick loop is boot-owned and stopped explicitly.** The loop
+  re-reads `mcp` each wake; `McpSupervisor::shutdown` withdraws every
+  generation's tools and drops the clients (and their transports),
+  so remote tools do not outlive the service.
+- **Capability consumers are wired to their services.** Eval runs
+  resolve `agentLoop` and drive the `eval` service's runner; the
+  scheduler driver ticks the mounted `scheduler` service and releases
+  the leader lease when it stops; chat and Anthropic-messages turns
+  refuse image / audio / stored-ref input while the `attachments`
+  service is unmounted.
+
+### Added (UI schema projection, HMR remounting, and the kernel facade)
+
+- **`ui/schema` projects the `[ui]` profile segment as JSON schema.** A
+  UI row must be in the `ui.` namespace, select the `ui-bundle` runtime,
+  and describe `version` / `components[{slot, kind, props}]`; the
+  loader rejects a core key and any executable field (`script`,
+  `stylesheet`, …). v1 never executes remote JavaScript or CSS — the
+  frontend renders only the kinds in
+  `elysper-web/src/components/ui-schema/` (`panel`, `list`,
+  `key-value`) and shows an unknown kind as a placeholder.
+- **The core remounts only the rows a profile change names.** With
+  `hmr = true`, the core polls the profile layers once a second,
+  resolves the new document, and diffs it against the effective mount:
+  `removed` rows unload, `added` / `remounted` rows mount as one new
+  kernel group, and a volatile-only change leaves the fiber alone.
+  Streaming turns keep the service handles they resolved. `hmr = false`
+  stops the loop and reports that a restart is required. An explicit
+  `[core]` row set is authoritative (omission disables a plugin); an
+  empty resolution (no profile document) boots the built-in set.
+  Residual: remounting the `mcp` row republishes the service but does
+  not restart the boot-owned tick loop or its dropped clients — a
+  process restart re-supervises the configured servers.
+- **`--dump-config` prints each row's real `provides` / `inject`.** The
+  command now builds the registered `PluginFactories` (over a
+  manifest-only host) and calls `dump_with_manifests`; a row with no
+  factory prints explicit empty arrays, and the UI segment does too.
+- **The facade's feature table names `kernel`.** `elysper::kernel`
+  re-exports `Plugin`, `PluginManifest`, `mount_all`, `MountHandle`,
+  `Context`, `EffectHandle`, `PluginState`, and the `ui.` namespace
+  boundary.
+- **Deprecation direction (not removal).** `elysper_harness::Host` and
+  the app-server's `AgentAssembly` stay with a documented direction
+  toward kernel effects / the `agentLoop` service: chat still assembles
+  each run through `AgentAssembly`, so deleting the wrapper now would
+  break chat. The target is the mounted `agentLoop` service (eval runs
+  already use it).
+
+### Added (the plugin kernel gains an opt-in Wasm component runtime)
+
+- **`elysper-wasm-runtime`** loads a WebAssembly **component** exporting
+  `describe() -> string` and `execute(input: string) -> string`, calls
+  `describe()` exactly once at mount, and caches the JSON schema.
+  Components are cached by content hash, and a successful call reuses its
+  store/instance; a trap discards the store, so the next call
+  instantiates a fresh one instead of resuming inconsistent guest state.
+  The cache holds `Weak` references, so dropping the last mounted
+  component evicts the entry and releases the compiled JIT code
+  (`WasmRuntime::evict` is the explicit form).
+- **Capability gating is a linker decision.** `log` is implicit,
+  `fs-read` is linked only when the manifest declares `fs:read`, and
+  `http-request` is linked when the embedding host installs a
+  `CapabilityHost` (`WasmRuntime::with_capability_host`) that supplies
+  `net:http`. An undeclared import fails the mount with
+  `missing_capability`, naming the capability, before the guest runs;
+  a declared capability no host supplies fails with
+  `unsupported_capability` instead of silently losing the import. Host
+  functions are kebab-case component imports (`fs-read`, `http-request`);
+  `fs-read` confines reads to the runtime's workspace root.
+- **Per-call limits.** A fresh fuel budget, a linear-memory ceiling
+  enforced by a `ResourceLimiter` (the refused growth is recorded so a
+  following trap maps to `memory_limit`), and an epoch-based wall-clock
+  deadline. Every failure maps to a stable `WasmErrorKind` code:
+  `fuel_exhausted`, `memory_limit`, `timeout`, `invalid_json`, `trap`,
+  and the mount-time kinds.
+- **Kernel seams.** `WasmToolPlugin` registers the mounted component as a
+  `Tool` under `tools` and withdraws exactly its registration on unload;
+  `WasmSandbox` implements `SandboxBackend` and fails closed for confined
+  OS policies it cannot enforce.
+- **Opt-in.** `wasmtime` 50 is pinned with `default-features = false`
+  (component model, runtime, Cranelift, std, WAT only). The facade's
+  `wasm` feature is default-off, and `make check-wasm-deps` asserts the
+  default dependency graph resolves zero wasmtime packages while
+  `--features wasm` resolves at least one.
+
+### Added (profile TOML assembly, a deterministic dump, and HMR diffing)
+
+- **`elysper-app-server` accepts `--profile`, `--bundle`, `--patch`, and
+  `--dump-config`.** Layers apply in the documented order — empty →
+  bundle patch → profile document → home patch (`~/.agents/profile.toml`
+  or `ELYSPER_HOME_PROFILE`, only when it exists) → CLI overlay — with
+  whole-config replacement, `insert`, and `disabled`; an unknown patch id
+  is an error. `--dump-config` prints the resolved tree as deterministic
+  JSON and exits 0, and `dump_with_manifests` adds each row's
+  `provides` / `inject` from the factory manifest. The legacy
+  `config.yaml` `[providers]` / `[agents]` / `[tools]` / `[plugins]`
+  sections are translated with deprecation warnings, and an id defined in
+  both the profile and `config.yaml` fails the boot.
+- **`PluginFactory` / `ProfileWatcher`** bind a profile id to a plugin and
+  diff two resolutions so only affected fibers remount; volatile config
+  fields are skipped and `hmr = false` reports `restart_required`. The
+  boot wiring that registers factories, mounts the result, and performs
+  the remount loop lands with the kernel cutover.
+
+### Changed (breaking: `elysper-app-server` — a headless JSON-RPC core, a WebSocket gateway, and the `~/.agents/` layout)
+
+- **`elysper-server` is now `elysper-app-server`**, and one binary
+  carries two subcommands. `core` (the default) is a headless process
+  speaking JSON-RPC 2.0 on stdio — Content-Length framed envelopes
+  (`Content-Length: <n>\r\n\r\n` plus exactly `n` bytes, default
+  ceiling 8 MiB); stdout carries only protocol frames
+  (logs go to stderr, selected by `elysper-telemetry`'s new
+  `log_writer`), and the process announces itself with one `ready`
+  notification after boot. `serve` is the App Server gateway: it
+  spawns `<current_exe> core`, forwards every browser WebSocket frame
+  verbatim, and adds what a browser cannot do for itself — responses
+  routed back by request id to the one connection that asked,
+  `session/event` / `anthropic/messages/event` notifications routed
+  by `params.session_id` to the connections following that session,
+  approval interrupts forwarded from a frontend modal to
+  `sessions/resume`, and core supervision (a dead core restarts with
+  1s→5s backoff; a reconnecting client re-follows from its cursor and
+  the fresh baseline rebuilds the timeline).
+- **The HTTP surface is gone.** No `/api/v1`, no SSE, no auth wall,
+  no CORS, no `track_metrics` middleware: the process is single-user
+  local and mints every session for the one operator
+  (`user_id = "dev"`). The gateway keeps exactly four HTTP probes —
+  `/livez`, `/readyz` (core alive **and** `ready` seen), `/version`,
+  `/metrics` (the Prometheus exposition via
+  `elysper::telemetry::gather_text()`; the HTTP RED middleware that
+  used to fill it went with the HTTP surface, so the exposition is
+  empty until gateway-level counters land) — and serves the web UI
+  statically (`--web-dir`, or the
+  `embed-web` feature, which bakes `elysper-web/dist` into the binary
+  with rust-embed). The management and chat surfaces live on ~57 RPC
+  methods (`sessions/*` with `sessions/follow`, `chat/*`,
+  `agents/*`, `skills/*`, `tools/*`, `schedules/*`, `workflows/*`,
+  `tasks/*`, `evals/*`, `attachments/*`, `search/all`, `health/*`,
+  `models/list`, `plugins/list`); the Anthropic Messages protocol is
+  preserved as the `anthropic/messages` method with its events on
+  `anthropic/messages/event`. Application errors are one shape:
+  `error.code = -32000` with the machine code in
+  `error.data.code` (`not_found`, `validation`,
+  `follow_cursor_truncated`, …). The old HTTP integration tests are
+  replaced by `tests/stdio_roundtrip.rs`, which spawns the binary
+  and drives the wire end to end.
+- **Definitions live in a two-layer `~/.agents/` layout.**
+  `elysper-core::layout` (std-only) defines the roots —
+  `<workspace>/.agents` and `~/.agents`, with `~/.elysper` as the
+  legacy global — and the four-source precedence: 项目直定义 >
+  项目插件包 > 全局直定义 > 全局插件包. Skills, agents and task
+  declarations are discovered from it; the `~/.claude` compatibility
+  root is gone. The new `elysper-agents` crate makes
+  `agents/<name>/agent.md` (+ optional `config.json`) the storage an
+  agent definition is: file-as-storage, so what the operator edits is
+  what the process reads, and the boot materializes each file-backed
+  agent (the built-in `agent` name is protected from shadowing).
+  `elysper-scheduler` grows `task_file` — `tasks/<name>/task.md`
+  declarations the boot syncs with the store by name, exporting
+  undeclared active jobs back to files. `elysper-mcp` grows
+  `config_file`: MCP servers come from the layout's `mcp.json` files
+  (a bundle's servers namespaced `<plugin>/<server>`), replacing the
+  removed `[mcp_servers]` config section. A plugin bundle may also
+  declare a **code component** in `plugin.json` — a subprocess the
+  host runs over the existing plugin-protocol channel (the channel
+  grows `env` overrides; bundle code installs with tools+observe
+  capability, reduced authority, unclassified risk, and sits behind
+  the `[plugins]` config in precedence). `plugins/list` answers a
+  third array, `bundles`, so an operator can see what the layout
+  declared.
+- **The config chain gained a global fallback and a parse fix.**
+  `~/.agents/config.toml` (then legacy `~/.elysper/config.toml`) back
+  the workspace config, and a config file is parsed by its extension
+  (`.yaml`/`.yml` → YAML, `.toml` → TOML, otherwise JSON) — the old
+  reader parsed every file as JSON.
+- **The MCP supervisor is kept alive.** The boot dropped it on the
+  floor after the first tick, so a server that died never came back;
+  it now lives on `AppState` and the scheduler driver ticks it.
+- **The web frontend speaks the one protocol.** `elysper-web` gains
+  `src/api/rpc.ts` (one WebSocket at `/rpc`, string ids, a
+  notification bus, capped-backoff reconnect); `src/api/client.ts`
+  keeps every exported call signature but translates the REST paths
+  onto RPC methods internally, so the pages did not change with the
+  transport. The chat stream is `sessions/follow` + `session/event`
+  with reconnect re-follow; the dev proxy forwards `/rpc`
+  (`ws: true`) beside the probes.
+
+### Removed (breaking: the Redis cluster backend, `elysper-hpc-batch`, and the deployment split)
+
+- `cluster-redis` (the Redis pub/sub bus and lease backend; the local
+  in-process bus stays, inert on one node), the `elysper-hpc-batch`
+  crate and the facade's `hpc-batch` feature, `Dockerfile.web`,
+  `nginx*`, `docker-compose.prod.yml` (the release image is one
+  artifact: `elysper-app-server serve` with `embed-web`), and the
+  `contract-closure/` scanner with `make contract-scan/report/check`
+  and its workflow — its subject, the REST router, no longer exists;
+  the wire contract is exercised by the stdio roundtrip test and the
+  web e2e.
+
 ### Changed (breaking: harness 0.2 — one kernel, reversible extensions, a log-owned transcript)
 
 - **One interception registry.** `elysper_steering::{Steering, HookMap}`
@@ -1863,6 +2119,33 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **Best-of-n:** candidate scoring is concurrent — an
   `llm-judge` scorer's N provider calls overlap instead of
   queueing behind the arrival loop.
+
+### Fixed
+
+- **`GET /api/v1/tasks` cursor resumes, and one delegation is listed
+  once.** A delegation's id is now `<parentSessionId>:<childSessionId>`
+  — the pair that names it, fixed at delegation time. The landed
+  pagination had keyed the cursor on the row's position inside the
+  scan's 256-row tail window, which shifts as the child's log grows,
+  so the second page came back empty; and a delegation — recorded both
+  in the child's own log and in the root parent's mirror — was listed
+  twice. The list is now sorted (`started_at`, newest first by
+  default, with the id as the tiebreaker), so the cursor resumes in
+  the order the first page was returned in.
+- **The delegation record is read from the child's own session log.**
+  That log holds the whole story — the `subagent_enter` header, the
+  dispatch prompt, the closing `subagent_exit` footer; the root
+  parent's mirror is the fallback when the child's log cannot be read.
+  The detail route reads the same source: a request naming a parent
+  that did not delegate is a 404, and an id shaped to escape the
+  sessions root is a 422.
+- **The Tasks page follows the cursor.** `GET /api/v1/tasks` is
+  keyset-paginated and the page had been fetching it once — silently
+  showing only the first 20 delegations. It now uses the same
+  cursor-list pattern as the other list pages (a "Load more" button
+  follows `next_cursor`), and the Tools page's "Recent task
+  delegations" panel fetches `?limit=5` — the server's default order
+  is newest first, so those five are the five most recent.
 
 ## [0.1.0] - 2026-09-30
 

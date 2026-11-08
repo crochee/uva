@@ -66,9 +66,9 @@ pub use store::SqliteMemory;
 
 #[cfg(test)]
 mod tests {
+    use elysper_provider::Message;
     use rusqlite::Connection;
     use serde_json::json;
-    use elysper_provider::Message;
     use ulid::Ulid;
 
     use super::*;

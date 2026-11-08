@@ -37,11 +37,16 @@ use base64::{
     engine::general_purpose::STANDARD as BASE64_STANDARD,
 };
 use chrono::{DateTime, Utc};
+use elysper_core::Clock;
+use elysper_provider::ContentPart;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use elysper_core::Clock;
-use elysper_provider::ContentPart;
+
+/// The `attachments` kernel service: the store as a plugin.
+pub mod plugin;
+
+pub use plugin::{AttachmentPlugin, KEY_ATTACHMENTS};
 
 /// Default maximum attachment size: 8 MiB.
 ///

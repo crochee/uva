@@ -18,10 +18,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(any(feature = "anthropic", feature = "openai"))]
-use futures::{Stream, StreamExt};
-#[cfg(any(feature = "anthropic", feature = "openai"))]
 use elysper_core::CancelToken;
 use elysper_core::Error;
+#[cfg(any(feature = "anthropic", feature = "openai"))]
+use futures::{Stream, StreamExt};
 
 /// Default bound on a single outstanding stream read (~2 min, the dsh
 /// `streamIdleTimeoutMs` magnitude): generous enough for the gap

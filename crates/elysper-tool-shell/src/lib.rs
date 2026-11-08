@@ -59,8 +59,6 @@ use std::sync::Mutex;
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use schemars_derive::JsonSchema;
-use serde::Deserialize;
 // POSIX-only: `signal_of` reads `ExitStatus::signal()`, which
 // lives on `std::os::unix`. The whole `ShellTool::call` path that
 // uses it (`execute`) is gated to `#[cfg(unix)]` below; the import
@@ -77,6 +75,8 @@ use elysper_tool::{
     ToolOutput,
     ToolOutputDefinition,
 };
+use schemars_derive::JsonSchema;
+use serde::Deserialize;
 #[cfg(unix)]
 use tokio::io::AsyncReadExt;
 // `process::Command` is the unix-only handle we wrap with
@@ -89,7 +89,12 @@ use tokio::process::Command;
 
 pub mod sandbox;
 
+/// The shell crate's native kernel plugins: the `sandbox` service and
+/// the `shell` tool brick.
+pub mod plugin;
+
 mod risk;
+pub use plugin::{KEY_SANDBOX, SandboxPlugin, SandboxService, ShellToolPlugin};
 pub use sandbox::{
     BackendAvailability,
     BwrapBackend,

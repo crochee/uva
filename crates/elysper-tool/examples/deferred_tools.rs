@@ -26,7 +26,6 @@
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
 use elysper_provider::{Content, ContentPart, Message, Role, ToolResult};
 use elysper_tool::{
     Context,
@@ -39,6 +38,7 @@ use elysper_tool::{
     called_tool_names,
     project_tool_definitions,
 };
+use serde_json::{Value, json};
 
 /// One tool that refuses to run without its single required argument.
 /// That refusal is the point: the model may see only a placeholder

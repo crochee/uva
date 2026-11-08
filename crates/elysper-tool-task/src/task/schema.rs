@@ -8,9 +8,9 @@
 //! the model never sees a description for a refused
 //! capability.
 
-use serde_json::{Map, Value, json};
 use elysper_provider::ToolDefinition;
 use elysper_tool::{ToolFeatures, ToolSchemaBuilder};
+use serde_json::{Map, Value, json};
 
 use super::spec::TASK_TOOL_NAME;
 

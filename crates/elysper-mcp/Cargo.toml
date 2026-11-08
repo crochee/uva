@@ -13,6 +13,7 @@ keywords.workspace = true
 categories.workspace = true
 [dependencies]
 elysper-core.workspace = true
+elysper-kernel.workspace = true
 elysper-tool.workspace = true
 # The MCP adapter projects foreign `tools/call` content blocks onto the
 # provider wire vocabulary (`ContentPart::{Text, Image, Audio}`), so a

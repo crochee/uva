@@ -22,6 +22,8 @@
 //!   and writes one batch per flush.
 //! - [`manager::SessionRegistry`] — owns the per-session sink
 //!   registry. Server-side glue; agents don't talk to it directly.
+//! - [`plugin::SessionStorePlugin`] — publishes that registry as the
+//!   native kernel `sessions` service ([`KEY_SESSIONS`]).
 //! - [`fs::FsBackend`] — the crate's one filesystem offload, over the
 //!   `Blocking` seam, so the read/write paths need no runtime.
 //! - [`token_meter::TokenMeter`] — pure replay fold that turns
@@ -63,6 +65,8 @@
 //! `serde_json::Value` before calling `append`.
 
 pub mod compaction;
+/// The `compaction` kernel service: the compactor as a plugin.
+pub mod compaction_plugin;
 pub mod events;
 pub mod fs;
 pub mod history;
@@ -73,6 +77,9 @@ pub mod log;
 pub mod log_surface;
 pub mod manager;
 pub mod operation;
+/// The `sessions` service: [`SessionStorePlugin`] publishes the
+/// registry under [`KEY_SESSIONS`].
+pub mod plugin;
 pub mod repair;
 pub mod repair_session;
 pub mod search;
@@ -108,6 +115,7 @@ pub use compaction::{
     should_compact,
     touched_target,
 };
+pub use compaction_plugin::{CompactionPlugin, KEY_COMPACTION};
 pub use events::{
     AttachmentRefRow,
     CompactionLifecycleOutcome,
@@ -150,6 +158,7 @@ pub use operation::{
     SnapshotBus,
     SnapshotReceiver,
 };
+pub use plugin::{KEY_SESSIONS, SessionStorePlugin};
 pub use repair::{
     OrphanedCompaction,
     ParkedPromptRecovery,

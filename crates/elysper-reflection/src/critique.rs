@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use elysper_provider::ModelProvider;
+use serde::{Deserialize, Serialize};
 
 /// Severity of a critique.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

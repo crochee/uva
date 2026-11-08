@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use elysper_core::SystemClock;
 use elysper_session::{
     LogWriter,
@@ -13,6 +12,7 @@ use elysper_session::{
     in_memory::InMemorySessionSink,
 };
 use elysper_tool::ToolRegistry;
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::super::{support::*, *};

@@ -515,6 +515,7 @@ impl SkillRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::skill::SKILL_FILE;
 
     fn make_skill(name: &str) -> Skill {
         Skill {
@@ -644,7 +645,7 @@ mod tests {
             let skill_dir = tmp.path().join(".agents/skills/example");
             std::fs::create_dir_all(&skill_dir).expect("mkdir");
             std::fs::write(
-                skill_dir.join("SKILL.md"),
+                skill_dir.join(SKILL_FILE),
                 "---\nname: example\ndescription: example skill\n---\n# example\nbody",
             )
             .expect("write");

@@ -10,7 +10,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::Value;
 use elysper_plugin_protocol::{ToolSpec, methods};
 use elysper_tool::{
     Context,
@@ -20,6 +19,7 @@ use elysper_tool::{
     ToolAnnotations,
     ToolOutput,
 };
+use serde_json::Value;
 
 use crate::client::Connection;
 

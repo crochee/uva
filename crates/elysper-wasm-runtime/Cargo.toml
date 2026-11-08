@@ -1,0 +1,58 @@
+[package]
+name = "elysper-wasm-runtime"
+description = "Opt-in WebAssembly component runtime: capability-gated Wasm tool plugins with fuel, memory, and wall-clock limits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+# The Wasm runtime is the one opt-in piece of the plugin kernel that
+# carries a JIT and a compiler backend, so it is its own crate and it
+# is never a dependency of the default build. `wasmtime` is pinned to
+# the current stable minor with `default-features = false`: the default
+# set enables async, pooling, GC, profiling, the cache, and the
+# component-model async extensions — none of which this runtime uses.
+# The five features below are the minimum a component model engine
+# needs: the component model itself, the runtime, Cranelift as the
+# compiler backend, std, and the WAT parser (the test fixtures and
+# text-format plugins are components written in WAT).
+[dependencies]
+elysper-kernel.workspace = true
+elysper-tool.workspace = true
+elysper-tool-shell.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+wasmtime = { workspace = true, features = [
+  "component-model",
+  "runtime",
+  "cranelift",
+  "std",
+  "wat",
+] }
+
+[dev-dependencies]
+# `#[tokio::test]` drives the `Tool` adapter; the runtime itself is
+# synchronous and no production path names a runtime.
+tokio = { workspace = true, features = ["macros", "rt"] }
+# The plugin test reads the text part out of a `ToolOutput`.
+elysper-provider.workspace = true
+# The `fs:read` confinement unit tests need a real temporary tree.
+tempfile.workspace = true
+# The sandbox test drives the `SandboxBackend` seam directly.
+elysper-tool-shell.workspace = true
+
+# The Wasm call benchmarks. Opt-in on purpose: this crate links
+# wasmtime, so the default `make bench-check` gate (harness + kernel +
+# app-server) stays fast; `make bench-wasm` runs this file explicitly.
+[[bench]]
+name = "wasm_calls"
+harness = false

@@ -18,6 +18,10 @@ async-trait.workspace = true
 # `tokio_util::CancellationToken` through the trait, so that feature is
 # declared in `[dev-dependencies]`.
 elysper-core.workspace = true
+# The `agentLoop` plugin implements the kernel's `Plugin` contract. The
+# kernel in turn depends only on the dependency-free `cordis` crate, so
+# this does not pull a runtime into the harness.
+elysper-kernel.workspace = true
 elysper-provider.workspace = true
 elysper-context.workspace = true
 elysper-steering.workspace = true

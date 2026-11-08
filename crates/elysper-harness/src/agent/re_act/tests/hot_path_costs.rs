@@ -11,9 +11,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use parking_lot::Mutex;
-use serde_json::json;
 use elysper_provider::{
     CompletionResponse,
     ModelConfig,
@@ -23,6 +20,9 @@ use elysper_provider::{
     ToolUse,
 };
 use elysper_tool::{ToolOutput, ToolRegistry};
+use futures::StreamExt;
+use parking_lot::Mutex;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::{support::*, *};

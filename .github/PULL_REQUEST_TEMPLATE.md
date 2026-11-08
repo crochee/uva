@@ -55,7 +55,7 @@ PR 标题用 Conventional Commits: `feat(scope): summary` / `fix(scope): summary
 
 ## 接口契约同步（双侧闭合）
 
-<!-- 若改 elysper-server 路由或 elysper-web api 调用时填；其它 PR 删本段。 -->
+<!-- 若改 elysper-app-server 的 RPC 方法或 elysper-web api 调用时填；其它 PR 删本段。 -->
 
 - [ ] `make contract-scan` 已跑（产出 `docs/interface-contract/contract.{md,yaml,json}`）
 - [ ] `make contract-check` 全绿（exit 0，无 frontend-only endpoint）

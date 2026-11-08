@@ -45,6 +45,7 @@ jobs:
           globs: |
             CONTRIBUTORS.md
             crates/elysper/README.md
+            crates/elysper-runtime/README.md
             crates/elysper-core/README.md
             crates/elysper-provider/README.md
             crates/elysper-context/README.md
@@ -61,7 +62,7 @@ jobs:
             crates/elysper-skill/README.md
             crates/elysper-steering/README.md
             crates/elysper-test-support/README.md
-            crates/elysper-server/README.md
+            crates/elysper-app-server/README.md
             crates/elysper-tool-read/README.md
             crates/elysper-tool-write/README.md
             crates/elysper-tool-shell/README.md
@@ -70,7 +71,7 @@ jobs:
             crates/elysper-tool-task/README.md
             crates/elysper-tool-scheduler/README.md
             crates/elysper-tool-search/README.md
-            crates/elysper-hpc-batch/README.md
+            crates/elysper-agents/README.md
             crates/elysper-budget/README.md
             crates/elysper-harness-tokio/README.md
             crates/elysper-macros/README.md

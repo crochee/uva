@@ -7,8 +7,8 @@
 use std::{path::PathBuf, time::Duration};
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
 use elysper_tool::ToolOutput;
+use parking_lot::RwLock;
 
 /// Scope applied to the memo key. Two tools with the same name and
 /// input but different scopes do not share cache.

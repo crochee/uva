@@ -70,8 +70,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::{Value, json};
 use elysper_tool::{
     Context,
     Tool,
@@ -81,6 +79,8 @@ use elysper_tool::{
     output::{RenderKind, ToolOutputDefinition},
     traits::ExecutionMode,
 };
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::{
     HealthState,

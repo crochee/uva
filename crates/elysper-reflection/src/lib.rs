@@ -36,7 +36,6 @@ pub mod critique;
 mod hook;
 
 pub use critique::{CriticProvider, Critique, Severity};
-pub use hook::{ReflectionHook, ReflectiveOutputTransformer, ReflectorConfig};
 // Re-exports for ergonomic plumbing.
 pub use elysper_core::Clock;
 pub use elysper_provider::ModelProvider;
@@ -49,6 +48,7 @@ pub use elysper_steering::{
     InjectionPoint,
     OutputTransformer,
 };
+pub use hook::{ReflectionHook, ReflectiveOutputTransformer, ReflectorConfig};
 
 #[cfg(test)]
 mod tests;

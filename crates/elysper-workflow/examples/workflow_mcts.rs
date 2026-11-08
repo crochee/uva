@@ -22,7 +22,6 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use elysper_workflow::{
     AgentOutcome,
     AgentRequest,
@@ -34,6 +33,7 @@ use elysper_workflow::{
     WorkflowRuntime,
     WorkflowSpec,
 };
+use parking_lot::Mutex;
 
 /// A host whose only job is to echo the prompt — and to record every
 /// depth's prompt so the example can show that depth 2 carries depth

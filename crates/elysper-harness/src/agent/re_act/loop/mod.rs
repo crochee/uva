@@ -13,7 +13,7 @@ pub(super) mod tools;
 use std::sync::Arc;
 
 use elysper_provider::ToolUse;
-use elysper_steering::{HookDecision, HookEvent};
+use elysper_steering::HookDecision;
 use tracing::{info, warn};
 
 use super::{
@@ -81,7 +81,7 @@ impl ReActLoop {
         for tool in &caps.tools.delegators {
             delegators.merge(Arc::clone(tool));
         }
-        for tool in caps.control.host.delegators() {
+        for tool in caps.control.seams.delegators() {
             delegators.merge(tool);
         }
         let delegator_defs = delegators.definitions();
@@ -343,18 +343,21 @@ async fn run_iterations(this: &mut ReActLoop, session: &mut RunState) -> bool {
                     session.end_reason = SessionEndReason::Error(reason);
                     return false;
                 }
-                // `after_step` (pi `finishTurn` parity): the one
+                // `step_post` (pi `finishTurn` parity): the one
                 // interception point after the step's results are
                 // committed. `Block` is meaningless here.
-                let arbitration =
-                    hooks::dispatch_hook(&*this, &session.agent_state, || {
-                        HookEvent::AfterStep {
-                            agent_name: this.caps.model.descriptor.name.clone(),
-                            run_idx: 0,
-                            iteration: iteration as u32,
-                        }
-                    })
-                    .await;
+                let arbitration = {
+                    let ctx = this.hook_context(&session.agent_state);
+                    this.caps
+                        .control
+                        .seams
+                        .step_post(
+                            &ctx,
+                            &this.caps.model.descriptor.name,
+                            iteration as u32,
+                        )
+                        .await
+                };
                 if let HookDecision::Terminate { reason } = arbitration.decision
                 {
                     session.end_reason = SessionEndReason::Error(reason);
@@ -523,7 +526,7 @@ async fn iteration_start_setup(
     iteration: usize,
 ) -> Option<Step> {
     session.agent_state.iteration_count = iteration + 1;
-    for tracker in &this.caps.control.host.tracker_table().trackers {
+    for tracker in &this.caps.control.seams.tracker_table() {
         isolate(
             &this.sink,
             WarningKind::Hook,

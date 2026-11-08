@@ -5,8 +5,8 @@
 //! `elysper-harness`, `elysper-context`) re-export this type via
 //! 1-line `pub use` shims.
 
-use serde::{Deserialize, Serialize};
 use elysper_core::Sensitive;
+use serde::{Deserialize, Serialize};
 
 /// Per-call token accounting. Mirrors the dsh `Usage` 5-bucket split:
 ///

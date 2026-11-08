@@ -65,7 +65,9 @@ elysper-harness::AgentInput
 elysper-harness::AgentMeta
 elysper-harness::AgentRegistry
 elysper-harness::AgentRuntime
+elysper-harness::ApprovalGate
 elysper-harness::ApprovalMode
+elysper-harness::ApprovalPlugin
 elysper-harness::ApprovalPolicy
 elysper-harness::ApprovalRequest
 elysper-harness::Arbitration
@@ -84,6 +86,7 @@ elysper-harness::GrantScope
 elysper-harness::Hook
 elysper-harness::HookContext
 elysper-harness::Host
+elysper-harness::KEY_APPROVAL
 elysper-harness::Plugin
 elysper-harness::PluginHandle
 elysper-harness::PromptContext
@@ -98,6 +101,7 @@ elysper-harness::ResumeCoverageError
 elysper-harness::ResumeDecision
 elysper-harness::ResumeStatus
 elysper-harness::ResumeToken
+elysper-harness::RiskOf
 elysper-harness::RunInbox
 elysper-harness::SessionEndReason
 elysper-harness::StrategyRegistry
@@ -144,10 +148,13 @@ elysper-provider::EMPTY_RESPONSE_MARKER
 elysper-provider::IDLE_TIMEOUT_MARKER
 elysper-provider::ImageContent
 elysper-provider::ImageDetail
+elysper-provider::KEY_LLM
+elysper-provider::KEY_LLM_DEFAULT
 elysper-provider::MAX_PROVIDER_ERROR_BODY_CHARS
 elysper-provider::Message
 elysper-provider::MessageCacheStrategy
 elysper-provider::MessageKind
+elysper-provider::ModelAdapterPlugin
 elysper-provider::ModelCapabilities
 elysper-provider::ModelConfig
 elysper-provider::ModelInfo
@@ -161,6 +168,7 @@ elysper-provider::ProviderErrorBody
 elysper-provider::ProviderInfo
 elysper-provider::ProviderProfile
 elysper-provider::ProviderRegistry
+elysper-provider::ProviderResolver
 elysper-provider::ReasoningContent
 elysper-provider::ResourceLink
 elysper-provider::RetryClass
@@ -215,6 +223,7 @@ elysper-session::CompactionOutcome
 elysper-session::CompactionPass
 elysper-session::CompactionPassError
 elysper-session::CompactionPlan
+elysper-session::CompactionPlugin
 elysper-session::CompactionRef
 elysper-session::CompactionSettings
 elysper-session::Compactor
@@ -228,6 +237,8 @@ elysper-session::FoldError
 elysper-session::FoldedSurface
 elysper-session::HistoryError
 elysper-session::JsonlSessionSearch
+elysper-session::KEY_COMPACTION
+elysper-session::KEY_SESSIONS
 elysper-session::KNOWN_SESSION_EVENT_TYPES
 elysper-session::LogWriter
 elysper-session::MAX_PLUGIN_KIND_BYTES
@@ -255,6 +266,7 @@ elysper-session::SessionMetadataHeader
 elysper-session::SessionSearch
 elysper-session::SessionSink
 elysper-session::SessionSnapshot
+elysper-session::SessionStorePlugin
 elysper-session::SharedSessionSearch
 elysper-session::SharedSurfaceLedger
 elysper-session::SnapshotBus
@@ -366,6 +378,7 @@ elysper-tool::DispatchPlan
 elysper-tool::DispatchRefusal
 elysper-tool::ExecutionMode
 elysper-tool::FULL_OUTPUT_TOOL_NAME
+elysper-tool::KEY_TOOLS
 elysper-tool::MCP_SELF_TOOL_PREFIX
 elysper-tool::OutputBound
 elysper-tool::OverflowStrategy
@@ -391,6 +404,7 @@ elysper-tool::ToolOutput
 elysper-tool::ToolOutputDefinition
 elysper-tool::ToolProvenance
 elysper-tool::ToolRegistry
+elysper-tool::ToolRegistryPlugin
 elysper-tool::ToolRestriction
 elysper-tool::ToolSchemaBuilder
 elysper-tool::ToolSurfacePolicy

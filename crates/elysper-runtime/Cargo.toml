@@ -1,0 +1,40 @@
+[package]
+name = "elysper-runtime"
+description = "Config-driven assembly for elysper: the fat plugin factories behind the built-in native plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+elysper-budget.workspace = true
+elysper-context.workspace = true
+elysper-core.workspace = true
+elysper-harness.workspace = true
+elysper-kernel.workspace = true
+elysper-resilience.workspace = true
+elysper-search.workspace = true
+elysper-semantic-cache.workspace = true
+elysper-session.workspace = true
+elysper-tool.workspace = true
+elysper-provider = { workspace = true, features = ["anthropic", "openai"] }
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+# Test-only runtime: `#[tokio::test]` for the tier-1 behavior tests
+# and `TokioSleeper` for the injected-sleeper backoff proof.
+async-trait.workspace = true
+elysper-harness-tokio.workspace = true
+elysper-test-support.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

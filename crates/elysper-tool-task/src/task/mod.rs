@@ -79,9 +79,9 @@ pub use spec::{
 mod tests {
     use std::sync::Arc;
 
-    use serde_json::{Value, json};
     use elysper_harness::{AgentRegistry, DelegatingTool};
     use elysper_tool::ToolFeatures;
+    use serde_json::{Value, json};
 
     use super::*;
 

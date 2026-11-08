@@ -10,9 +10,14 @@
 
 use std::collections::HashMap;
 
+use elysper_tool::{Context, Tool, ToolAnnotations, ToolOutput};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use elysper_tool::{Context, Tool, ToolAnnotations, ToolOutput};
+
+/// The `TodoWrite` tool brick as a native kernel plugin.
+pub mod plugin;
+
+pub use plugin::TodoWriteToolPlugin;
 
 const MAX_TODO_ITEMS: usize = 20;
 const MAX_IN_PROGRESS: usize = 1;

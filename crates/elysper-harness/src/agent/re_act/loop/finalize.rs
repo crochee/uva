@@ -1,6 +1,4 @@
 //! Post-loop finalize: the max-iterations warning, the terminal `SessionEnded` emission, and output assembly.
-use elysper_steering::HookEvent;
-
 use super::{super::state::RunState, ReActLoop};
 use crate::events::{SessionEndReason, WarningKind};
 
@@ -66,17 +64,20 @@ impl ReActLoop {
         );
         self.warn_missing_structured_output(&session, &end_reason);
         self.sink.end(end_reason.clone());
-        // `AfterRun` is observational: the run has ended, so the point
-        // accepts no decision — a handler that returns one is
+        // `run_finished` is observational: the run has ended, so the
+        // point accepts no decision — a handler that returns one is
         // recorded as a diagnostic.
-        super::hooks::dispatch_hook(&self, &session.agent_state, || {
-            HookEvent::AfterRun {
-                agent_name: self.caps.model.descriptor.name.clone(),
-                run_idx: 0,
-                reason: end_reason.as_str().to_string(),
-            }
-        })
-        .await;
+        let ctx = self.hook_context(&session.agent_state);
+        self.caps
+            .control
+            .seams
+            .run_finished(
+                &ctx,
+                &self.caps.model.descriptor.name,
+                0,
+                end_reason.as_str(),
+            )
+            .await;
     }
 
     fn warn_missing_structured_output(

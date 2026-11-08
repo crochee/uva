@@ -15,7 +15,7 @@ use elysper_provider::{
     ToolChoice,
     ToolUse,
 };
-use elysper_steering::{HookDecision, HookEvent, RequestParams};
+use elysper_steering::{HookDecision, RequestParams};
 use elysper_tool::ToolOutput;
 use tracing::{debug, info};
 
@@ -171,18 +171,23 @@ pub(crate) async fn sample_once(
     model_hint: Option<&String>,
     iteration: usize,
 ) -> Result<SampleOutcome, SessionEndReason> {
-    // The step boundary: a policy can end the run before the model
-    // is asked anything.
-    let arbitration = super::hooks::dispatch_hook(this, agent_state, || {
-        HookEvent::BeforeStep {
-            agent_name: this.caps.model.descriptor.name.clone(),
-            run_idx: 0,
-            iteration: iteration as u32,
+    // The step boundary: a policy can end the run or short-circuit the
+    // step before the model is asked anything.
+    let arbitration = {
+        let ctx = this.hook_context(agent_state);
+        this.caps
+            .control
+            .seams
+            .step_pre(&ctx, &this.caps.model.descriptor.name, iteration as u32)
+            .await
+    };
+    match arbitration.decision {
+        HookDecision::Terminate { reason } | HookDecision::Block { reason } => {
+            return Err(SessionEndReason::Error(reason));
         }
-    })
-    .await;
-    if let HookDecision::Terminate { reason } = arbitration.decision {
-        return Err(SessionEndReason::Error(reason));
+        HookDecision::Allow
+        | HookDecision::Ask { .. }
+        | HookDecision::ReplaceParams(_) => {}
     }
     let req =
         Arc::new(completion_request(this, model_hint, projection, messages));
@@ -227,26 +232,13 @@ async fn rewrite_request(
 ) {
     // Nothing can rewrite the request: skip the whole pass — the
     // params snapshot, the dispatch and the write-back — rather than
-    // paying for it on every step.
-    if !this.caps.control.host.has_request_rewriters() {
-        return;
-    }
+    // paying for it on every step. The seam layer owns that check.
     let mut params = RequestParams::from_request(request);
-    let provider = this.cfg.provider.clone();
-    let arbitration =
-        super::hooks::dispatch_hook(this, state, || HookEvent::BeforeRequest {
-            provider: provider.clone(),
-            params: params.clone(),
-        })
-        .await;
-    if let HookDecision::ReplaceParams(replacement) = arbitration.decision {
-        params = replacement;
-    }
     let ctx = this.hook_context(state);
     this.caps
         .control
-        .host
-        .apply_request_transformers(&mut params, &ctx)
+        .seams
+        .llm_request(&ctx, &this.cfg.provider, &mut params)
         .await;
     params.apply_to(request);
 }
@@ -271,17 +263,15 @@ fn log_sample_result(
 }
 
 async fn notify_provider_start_hooks(this: &ReActLoop, state: &AgentState) {
-    // `BeforeProviderCall` is observational: the point accepts no
+    // `provider_started` is observational: the point accepts no
     // decision, so a handler that returns one is recorded as a
     // diagnostic and the run continues.
-    super::hooks::dispatch_hook(this, state, || {
-        HookEvent::BeforeProviderCall {
-            provider: this.cfg.provider.clone(),
-            model: this.cfg.name.clone(),
-            estimated_tokens: 0,
-        }
-    })
-    .await;
+    let ctx = this.hook_context(state);
+    this.caps
+        .control
+        .seams
+        .provider_started(&ctx, &this.cfg.provider, &this.cfg.name, 0)
+        .await;
 }
 
 async fn stream_completion(
@@ -371,13 +361,14 @@ async fn provider_failed(
     detail: &str,
 ) -> SessionEndReason {
     let reason = format!("{context}: {detail}");
-    // `OnError` is observational: the point accepts no decision, so
-    // a handler that returns one is recorded as a diagnostic.
-    super::hooks::dispatch_hook(this, state, || HookEvent::OnError {
-        agent_name: this.caps.model.descriptor.name.clone(),
-        reason: reason.clone(),
-    })
-    .await;
+    // `provider_failed` is observational: the point accepts no decision,
+    // so a handler that returns one is recorded as a diagnostic.
+    let ctx = this.hook_context(state);
+    this.caps
+        .control
+        .seams
+        .provider_failed(&ctx, &this.caps.model.descriptor.name, &reason)
+        .await;
     this.sink
         .warn(WarningKind::Hook, Some(iteration), reason.clone());
     SessionEndReason::Error(reason)
@@ -399,7 +390,7 @@ async fn observe_provider_success(
     ));
     // Consumer-supplied; a panic here must not end the run when every
     // other observation surface degrades.
-    for tracker in &this.caps.control.host.tracker_table().trackers {
+    for tracker in &this.caps.control.seams.tracker_table() {
         isolate(
             &this.sink,
             WarningKind::Hook,
@@ -410,19 +401,21 @@ async fn observe_provider_success(
             },
         );
     }
-    // `AfterProviderCall` is observational: the point accepts no
-    // decision, so a handler that returns one is recorded as a
-    // diagnostic.
-    super::hooks::dispatch_hook(this, agent_state, || {
-        HookEvent::AfterProviderCall {
-            provider: this.cfg.provider.clone(),
-            model: this.cfg.name.clone(),
-            prompt_tokens: resp.usage.prompt_tokens,
-            completion_tokens: resp.usage.completion_tokens,
-            stop_reason: resp.stop_reason.clone(),
-        }
-    })
-    .await;
+    // `llm_result` is observational: the point accepts no decision, so a
+    // handler that returns one is recorded as a diagnostic.
+    let ctx = this.hook_context(agent_state);
+    this.caps
+        .control
+        .seams
+        .llm_result(
+            &ctx,
+            &this.cfg.provider,
+            &this.cfg.name,
+            resp.usage.prompt_tokens,
+            resp.usage.completion_tokens,
+            resp.stop_reason.clone(),
+        )
+        .await;
 }
 
 // ===== assistant commit ==============================================
@@ -464,10 +457,10 @@ pub(super) fn commit_assistant(
 mod tests {
     use std::sync::Arc;
 
-    use futures::channel::mpsc;
     use elysper_context::AgentState;
     use elysper_core::{AtomicCancelToken, SystemClock};
     use elysper_session::{LogWriter, in_memory::InMemorySessionSink};
+    use futures::channel::mpsc;
 
     use super::{
         super::{

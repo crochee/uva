@@ -14,6 +14,8 @@
 
 use std::{fs, path::Path};
 
+use crate::skill::SKILL_FILE;
+
 const SEED_SKILLS: &[(&str, &str)] = &[
     (
         "code-review",
@@ -90,7 +92,7 @@ pub fn seed_default_skills(workspace_root: &Path) -> Result<usize, String> {
     let mut written = 0;
     for (name, content) in SEED_SKILLS {
         let skill_dir = skills_dir.join(name);
-        let skill_md = skill_dir.join("SKILL.md");
+        let skill_md = skill_dir.join(SKILL_FILE);
         if skill_md.exists() {
             continue;
         }
@@ -123,7 +125,7 @@ mod tests {
                 .join(".agents")
                 .join("skills")
                 .join(name)
-                .join("SKILL.md");
+                .join(SKILL_FILE);
             assert!(md.exists(), "missing {name}");
         }
     }
@@ -138,7 +140,7 @@ mod tests {
             .join(".agents")
             .join("skills")
             .join("code-review")
-            .join("SKILL.md");
+            .join(SKILL_FILE);
         let original = fs::read_to_string(&read_file).unwrap();
         assert_eq!(seed_default_skills(dir.path()).unwrap(), 0);
         let after = fs::read_to_string(&read_file).unwrap();

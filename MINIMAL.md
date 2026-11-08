@@ -30,7 +30,8 @@ nothing in `elysper` is forced on you.
 | Run eval suites | `elysper-eval` | `eval` |
 | Bundle skills | `elysper-skill` | `skill` |
 | Attach images / audio / files | `elysper-attachment` | `attachment` |
-| Ship a full HTTP server | `elysper-server` | `server` |
+| Extend the runtime with kernel plugins (manifests, mount, unload) | `elysper-kernel` | `kernel` |
+| Run the reference agent runtime (stdio core / gateway binary) | `elysper-app-server` (binary crate, not a lib dep) | — |
 
 The default feature set assembles a basic agent — including the two
 bundled HTTP adapters and the `web_fetch` builtin. The **minimum**
@@ -202,6 +203,7 @@ re-enters that feature set.
 | The defensive policy | `Host::default_policy(workspace)` instead of `Host::new()` — five guards, three hints, the adaptive tracker and the logging hook |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
 | Multi-agent delegation | `elysper-tool-task`: `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
+| Plugin kernel | add the `kernel` feature and mount a manifest group: `let ctx = elysper::kernel::Context::new(); let mounted = elysper::kernel::mount_all(&ctx, &[Arc::new(MyPlugin)])?;` — `mounted.dispose_plugin("my-id")` unloads one plugin and parks its consumers; UI extensions are `[ui]` profile rows the frontend renders from `ui/schema`, never remote code |
 | Remote MCP tools the host discovered | `elysper-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
 | Scheduling, model-side | add `tool-scheduler` and share one store: `let store = Arc::new(ScheduleStore::new(dir)); register_scheduler_tool(&registry, SchedulerTool::new(Arc::clone(&store)));` — the host still owns delivery (`Scheduler::new(store).tick(now)`), and a tool-side write (or a `ScheduleStore::load` that ingests another process's rows) reaches the next `tick` / `next_deadline` on its own: the pass sees the store's revision move and rebuilds its wheel. `Scheduler::resync(now)` stays available as the explicit rebuild, for a host that needs the wheel correct between passes |
 

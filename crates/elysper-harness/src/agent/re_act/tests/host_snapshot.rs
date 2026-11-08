@@ -7,11 +7,11 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use futures::channel::mpsc;
 use elysper_context::AgentState;
 use elysper_core::CancelToken;
 use elysper_steering::{HookDecision, HookEvent, RequestParams};
 use elysper_tool::ToolOutput;
+use futures::channel::mpsc;
 
 use crate::{
     agent::{

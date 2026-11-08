@@ -198,6 +198,36 @@ pub trait SessionSink: Send + Sync {
         Ok(rows[start..].to_vec())
     }
 
+    /// The rows after ordinal `from`, newest at the end, bounded by
+    /// `window`.
+    ///
+    /// The rows are the ones whose ordinal is greater than `from` —
+    /// the same numbering [`read_from`](Self::read_from) uses. The
+    /// default implementation reads the tail and skips by position,
+    /// which is correct for a log numbered by position and close
+    /// enough for a stamped one; an implementation with a cheaper
+    /// incremental path overrides it.
+    ///
+    /// The window bounds what the caller receives. When more rows
+    /// arrived than the window holds, the returned rows are the
+    /// **oldest** ones that fit: a reader that advances its cursor
+    /// past them asks again for the rest, so no row is lost.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`read_tail`](Self::read_tail) returns.
+    async fn read_since(
+        &self,
+        from: u64,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
+        let tail = self.read_tail(window).await?;
+        Ok(tail
+            .into_iter()
+            .skip(usize::try_from(from).unwrap_or(usize::MAX))
+            .collect())
+    }
+
     /// The **first** event, if the log holds one.
     ///
     /// The few facts that are whole-log rather than tail-shaped (a

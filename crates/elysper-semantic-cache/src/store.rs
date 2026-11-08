@@ -7,10 +7,10 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
-use sha2::{Digest, Sha256};
 use elysper_provider::CompletionResponse;
 use elysper_search::Embedder;
+use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 
 /// 32-byte key derived from `Sha256(model + tool_set_names +
 /// messages)`. Used both as a map key (hex string form) and as the

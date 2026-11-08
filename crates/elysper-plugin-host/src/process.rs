@@ -49,11 +49,16 @@ impl ChildProcess {
     /// block the plugin mid-answer.
     pub(crate) fn spawn(
         argv: &[String],
+        env: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<(Arc<Self>, ChildStdin, ChildStdout), HostError> {
         let Some((program, arguments)) = argv.split_first() else {
             return Err(HostError::EmptyCommand);
         };
-        let mut child = Command::new(program)
+        let mut child = Command::new(program);
+        if let Some(env) = env {
+            child.envs(env);
+        }
+        let mut child = child
             .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

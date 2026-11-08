@@ -38,7 +38,6 @@ use std::{
     thread,
 };
 
-use futures::StreamExt;
 use elysper_core::{
     AtomicCancelToken,
     CancelToken,
@@ -57,6 +56,7 @@ use elysper_provider::{
     ToolUse,
 };
 use elysper_tool::{Tool, ToolOutput, ToolRegistry, registry::ToolEntry};
+use futures::StreamExt;
 
 /// The one thing a non-tokio consumer must supply: where detached work
 /// goes. This implementation gives every task its own OS thread and

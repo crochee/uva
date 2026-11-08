@@ -55,9 +55,9 @@ pub use budget::{
     TokenBudget,
     TokenSource,
 };
+pub use elysper_core::{Clock, FixedClock, SharedClock};
 pub use pricing::{PricingTable, StaticPricingTable};
 pub use provider::BudgetProvider;
-pub use elysper_core::{Clock, FixedClock, SharedClock};
 pub use tool::BudgetTool;
 
 /// The README, **compiled**.

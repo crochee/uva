@@ -108,6 +108,7 @@ mod error;
 mod event_sink;
 mod gate;
 mod observer;
+mod plugin;
 mod process;
 mod registry;
 mod remote_tool;
@@ -115,15 +116,16 @@ mod transform;
 
 use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
-pub use error::HostError;
-pub use event_sink::{PluginEventSink, PublishedEvent};
-pub use registry::PluginRegistry;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
 use elysper_core::blocking::{Blocking, ThreadBlocking};
 use elysper_harness::{Host, PluginHandle};
 use elysper_plugin_protocol::{PluginCapabilities, ToolSpec, methods};
 use elysper_tool::Risk;
+pub use error::HostError;
+pub use event_sink::{PluginEventSink, PublishedEvent};
+pub use plugin::ProcessPluginsPlugin;
+pub use registry::PluginRegistry;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
     client::Connection,
@@ -200,6 +202,15 @@ pub struct RemotePluginConfig {
     /// a deadline.
     #[serde(default)]
     pub call_timeout_ms: Option<u64>,
+    /// Environment overrides applied to the plugin's process, on top
+    /// of the host's own environment.
+    ///
+    /// A bundle's manifest may declare a code component that needs
+    /// one (a token, a `PLUGIN_MODE`); the overrides are the
+    /// operator's, not the plugin's — they are read from the
+    /// deployment's files, never negotiated over the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::HashMap<String, String>>,
 }
 
 /// How much authority the operator grants a plugin.
@@ -537,6 +548,7 @@ impl RemotePlugin {
         let connection = Arc::new(Connection::spawn(
             &self.config.name,
             &self.config.command,
+            self.config.env.as_ref(),
             Arc::clone(&self.blocking),
             self.timeout,
         )?);

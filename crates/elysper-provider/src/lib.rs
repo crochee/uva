@@ -26,6 +26,9 @@ pub mod json_repair;
 pub mod openai;
 #[cfg(feature = "openai")]
 pub(crate) mod openai_streaming;
+/// The `llm` service: [`ModelAdapterPlugin`] publishes the provider
+/// catalogue under [`KEY_LLM`].
+pub mod plugin;
 #[cfg(feature = "hpc-pool")]
 pub mod pool;
 pub mod profile;
@@ -90,6 +93,12 @@ pub use json_repair::{
 };
 #[cfg(feature = "openai")]
 pub use openai::OpenAICompatibleProvider;
+pub use plugin::{
+    KEY_LLM,
+    KEY_LLM_DEFAULT,
+    ModelAdapterPlugin,
+    ProviderResolver,
+};
 pub use retry::{
     RetryClass,
     RetryConfig,

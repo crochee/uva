@@ -21,6 +21,7 @@ categories.workspace = true
 cron = ["elysper-scheduler/cron"]
 
 [dependencies]
+elysper-kernel.workspace = true
 elysper-tool.workspace = true
 elysper-scheduler.workspace = true
 elysper-core.workspace = true

@@ -9,9 +9,6 @@
 
 use std::collections::HashSet;
 
-use reqwest::Client;
-use schemars_derive::JsonSchema;
-use serde::Deserialize;
 use elysper_core::cap_to_char_boundary;
 use elysper_tool::{
     Context,
@@ -22,6 +19,14 @@ use elysper_tool::{
     ToolOutput,
     ToolOutputDefinition,
 };
+use reqwest::Client;
+use schemars_derive::JsonSchema;
+use serde::Deserialize;
+
+/// The `web_fetch` tool brick as a native kernel plugin.
+pub mod plugin;
+
+pub use plugin::WebFetchToolPlugin;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 

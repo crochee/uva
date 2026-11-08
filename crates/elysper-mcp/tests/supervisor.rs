@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use serde_json::json;
 use elysper_mcp::{
     HealthState,
     InMemoryTransport,
@@ -16,6 +15,7 @@ use elysper_mcp::{
     ServerHealth,
 };
 use elysper_tool::ToolRegistry;
+use serde_json::json;
 
 /// One supervised server over a shared, scriptable transport.
 struct Fixture {
@@ -390,4 +390,29 @@ async fn report_failure_for_an_unknown_server_is_a_noop() {
         .report_failure(&fx.registry, "ghost", Utc::now())
         .await;
     assert!(fx.supervisor.health().await.is_empty());
+}
+
+#[tokio::test]
+async fn shutdown_unregisters_every_generation_and_drops_its_servers() {
+    let mut fixture = Fixture::new();
+    fixture.boot().await;
+    assert!(
+        fixture.names().iter().any(|name| name == "mcp__srv__echo"),
+        "the boot tick registered the remote tool"
+    );
+
+    fixture.supervisor.shutdown(&fixture.registry).await;
+
+    assert!(
+        !fixture.registry.contains("mcp__srv__echo"),
+        "shutdown withdraws every live generation's tools"
+    );
+    assert!(
+        fixture.supervisor.health().await.is_empty(),
+        "a shut-down supervisor supervises no server"
+    );
+    assert!(
+        !fixture.wire.recorded().is_empty(),
+        "the transport was used before shutdown"
+    );
 }

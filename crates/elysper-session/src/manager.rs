@@ -20,12 +20,12 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use parking_lot::RwLock;
 use elysper_core::{
     Clock,
     SystemClock,
     blocking::{Blocking, ThreadBlocking},
 };
+use parking_lot::RwLock;
 
 use crate::{LogWriter, SessionError, SessionSink, jsonl::JsonlSessionSink};
 

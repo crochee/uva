@@ -136,8 +136,6 @@ use std::{fmt::Write as _, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-use serde_json::{Value, json};
 use elysper_core::{Clock, SharedClock};
 #[cfg(feature = "cron")]
 use elysper_scheduler::CronTrigger;
@@ -159,6 +157,13 @@ use elysper_tool::{
     output::{RenderKind, ToolOutputDefinition},
     traits::ExecutionMode,
 };
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+/// The `schedule` tool brick: the scheduler service as a plugin.
+pub mod plugin;
+
+pub use plugin::ScheduleToolPlugin;
 
 /// The name the tool registers under.
 pub const SCHEDULE_TOOL_NAME: &str = "schedule";

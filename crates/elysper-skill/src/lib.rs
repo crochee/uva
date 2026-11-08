@@ -42,6 +42,7 @@ pub mod application;
 pub mod builtin;
 pub mod discovery;
 pub mod loader;
+pub mod plugin;
 pub mod provider;
 pub mod seed;
 pub mod skill;
@@ -64,6 +65,7 @@ pub use builtin::skill_tool::{
 };
 pub use discovery::{PROJECT_SKILLS_DIR, discover_skills};
 pub use loader::SkillLoader;
+pub use plugin::{KEY_SKILLS, SkillPlugin};
 pub use provider::{
     BoxedSkillProvider,
     FileSkillProvider,

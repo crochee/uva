@@ -26,7 +26,6 @@ use std::{
 };
 
 use chrono::Utc;
-use serde_json::json;
 use elysper_tool::{Context, Tool, ToolOutput};
 use elysper_tool_shell::{
     BackendAvailability,
@@ -38,6 +37,7 @@ use elysper_tool_shell::{
     denial_marker,
     resolve_confined_command,
 };
+use serde_json::json;
 
 /// A unique workspace under the system temp dir — no `tempfile`
 /// dependency, so the example runs on a bare checkout.

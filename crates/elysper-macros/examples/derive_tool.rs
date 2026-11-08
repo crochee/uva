@@ -18,10 +18,10 @@
 
 use std::path::PathBuf;
 
-use schemars::JsonSchema;
-use serde::Deserialize;
 use elysper_macros::Tool;
 use elysper_tool::{Context, Tool, ToolOutput};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 /// Multiplies two integers (description taken from this doc comment).
 #[derive(Tool, Deserialize, JsonSchema)]

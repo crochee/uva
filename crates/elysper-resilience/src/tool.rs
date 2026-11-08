@@ -2,8 +2,6 @@
 
 use std::{pin::Pin, sync::Arc};
 
-use futures::Stream;
-use parking_lot::Mutex;
 use elysper_core::{
     Clock,
     breaker::{BreakerConfig, BreakerState, Outcome},
@@ -18,6 +16,8 @@ use elysper_tool::{
     ToolOutput,
     ToolOutputDefinition,
 };
+use futures::Stream;
+use parking_lot::Mutex;
 
 use crate::{
     classify::Outcome as ClassifyOutcome,

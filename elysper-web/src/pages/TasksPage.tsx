@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Box, Flex } from '@radix-ui/themes';
+import { Button } from '../components/ui/Button';
 import { EmptyState } from '../components/ui/EmptyState';
 import { SkeletonList } from '../components/ui/SkeletonList';
 import { ListToolbar } from '../components/ui/ListToolbar';
 import { PageHero, PageShell, StatusPill, CardGrid } from '../components/ui/visual';
-import { tasksApi } from '../api/tasks';
+import { useCursorList } from '../hooks/useCursorList';
 import type { TaskDelegation } from '../api/types';
 
 const TASK_GLYPH = '🧭';
@@ -15,36 +15,21 @@ const TASK_CARD_MODIFIER = 'nt-vis-card--tool';
 /**
  * Tasks list page — sub-agent delegation history.
  *
- * Unlike the other three new pages, this one DOES fetch on
- * mount: the `task` tool's history is reconstructed from
- * session events (which the backend already exposes at
- * `/api/v1/sessions/:id`), so the page works today even
- * without a dedicated `/api/v1/tasks` endpoint. See
- * `src/api/tasks.ts::listAll` for the N+1 fan-out cost
- * (bounded by `?limit=50` on the outer session query).
- *
- * Once a dedicated `/api/v1/tasks` endpoint ships, this page
- * switches to a single list call without UI changes.
+ * The list is the backend's own: `GET /api/v1/tasks` scans the
+ * recent sessions server-side and returns the delegations it
+ * found, already ordered newest-first. The endpoint is
+ * keyset-paginated like the rest of the v1 surface, so the page
+ * follows the cursor with a "Load more" button rather than
+ * fetching one unbounded list.
  */
 export function TasksPage() {
-  const [delegations, setDelegations] = useState<TaskDelegation[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError(null);
-    tasksApi
-      .listAll(controller.signal)
-      .then((result) => setDelegations(result.data))
-      .catch((e: unknown) => {
-        if ((e as { name?: string } | null)?.name === 'AbortError') return;
-        setError((e as Error).message);
-      })
-      .finally(() => setLoading(false));
-    return () => controller.abort();
-  }, []);
+  const {
+    items: delegations,
+    loading,
+    error,
+    hasMore,
+    loadMore,
+  } = useCursorList<TaskDelegation>('/api/v1/tasks');
 
   const heroPills = (
     <>
@@ -58,13 +43,13 @@ export function TasksPage() {
         glyph={TASK_GLYPH}
         heroModifier={TASK_HERO_MODIFIER}
         title="Tasks"
-        subtitle="Sub-agent delegation history. The task tool (`elysper-tool-task`) spawns child agents during a chat run; the resulting { type: 'Agent' } envelopes persist as session events and are reconstructed here. Once /api/v1/tasks ships, the N+1 fan-out in tasks.listAll is replaced by a single list call."
+        subtitle="Sub-agent delegation history. The task tool (`elysper-tool-task`) spawns child agents during a chat run; each delegation is recorded in the child's own session log and listed here."
         pills={heroPills}
         meta={
           <div className="nt-vis-meta-cluster">
             <div className="nt-vis-meta-cluster__row">
               <span>Source</span>
-              <span>elysper-tool-task · session Agent envelopes</span>
+              <span>elysper-tool-task · session delegation records</span>
             </div>
             <div className="nt-vis-meta-cluster__row">
               <span>Depth</span>
@@ -78,7 +63,7 @@ export function TasksPage() {
       <ListToolbar
         query=""
         onQueryChange={() => {
-          /* client-side filter placeholder; listAll is fetch-once */
+          /* client-side filter placeholder; the page loads by cursor */
         }}
         sortDir="asc"
         onSortDirChange={() => {
@@ -104,8 +89,7 @@ export function TasksPage() {
           description={
             <>
               Run a chat session that invokes the <code>task</code> tool to see its sub-agent
-              envelopes here. The reconstruction walks the 50 most recent sessions and extracts
-              every <code>{`{ type: 'Agent' }`}</code> event.
+              delegations here.
             </>
           }
           testId="tasks-empty"
@@ -116,6 +100,19 @@ export function TasksPage() {
             <TaskCard key={task.id} task={task} />
           ))}
         </CardGrid>
+      )}
+
+      {hasMore && (
+        <div style={{ display: 'flex', justifyContent: 'center' }}>
+          <Button
+            variant="soft"
+            onClick={loadMore}
+            disabled={loading}
+            data-testid="tasks-load-more"
+          >
+            {loading ? 'Loading...' : 'Load More Delegations'}
+          </Button>
+        </div>
       )}
     </PageShell>
   );

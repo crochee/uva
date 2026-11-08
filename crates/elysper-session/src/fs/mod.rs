@@ -44,8 +44,8 @@ use std::{
     },
 };
 
-use futures::{FutureExt as _, channel::oneshot};
 use elysper_core::blocking::{Blocking, ThreadBlocking};
+use futures::{FutureExt as _, channel::oneshot};
 
 /// A refused batch, and what it left behind.
 ///

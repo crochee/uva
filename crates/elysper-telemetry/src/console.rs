@@ -15,7 +15,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use crate::TelemetryConfig;
+use crate::{LogWriter, TelemetryConfig};
 
 /// Environment variable for the local log file directory.
 ///
@@ -46,7 +46,14 @@ pub(crate) fn init_console_tracing(
 
     tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(console_writer(config))
+                .with_target(true)
+                .with_span_events(
+                    tracing_subscriber::fmt::format::FmtSpan::NONE,
+                ),
+        )
         .try_init()
         .map_err(|e| {
             Error::telemetry(format!("Failed to init console tracing: {e}"))
@@ -58,6 +65,41 @@ pub(crate) fn init_console_tracing(
     );
 
     Ok(())
+}
+
+/// The console layer's writer, pointed at the stream the config
+/// names.
+///
+/// The default is stdout; a process that owns stdout for a protocol
+/// frame stream asks for stderr instead, because a log line on
+/// stdout would reach the peer as a malformed frame.
+///
+/// The writer is a named type (not the `std::io::stdout` /
+/// `std::io::stderr` function pointers), so both spellings share one
+/// concrete writer type and the layer's type stays the same either
+/// way.
+fn console_writer(config: &TelemetryConfig) -> SinkWriter {
+    SinkWriter {
+        stderr: config.log_writer == LogWriter::Stderr,
+    }
+}
+
+/// The console layer's writer: stdout or stderr, chosen once.
+#[derive(Clone, Copy)]
+struct SinkWriter {
+    stderr: bool,
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SinkWriter {
+    type Writer = Box<dyn std::io::Write + Send + 'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        if self.stderr {
+            Box::new(std::io::stderr())
+        } else {
+            Box::new(std::io::stdout())
+        }
+    }
 }
 
 /// Initialize console + optional file tracing as a single `try_init`
@@ -79,14 +121,17 @@ pub(crate) fn init_console_with_file(
 ) -> Result<(), Error> {
     let filter = env_filter(config);
 
-    let console_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE);
-
     tracing_subscriber::registry()
         .with(file_layer)
         .with(filter)
-        .with(console_layer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(console_writer(config))
+                .with_target(true)
+                .with_span_events(
+                    tracing_subscriber::fmt::format::FmtSpan::NONE,
+                ),
+        )
         .try_init()
         .map_err(|e| {
             Error::telemetry(format!("Failed to init tracing: {e}"))

@@ -68,9 +68,23 @@ jobs:
       - name: Install cargo-deny
         run: cargo install --locked cargo-deny
 
+      # `make ci` also runs this gate. The explicit step names the
+      # boundary in the CI log (the aggregate target would only print
+      # one line among many), and it fails before the slow gates when
+      # the kernel grows an agent / UI dependency.
+      - name: kernel dependency boundary (no agent / UI crates)
+        run: make check-kernel-deps
+
+      # The core's stdout is the JSON-RPC transport: a `println!` in
+      # the binary reaches the peer as a non-frame. A dedicated step
+      # names the discipline in the log; `make ci` also runs it.
+      - name: stdout discipline (protocol frames only)
+        run: make check-stdout
+
       # `make ci` = fmt-check, clippy, doc-check (rustdoc warnings are
       # errors), the compiled-guide doctests, MVP-dependency gate,
-      # runtime-free gate, public-API runtime gate, pub-surface ratchet,
+      # kernel-dependency gate, stdout-discipline gate, runtime-free
+      # gate, public-API runtime gate, pub-surface ratchet,
       # claim-language gate, clock ratchet, harness-shape gate, and the
       # test-layout ratchet.
       - name: fmt, clippy, rustdoc, dependency + layout + shape invariants

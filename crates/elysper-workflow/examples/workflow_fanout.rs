@@ -22,7 +22,6 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use elysper_workflow::{
     AgentOutcome,
     AgentRequest,
@@ -34,6 +33,7 @@ use elysper_workflow::{
     WorkflowRuntime,
     WorkflowSpec,
 };
+use parking_lot::Mutex;
 
 /// A host with no model behind it: it echoes the prompt, fails any
 /// gate whose command starts with `fail`, and counts how many agent

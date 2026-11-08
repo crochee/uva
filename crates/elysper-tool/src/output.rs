@@ -32,9 +32,9 @@
 
 use std::collections::BTreeMap;
 
+use elysper_provider::types::ContentPart;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use elysper_provider::types::ContentPart;
 
 use crate::{ToolOutput, types::Context};
 

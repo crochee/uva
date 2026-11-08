@@ -1,0 +1,27 @@
+[package]
+name = "elysper-agents"
+description = "Agent definitions for elysper: file-backed agents (agent.md + config.json) discovered across the two-layer ~/.agents layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+# The definition format is a plain value type plus the layout the
+# definitions live in — the core crate owns both, so this crate
+# stays a thin format layer on top of them.
+elysper-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

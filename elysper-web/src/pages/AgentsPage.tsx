@@ -231,7 +231,7 @@ export function AgentsPage() {
           <div className="nt-vis-meta-cluster">
             <div className="nt-vis-meta-cluster__row">
               <span>List</span>
-              <span>/api/v1/agents</span>
+              <span>agents/list</span>
             </div>
             <div className="nt-vis-meta-cluster__row">
               <span>Source</span>

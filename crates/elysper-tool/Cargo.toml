@@ -14,6 +14,11 @@ categories.workspace = true
 [dependencies]
 elysper-core.workspace = true
 elysper-provider.workspace = true
+# The `tools` service is a native kernel plugin, so this crate
+# implements the kernel's `Plugin` contract. The kernel is runtime-free
+# (`cordis-rs` has an empty dependency table), so the crate's own
+# `[dependencies]` stay tokio-free.
+elysper-kernel.workspace = true
 # `metrics` only: tool dispatch records the Prometheus counters. The
 # OTLP exporter (and with it the whole opentelemetry + transport
 # stack) is deliberately NOT linked, so every agent consumer of this

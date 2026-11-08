@@ -30,6 +30,9 @@ categories.workspace = true
 # its one job. It is re-exported as `elysper::async_trait`.
 [dependencies]
 elysper-core = { workspace = true, optional = true }
+# The plugin kernel: manifests and `mount_all`. Opt-in until the harness
+# moves onto it; the kernel carries `cordis-rs` and no runtime.
+elysper-kernel = { workspace = true, optional = true }
 elysper-provider = { workspace = true, optional = true }
 elysper-context = { workspace = true, optional = true }
 elysper-tool = { workspace = true, optional = true }
@@ -56,6 +59,7 @@ elysper-macros = { workspace = true, optional = true }
 elysper-harness-tokio = { workspace = true, optional = true }
 
 elysper-skill = { workspace = true, optional = true }
+elysper-agents = { workspace = true, optional = true }
 elysper-attachment = { workspace = true, optional = true }
 elysper-mcp = { workspace = true, optional = true }
 elysper-search = { workspace = true, optional = true }
@@ -72,10 +76,10 @@ elysper-strategy-cot = { workspace = true, optional = true }
 elysper-strategy-best-of-n = { workspace = true, optional = true }
 elysper-reflection = { workspace = true, optional = true }
 elysper-budget = { workspace = true, optional = true }
+elysper-runtime = { workspace = true, optional = true }
 # : opt-in plug-ins in the new round (Tier 1 perf + concurrency).
 # Default-NO for every one so the seven-feature MVP subset stays at zero
 # HTTP/OTel/DB dependencies (`make check-mvp-deps` is the assertion).
-elysper-hpc-batch = { workspace = true, optional = true }
 # W2: the dynamic plugin channel's wire crate. Opt-in and serde-only;
 # it does not depend on the harness, so a plugin author can take it
 # alone. `elysper-plugin-host` maps its vocabulary onto internal types.
@@ -84,6 +88,10 @@ elysper-plugin-protocol = { workspace = true, optional = true }
 # and speaks `Tool`, so its feature pulls those modules — unlike the
 # wire crate, this one is not usable alone.
 elysper-plugin-host = { workspace = true, optional = true }
+# The opt-in Wasm component runtime. Default-NO: it carries `wasmtime`
+# (a JIT plus Cranelift), the one dependency the default build must
+# never resolve. `make check-wasm-deps` is the assertion.
+elysper-wasm-runtime = { workspace = true, optional = true }
 
 async-trait.workspace = true
 
@@ -202,6 +210,8 @@ macros = ["dep:elysper-macros"]
 
 # --- opt-in pieces ---------------------------------------------------
 skill = ["dep:elysper-skill", "core", "tool"]
+# The file-backed agent definitions (`agents/<name>/agent.md`).
+agents = ["dep:elysper-agents", "core"]
 attachment = ["dep:elysper-attachment", "core", "provider"]
 mcp = ["dep:elysper-mcp", "core", "tool"]
 # The `schedule` tool—the model-facing adapter over
@@ -226,6 +236,23 @@ tool-search = [
 ]
 scheduler = ["dep:elysper-scheduler", "core"]
 search = ["dep:elysper-search", "core"]
+# The config-driven assembly layer: fat plugin factories for the
+# built-in native plugins (model-adapter with the tier-1 wrapping
+# chain, agent-loop, …). Opt-in and never in the default set: it
+# carries the provider adapters and the tier-1 plugin crates, which
+# the seven-feature MVP subset deliberately stays free of.
+runtime = [
+  "dep:elysper-runtime",
+  "kernel",
+  "provider",
+  "harness",
+  "tool",
+  "session",
+  "context",
+  "semantic-cache",
+  "resilience",
+  "budget",
+]
 # The whole cron path, both halves at once: the parser behind
 # `elysper::scheduler::CronTrigger` (`elysper-scheduler/cron`) *and*
 # the `schedule` tool's acceptance of `kind: "cron"`
@@ -312,7 +339,6 @@ budget = ["dep:elysper-budget", "core", "provider", "tool"]
 # check-public-api-runtime` is the gate).
 hpc-pool = ["provider", "elysper-provider/hpc-pool"]
 hpc-simd = ["search", "elysper-search/simd"]
-hpc-batch = ["dep:elysper-hpc-batch", "core", "provider", "search"]
 
 # W2: the dynamic plugin channel. A single-crate axis, not a bundle:
 # the wire vocabulary is useful on its own (a plugin author reads it
@@ -330,6 +356,24 @@ plugin-host = [
   "harness",
   "tool",
   "core",
+]
+
+# The plugin kernel (`Plugin`, `PluginManifest`, `mount_all`). A
+# single-crate axis like `plugin-protocol`: the kernel names no harness,
+# tool, or runtime type, so it pulls no sibling feature. Opt-in because
+# nothing in the default assembly consumes it yet.
+kernel = ["dep:elysper-kernel"]
+
+# The Wasm component runtime: `WasmRuntime`, `WasmToolPlugin`, and
+# `WasmSandbox`. Its public types name the kernel (`Plugin`,
+# `PluginManifest`), the registry (`Tool`, `ToolRegistry`), and the
+# shell's `SandboxBackend`, so the feature pulls those three modules.
+# Default-NO, and the only feature that reaches `wasmtime`.
+wasm = [
+  "dep:elysper-wasm-runtime",
+  "kernel",
+  "tool",
+  "tool-shell",
 ]
 
 # The one runtime the facade speaks: `elysper-harness-tokio`'s three

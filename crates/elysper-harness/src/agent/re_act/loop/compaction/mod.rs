@@ -150,12 +150,15 @@ async fn finish(
             if let Some(seq) = seq {
                 let start = plan.range.start;
                 let end = plan.range.end;
-                let mut next = (*session.messages).clone();
-                next.splice(
+                // `Arc::make_mut` clones the transcript only when
+                // somebody else still holds it. The run owns the only
+                // reference in the common case, so the replace costs
+                // the splice instead of a copy of the whole history.
+                let messages = Arc::make_mut(&mut session.messages);
+                messages.splice(
                     start..end,
                     [Message::assistant(outcome.summary.clone())],
                 );
-                session.messages = Arc::new(next);
                 session.surface_seqs.splice(start..end, [seq]);
                 session.last_compaction = Some(seq);
             }

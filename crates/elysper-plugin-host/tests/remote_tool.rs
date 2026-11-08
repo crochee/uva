@@ -19,8 +19,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::{executor::block_on, join};
-use serde_json::json;
 use elysper_harness::Host;
 use elysper_plugin_host::{
     Authority,
@@ -34,6 +32,8 @@ use elysper_plugin_protocol::{PluginCapabilities, PluginError};
 use elysper_provider::types::ContentPart;
 use elysper_steering::HookEvent;
 use elysper_tool::{Context, Risk, Tool, ToolOutput};
+use futures::{executor::block_on, join};
+use serde_json::json;
 
 /// Serves one tool and answers a call with a fixed string.
 const TOOL_PLUGIN: &str = r#"
@@ -164,6 +164,7 @@ fn config(authority: Authority, risk: Risk) -> RemotePluginConfig {
         authority,
         risk,
         call_timeout_ms: None,
+        env: None,
     }
 }
 
@@ -182,6 +183,7 @@ fn scripted(
         authority: Authority::Reduced,
         risk: Risk::Low,
         call_timeout_ms: None,
+        env: None,
     })
 }
 
@@ -777,6 +779,7 @@ fn an_unclassified_plugin_risk_fails_closed() {
         authority: Authority::Reduced,
         risk: Risk::Unknown,
         call_timeout_ms: None,
+        env: None,
     };
 
     let unknown = RemotePlugin::new(config.clone());

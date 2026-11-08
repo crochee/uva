@@ -16,7 +16,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
 use elysper_core::{
     CancelToken,
     registry::{Registry, RegistryItem},
@@ -40,6 +39,7 @@ use elysper_tool_task::{
     CommandStopReason,
     TaskDelegator,
 };
+use futures::{StreamExt, stream};
 
 const BASE_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
 const CHILD_ANSWER: &str = "the isolated child ran";

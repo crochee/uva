@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use elysper_harness::{
     Agent,
     AgentInput,
@@ -12,6 +11,7 @@ use elysper_harness::{
 };
 use elysper_provider::{Content, ContentPart, ToolUse};
 use elysper_tool::registry::{ToolEntry, ToolRegistry};
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 mod support;
@@ -314,8 +314,8 @@ async fn sequential_tools_abort_round_on_first_error() {
 /// telemetry without parsing the content stream.
 #[tokio::test]
 async fn tool_output_metadata_and_truncated_by_reach_the_wire() {
-    use serde_json::json;
     use elysper_tool::types::TruncatedBy;
+    use serde_json::json;
 
     // Build a tool that attaches both a metadata entry
     // and a `TruncatedBy::SpilledTo` reason.

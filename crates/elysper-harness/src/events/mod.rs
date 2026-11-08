@@ -6,8 +6,8 @@
 //! `SystemEvent::Plugin` (or a host-registered `Hook`), so the wire
 //! carries only variants the harness itself can produce.
 
-use serde::{Deserialize, Serialize};
 use elysper_provider::{ContentPart, SamplingResult};
+use serde::{Deserialize, Serialize};
 
 use crate::agent::approval::Suspension;
 

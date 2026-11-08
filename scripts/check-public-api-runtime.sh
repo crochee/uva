@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Public-API runtime gate: no library crate may name a runtime type in its
-# public API (AGENTS.md §3.7). `elysper-server` and `elysper-mcp-server`
+# public API (AGENTS.md §3.7). `elysper-app-server` and `elysper-mcp-server`
 # are the app / binary crates and are exempt; tests are out of scope.
 #
 # Why a script instead of a one-line recipe (R123): a type does not have to
@@ -142,7 +142,7 @@ FNR == 1 { delete names; delete aliases; in_sig = 0; in_use = 0; use_buf = "" }
 '
 
 report=$(find crates -name '*.rs' -path '*/src/*' \
-  ! -path 'crates/elysper-server/*' ! -path 'crates/elysper-mcp-server/*' \
+  ! -path 'crates/elysper-app-server/*' ! -path 'crates/elysper-mcp-server/*' \
   ! -path '*/tests/*' -print0 \
   | xargs -0 awk "$awk_program")
 
@@ -152,8 +152,8 @@ if [[ -n "$report" ]]; then
   echo "Library crates must stay runtime-independent (AGENTS.md §3.7): expose a trait" >&2
   echo "(Spawner, CancelToken, Clock), a callback, or a futures::channel, and keep the" >&2
   echo "runtime type inside the tokio-bound plugin that constructs it." >&2
-  echo "elysper-server and elysper-mcp-server are the app / binary crates and are exempt." >&2
+  echo "elysper-app-server and elysper-mcp-server are the app / binary crates and are exempt." >&2
   exit 1
 fi
 
-echo "OK: no runtime type appears in a library crate's public API (elysper-server, elysper-mcp-server are exempt)"
+echo "OK: no runtime type appears in a library crate's public API (elysper-app-server, elysper-mcp-server are exempt)"

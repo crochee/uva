@@ -15,7 +15,6 @@
 //! cargo run -p elysper-context --features sqlite --example sqlite_memory
 //! ```
 
-use serde_json::json;
 use elysper_context::memory::{
     Memory,
     MemoryEntry,
@@ -23,6 +22,7 @@ use elysper_context::memory::{
     SqliteMemory,
     SqliteMemoryError,
 };
+use serde_json::json;
 
 /// Fixed ULIDs, so the stored rows and their ids are deterministic.
 const ID_A: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";

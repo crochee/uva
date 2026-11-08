@@ -72,7 +72,7 @@ export function WorkflowDetailPage() {
         glyph={WORKFLOW_GLYPH}
         heroModifier={WORKFLOW_HERO_MODIFIER}
         title={spec ? <code>{spec.id}</code> : id ? <code>{id}</code> : 'Workflow'}
-        subtitle="Detail view for one workflow document. Run posts to /api/v1/workflows/{id}/run; today the runtime is stubbed (every call settles as `superseded`)."
+        subtitle="Detail view for one workflow document. Run calls workflows/run; today the runtime is stubbed (every call settles as `superseded`)."
         pills={spec ? <StatusPill tone="purple">WorkflowSpec</StatusPill> : undefined}
         meta={
           spec ? (

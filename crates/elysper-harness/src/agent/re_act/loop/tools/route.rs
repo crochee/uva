@@ -6,9 +6,9 @@ use std::{
     task::{Context as TaskContext, Poll},
 };
 
-use futures::{StreamExt, future::Either, pin_mut, task::noop_waker_ref};
 use elysper_provider::ToolUse;
 use elysper_tool::{Context, DispatchPlan, StreamOutput, ToolOutput};
+use futures::{StreamExt, future::Either, pin_mut, task::noop_waker_ref};
 use tracing::{debug, warn};
 
 use super::super::ReActLoop;

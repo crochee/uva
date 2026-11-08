@@ -8,8 +8,6 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use futures::{StreamExt, executor::block_on};
-use serde_json::json;
 use elysper_core::{AtomicCancelToken, CancelToken, Error, SystemClock};
 use elysper_harness::{
     Agent,
@@ -48,6 +46,8 @@ use elysper_session::{
 };
 use elysper_steering::{HookDecision, HookEvent};
 use elysper_tool::{Risk, ToolOutput, ToolRegistry};
+use futures::{StreamExt, executor::block_on};
+use serde_json::json;
 
 /// The dispatch context a registration sees: an empty run state, a
 /// sink with no writer and a fresh cancel token.
@@ -170,6 +170,7 @@ fn plugin_config(
         // held for approval before it ever reaches the gate.
         risk: Risk::Low,
         call_timeout_ms: None,
+        env: None,
     }
 }
 

@@ -37,11 +37,11 @@ The frozen surface is that set of names, per crate:
 |---|---|
 | `elysper-core` | 41 |
 | `elysper-context` | 41 |
-| `elysper-harness` | 60 |
-| `elysper-provider` | 89 |
-| `elysper-session` | 115 |
+| `elysper-harness` | 64 |
+| `elysper-provider` | 92 |
+| `elysper-session` | 119 |
 | `elysper-steering` | 43 |
-| `elysper-tool` | 46 |
+| `elysper-tool` | 48 |
 
 The full lists are in [The frozen names](#the-frozen-names) below. Every
 entry is spelled exactly as you would write it after the crate name:
@@ -181,26 +181,27 @@ settings.
 `events_to_messages`, `repair_session`, `should_compact`, `touched_target`
 `typed_messages_from_sink`
 
-### elysper-harness — 60 names
+### elysper-harness — 64 names
 
 The agent loop: strategies, approval/resume, checkpoints, host hooks,
 events, and the loop's own contract.
 
 `Agent`, `AgentCaps`, `AgentDescriptor`, `AgentEntry`, `AgentEvent`, `AgentInput`
-`AgentMeta`, `AgentRegistry`, `AgentRuntime`, `ApprovalMode`, `ApprovalPolicy`
-`ApprovalRequest`, `Arbitration`, `CheckpointError`, `CheckpointSnapshot`
-`Checkpointer`, `DEFAULT_MAX_ITERATIONS`, `DEFAULT_SYSTEM_PROMPT`, `DelegatingTool`
-`DelegationCall`, `Diagnostic`, `DiagnosticKind`, `EventSink`, `Gate`, `GrantKey`
-`GrantScope`, `Hook`, `Host`, `InMemoryCheckpointer`, `Plugin`, `PluginHandle`
-`PromptContext`, `PromptSection`, `ReActAgent`, `ReActStrategy`, `ReasoningStrategy`
-`Registration`, `RequestTransformer`, `ResultTransformer`, `ResumeCoverageError`
-`ResumeDecision`, `ResumeStatus`, `ResumeToken`, `SessionEndReason`, `StrategyRegistry`
+`AgentMeta`, `AgentRegistry`, `AgentRuntime`, `ApprovalGate`, `ApprovalMode`
+`ApprovalPlugin`, `ApprovalPolicy`, `ApprovalRequest`, `Arbitration`
+`CheckpointError`, `CheckpointSnapshot`, `Checkpointer`, `DEFAULT_MAX_ITERATIONS`
+`DEFAULT_SYSTEM_PROMPT`, `DelegatingTool`, `DelegationCall`, `Diagnostic`
+`DiagnosticKind`, `EventSink`, `Gate`, `GrantKey`, `GrantScope`, `Hook`, `Host`
+`InMemoryCheckpointer`, `KEY_APPROVAL`, `Plugin`, `PluginHandle`, `PromptContext`
+`PromptSection`, `ReActAgent`, `ReActStrategy`, `ReasoningStrategy`, `Registration`
+`RequestTransformer`, `ResultTransformer`, `ResumeCoverageError`, `ResumeDecision`
+`ResumeStatus`, `ResumeToken`, `RiskOf`, `SessionEndReason`, `StrategyRegistry`
 `SubagentWriters`, `Suspension`, `SystemEvent`, `WarningKind`, `align_decisions`
 `check_coverage`, `default_descriptor`, `latest_request_snapshot_hash`, `may_retry`
 `open_requests`, `prepare_messages_for_shot`, `single_shot_request`, `single_shot_request_shared`
 `suspended_segment`, `workspace_hash`
 
-### elysper-provider — 89 names
+### elysper-provider — 92 names
 
 Model providers and everything around a completion: request/response
 types, credentials, retry classification, cache policy, JSON repair.
@@ -212,11 +213,11 @@ types, credentials, retry classification, cache policy, JSON repair.
 `CredentialError`, `CredentialStatus`, `DEFAULT_ANTHROPIC_CONTEXT_WINDOW`
 `DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS`, `DEFAULT_OPENAI_CONTEXT_WINDOW`, `DEFAULT_OPENAI_MAX_OUTPUT_TOKENS`
 `DEFAULT_STREAM_IDLE_TIMEOUT`, `EMPTY_RESPONSE_MARKER`, `IDLE_TIMEOUT_MARKER`
-`ImageContent`, `ImageDetail`, `MAX_PROVIDER_ERROR_BODY_CHARS`, `Message`
-`MessageCacheStrategy`, `MessageKind`, `ModelCapabilities`, `ModelConfig`
+`ImageContent`, `ImageDetail`, `KEY_LLM`, `KEY_LLM_DEFAULT`, `MAX_PROVIDER_ERROR_BODY_CHARS`, `Message`
+`MessageCacheStrategy`, `MessageKind`, `ModelAdapterPlugin`, `ModelCapabilities`, `ModelConfig`
 `ModelInfo`, `ModelProvider`, `ModelTier`, `OpenAICompatibleProvider`, `OpenAIProfile`
 `ProviderConfig`, `ProviderEntry`, `ProviderErrorBody`, `ProviderInfo`, `ProviderProfile`
-`ProviderRegistry`, `ReasoningContent`, `ResourceLink`, `RetryClass`, `RetryConfig`
+`ProviderRegistry`, `ProviderResolver`, `ReasoningContent`, `ResourceLink`, `RetryClass`, `RetryConfig`
 `Role`, `SamplingResult`, `StreamChunk`, `StubProfile`, `TextContent`, `TierLimits`
 `TierParseError`, `TokenCounter`, `TokenUsage`, `ToolAnnotations`, `ToolArgsQuality`
 `ToolChoice`, `ToolDefinition`, `ToolResult`, `ToolUse`, `WorkspaceConfig`
@@ -228,7 +229,7 @@ types, credentials, retry classification, cache policy, JSON repair.
 `parse_tool_input_logged`, `parse_tool_input_reported`, `parse_tool_input_with_completion`
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
-### elysper-session — 115 names
+### elysper-session — 119 names
 
 The durable ledger: JSONL sink and version header, events, history fold,
 surface ledger, compaction, search, token metering, typed builders.
@@ -236,15 +237,17 @@ surface ledger, compaction, search, token metering, typed builders.
 `AttachmentRefRow`, `BalanceCache`, `CURRENT_SCHEMA_VERSION`, `CompactionCheckpoint`
 `CompactionError`, `CompactionLifecycleOutcome`, `CompactionLifecycleView`
 `CompactionOutcome`, `CompactionPass`, `CompactionPassError`, `CompactionPlan`
-`CompactionRecordView`, `CompactionRef`, `Compactor`, `ContextPressure`, `DEFAULT_BUS_CAPACITY`
+`CompactionPlugin`, `CompactionRecordView`, `CompactionRef`, `Compactor`
+`ContextPressure`, `DEFAULT_BUS_CAPACITY`
 `DEFAULT_LIMIT`, `DEFAULT_PRUNE_MIN_CHARS`, `DEFAULT_SUMMARY_TIMEOUT`, `EntryHit`
-`FoldError`, `FoldedSurface`, `HistoryError`, `JsonlSessionSearch`, `KNOWN_SESSION_EVENT_TYPES`
+`FoldError`, `FoldedSurface`, `HistoryError`, `JsonlSessionSearch`, `KEY_COMPACTION`
+`KEY_SESSIONS`, `KNOWN_SESSION_EVENT_TYPES`
 `LogWriter`, `MAX_PLUGIN_KIND_BYTES`, `MAX_PLUGIN_PAYLOAD_BYTES`, `MappingGap`
 `MeasurementBaseline`, `MetaMarker`, `OperationSnapshot`, `OperationState`
 `OrphanedCompaction`, `PRUNED_TOOL_RESULT`, `ParkedPromptRecovery`, `PlannedCompaction`
 `ReplaceRange`, `ResolvedReplace`, `SearchError`, `SearchQuery`, `SessionEndReason`
 `SessionError`, `SessionEvent`, `SessionHit`, `SessionMetadataHeader`, `SessionSearch`
-`SessionSink`, `SessionSnapshot`, `SharedSessionSearch`, `SharedSurfaceLedger`
+`SessionSink`, `SessionSnapshot`, `SessionStorePlugin`, `SharedSessionSearch`, `SharedSurfaceLedger`
 `SnapshotBus`, `SnapshotReceiver`, `SummaryCompactor`, `SurfaceLedger`, `SurfaceOp`
 `SurfaceToken`, `TOOL_NOT_STARTED`, `TOOL_OUTCOME_UNKNOWN`, `TURN_INTERRUPTED`
 `TokenBudget`, `TokenMeasurement`, `TokenMeter`, `TokenMeterError`, `TypedEventRecord`
@@ -275,19 +278,19 @@ The policy layer: guards, gates, hints, hooks, and output transformers.
 `TruncationHint`, `WorkspaceBoundaryGuard`, `auto`, `event_name`, `for_tier`
 `logging_hook_map`, `run_guards`, `tool_fingerprint`
 
-### elysper-tool — 46 names
+### elysper-tool — 48 names
 
 The tool paradigm: registry, traits, annotations, restriction, surface
 projection.
 
 `AdaptiveRegistry`, `Context`, `DispatchPlan`, `DispatchRefusal`, `ExecutionMode`
-`FULL_OUTPUT_TOOL_NAME`, `GroupError`, `GroupedRegistry`, `MCP_SELF_TOOL_PREFIX`
+`FULL_OUTPUT_TOOL_NAME`, `GroupError`, `GroupedRegistry`, `KEY_TOOLS`, `MCP_SELF_TOOL_PREFIX`
 `OutputBound`, `OverflowStrategy`, `RegistrationScope`, `RegistrationToken`
 `RenderKind`, `RestrictedRegistry`, `Result`, `RetrieveFullOutputTool`, `Risk`
 `STRUCTURED_OUTPUT_TOOL_NAME`, `SanitizationPolicy`, `StreamOutput`, `SurfacePolicyError`
 `Tool`, `ToolAnnotations`, `ToolCategory`, `ToolDescriptor`, `ToolEntry`
 `ToolExposure`, `ToolFeatures`, `ToolMetadataSnapshot`, `ToolOutput`, `ToolOutputDefinition`
-`ToolProvenance`, `ToolRegistry`, `ToolRestriction`, `ToolSchemaBuilder`
+`ToolProvenance`, `ToolRegistry`, `ToolRegistryPlugin`, `ToolRestriction`, `ToolSchemaBuilder`
 `ToolSurfacePolicy`, `TruncatedBy`, `Visibility`, `bound_output`, `called_tool_names`
 `full_output_tool`, `is_mcp_self_tool`, `project_tool_definitions`, `signal_of`
 `structured_output_tool`

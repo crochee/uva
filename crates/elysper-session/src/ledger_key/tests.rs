@@ -1,8 +1,8 @@
 //! The key scheme's tests: every shadowable row carries an identity,
 //! and no two rows on one surface share one.
 
-use serde_json::{Value, json};
 use elysper_provider::{Content, ContentPart, Message, Role, ToolUse};
+use serde_json::{Value, json};
 
 use crate::{ledger_key::key_of, log_surface::SurfaceLedger};
 

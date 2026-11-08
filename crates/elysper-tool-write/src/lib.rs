@@ -16,8 +16,6 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use schemars_derive::JsonSchema;
-use serde::Deserialize;
 use elysper_tool::{
     Context,
     ExecutionMode,
@@ -26,6 +24,13 @@ use elysper_tool::{
     ToolOutput,
     workspace::{check_path_safety, resolve_path},
 };
+use schemars_derive::JsonSchema;
+use serde::Deserialize;
+
+/// The `write` tool brick as a native kernel plugin.
+pub mod plugin;
+
+pub use plugin::WriteToolPlugin;
 
 /// Write mode for [`WriteTool`].
 ///

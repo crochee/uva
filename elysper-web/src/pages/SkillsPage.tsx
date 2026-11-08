@@ -195,7 +195,7 @@ export function SkillsPage() {
             </div>
             <div className="nt-vis-meta-cluster__row">
               <span>API</span>
-              <span>/api/v1/skills</span>
+              <span>skills/list</span>
             </div>
           </div>
         }

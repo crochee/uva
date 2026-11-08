@@ -50,9 +50,9 @@
 
 use std::sync::Arc;
 
+use elysper_provider::{Content, ContentPart, Message, Role};
 use parking_lot::Mutex;
 use serde_json::Value;
-use elysper_provider::{Content, ContentPart, Message, Role};
 
 use crate::{
     events::{ReplaceRange, SessionEvent, SurfaceOp},

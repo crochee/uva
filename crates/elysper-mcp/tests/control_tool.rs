@@ -9,7 +9,6 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::{Value, json};
 use elysper_mcp::{
     InMemoryTransport,
     InMemoryTransportFactory,
@@ -18,6 +17,7 @@ use elysper_mcp::{
     register_mcp_control_tool,
 };
 use elysper_tool::{Context, Tool, ToolOutput, ToolRegistry};
+use serde_json::{Value, json};
 
 /// A supervisor with two servers: `alpha` (connected, one `echo`
 /// tool) and `beta` (transport dead at boot, so it lands in

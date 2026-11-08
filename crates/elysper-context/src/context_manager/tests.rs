@@ -319,3 +319,120 @@ async fn prepare_arc_copies_when_input_arc_is_shared() {
     // Untouched because the list fits — the input was kept alive.
     assert_eq!(arc_out.len(), 2);
 }
+
+// -- the projection contract ----------------------------------------
+
+/// A body shaped like a real transcript: the tool result and the
+/// summary that follow a dropped user/assistant pair survive, so the
+/// surviving set is *not* a contiguous range. A projection that
+/// answered with a range would silently keep a different set.
+fn projected_body(pairs: usize) -> Vec<Message> {
+    let mut body = Vec::new();
+    for i in 0..pairs {
+        body.push(user(&format!("question {i} with padding")));
+        body.push(assistant(&format!("answer {i} with padding")));
+        body.push(tool_result(
+            &format!("call-{i}"),
+            &format!("result {i} with padding"),
+        ));
+        body.push(assistant(&format!("summary {i} with padding")));
+    }
+    body
+}
+
+#[tokio::test]
+async fn the_projection_names_exactly_what_prepare_keeps() {
+    // The contract: a caller that copies only the projected messages
+    // sends the model exactly the list `prepare` would have left
+    // behind. If the two ever disagree, the model reads a different
+    // history than the one the manager decided on.
+    let manager = TruncatingContextManager;
+    let prefix = vec![sys("you are elysper, helpful")];
+    let body = projected_body(12);
+
+    for window in [10, 50, 200, 1_000, 100_000] {
+        // What `prepare` leaves behind.
+        let mut whole = prefix.clone();
+        whole.extend(body.clone());
+        let mut prepared_state = AgentState::with_window(window);
+        manager.prepare(&mut whole, &mut prepared_state).await;
+
+        // What the projection names.
+        let mut projected_state = AgentState::with_window(window);
+        let kept = manager
+            .kept_indices(&prefix, &body, &mut projected_state)
+            .await
+            .expect("the truncating manager projects");
+
+        let projected: Vec<Message> =
+            kept.iter().map(|index| body[*index].clone()).collect();
+        let mut expected = prefix.clone();
+        expected.extend(projected);
+
+        assert_eq!(
+            expected, whole,
+            "the projection and prepare disagree at window {window}"
+        );
+        assert_eq!(
+            projected_state.estimated_tokens, prepared_state.estimated_tokens,
+            "the two paths must leave the same estimate at window {window}"
+        );
+        assert_eq!(
+            projected_state.last_truncated, prepared_state.last_truncated,
+            "the two paths must agree on whether anything was dropped \
+             at window {window}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_projection_keeps_the_messages_prepare_keeps_when_it_fits() {
+    // A list that fits is not pruned, so the projection is every
+    // message — and the caller that copies only those sends the
+    // whole body.
+    let manager = TruncatingContextManager;
+    let prefix = vec![sys("sys")];
+    let body = projected_body(3);
+
+    let mut state = AgentState::with_window(1_000_000);
+    let kept = manager
+        .kept_indices(&prefix, &body, &mut state)
+        .await
+        .expect("the truncating manager projects");
+
+    assert_eq!(kept, (0..body.len()).collect::<Vec<usize>>());
+    assert!(!state.last_truncated);
+}
+
+#[tokio::test]
+async fn the_projection_is_not_a_range() {
+    // The pairwise drop leaves the tool result and the summary of a
+    // dropped turn in place, so the survivors are scattered. A
+    // projection that answered with a range would keep a different
+    // set — this test is why the seam is indices and not a range.
+    let manager = TruncatingContextManager;
+    let prefix = vec![sys("sys")];
+    let body = projected_body(6);
+
+    let mut state = AgentState::with_window(60);
+    let kept = manager
+        .kept_indices(&prefix, &body, &mut state)
+        .await
+        .expect("the truncating manager projects");
+
+    assert!(state.last_truncated, "the window must have forced a drop");
+    assert!(
+        kept.len() < body.len(),
+        "the projection must have dropped something"
+    );
+    // The survivors are not the tail of the body: the first message
+    // is gone while a later one is not.
+    assert!(
+        !kept.contains(&0),
+        "the oldest user turn must be among the dropped"
+    );
+    assert!(
+        kept.iter().any(|index| *index > 0),
+        "a later message must have survived the drop"
+    );
+}

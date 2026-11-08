@@ -1,10 +1,10 @@
 //! The veto pipeline: tool restriction, hook veto, guard rewrite, observation. Each refusal converges on [`deny_with_event`] so the model always sees a clear error.
 
-use sha2::{Digest, Sha256};
 use elysper_context::AgentState;
 use elysper_provider::ToolUse;
-use elysper_steering::{Action, GuardOutcome, HookDecision, HookEvent};
+use elysper_steering::{Action, GuardOutcome, HookDecision};
 use elysper_tool::ToolOutput;
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 
 use super::{ReActLoop, tools};
@@ -170,14 +170,14 @@ pub(super) async fn execute_gated(
     // on the way to the commit. Nothing is snapshotted and no row is
     // built on a run whose host holds no result transformer: the check
     // comes before the digest.
-    if this.caps.control.host.has_result_rewriters() {
+    if this.caps.control.seams.has_tool_result_transformers() {
         let before = result_digest(&result);
         let ctx = this.hook_context(state);
         let transformers = this
             .caps
             .control
-            .host
-            .apply_result_transformers(&mut result, &ctx)
+            .seams
+            .tool_result_transformers(&ctx, &mut result)
             .await;
         if !transformers.is_empty() {
             // One row per rewritten result. The digests cover the whole
@@ -200,7 +200,7 @@ pub(super) async fn execute_gated(
     // after-execute hooks fire regardless of outcome shape.
     // Consumer-supplied (`Steering`); isolated like the other
     // surfaces.
-    for tracker in &this.caps.control.host.tracker_table().trackers {
+    for tracker in &this.caps.control.seams.tracker_table() {
         if let Err(panic) = crate::agent::re_act::panic::caught(|| {
             tracker.on_tool_call(tool_name, &effective_call.input, state);
         }) {
@@ -250,7 +250,7 @@ fn denied(
 ) -> ToolOutput {
     // Panic-isolated like the success path: a denial must not
     // become a run-ending error because the tracker panicked.
-    for tracker in &this.caps.control.host.tracker_table().trackers {
+    for tracker in &this.caps.control.seams.tracker_table() {
         if let Err(panic) = crate::agent::re_act::panic::caught(|| {
             tracker.on_tool_call(tool_name, &call.input, state);
         }) {
@@ -289,21 +289,18 @@ async fn pre_execution_veto(
         )));
     }
 
-    // Steering seam 1 — the `before_tool` interception. The event is
-    // built lazily inside `dispatch_tool_gate`, which returns before
-    // calling the closure when no steering hook and no host
-    // registration exists — so the `call.input.clone()` below only
-    // happens on a run that actually has a hook or a gate, and the
-    // zero-hook hot path pays nothing for it. Do not "fix" the clone
-    // without measuring: on that path it does not execute.
-    let arbitration = super::hooks::dispatch_tool_gate(this, state, || {
-        HookEvent::BeforeTool {
-            tool_name: tool_name.to_string(),
-            call_id: call.id.clone(),
-            arguments: call.input.clone(),
-        }
-    })
-    .await;
+    // Steering seam 1 — the `tool/pre-execute` interception. `Seams`
+    // builds the event lazily: it returns before cloning the arguments
+    // when no hook and no gate is registered, so the zero-registration
+    // hot path pays nothing for the clone.
+    let arbitration = {
+        let ctx = this.hook_context(state);
+        this.caps
+            .control
+            .seams
+            .tool_pre(&ctx, tool_name, call.id.as_str(), &call.input)
+            .await
+    };
     match arbitration.decision {
         HookDecision::Block { reason } => {
             let denied = deny_with_event(
@@ -314,17 +311,16 @@ async fn pre_execution_veto(
                 format!("policy blocked `{}`: {reason}", call.name),
                 format!("[blocked by policy] {reason}"),
             );
-            // Observers see the veto too: `after_tool` fires
-            // regardless of outcome shape, denial included; the
-            // veto already happened, so the decision is ignored.
-            let _ = super::hooks::dispatch_hook(this, state, || {
-                HookEvent::AfterTool {
-                    tool_name: tool_name.to_string(),
-                    call_id: call.id.clone(),
-                    is_error: true,
-                }
-            })
-            .await;
+            // Observers see the veto too: `tool_post` fires regardless of
+            // outcome shape, denial included; the veto already happened,
+            // so the decision is ignored.
+            let ctx = this.hook_context(state);
+            let _ = this
+                .caps
+                .control
+                .seams
+                .tool_post(&ctx, tool_name, call.id.as_str(), true)
+                .await;
             return Some(PreDecision::Respond(denied));
         }
         HookDecision::Terminate { reason } => {
@@ -459,13 +455,13 @@ pub(super) fn apply_guard_pipeline<'a>(
     call: &'a ToolUse,
     state: &AgentState,
 ) -> Verdict<'a> {
-    if this.caps.control.host.snapshot().guards.is_empty() {
+    if !this.caps.control.seams.has_guards() {
         // No guards → the call passes through with zero clone.
         return Verdict::Allowed(std::borrow::Cow::Borrowed(call));
     }
     let action = Action::from_tool_use(call);
     let ctx = this.hook_context(state);
-    match this.caps.control.host.dispatch_guards(&action, &ctx) {
+    match this.caps.control.seams.tool_guards(&action, &ctx) {
         GuardOutcome::Allowed { action } => {
             Verdict::Allowed(std::borrow::Cow::Owned(action.apply_to(call)))
         }
@@ -501,13 +497,19 @@ async fn notify_after_hooks(
     call_id: &str,
     result: &ToolOutput,
 ) -> Option<String> {
-    let arbitration =
-        super::hooks::dispatch_hook(this, state, || HookEvent::AfterTool {
-            tool_name: tool_name.to_string(),
-            call_id: call_id.to_string(),
-            is_error: result.is_error.unwrap_or(false),
-        })
-        .await;
+    let arbitration = {
+        let ctx = this.hook_context(state);
+        this.caps
+            .control
+            .seams
+            .tool_post(
+                &ctx,
+                tool_name,
+                call_id,
+                result.is_error.unwrap_or(false),
+            )
+            .await
+    };
     match arbitration.decision {
         HookDecision::Terminate { reason } => Some(reason),
         HookDecision::Allow

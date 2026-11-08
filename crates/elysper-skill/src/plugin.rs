@@ -1,0 +1,141 @@
+//! The `skills` service: the skill registry and the `skill` tool as a
+//! native kernel plugin.
+//!
+//! # Two contributions, both reversible
+//!
+//! [`SkillPlugin`] provides the host's [`SkillRegistry`] under
+//! [`KEY_SKILLS`] and registers [`SkillTool`] into the injected `tools`
+//! registry. The tool registration is token-scoped: `apply` keeps the
+//! [`RegistrationToken`](elysper_tool::RegistrationToken) that
+//! `register_entry_with_token` returned and returns a
+//! [`ctx.effect`](elysper_kernel::Context::effect) that calls
+//! `unregister_by_token`, so unloading the plugin removes exactly the
+//! entry it filed — never a same-named entry another registrant owns.
+//!
+//! # The prompt section belongs to the consumer
+//!
+//! The registry is what the app-server's prompt builder reads to
+//! contribute the `<available_skills>` block; the plugin deliberately
+//! registers no `prompt/sections` effect. A kernel-owned section effect
+//! that no builder read would be a promise the system does not keep, so
+//! the wiring stays with the consumer that assembles the prompt.
+//!
+//! # Refusal is loud
+//!
+//! The `skill` name is a shipped tool: when a Core tool already owns
+//! it, [`ToolRegistry::register_entry_with_token`] refuses the
+//! registration. `apply` turns that `None` into a [`PluginError`]
+//! naming the tool and the core owner instead of mounting a plugin
+//! whose flagship tool silently never appeared.
+//!
+//! # The service value's shape
+//!
+//! [`SkillRegistry`] is `Sized`, so `apply` calls
+//! `ctx.provide_arc(KEY_SKILLS, Arc<SkillRegistry>)` and a consumer
+//! writes `ctx.require::<SkillRegistry>(KEY_SKILLS)`.
+//!
+//! # Lifecycle
+//!
+//! The manifest injects `tools`, so the kernel orders this plugin after
+//! the registry provider and parks it while `tools` is absent. `apply`
+//! returns both handles; unload revokes the tool entry first (reverse
+//! order) and then the service, and a failed apply rolls the whole
+//! group back.
+
+use std::sync::Arc;
+
+use elysper_kernel::{
+    Context,
+    EffectHandle,
+    PLUGIN_PROTOCOL_VERSION,
+    Plugin as KernelPlugin,
+    PluginError,
+    PluginManifest,
+    RuntimeKind,
+};
+use elysper_tool::{KEY_TOOLS, ToolEntry, ToolRegistry};
+
+use crate::{
+    SkillRegistry,
+    builtin::skill_tool::{SKILL_TOOL_NAME, SkillTool},
+};
+
+/// The service key the `skills` service is registered under.
+///
+/// The kernel's manifest `provides` list carries the same string, so
+/// the key a consumer passes to `Context::require` and the key the
+/// kernel validates are one constant.
+pub const KEY_SKILLS: &str = "skills";
+
+/// The plugin id the `skills` manifest declares.
+const SKILLS_ID: &str = "skills";
+
+/// Label of the effect that withdraws the `skill` tool registration.
+const SKILL_TOOL_EFFECT: &str = "skill-tool";
+
+/// The `skills` kernel plugin: provides [`KEY_SKILLS`] and registers
+/// the `skill` tool.
+///
+/// Mount it with [`elysper_kernel::mount_all`] in the same group as (or
+/// after) the `tool-registry` plugin. See the [module docs](crate::plugin)
+/// for the token scoping and the prompt-section boundary.
+pub struct SkillPlugin {
+    manifest: PluginManifest,
+    /// The registry the host built from its skill providers.
+    ///
+    /// Public because the prompt builder and the HTTP routes resolve
+    /// the same `Arc`; the service hands out exactly this value.
+    pub registry: Arc<SkillRegistry>,
+}
+
+impl SkillPlugin {
+    /// Publish `registry` as the `skills` service and register the
+    /// `skill` tool.
+    ///
+    /// The host builds the registry (one per node) and keeps its own
+    /// handle for prompt assembly.
+    pub fn new(registry: Arc<SkillRegistry>) -> Self {
+        let mut manifest =
+            PluginManifest::new(SKILLS_ID, PLUGIN_PROTOCOL_VERSION);
+        manifest.runtime = RuntimeKind::Native;
+        manifest.provides.push(KEY_SKILLS.to_string());
+        manifest.inject.push(KEY_TOOLS.to_string());
+        Self { manifest, registry }
+    }
+}
+
+impl KernelPlugin for SkillPlugin {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
+        let service =
+            ctx.provide_arc(KEY_SKILLS, Arc::clone(&self.registry))?;
+        let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
+        let entry = ToolEntry::new(Arc::new(SkillTool::new()));
+        let Some(token) = tools.register_entry_with_token(entry) else {
+            return Err(PluginError::new(format!(
+                "the `{KEY_TOOLS}` registry refused to register the \
+                 `{SKILL_TOOL_NAME}` tool: a core tool already owns the \
+                 name `{SKILL_TOOL_NAME}`"
+            )));
+        };
+        // The closure owns one token clone; `rollback` covers the case
+        // where the framework refuses to file the effect at all.
+        let rollback = token.clone();
+        let registry = Arc::clone(&tools);
+        let unregister = ctx.effect(SKILL_TOOL_EFFECT, move || {
+            registry.unregister_by_token(token);
+            Ok(())
+        });
+        let effect = match unregister {
+            Ok(effect) => effect,
+            Err(error) => {
+                tools.unregister_by_token(rollback);
+                return Err(error);
+            }
+        };
+        Ok(vec![service, effect])
+    }
+}

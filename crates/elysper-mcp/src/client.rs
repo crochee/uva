@@ -11,8 +11,6 @@ use std::{
     },
 };
 
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
 use elysper_core::Error;
 use elysper_provider::types::{
     AudioContent,
@@ -21,6 +19,8 @@ use elysper_provider::types::{
     TextContent,
 };
 use elysper_tool::{ToolEntry, ToolExposure, ToolRegistry};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::{
     MCP_PROTOCOL_VERSION,

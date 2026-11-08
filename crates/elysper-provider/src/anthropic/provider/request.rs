@@ -21,6 +21,30 @@ use super::core::AnthropicProvider;
 use crate::types::CompletionRequest;
 
 impl AnthropicProvider {
+    /// The one POST builder for `/v1/messages`.
+    ///
+    /// `.json(body)` already sets `content-type: application/json`;
+    /// adding it again appends a second header, and at least one
+    /// Anthropic-compatible proxy (DeepSeek) answers a duplicated
+    /// content-type with `415 Expected request with Content-Type:
+    /// application/json` even though the value is right — so this is
+    /// the only place the headers are set, and a test pins the count.
+    pub(in crate::anthropic) fn messages_request(
+        &self,
+        body: &super::super::types::AnthropicRequest,
+    ) -> reqwest::RequestBuilder {
+        let mut req = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .json(body)
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-beta", "prompt-caching-2024-07-31");
+        if let Some(key) = &self.api_key {
+            req = req.header("x-api-key", key);
+        }
+        req
+    }
+
     pub(in crate::anthropic) async fn make_request(
         &self,
         request: &CompletionRequest,
@@ -35,18 +59,6 @@ impl AnthropicProvider {
             "Anthropic outgoing request body"
         );
 
-        let mut req = self
-            .client
-            .post(url)
-            .json(&body)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .header("anthropic-beta", "prompt-caching-2024-07-31");
-
-        if let Some(ref key) = self.api_key {
-            req = req.header("x-api-key", key);
-        }
-
-        Ok(req)
+        Ok(self.messages_request(&body))
     }
 }

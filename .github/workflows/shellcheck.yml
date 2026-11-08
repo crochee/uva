@@ -50,12 +50,14 @@ jobs:
             ./scripts/check-frozen-api.sh
             ./scripts/check-harness-docs.sh
             ./scripts/check-harness-shape.sh
+            ./scripts/check-kernel-deps.sh
             ./scripts/check-plugin-shape.sh
             ./scripts/check-pub-surface-strict.sh
             ./scripts/check-public-api-runtime.sh
             ./scripts/check-public-docs.sh
             ./scripts/check-publishable.sh
             ./scripts/check-single-writer.sh
+            ./scripts/check-stdout.sh
           # SC1091 (sourced file not found) is irrelevant: the gate
           # scripts do not source anything. SC2086 (unquoted globbing)
           # is intentional in the awk pipeline; see the comment in

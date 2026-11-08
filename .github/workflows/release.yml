@@ -1,6 +1,6 @@
 # release.yml — tag 推送自动出跨平台容器镜像 (linux/amd64 + linux/arm64).
 #
-# 产物: docker.io/crochee/elysper-server 与 docker.io/crochee/elysper-web,
+# 产物: docker.io/crochee/elysper-app-server 与 docker.io/crochee/elysper-web,
 # 每个镜像打 tag 两件套: `<tag>` 直用 + `<tag>-<short-sha>` 追溯.
 # (workflow 仅由 tag push 触发; `<branch>-<short-sha>` 给 branch
 # pre-release 预留接口, 当前 ON 里没启用.) 草稿 release 不再创建
@@ -136,7 +136,7 @@ jobs:
       # ELYSPER_TARGET 完全对齐, builder 阶段会原样写入
       # cargo:rustc-env=, 最终进 binary 的 `--version` 行 — 与
       # `--version` 自证路径同源.
-      - name: Build and push elysper-server (multi-arch)
+      - name: Build and push elysper-app-server (multi-arch)
         env:
           SHA: ${{ steps.identity.outputs.sha }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
@@ -158,8 +158,8 @@ jobs:
             exit 1
           fi
           tags=(
-            "docker.io/crochee/elysper-server:${TAG}"
-            "docker.io/crochee/elysper-server:${TAG}-${SHORT_SHA}"
+            "docker.io/crochee/elysper-app-server:${TAG}"
+            "docker.io/crochee/elysper-app-server:${TAG}-${SHORT_SHA}"
           )
           tag_args=()
           for t in "${tags[@]}"; do tag_args+=(--tag "$t"); done
@@ -339,7 +339,7 @@ jobs:
 
           failed=0
           for image in \
-              "docker.io/crochee/elysper-server:${TAG}" \
+              "docker.io/crochee/elysper-app-server:${TAG}" \
               "docker.io/crochee/elysper-web:${TAG}"; do
             if ! verify_image "${image}"; then
               failed=1

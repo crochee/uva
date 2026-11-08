@@ -28,6 +28,12 @@ categories.workspace = true
 elysper-plugin-protocol.workspace = true
 elysper-harness.workspace = true
 elysper-tool.workspace = true
+# The `process-plugins` entry is a native kernel plugin: it speaks the
+# kernel's manifest/effect contract, not a runtime's.
+elysper-kernel.workspace = true
+# A refused host bind is reported through the same logging facade the
+# harness uses; this is not a runtime dependency.
+tracing.workspace = true
 elysper-core.workspace = true
 elysper-steering.workspace = true
 async-trait.workspace = true

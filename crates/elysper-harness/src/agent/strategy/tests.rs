@@ -9,8 +9,8 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use futures::{StreamExt as _, channel::mpsc};
 use elysper_provider::ModelProvider;
+use futures::{StreamExt as _, channel::mpsc};
 
 use super::*;
 use crate::{

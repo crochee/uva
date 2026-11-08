@@ -20,9 +20,9 @@
   - files:
       - "crates/elysper-tool/**"
 
-"area: crates/elysper-server":
+"area: crates/elysper-app-server":
   - files:
-      - "crates/elysper-server/**"
+      - "crates/elysper-app-server/**"
 
 "area: elysper-web":
   - files:

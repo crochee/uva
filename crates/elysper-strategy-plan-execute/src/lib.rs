@@ -37,6 +37,7 @@ mod defaults;
 mod strategy;
 
 pub use defaults::{DefaultExecutor, DefaultPlanGenerator, DefaultRePlanner};
+pub use elysper_harness::agent::ReasoningStrategy;
 pub use strategy::{
     Plan,
     PlanExecuteConfig,
@@ -45,7 +46,6 @@ pub use strategy::{
     Step,
     StepOutcome,
 };
-pub use elysper_harness::agent::ReasoningStrategy;
 
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use futures::StreamExt;
 use elysper_core::CancelToken;
 use elysper_harness::{
     Agent,
@@ -11,6 +10,7 @@ use elysper_harness::{
     SystemEvent,
 };
 use elysper_provider::{ContentPart, TextContent};
+use futures::StreamExt;
 
 use super::spec::TaskSpec;
 use crate::{

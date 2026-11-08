@@ -2,7 +2,6 @@
 
 use std::{pin::Pin, sync::Arc};
 
-use futures::Stream;
 use elysper_tool::{
     Context,
     ExecutionMode,
@@ -12,6 +11,7 @@ use elysper_tool::{
     ToolOutput,
     ToolOutputDefinition,
 };
+use futures::Stream;
 
 use crate::budget::Budget;
 

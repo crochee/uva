@@ -246,17 +246,10 @@ impl ModelProvider for AnthropicProvider {
                 }
                 let mut body = self.transform_request(&req);
                 body.stream = true;
-                let url = format!("{}/v1/messages", self.base_url);
-                let mut outbound = self
-                    .client
-                    .post(url)
-                    .json(&body)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("content-type", "application/json")
-                    .header("anthropic-beta", "prompt-caching-2024-07-31");
-                if let Some(key) = &self.api_key {
-                    outbound = outbound.header("x-api-key", key);
-                }
+                // The one header set lives in `messages_request`; a
+                // duplicate content-type gets the request a 415 from
+                // strict Anthropic-compatible proxies.
+                let outbound = self.messages_request(&body);
                 let resp = outbound
                     .send()
                     .await

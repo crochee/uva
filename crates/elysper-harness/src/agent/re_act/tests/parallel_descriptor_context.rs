@@ -4,8 +4,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use serde_json::json;
 use elysper_core::{CancelToken, Error};
 use elysper_provider::{
     CompletionRequest,
@@ -16,6 +14,8 @@ use elysper_provider::{
     types::ModelConfig,
 };
 use elysper_tool::{Context, Tool, ToolOutput, ToolRegistry};
+use futures::StreamExt;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::{support::*, *};

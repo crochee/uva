@@ -109,7 +109,7 @@ loop → session writer）在这一份代码里真实跑一遍，并断言工具
 
 ## 仓库分层
 
-The framework is organized as a Rust workspace with **25 members**, all under `crates/`, every one of them a `elysper-*` crate except the `elysper` facade. Of those, 24 are libraries meant to be composed by consumers and `elysper-server` is the application crate (the one place where `tokio` / `axum` may appear in a public signature). The front-end sits next to the workspace as `elysper-web/` with its own `package.json`.
+The framework is organized as a Rust workspace with **40 members**, all under `crates/`, every one of them a `elysper-*` crate except the `elysper` facade. Of those, the libraries are meant to be composed by consumers; `elysper-app-server` is the application crate and `elysper-mcp-server` the stdio binary — the two places where `tokio` / `axum` may appear in a public signature. The front-end sits next to the workspace as `elysper-web/` with its own `package.json`.
 
 ### Core Crates
 
@@ -135,26 +135,21 @@ The framework is organized as a Rust workspace with **25 members**, all under `c
 
 | Crate | Description |
 |-------|-------------|
-| [elysper-server](crates/elysper-server/) | HTTP/WebSocket server with axum, exposes the REST + SSE chat surface |
+| [elysper-app-server](crates/elysper-app-server/) | The application crate: `core` (headless JSON-RPC 2.0 on stdio) + `serve` (the gateway: one WebSocket at `/rpc`, HTTP probes, static web) |
 
 ### Support Crates
 
 | Crate | Description |
 |-------|-------------|
 | [elysper-test-support](crates/elysper-test-support/) | Shared mock implementations for cross-crate testing |
-| [elysper-web](elysper-web/) | React/Vite frontend speaking the REST + SSE chat surface |
-
-### 自带工具
-
-| Path | One-line responsibility |
-|------|-------------------------|
-| [`contract-closure/`](contract-closure/) | 项目自带 TypeScript 工具：双侧接口契约闭环（backend router + frontend fetch calls 互校；advisory，§6 闭环时升级为 gating）。CI 入口：[`.github/workflows/contract-closure.yml`](.github/workflows/contract-closure.yml)；Makefile 入口：`make contract-scan / contract-check / contract-report`；产出归位 [`docs/interface-contract/`](docs/interface-contract/) |
+| [elysper-web](elysper-web/) | React/Vite frontend speaking JSON-RPC 2.0 over the gateway's `/rpc` WebSocket |
 
 ### Protocol / Cache / Skill Crates
 
 | Crate | Description |
 |-------|-------------|
 | [elysper-skill](crates/elysper-skill/) | Skill registry (slash-command, prompt, and tool bundles) |
+| [elysper-agents](crates/elysper-agents/) | Agent definitions as files (`agents/<name>/agent.md` + optional `config.json`), discovered over the two-layer `~/.agents` layout |
 
 ### Workspace Members
 
@@ -170,9 +165,11 @@ listed below, and every path is a real on-disk directory:
 | `crates/elysper-tool` | Tool paradigm: trait, registry, exposure projection, `workspace` path confinement |
 | `crates/elysper-tool-*` | Tool plugins (`-read`, `-write`, `-shell`, `-todo`, `-web`, `-task`, `-scheduler`, `-search`), one tool each |
 | `crates/elysper-skill` | Skill registry + loader |
+| `crates/elysper-agents` | Agent definitions as files: `agents/<name>/agent.md` + `config.json`, discovered over the `~/.agents` layout |
 | `crates/elysper-session` | Session lifecycle + cleanup daemon |
 | `crates/elysper-harness` | ReAct loop agent (the "AI" of Elysper) |
-| `crates/elysper-server` | HTTP / WebSocket server (axum, REST + SSE chat surface) — the application crate |
+| `crates/elysper-kernel` | Plugin kernel: manifests, dependency-ordered `mount_all`, reversible `EffectHandle`s, per-plugin `dispose_plugin`, and the `ui.` / core namespace boundary |
+| `crates/elysper-app-server` | The application crate: headless JSON-RPC 2.0 core (`core`) + WebSocket gateway (`serve`) — the human entry point; boots the native plugin set through the kernel, polls `profile.toml` for HMR, and serves `ui/schema` |
 | `crates/elysper-attachment` | Multimodal attachment store (filesystem + in-memory backends) |
 | `crates/elysper-mcp` | MCP client (stdio + in-memory transports) and tool publication |
 | `crates/elysper-scheduler` | Cron / interval / once dispatcher (caller owns the timer) + atomic JSON job store |
@@ -247,8 +244,8 @@ end-to-end (no network, no API key) — through the facade, or crate by
 crate if you prefer to see each brick:
 
 ```bash
-cargo run --example assemble_from_zero      -p elysper       # prelude only
-cargo run --example assemble_from_scratch   -p elysper-harness # each crate named
+cargo run --example assemble_from_zero      -p elysper         # prelude only
+cargo run --example assemble_with_builder   -p elysper-harness # each crate named
 ```
 
 Sketch of the same assembly:
@@ -315,8 +312,8 @@ Later rounds kept growing the same lego axes:
 | 9 | `AdaptiveRegistry` | `elysper-tool` | Tier-capped LLM-visible tool list over any `Arc<ToolRegistry>` |
 | 10 | `ToolOutputDefinition` + `present_call` / `present_result` | `elysper-tool` | Tool-owned canonical render contract for LLM + UI surfaces (dsh parity) |
 | 11 | `Router` + `LeaderRouter` + `mentions_to_task_specs` | `elysper-tool-task` | `@agent: prompt` text mentions → delegation `TaskSpec`s |
-| 12 | `AttachmentStore` + `ImageAttachmentRef` | `elysper-attachment` | Content-addressed multimodal store (sha256, hash re-verify, FS + memory backends) + `/api/v1/attachments` |
-| 13 | `SnapshotBus` + `subscribe_snapshots` | `elysper-session` / `elysper-server` | Publish/subscribe channel for run lifecycle snapshots; `GET /sessions/{id}/status` |
+| 12 | `AttachmentStore` + `ImageAttachmentRef` | `elysper-attachment` | Content-addressed multimodal store (sha256, hash re-verify, FS + memory backends) |
+| 13 | `SnapshotBus` + `subscribe_snapshots` | `elysper-session` / `elysper-app-server` | Publish/subscribe channel for run lifecycle snapshots; surfaced by the `sessions/status` method |
 | 14 | `ReActAgent` + `with_*` chain | `elysper-harness` | One-expression assembly of a complete agent (`new(provider, registry)` + chained setters; the harness *is* the builder) |
 | 15 | `validate_against_schema` + `SchemaViolation` | `elysper-core` | JSON-Schema-subset validator with dotted-path, all-at-once violations |
 | 16 | `StructuredOutputTool` | `elysper-tool` | Schema-validated structured-output capture; `with_output_schema(json)` on the agent auto-injects it |
@@ -326,12 +323,12 @@ Later rounds kept growing the same lego axes:
 | 26 | `credential::normalize_api_key` | `elysper-provider` | Pre-send credential classifier; a malformed key fails before it reaches the transport (dsh parity) |
 | 27 | `MentionClone` + `LeaderRouter::mention_clone_mode` | `elysper-tool-task` | Route a `@agent:` mention through an invisible throwaway clone, not the leader's own tool call (pi-subagents parity) |
 | 28 | `Scheduler` + `Job` + `ScheduleStore` | `elysper-scheduler` | Cron / interval / once dispatch with the timer owned by the caller and atomic JSON persistence |
-| 29 | `OperationRequest` + gated `/chat/sessions/{id}/operation` | `elysper-server` | One discriminated-union endpoint (`prompt | skill | prompt_template | compaction | navigation`) behind `[operations] enabled` |
+| 29 | `OperationRequest` + gated operation dispatch | `elysper-app-server` | One discriminated-union request (`prompt | skill | prompt_template | compaction | navigation`) behind `[operations] enabled`, served by the `chat/operation` method |
 | 30 | `CompactionLifecycle` emitter + `compaction_outcomes` | `elysper-context`, `elysper-session` | Pair `compaction_start`/`end` in the durable log; an orphan is `Interrupted`, not an ambiguous gap |
 | 31 | `AssistantChunk` + `assemble_chunks` | `elysper-session`, `elysper-harness` | Preserve every streamed delta verbatim so replay reproduces the sequence, not just the concatenation |
 | 32 | `ContextManager::set_compaction_details` + `CompactionDetails` | `elysper-context`, `elysper-harness` | Name the files a run touched in the next compaction's summariser prompt (read / write only — no shell guessing) |
 | 33 | `RetryClass::{EmptyResponse, Quota}` + `validation::is_empty_terminal_completion` + shared `streaming::idle_watchdog::pump_sse` | `elysper-provider` | Retry taxonomy completion (dsh llm-retry); terminal empty completions become typed errors instead of silent success; per-read stream idle watchdog with shared cancel-drain grace across Anthropic + OpenAI |
-| 34 | `public_tool_name` + `NamingPolicy` + `McpSupervisor` + `StreamableHttpTransport` + `AppState::mcp_health` | `elysper-mcp`, `elysper-server` | Deterministic `mcp__<server>__<raw>` namespacing with sha-suffix on lossy normalization (two servers with the same raw name now coexist); supervisor tick(now) reconnect, generation-swap resync on `tools/list_changed`; streamable-HTTP transport (wiremock tested); per-server health |
+| 34 | `public_tool_name` + `NamingPolicy` + `McpSupervisor` + `StreamableHttpTransport` + `AppState::mcp_health` | `elysper-mcp`, `elysper-app-server` | Deterministic `mcp__<server>__<raw>` namespacing with sha-suffix on lossy normalization (two servers with the same raw name now coexist); supervisor tick(now) reconnect, generation-swap resync on `tools/list_changed`; streamable-HTTP transport (wiremock tested); per-server health |
 | 35 | `token_meter::TokenMeter` + `UsageBuckets` + `ContextPressure` + `CompactionSettings::should_compact_anchored` + `OperationSnapshot::usage_buckets / context_pressure` | `elysper-session`, `elysper-context` | Usage-anchored token meter fold (dsh token-meter): provider-usage anchoring, `max(0, anchor + signed surface_delta)` projection; opt-in anchor-aware compaction gating; serde-default back-compat for old logs |
 | 36 | `#[derive(Tool)]` + `#[tool(name, description, mode)]` | `elysper-macros` (new) | Derive a full `impl elysper_tool::Tool` from a struct + an inherent `async fn execute(&self, &Context) -> ToolOutput`; schemars-driven `parameters()`; compile-error diagnostics for misuse (non-struct, generics, missing `execute`, missing description, bad attribute) |
 | 37 | `EvalSuite` / `TestCase` / `Metric` (sync) / `AsyncMetric` / `EvalRunner` / `KeywordMetric` / `LlmJudgeMetric` / `SchemaValidationMetric` / `EvalReport` (JSON + CSV) | `elysper-eval` (new) | Quality measurement: case passes iff ALL metric scores ≥ threshold; LLM judge with local `JudgeProvider` seam and clamped score parse; schema-validation reuses `elysper_core::schema::validate_against_schema`; RFC4180 CSV escaping |
@@ -347,73 +344,58 @@ Later rounds kept growing the same lego axes:
 | 47 | Layered `elysper-harness`: private submodules + curated re-exports; `agent::{strategy, run}` | `elysper-harness`, `elysper-tool-task` | R122's harness cleanup. Every submodule of `elysper-harness` is **private** and re-exports only the names it is for, so internal structure is no longer public API and adding an item to an internal module cannot silently widen the contract. The three reasoning strategies moved under `agent::strategy` beside the seam they implement (with `CandidateScorer` its own file and one shared single-shot request builder), and run control — `RunInbox`/`MpscInbox` under `agent::run`; the `AgentHandle`/`DetachedAgent` deferred-run pair that sat beside them has since been **deleted** (no in-tree consumer — `Agent::run`'s event stream is the single run entry point). The out-of-band **team** layer (`BoundAgent` / `VerificationChain` / `RoundRobinGroupChat`) was **deleted**: a `prompt -> text` team chat has no caller in a harness whose delegation is the `task` tool, verify-then-retry is a `CandidateScorer` (or a `elysper-workflow` gate), and a stop condition is the loop's own |
 | 48 | `ConditionalRouter` + `RoutePatternError` | `elysper-tool-task` | Ordered regex routing rules, first match wins, with a default fallback (traitclaw `ConditionalRouter`) — implemented against the existing `Router` trait, so rules and `@agent:` mentions are two strategies behind one seam. A bad pattern is a typed error, never a panic |
 | 49 | `SqliteMemory` + `SqliteMemoryError` (feature `sqlite`) | `elysper-context` | Single-file durable memory (traitclaw-memory-sqlite): FTS5/BM25 long-term recall (queries are sanitised into quoted terms so `NEAR(` and `*` are text, not syntax), a durable working-memory table, a session registry, read-only opens, and typed errors that keep `SQLite`'s own message. The conversation tier still delegates to the session sink — one source of truth |
-| 50 | `ToolEntry::with_exposure` + `ToolDescriptor::exposure` + `project_tool_definitions` + `called_tool_names` + `ToolRegistry::descriptors` | `elysper-tool`, `elysper-harness`, `elysper-server` | The tool surface the model is offered, in one place: `Direct` sends the full schema, `Deferred` sends name + description with a permissive schema until the transcript shows the tool was called (then it is promoted), `Hidden`/`is_hidden` sends nothing. Promotion is derived from the transcript, so it is replay-stable and needs no mutable registry state; the same projection serves the agent loop and the operator listing, and the visible-name filter is how `AdaptiveRegistry`'s tier cap and `GroupedRegistry`'s groups plug in |
+| 50 | `ToolEntry::with_exposure` + `ToolDescriptor::exposure` + `project_tool_definitions` + `called_tool_names` + `ToolRegistry::descriptors` | `elysper-tool`, `elysper-harness`, `elysper-app-server` | The tool surface the model is offered, in one place: `Direct` sends the full schema, `Deferred` sends name + description with a permissive schema until the transcript shows the tool was called (then it is promoted), `Hidden`/`is_hidden` sends nothing. Promotion is derived from the transcript, so it is replay-stable and needs no mutable registry state; the same projection serves the agent loop and the operator listing, and the visible-name filter is how `AdaptiveRegistry`'s tier cap and `GroupedRegistry`'s groups plug in |
 | 51 | `json_repair::{repair_json, parse_tool_input_reported, parse_tool_input_logged, ToolArgsQuality}` + `error_body::{ProviderErrorBody, parse_provider_error_body}` + `RetryClass::{ContextOverflow, Auth}` + `classify_provider_error_body` | `elysper-provider` | Wire hygiene: malformed tool-call arguments are salvaged by repair instead of silently degrading, and *how* they were parsed is reported (strict / repaired / raw fallback) so a production log shows it. Provider error bodies are parsed into a typed signal, so quota exhaustion, context overflow, capacity overload and auth failures classify distinctly — including when they share an HTTP status (429 quota vs 429 throttling) |
 | 52 | `Step::BestOf` + `BestOfStep` + `CallStatus::Superseded` + `WorkflowRun::winner_of` | `elysper-workflow` | Selection as a workflow step (traitclaw MCTS-lite, declarative): one call per candidate under the existing caps and concurrency bound, the first candidate whose gate passes wins and its text becomes the step's output. Losers are `Superseded` — recorded, never able to drag a passing run down — and an all-failed selection fails the step while still handing the caller every failure text |
 | 53 | the `elysper` facade: `prelude` + one feature per piece | `elysper` (new) | One dependency instead of nine: `elysper::agent`, `elysper::tool`, … are feature-gated re-exports, and `elysper::prelude::*` is a 27-name curated subset with every collision decided and documented (`Result`, `Tool`, `Context`, and the deliberately excluded `SessionEndReason`). The crate docs are the assembly tutorial; 11 `compile_fail` doc tests pin the feature gating |
-| 54 | `ToolSurfacePolicy` + `SurfacePolicyError` + `ToolRegistry::{set_exposure, set_hidden, exposure}` + `[tools]` server config | `elysper-tool`, `elysper-harness`, `elysper-server` | The R33 tool surface, reachable from a deployment: groups and an active-group set (a member of an inactive group is simply not advertised), `max_visible` cap, deferred advertisement — validated with typed errors before any write, applied at boot from `[tools]`, and an unknown tool name is a warning rather than a startup failure. A tool nobody advertises still executes |
+| 54 | `ToolSurfacePolicy` + `SurfacePolicyError` + `ToolRegistry::{set_exposure, set_hidden, exposure}` + `[tools]` server config | `elysper-tool`, `elysper-harness`, `elysper-app-server` | The R33 tool surface, reachable from a deployment: groups and an active-group set (a member of an inactive group is simply not advertised), `max_visible` cap, deferred advertisement — validated with typed errors before any write, applied at boot from `[tools]`, and an unknown tool name is a warning rather than a startup failure. A tool nobody advertises still executes |
 | 55 | `WorkflowHost::select_candidate` + `SelectionRequest` / `SelectionCandidate` / `CandidateOutcome` / `GateVerdict` + `JournalEntry.winner` | `elysper-workflow` | The host may judge candidates (a rubric, an LLM, the longest answer) instead of taking the first passing gate; the default implementation keeps R33's rule, the choice is **recorded** so a replay never re-asks the host, and naming a candidate that did not succeed is a typed error rather than a plausible-looking wrong winner |
-| 56 | `CompactionCheckpoint` + `SurfaceLedger` + `fold_log_surface` / `try_fold_log_surface` | `elysper-session`, `elysper-context`, `elysper-harness`, `elysper-server` | Durable compaction checkpoints, end to end: provenance is resolved through the log (the manager's in-memory indices cannot address the surface), the lifecycle pair is handed to the session's writer as soon as it fires and reaches the log at the writer's next flush, and a record whose span cannot be proven is dropped with a warning instead of writing a checkpoint with wrong provenance. The production resume projection folds the log, so a resumed session rebuilds the compacted surface instead of replaying (and re-paying for) the pre-compaction history |
+| 56 | `CompactionCheckpoint` + `SurfaceLedger` + `fold_log_surface` / `try_fold_log_surface` | `elysper-session`, `elysper-context`, `elysper-harness`, `elysper-app-server` | Durable compaction checkpoints, end to end: provenance is resolved through the log (the manager's in-memory indices cannot address the surface), the lifecycle pair is handed to the session's writer as soon as it fires and reaches the log at the writer's next flush, and a record whose span cannot be proven is dropped with a warning instead of writing a checkpoint with wrong provenance. The production resume projection folds the log, so a resumed session rebuilds the compacted surface instead of replaying (and re-paying for) the pre-compaction history |
 
 | 57 | `Spawner` + `SharedSpawner` + `ReActAgent::with_spawner` | `elysper-core`, `elysper-harness` | The one operation that used to hard-code tokio — detached work — behind a trait with no runtime in its signature. The loop still detaches one task per run (a caller that stops polling must not cancel the run), but *where* that task goes is the consumer's choice: `cargo run --example runtime_agnostic -p elysper-harness` runs a full turn on `std::thread` + `futures::executor::block_on`. Tool dispatch is spawn-free entirely (`run_stream` drives every call from the caller's poll); the tool plugin crates, the provider HTTP adapters and the JSONL sink remain tokio-bound plugins, and the crate docs say so |
 | 58 | Per-crate features: tool plugins (`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-web` / `-task` / `-scheduler` / `-search`, one tool each) + `elysper-telemetry` (`metrics`, `otlp`), `elysper-provider` (`anthropic`, `openai`), facade features (`provider-anthropic`, `provider-openai`, `tool-*`) + `make check-mvp-deps` | workspace-wide | Transport and tools are opt-in and *separable*: the seven-feature MVP subset compiles the `Tool` paradigm and **no agent-facing tool** (no HTTP client at all — `reqwest` / `hyper` / `rustls` / `h2` / `tower` absent), each tool plugin is a crate you either depend on or don't, the OTel exporter arrives only with `otlp`, and the gate asserts both the MVP subset and the seven offline tool crates stay clean |
-| 59 | `ReasoningStrategy` + `AgentRuntime` + `EventSink` + `ReActAgent::with_strategy` | `elysper-harness` | The reasoning loop as a swappable part: a strategy receives every assembled piece (provider, tools, steering, context manager, clock, cancel token, executor) and publishes events, so `ReActStrategy` and `ChainOfThoughtStrategy` run against one runtime — `cargo run --example strategy_swap -p elysper-harness` proves both from the provider's recorded requests. One method, streaming-first; errors travel as `SessionEnded { reason }` |
+| 59 | `ReasoningStrategy` + `AgentRuntime` + `EventSink` + `ReActAgent::with_strategy` | `elysper-harness` | The reasoning loop as a swappable part: a strategy receives every assembled piece (provider, tools, steering, context manager, clock, cancel token, executor) and publishes events, so `ReActStrategy` and `ChainOfThoughtStrategy` run against one runtime — `cargo run --example chain_of_thought -p elysper-strategy-cot` exercises the chain-of-thought strategy against the same runtime. One method, streaming-first; errors travel as `SessionEnded { reason }` |
 | 60 | `McpControlTool` + `register_mcp_control_tool` (`MCP_TOOL_NAME`) | `elysper-mcp` | The `mcp` tool: the **dynamic** counterpart of the per-tool `McpTool` registration. Three actions (`servers` / `tools` / `call`) over a shared `McpSupervisor`, so a model can read the live catalog — including each remote tool's argument schema — and call a remote tool by its server-side name without the host publishing every remote schema up front. Unknown server vs disconnected server get different, corrective messages; a remote tool's `isError` and its image/audio blocks travel through the same projection as the pre-registered path (`cargo run --example mcp_control_tool -p elysper-mcp`) |
 | 61 | `SchedulerTool` + `register_scheduler_tool` (`SCHEDULE_TOOL_NAME`) | `elysper-tool-scheduler` (new) | The `schedule` tool: `list` / `create` / `pause` / `resume` / `remove` over a shared `ScheduleStore`, addressed by job id **or** name. It plans, the host delivers — `create` never fires its own payload, so there is one delivery path (`Scheduler::tick`). `cron` is refused by the schema unless the `cron` feature is enabled — with it, `kind: "cron"` plus a 5-field POSIX `cron_expr` is accepted and the first fire is the expression's own next occurrence; without it the scheduler crate cannot compute a recurrence, so an accepted job is always one the crate can honour (`cargo run --example schedule_jobs -p elysper-tool-scheduler`) |
 
 
 ```bash
 # Assemble an agent
-cargo run --example assemble_from_zero             -p elysper
-cargo run --example assemble_from_scratch          -p elysper-harness
-cargo run --example assemble_with_builder          -p elysper-harness
-cargo run --example assemble_with_provider_profile -p elysper-harness
-cargo run --example assemble_with_skills           -p elysper-harness
-cargo run --example assemble_with_tier_steering    -p elysper-harness
+cargo run --example assemble_with_builder -p elysper-harness
+cargo run --example zero_deps_agent -p elysper-harness
+cargo run --example durable_hitl -p elysper-harness
+cargo run --example lib_grade -p elysper-harness
 
 # Tools
-cargo run --example tool_groups                    -p elysper-tool
-cargo run --example deferred_tools                 -p elysper-tool
-cargo run --example read_ranges                    -p elysper-tool-read
-cargo run --example write_modes                    -p elysper-tool-write
-cargo run --example todo_list                      -p elysper-tool-todo
-cargo run --example allowlist                      -p elysper-tool-web
-cargo run --example tool_surface_policy            -p elysper-harness
-cargo run --example derive_tool                    -p elysper-macros
-cargo run --example output_transformers            -p elysper-harness
-cargo run --example sandbox_policy                 -p elysper-tool-shell
-cargo run --example schedule_jobs                  -p elysper-tool-scheduler
-cargo run --example search_tool_demo               -p elysper-tool-search
-
-# Durability
-cargo run --example compaction_checkpoint          -p elysper-session
-
-# Wire robustness
-cargo run --example tool_arg_repair                -p elysper-provider
+cargo run --example deferred_tools -p elysper-tool
+cargo run --example read_ranges -p elysper-tool-read
+cargo run --example write_modes -p elysper-tool-write
+cargo run --example todo_list -p elysper-tool-todo
+cargo run --example allowlist -p elysper-tool-web
+cargo run --example sandbox_policy -p elysper-tool-shell
+cargo run --example schedule_jobs -p elysper-tool-scheduler
+cargo run --example search_tool_demo -p elysper-tool-search
+cargo run --example derive_tool -p elysper-macros
 
 # Teams and workflows
-cargo run --example fan_out_with_group_join        -p elysper-tool-task
-cargo run --example delegation_gate                -p elysper-tool-task
-cargo run --example worktree_isolation             -p elysper-tool-task
-cargo run --example workflow_fanout                -p elysper-workflow
-cargo run --example workflow_best_of               -p elysper-workflow
-
-# Interactivity and prompt hygiene
-cargo run --example run_inbox_steering             -p elysper-harness
-cargo run --example runtime_context                -p elysper-harness
-cargo run --example token_meter                    -p elysper-harness
+cargo run --example delegation_gate -p elysper-tool-task
+cargo run --example worktree_isolation -p elysper-tool-task
+cargo run --example workflow_fanout -p elysper-workflow
+cargo run --example workflow_best_of -p elysper-workflow
 
 # Runtime choice and reasoning loop
-cargo run --example runtime_agnostic               -p elysper-harness
-cargo run --example strategy_swap                  -p elysper-harness   # three paradigms
+cargo run --example runtime_agnostic -p elysper-harness
+cargo run --example chain_of_thought -p elysper-strategy-cot
+cargo run --example best_of_n_demo -p elysper-strategy-best-of-n
 
 # Memory and remote tools
-cargo run --example sqlite_memory -p elysper-context --features sqlite
-cargo run --example register_remote_tools          -p elysper-mcp
-cargo run --example mcp_control_tool               -p elysper-mcp
+cargo run --example sqlite_memory -p elysper-context
+cargo run --example register_remote_tools -p elysper-mcp
+cargo run --example mcp_control_tool -p elysper-mcp
+
 # Measuring and replaying
-cargo run --example eval_suite                     -p elysper-eval
-cargo run --example replay_provider                -p elysper-test-support
+cargo run --example eval_suite -p elysper-eval
+cargo run --example replay_provider -p elysper-test-support
 ```
 
 The `assemble_with_builder` example is the recommended starting
@@ -476,7 +458,7 @@ want them.
 ### Develop
 
 ```bash
-make dev   # boots elysper-server (:8080) + elysper-web (:5173)
+make dev   # boots elysper-app-server + elysper-web (:5173)
 ```
 
 Open `http://localhost:5173`.
@@ -532,10 +514,16 @@ make fmt             # cargo +nightly fmt + prettier
 
 ## Running
 
-### Server
+One binary, two modes — `elysper-app-server`:
 
 ```bash
-make dev-server   # or: cargo run -p elysper-server
+# the gateway (the human entry point): spawns a core subprocess and
+# serves it — WebSocket /rpc, probes, and the web front-end
+cargo run -p elysper-app-server -- serve --port 8080
+
+# the headless core: JSON-RPC 2.0 on stdin/stdout (LF-framed), for a
+# TUI / desktop shell / any host that wants a sidecar
+cargo run -p elysper-app-server -- core --directory .
 ```
 
 ### Server + Web
@@ -545,7 +533,7 @@ make dev   # boots both with hot reload
 ```
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for production deployment,
-Docker Compose, Nginx configuration, and environment variables.
+Docker Compose, and environment variables.
 
 ## Makefile
 
@@ -559,13 +547,10 @@ Run `make help` for the full list of targets.
 .
 ├── Cargo.toml                  # Rust workspace root
 ├── Makefile                    # unified dev/build/test/deploy entry point
-├── Dockerfile.server           # elysper-server production image
-├── Dockerfile.web              # elysper-web production image
+├── Dockerfile.server           # elysper-app-server production image
 ├── docker-compose.yml          # development compose
-├── docker-compose.prod.yml     # production compose (split deploy)
-├── nginx.conf                  # reverse-proxy config (used by web image)
 ├── DEPLOYMENT.md               # deployment guide
-├── crates/                     # the 26 workspace members
+├── crates/                     # the 40 workspace members
 │   ├── elysper/                # the facade: one dependency, one prelude
 │   ├── elysper-core/           # error, cancel, clock, idgen, spawn, text, schema
 │   ├── elysper-telemetry/      # console logging always; metrics / otlp as features
@@ -577,6 +562,7 @@ Run `make help` for the full list of targets.
 │   │                           #   scheduler (the `schedule` tool), search (cross-domain
 │   │                           #   over a host-built elysper-search registry)
 │   ├── elysper-skill/          # procedural skills bound to tools
+│   ├── elysper-agents/         # agent definitions as files (agent.md + config.json)
 │   ├── elysper-session/        # session lifecycle, sinks, typed events
 │   ├── elysper-steering/       # guards / hooks / hints / tracker / transformers
 │   ├── elysper-harness/          # the harness: ReAct loop, reasoning strategies,
@@ -588,9 +574,9 @@ Run `make help` for the full list of targets.
 │   ├── elysper-eval/           # eval suites, metrics, judge, reports
 │   ├── elysper-macros/         # #[derive(Tool)]
 │   ├── elysper-test-support/   # deterministic fakes (ReplayProvider, …)
-│   └── elysper-server/         # the application crate: axum REST + SSE
+│   └── elysper-app-server/     # the application crate: stdio JSON-RPC core + gateway
 └── elysper-web/                # React frontend
-    │   ├── api/                # REST + SSE client modules
+    │   ├── api/                # /rpc WebSocket JSON-RPC client modules
     │   ├── components/         # UI components (ui/, layout/)
     │   ├── pages/              # Top-level pages
     │   ├── styles/             # Design tokens

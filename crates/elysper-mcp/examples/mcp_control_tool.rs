@@ -29,7 +29,6 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use serde_json::{Value, json};
 use elysper_mcp::{
     McpControlTool,
     McpSupervisor,
@@ -38,6 +37,7 @@ use elysper_mcp::{
     register_mcp_control_tool,
 };
 use elysper_tool::{Context, Tool, ToolOutput, ToolRegistry};
+use serde_json::{Value, json};
 
 /// A `sh` response loop: one JSON-RPC answer per *request* (a
 /// notification carries no `id`, so the loop skips it). Matching on the

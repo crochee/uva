@@ -5,8 +5,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Serialize;
 use elysper_core::registry::RegistryItem;
+use serde::Serialize;
 
 use super::{
     catalog::{ToolCategory, ToolDescriptor, ToolExposure, ToolProvenance},

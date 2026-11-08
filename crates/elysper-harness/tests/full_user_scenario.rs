@@ -22,8 +22,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use futures::StreamExt;
-use serde_json::json;
 use elysper_harness::{
     Agent,
     AgentInput,
@@ -32,6 +30,8 @@ use elysper_harness::{
 };
 use elysper_provider::{Content, ContentPart, TextContent, ToolUse};
 use elysper_tool::registry::{ToolEntry, ToolRegistry};
+use futures::StreamExt;
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 mod support;

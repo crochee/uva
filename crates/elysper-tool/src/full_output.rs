@@ -33,9 +33,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use elysper_core::FullOutputStore;
 use schemars_derive::JsonSchema;
 use serde::Deserialize;
-use elysper_core::FullOutputStore;
 
 use crate::{
     traits::{ExecutionMode, Tool},
@@ -138,8 +138,8 @@ impl Tool for RetrieveFullOutputTool {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use elysper_core::InMemoryFullOutputStore;
+    use serde_json::json;
 
     use super::*;
 

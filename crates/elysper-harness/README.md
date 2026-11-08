@@ -121,7 +121,7 @@ elysper-provider = { version = "0.1", default-features = false }
 
 ## The two public layers
 
-The crate root re-exports a curated facade of 60 names. That facade is
+The crate root re-exports a curated facade of 64 names. That facade is
 the promised surface: depend on it, and a release will not move your
 names. The crate is public further down, under
 `elysper_harness::agent::…` and `elysper_harness::events::…`. Only a

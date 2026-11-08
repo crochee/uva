@@ -8,13 +8,13 @@
 
 use std::time::Duration;
 
+use elysper_core::Error;
 use opentelemetry::{global, trace::TracerProvider};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::{
     Resource,
     trace::{BatchSpanProcessor, Sampler, SdkTracerProvider},
 };
-use elysper_core::Error;
 use tracing_subscriber::{
     EnvFilter,
     Registry,

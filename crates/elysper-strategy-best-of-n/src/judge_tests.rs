@@ -7,7 +7,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use elysper_core::Error as ProviderError;
 use elysper_provider::{
     CompletionRequest,
@@ -18,6 +17,7 @@ use elysper_provider::{
     ProviderConfig,
     TextContent,
 };
+use parking_lot::Mutex;
 
 use crate::{CandidateScorer, judge::LlmJudgeScorer};
 

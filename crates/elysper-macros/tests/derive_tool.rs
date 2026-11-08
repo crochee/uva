@@ -3,10 +3,10 @@
 
 use std::path::PathBuf;
 
-use schemars::JsonSchema;
-use serde::Deserialize;
 use elysper_macros::Tool;
 use elysper_tool::{Context, ExecutionMode, Tool, ToolOutput};
+use schemars::JsonSchema;
+use serde::Deserialize;
 
 // ── Fixture: defaults come from the struct ───────────────────────
 

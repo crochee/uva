@@ -39,16 +39,6 @@ pub mod settings;
 
 use std::{ops::Range, sync::Arc};
 
-use futures::{FutureExt, future::BoxFuture};
-use serde_json::Value;
-pub use settings::{
-    CompactionDetails,
-    CompactionSettings,
-    TouchedPair,
-    ValidationError,
-    should_compact,
-    touched_target,
-};
 use elysper_core::{
     CancelToken,
     sleeper::{Sleeper, ThreadSleeper},
@@ -62,6 +52,16 @@ use elysper_provider::{
     Role,
     TokenUsage,
     estimate_messages_token_count,
+};
+use futures::{FutureExt, future::BoxFuture};
+use serde_json::Value;
+pub use settings::{
+    CompactionDetails,
+    CompactionSettings,
+    TouchedPair,
+    ValidationError,
+    should_compact,
+    touched_target,
 };
 
 use crate::{

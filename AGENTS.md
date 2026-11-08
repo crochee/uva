@@ -15,14 +15,15 @@
   - `elysper-telemetry` 常驻编译 console / file logging（`tracing` + `tracing-subscriber`）；
   - `elysper-telemetry/metrics` — gate `prometheus` 向量与 `gather_text()`；
   - `elysper-telemetry/otlp` — gate OTel exporter、`tracer` / `propagation` 模块及全部 `opentelemetry*` + 传输依赖。
-  - 仓库内成员显式声明所需 feature：`elysper-tool` 仅 `metrics`（保持 agent 依赖树无 exporter），`elysper-server` 显式 `["metrics", "otlp"]`；facade 的 `telemetry` feature 同时打开两者。详见 [crates/elysper-telemetry/README.md](crates/elysper-telemetry/README.md)。
-- [elysper-server](file:///home/crochee/workspace/elysper/crates/elysper-server/) 对自身而言可观测性始终开启（OTLP tracing、Prometheus RED 指标、`GET /metrics` 端点与 `track_metrics` 中间件），保留两个 feature：`test-utils`（转发 facade 的 `test-support`，用于测试 wiring 与 `[providers.<name>] type = "demo"` 免 key 演示 provider）与 `cluster-redis`（多节点控制面的 Redis 后端：pub/sub + `SET NX EX` 会话租约；单节点构建零 Redis 依赖）。多节点部署 = 无状态计算节点 + 共享 workspace 文件系统（sessions / workflows / evals / schedules 的 durable 真源）+ `[cluster] mode = "redis"`；`/metrics` 与 usage 计数按节点语义（加节点 = 加 scrape 目标），lease 名与投递语义见 [crates/elysper-server/README.md](crates/elysper-server/README.md) 的「多节点部署」节。
-- **elysper-server 只依赖 `elysper` facade**（R121 单一收口规则）：`crates/elysper-server/Cargo.toml` 的 elysper 依赖只有 `elysper = { workspace = true, features = [...] }` 一行，全部 SDK 类型（provider / harness / tool / session / skill / attachment / mcp / telemetry / core / 各 tool 插件）一律经 `elysper::module::…` 路径引用，不再直接依赖任何 `elysper-*` 库 crate。因此 facade **没有** `server` feature——facade 反向 re-export `elysper-server` 会构成依赖环；需要部署二进制的消费方在 `elysper` 之外自行添加 `elysper-server`。
+  - 仓库内成员显式声明所需 feature：`elysper-tool` 仅 `metrics`（保持 agent 依赖树无 exporter），`elysper-app-server` 经 facade 的 `telemetry` feature 同时打开两者（该 crate 不再直接依赖 `elysper-telemetry`）。详见 [crates/elysper-telemetry/README.md](crates/elysper-telemetry/README.md)。
+- [elysper-app-server](crates/elysper-app-server/) 一个二进制、两种模式：`core`（缺省子命令）是无头 stdio JSON-RPC 2.0 内核——stdout 只承载协议帧（LF 分帧），日志一律写 stderr（`LogWriter::Stderr`：`core` 模式下 stdout 上一行日志会被对端当坏帧），boot 完成后发一条 `ready` 通知；`serve` 是网关——spawn 一个 `<current_exe> core` 子进程（死亡后按 1s→5s 退避重启，靠 `ready` 通知判定就绪），在 `/rpc` WebSocket 上逐帧转发 JSON-RPC：按 `id` 把响应路由回发起请求的连接，按 `params.session_id` 把 `session/event` / `anthropic/messages/event` 通知投给 follow 该会话的连接（连接以 `sessions/follow` 订阅、`session/unfollow` 或断开退订），审批中断也是一类 `session/event`，客户端用 `sessions/resume` 应答；另提供 `/livez` / `/readyz` / `/version` / `/metrics` 探针与静态前端（`--web-dir <path>`，或 `embed-web` feature 内嵌 `elysper-web/dist`）。可观测性对该 crate 始终开启（OTLP tracing、Prometheus `/metrics` 文本），feature 仅剩 `test-utils`（转发 facade 的 `test-support`）与 `embed-web`：`cluster-redis` 与 Redis bus 已删除，进程内 local bus 保留但闲置（`[cluster]` 默认 `mode = "local"`，配 `"redis"` 会 boot 失败）。服务器不做认证 / CORS——单用户本地运行，`user_id = "dev"`（`SERVER_DEFAULT_USER_ID`），`[auth]` / `[cors]` / `[mcp_servers]` 配置段已删除（MCP 服务器改由 `~/.agents` 布局里的 `mcp.json` 声明）。详见 [crates/elysper-app-server/README.md](crates/elysper-app-server/README.md)。
+- [elysper-runtime](crates/elysper-runtime/) 配置驱动的装配 crate（「一切皆插件」阶段 1 落点）：provider catalogue（`ProviderCatalogue` + tier-1 包装链 `wrap_tier1_providers` + `ModelAdapterConfig`）与 agent-loop 工厂（`server_agent_loop` / `AgentLoopDefaults`）从 app-server 迁入此处；app-server 经 facade 的非默认 `runtime` feature 取用（`elysper::runtime::…`）。`ModelAdapterServicePlugin` 发布 `llm`（catalogue）+ `llm.default`（tier-1 包装后的默认句柄）双服务键，`AgentLoopServicePlugin` 在 apply 期解析 `llm.default` / `compaction` 后发布 `agentLoop`。详见 [crates/elysper-runtime/README.md](crates/elysper-runtime/README.md)。
+- **elysper-app-server 只依赖 `elysper` facade**（R121 单一收口规则）：`crates/elysper-app-server/Cargo.toml` 的 elysper 依赖只有 `elysper = { workspace = true, features = [...] }` 一行，全部 SDK 类型（provider / harness / tool / session / skill / attachment / mcp / telemetry / core / 各 tool 插件）一律经 `elysper::module::…` 路径引用，不再直接依赖任何 `elysper-*` 库 crate。因此 facade **没有** `server` feature——facade 反向 re-export `elysper-app-server` 会构成依赖环；需要部署二进制的消费方在 `elysper` 之外自行取用 `elysper-app-server`（该 crate `publish = false`，不进 crates.io）。
 - 网络传输（HTTP client）一律通过 crate 级 feature 可选，禁止无条件依赖 `reqwest`：
   - `elysper-provider/anthropic`、`elysper-provider/openai` — 两个内置 adapter（各自拉起 `reqwest` 与 `elysper-core/reqwest`），默认开启；只写自己的 `ModelProvider` 时用 `default-features = false`。
   - `elysper-tool-web` — `web_fetch` 工具，唯一允许拉起 `reqwest` 的 tool crate；其余 tool crate（`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-task` / `-scheduler` / `-search`）保持离线。
   - facade 对应 feature：`provider-anthropic` / `provider-openai` / `tool-read` / `tool-write` / `tool-shell` / `tool-todo` / `tool-web` / `tool-task`（均在默认集合内）；`provider` 仅指 trait 与 wire types，`tool` 仅指范式（registry + `Tool` trait + `workspace` 路径约束），**不含面向 agent 的内建工具集**——`read` / `write` / `shell` / `todo` / `web` / `task` 各自独立成 crate；范式 crate 内只保留两个合成契约工具（`RetrieveFullOutputTool`、`StructuredOutputTool`，后者由 `ReActAgent::with_output_schema` 自动注入）与 registry 的 `ToolEntry::dynamic` 直通实现。`tool-scheduler`（`elysper-tool-scheduler`）、`tool-search`（`elysper-tool-search`）与 `mcp` 一样是**可选** feature：三者的宿主都必须先构造运行时对象（`ScheduleStore` / 待检索的 `elysper-search::Registry` / `McpSupervisor`），因此不进入默认集合。`cron` 同样是 opt-in feature（`cron = 0.17`，`elysper-tool-scheduler/cron` 转发 `elysper-scheduler/cron`）：默认构建零 cron 解析器——`JobKind::Cron` 只退回一分钟占位、`schedule` 工具逐字拒绝 `kind: "cron"`。facade 的 `cron` feature 把这条路径**两半一起**打开（`scheduler` + `elysper-scheduler/cron` + `tool-scheduler` + `elysper-tool-scheduler/cron`）：只开解析器而工具仍拒绝 `kind: "cron"` 是半截切换，本轮"模型能创建 cron 任务"这个用户可见收益就落不了地；它不在默认集合内。立场文本在 [crates/elysper-scheduler/src/lib.rs](crates/elysper-scheduler/src/lib.rs) 与 [crates/elysper-tool-scheduler/src/lib.rs](crates/elysper-tool-scheduler/src/lib.rs)。
-  - 仓库内成员必须显式声明所需 feature（`elysper-server` 经 facade 一行声明全集，见上；其余成员按各自 Cargo.toml）。`make check-mvp-deps` 保证七 feature 最小子集与七个离线 tool crate 均不引入 `reqwest|hyper|rustls|h2|tower`（离线 tool crate：`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-task` / `-scheduler` / `-search` / `-tool-memo`；R-OPT-HPC 六个新插件 crate `elysper-semantic-cache` / `-tool-memo` / `-resilience` / `-strategy-plan-execute` / `-reflection` / `-budget` 由同段 `ROPT_PLUGIN_CRATES` 专段断言；另有 `elysper-hpc-batch`（批量 embed / 批量 complete）与 inline `simd` feature 由同一 `check-mvp-deps` 的 `R_OPT_HPC_PLUGIN_CRATES` / `elysper-search --features simd` 两段断言）；elysper-search 由专段断言（default + `provider` 两种配置）；`elysper-tool-scheduler` 同样由专段断言（default + `--features cron` 两种配置），且其后紧跟 cron 表面的 rustdoc 检查（`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p elysper-scheduler --features cron`）——`doc-check` 只建默认 features，没有这一行则 cron 门后的文档在整个 `make ci` 里从不被检查。
+  - 仓库内成员必须显式声明所需 feature（`elysper-app-server` 经 facade 一行声明全集，见上；其余成员按各自 Cargo.toml）。`make check-mvp-deps` 保证七 feature 最小子集与七个离线 tool crate 均不引入 `reqwest|hyper|rustls|h2|tower`（离线 tool crate：`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-task` / `-scheduler` / `-search` / `-tool-memo`；R-OPT-HPC 六个插件 crate `elysper-semantic-cache` / `-tool-memo` / `-resilience` / `-strategy-plan-execute` / `-reflection` / `-budget` 由同段 `ROPT_PLUGIN_CRATES` 专段断言；elysper-search 由专段断言（default + `provider` 两种配置 + inline `simd` feature）；`elysper-tool-scheduler` 同样由专段断言（default + `--features cron` 两种配置），且其后紧跟 cron 表面的 rustdoc 检查（`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p elysper-scheduler --features cron`）——`doc-check` 只建默认 features，没有这一行则 cron 门后的文档在整个 `make ci` 里从不被检查。
 - 异步运行时同样按 crate 声明，禁止从 workspace 继承 `tokio` 的 `full`：
   - 每个 crate 的 `tokio` 行只写自己代码真正用到的 feature（例：`elysper-provider` 用 `["macros", "time"]`，`elysper-session` 用 `["rt", "sync", "time", "macros"]`），并附一行原因注释。
   - 仅在测试中使用 tokio 的 crate（`elysper-core` / `context` / `steering` / `skill` / `eval` / `macros` / `workflow` / `elysper-tool-scheduler` / `elysper-tool-search`）一律放 `[dev-dependencies]`。
@@ -81,7 +82,7 @@
 - [scripts/harness-shape/clippy.toml](file:///home/crochee/workspace/elysper/scripts/harness-shape/clippy.toml) — **形状预算** `too-many-lines-threshold = 100` 与 `excessive-nesting-threshold = 4`。它**故意不放在根 `clippy.toml`**：把这两个键写进根配置会**全局启用**这两个默认关闭的 lint（`excessive_nesting` 的默认值 0 即禁用），从而让 `make lint-rust -D warnings` 在本轮未改动的 crate 上报错。该文件只由 `scripts/check-harness-shape.sh` 通过 `CLIPPY_CONF_DIR` 注入，是这两个阈值的**唯一真源**。
 - [Cargo.toml](file:///home/crochee/workspace/elysper/Cargo.toml) — workspace `resolver = "2"`、`edition = "2024"`、`rust-version = "1.98"`；release profile 已固定 `opt-level = 3` / `lto = "thin"` / `codegen-units = 1` / `strip = "symbols"`，**不得随意调整**。
 - [deny.toml](file:///home/crochee/workspace/elysper/deny.toml) — `cargo-deny` 的许可证 / 来源 / ban 审计入口（已落地的最低策略：bans/licenses/sources 三项在 `make check-deny` 跑通；advisories 由 `cargo-audit` 单独负责，见 `.github/workflows/security-audit.yml`）。新增依赖须保证通过该审计。
-- [.markdownlint.json](file:///home/crochee/workspace/elysper/.markdownlint.json) — markdown lint 锁，作用于 41 个 crate 顶层 `README.md` 与 `CONTRIBUTORS.md`（与 `make fmt-check` 互不重叠；CI 入口 `.github/workflows/markdown-lint.yml`）。
+- [.markdownlint.json](file:///home/crochee/workspace/elysper/.markdownlint.json) — markdown lint 锁，作用于 42 个 crate 顶层 `README.md` 与 `CONTRIBUTORS.md`（与 `make fmt-check` 互不重叠；CI 入口 `.github/workflows/markdown-lint.yml`）。
 - [.editorconfig](file:///home/crochee/workspace/elysper/.editorconfig) — 编辑期 LF / UTF-8 / `trim_trailing_whitespace` / `final_newline` / Makefile `indent_style = tab`。**与 rustfmt / prettier 互补而非重复**：只覆盖它们不触达的文件类型（shell / TOML / Markdown 等），不与 formatter 抢同一文件的格式规则。
 - [.gitattributes](file:///home/crochee/workspace/elysper/.gitattributes) — git 期 LF 强制 + binary 标记 + linguist 关闭 vendor/generated + `CHANGELOG.md` / `Cargo.lock` 用 `merge = union` 防冲突 + `Cargo.lock` 不进 diff。
 - `[workspace.lints]` in [Cargo.toml](file:///home/crochee/workspace/elysper/Cargo.toml) — workspace 级 rustdoc 棘轮表：`missing_docs = warn` / `broken_intra_doc_links = warn` / `private_doc_tests = warn` / `missing_crate_level_docs = warn`。**该表不自动生效**：Cargo 1.74+ 的继承要靠各 crate 在自己的 `[lints]` 表写 `workspace = true` 显式 opt-in，而当前仓库没有任何 crate opt-in（`grep -rln '^\[lints\]' crates/*/Cargo.toml` 为空），所以这组 lint 目前一个都没在跑。公开文档的实际约束是 `make check-public-docs`（§3.6）：对 7 个冻结 crate 的未文档化 `pub` 项逐 crate 计数、只降不升，基线在 `scripts/public-docs/baseline`。`warn` 而非 `deny` 是给历史留余地——哪天有 crate opt-in 时先看 warn 的实际命中再谈升 `deny`；届时本条 + `[workspace.lints]` 同步更新。
@@ -135,9 +136,10 @@
 | `make test-crates` | 逐个 crate 运行完整测试（禁止 `cargo test --workspace`，见 §3.3）             |
 | `make test-sqlite` | 运行可选 SQLite 记忆层测试（`cargo test -p elysper-context --features sqlite`） |
 | `make examples`  | 运行全部 example 与两个独立 consumer crate（各自打印 proof line）               |
-| `make check-mvp-deps` | 断言七 feature 最小子集与七个离线 tool crate（含 `elysper-tool-memo`）不引入 HTTP/OTel/DB 依赖，且 `--no-default-features` 可编译 ；elysper-search 专段断言 default+provider 两种配置；elysper-tool-scheduler 专段断言 default+`--features cron`，并检查 cron 表面 rustdoc 无警告；`ROPT_PLUGIN_CRATES`（`elysper-semantic-cache` / `-tool-memo` / `-resilience` / `-strategy-plan-execute` / `-reflection` / `-budget`）由专段断言同样保持离线；`R_OPT_HPC_PLUGIN_CRATES`（`elysper-hpc-batch`）与 `elysper-search --features simd` 也各有一段 |
+| `make check-mvp-deps` | 断言七 feature 最小子集与七个离线 tool crate（含 `elysper-tool-memo`）不引入 HTTP/OTel/DB 依赖，且 `--no-default-features` 可编译 ；elysper-search 专段断言 default+provider 两种配置与 `--features simd`；elysper-tool-scheduler 专段断言 default+`--features cron`，并检查 cron 表面 rustdoc 无警告；`ROPT_PLUGIN_CRATES`（`elysper-semantic-cache` / `-tool-memo` / `-resilience` / `-strategy-plan-execute` / `-reflection` / `-budget`）由专段断言同样保持离线 |
 | `make check-no-runtime` | 断言 runtime-free crate 的 lib 构建不含 tokio；另断言 `elysper-tool` 直接依赖零运行时 crate（传递性 tokio 来自 `elysper-provider`，见目标注释） |
-| `make check-public-api-runtime` | 断言库 crate 的**公开 API** 不出现运行时类型（`elysper-server` 与 `elysper-mcp-server` 豁免，二者皆为应用 / 二进制 crate，`main()` 是唯一允许出现具体运行时类型的地方；R125 同步修复了多行 `use` brace body 未注册的盲区）：现读每个文件对 `tokio` / `tokio_util` / `tokio_stream` / `async_std` / `smol` / `futures::executor` 的 `use` 别名，再跨签名续行扫描 `pub` 项，因此 `use tokio::sync::mpsc;` + `pub fn new(tx: Arc<mpsc::UnboundedSender<…>>)` 这类别名泄漏也会被抓到（见 [scripts/check-public-api-runtime.sh](file:///home/crochee/workspace/elysper/scripts/check-public-api-runtime.sh)） |
+| `make check-kernel-deps` | 断言 `elysper-kernel` 的 normal 依赖图不含 agent / UI / 传输层 crate（`scripts/check-kernel-deps.sh`） |
+| `make check-public-api-runtime` | 断言库 crate 的**公开 API** 不出现运行时类型（`elysper-app-server` 与 `elysper-mcp-server` 豁免，二者皆为应用 / 二进制 crate，`main()` 是唯一允许出现具体运行时类型的地方；R125 同步修复了多行 `use` brace body 未注册的盲区）：现读每个文件对 `tokio` / `tokio_util` / `tokio_stream` / `async_std` / `smol` / `futures::executor` 的 `use` 别名，再跨签名续行扫描 `pub` 项，因此 `use tokio::sync::mpsc;` + `pub fn new(tx: Arc<mpsc::UnboundedSender<…>>)` 这类别名泄漏也会被抓到（见 [scripts/check-public-api-runtime.sh](file:///home/crochee/workspace/elysper/scripts/check-public-api-runtime.sh)） |
 | `make check-test-layout` | 棘轮：生产文件内联 `#[cfg(test)] mod` 测试块不得 ≥400 行（硬上限），300 行档位已清零（基线 0）；新增测试放同级 `tests.rs` |
 | `make check-pub-surface` | 棘轮：`crates/*/src` 内禁止 `pub use <内部模块>::*;`（facade 传播 `elysper_xxx::*` 除外） |
 | `make check-harness-shape` | 断言 `elysper-harness` **生产代码**无函数超过 100 行或嵌套超过 4 层（`too_many_lines` + `excessive_nesting`，阈值现读 [scripts/harness-shape/clippy.toml](file:///home/crochee/workspace/elysper/scripts/harness-shape/clippy.toml)；见 [scripts/check-harness-shape.sh](file:///home/crochee/workspace/elysper/scripts/check-harness-shape.sh)，仅限该 crate） |
@@ -149,12 +151,13 @@
 | `make test-guides` | 编译 `MINIMAL.md` 的 `rust` 围栏（doctest）：先默认 feature，再七 feature MVP 子集。`doc-check` 只**生成**文档、不**编译**示例，所以向导里的配方只能靠这个目标（和 CI）拦住 |
 | `make test-layout-audit` | 打印当前所有 ≥300 行的内联测试块位置，便于核对棘轮                        |
 | `make check-claim-language` | 棘轮：`README.md` / `MINIMAL.md` / `SEAMS.md` / `CHANGELOG.md` [Unreleased] / `crates/*/README.md` / facade 与范式 lib crate 的 rustdoc 里若出现 "paradigm only" / "zero tool implementations" / "default tool set" / "ships no implementations" / "the built-ins" 等与代码事实矛盾的绝对化措辞即失败；冻结的 `docs/optimization-report-R*.md` / `docs/superpowers/` / 已发布 CHANGELOG 条目豁免（与本文件 §3.7 配套） |
-| `make check-clock` | 棘轮：库 crate 生产代码不得有 `chrono::Utc::now()` 直接调用（基线 0；app crate `elysper-server` 豁免，`#[cfg(test)]` 豁免）——一律走 `elysper_core::Clock`（§3.8） |
+| `make check-clock` | 棘轮：库 crate 生产代码不得有 `chrono::Utc::now()` 直接调用（基线 0；app crate `elysper-app-server` 豁免，`#[cfg(test)]` 豁免）——一律走 `elysper_core::Clock`（§3.8） |
+| `make check-stdout` | 棘轮：无头核心的 stdout 是 JSON-RPC 传输面，二进制（`crates/elysper-app-server/src/bin/` 与 `src/main.rs`）不得出现 `print!` / `println!` / `dbg!` / `std::io::stdout`（见 [scripts/check-stdout.sh](file:///home/crochee/workspace/elysper/scripts/check-stdout.sh)）；日志与诊断只走 stderr，唯一允许写 stdout 的是协议写入器 `crates/elysper-app-server/src/rpc/stdio.rs`，该文件不在扫描范围内 |
 | `make check-deny` | 跑 `cargo deny check licenses bans sources`（公告检查 `advisories` 由 `.github/workflows/security-audit.yml` 单独负责）；新增依赖必须保证通过 |
 | `make check-publishable` | 断言每个 crate 都能被 `cargo package`（见 [scripts/check-publishable.sh](file:///home/crochee/workspace/elysper/scripts/check-publishable.sh)）："可 `cargo add` 安装" 的唯一硬证据 —— path 依赖缺版本号这类缺陷在 `cargo build` / `cargo test` 里完全看不见，只有打包那一刻才暴露。脚本按依赖拓扑序逐个打包（`--no-verify --allow-dirty`），并用 `--config` 传入的 `[patch.crates-io]` 把兄弟 crate 指向本地路径，这样首次发布前也能跑 |
 | `make check-web` | 前端门禁：`tsc --noEmit` + `eslint` + `prettier --check`；本项目**不**留前端 e2e 套件（详见 §4.2） |
-| `make lint-sh` | 对 9 个门禁脚本跑 shellcheck——`scripts/check-frozen-api.sh` / `scripts/check-harness-docs.sh` / `scripts/check-harness-shape.sh` / `scripts/check-plugin-shape.sh` / `scripts/check-pub-surface-strict.sh` / `scripts/check-public-api-runtime.sh` / `scripts/check-public-docs.sh` / `scripts/check-publishable.sh` / `scripts/check-single-writer.sh`（`SC1091`/`SC2086` 豁免，`-S warning`）——`.github/workflows/shellcheck.yml` 是 CI 对应入口，**两份清单必须一致**：新增 `scripts/*.sh` 门禁要在同一变更里同时更新本表、`Makefile` 的 `lint-sh` 与该 workflow |
-| `make ci`        | 快速门禁 = `fmt-check` + `lint-rust` + doc-check + test-guides + 依赖/布局/形状/注释预算/公开文档/时钟/许可证不变量目标            |
+| `make lint-sh` | 对 11 个门禁脚本跑 shellcheck——`scripts/check-frozen-api.sh` / `scripts/check-harness-docs.sh` / `scripts/check-harness-shape.sh` / `scripts/check-plugin-shape.sh` / `scripts/check-pub-surface-strict.sh` / `scripts/check-public-api-runtime.sh` / `scripts/check-public-docs.sh` / `scripts/check-publishable.sh` / `scripts/check-single-writer.sh` / `scripts/check-kernel-deps.sh` / `scripts/check-stdout.sh`（`SC1091`/`SC2086` 豁免，`-S warning`）——`.github/workflows/shellcheck.yml` 是 CI 对应入口，**两份清单必须一致**：新增 `scripts/*.sh` 门禁要在同一变更里同时更新本表、`Makefile` 的 `lint-sh` 与该 workflow |
+| `make ci`        | 快速门禁 = `fmt-check` + `lint-rust` + doc-check + test-guides + 依赖/布局/形状/注释预算/公开文档/时钟/stdout 纪律/许可证不变量目标            |
 
 CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）只调用上述 `make` 目标，分 `gates` / `tests` / `examples` / `web` / `bench` 五个 job（`cargo fetch` / `npm ci` 属依赖安装，不是门禁）；测试与示例均无需 API key。
 
@@ -166,10 +169,9 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
 | `docs.yml` | push | `cargo doc --all-features` + 部署到 `gh-pages` |
 | `release.yml` | `v*` tag | 多平台 release 产物 + SHA-256 + CycloneDX SBOM + SLSA Build L3 provenance |
 | `security-audit.yml` | push / PR + 周一 03:00 UTC | `cargo audit`（rustsec/advisory-db）+ `cargo deny check` |
-| `contract-closure.yml` | push / PR | 双侧接口契约闭环扫描（advisory；§6 闭环时升级为 gating） |
 | `dependabot-auto-merge.yml` | Dependabot PR | patch/minor 自动合（major 走人审） |
-| `markdown-lint.yml` | push / PR + 每天 UTC 04:00 | `markdownlint-cli2` 跑 41 个 crate README + `CONTRIBUTORS.md` |
-| `shellcheck.yml` | push / PR + 每天 UTC 05:00 | `shellcheck` 跑与 `make lint-sh` 相同的 9 个门禁脚本 |
+| `markdown-lint.yml` | push / PR + 每天 UTC 04:00 | `markdownlint-cli2` 跑 42 个 crate README + `CONTRIBUTORS.md` |
+| `shellcheck.yml` | push / PR + 每天 UTC 05:00 | `shellcheck` 跑与 `make lint-sh` 相同的 11 个门禁脚本 |
 | `stale.yml` | 每天 UTC 02:00 | CNCF 范式：停滞 issue / PR 自动 stale → close（详见 `.github/stale.yml`） |
 
 任何对 `clippy.toml` / `scripts/harness-shape/clippy.toml` / `rustfmt.toml` / `deny.toml` / `Cargo.toml`（含 `[workspace.lints]` 与 `[workspace.metadata.docs.rs]`） / `.markdownlint.json` / `.editorconfig` / `.gitattributes` / `.github/stale.yml` / `.github/workflows/*.yml` / `CLAUDE.md` 的修改必须在同一变更中更新本文件对应引用，避免规则与配置漂移。
@@ -187,7 +189,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
 
 由此衍生以下硬性约束：
 
-- **不依赖具体运行时**：除 `elysper-server`（应用 crate，可选 feature）
+- **不依赖具体运行时**：除 `elysper-app-server`（应用 crate）
   与 `elysper-mcp-server`（stdio 二进制，R125）外，任何 crate 都不应在
   公共 API 暴露 `tokio::*` / `async-std::*` / `smol::*` 类型。
   取消用 [`elysper_core::CancelToken`] trait，
@@ -204,10 +206,10 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   与 `W: tokio::io::AsyncWrite + Unpin` —— trait 是 **trait bound**
   而非具体类型。`scripts/check-public-api-runtime.sh` 仍按 §3.7
   的"零 `tokio::` 路径"规则捕获它（trait bound 也算路径出现），
-  所以整个 crate 走 `elysper-server` 同款豁免（应用 / 二进制 crate
+  所以整个 crate 走 `elysper-app-server` 同款豁免（应用 / 二进制 crate
   的 `main()` 是唯一允许出现 `tokio::io::stdin()` / `stdout()`
   等具体类型的地方）。`make check-public-api-runtime` 把
-  `elysper-server` 和 `elysper-mcp-server` 都列入豁免。
+  `elysper-app-server` 和 `elysper-mcp-server` 都列入豁免。
 - **chrono 是唯一的时间库**：墙钟时间一律走
   [`elysper_core::Clock`](crates/elysper-core/src/clock.rs)
   trait（默认实现 [`SystemClock`](crates/elysper-core/src/clock.rs)），
@@ -272,6 +274,27 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   回填进 `elysper-harness`。
 - **依赖方向单向**：`elysper` → `elysper-*` → `elysper-core`，
   永远不回指；用 `cargo tree -p elysper-core` 验证无环。
+- **`elysper-kernel` 是框架边界，不是 agent**：它位于
+  `elysper-core`（纯类型 / trait 基座）与 `elysper-harness`
+  （agent 循环）之间，只承载 Cordis 适配（`Plugin` / `mount_all` /
+  `Waterfall` / 作用域）与生命周期原语。它的 normal 依赖图不得出现
+  `elysper-provider` / `-tool` / `-session` / `-harness` /
+  `-app-server` / `-mcp` / `-skill` / `-eval` / `-scheduler` /
+  `-attachment` 或任何 UI / 传输层 crate；边界由
+  `make check-kernel-deps`（`scripts/check-kernel-deps.sh`，跑
+  `cargo tree -p elysper-kernel -e normal`）断言，并接入 `make ci`
+  与 `rust-quality.yml` 的 `gates` job。
+- **profile HMR 只重挂 diff 的 id**：`profile.hmr = true` 时核心每秒
+  `ProfileWatcher::poll`，变更后 `diff_profiles`，只对 `added` /
+  `removed` / `remounted` 行执行卸载 / 重挂；volatile-only 变更不重挂；
+  已开始的 turn 使用其已解析的服务句柄完成。`hmr = false` 的变更只记录
+  「需要重启」，绝不半重载。显式 `[core]` 行是权威装配（省略即禁用）；
+  仅由旧 `config.yaml` 翻译出的行不是 mount 行，boot 对象仍按旧配置构建。
+- **UI 扩展点只传 JSON schema**：`[ui]` 条目必须落在 `ui.` 命名空间、
+  运行时必须是 `ui-bundle`；`ui/schema` 只返回 `version` / `slot` /
+  `kind` / `props`。前端只在 `components/ui-schema/` 的注册表内渲染已知
+  kind，未知 kind 走占位；v1 永不执行远端 JS/CSS，装载器拒绝
+  `script` / `stylesheet` 等字段。核心装载器同样拒绝 `ui.*` 服务键。
 - **Registry seam 收口在 `elysper-core`**：所有"具名目录 + cursor 分页"
   的抽象（[`elysper_core::registry::Registry`](crates/elysper-core/src/registry.rs)
   + [`RegistryItem`](crates/elysper-core/src/registry.rs) +
@@ -305,7 +328,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   完整工具集。`lib.rs` 的 `run<R, W>` 泛型函数以 `tokio::io
   ::AsyncRead + Unpin` / `AsyncWrite + Unpin` 作为 I/O 接缝
   （任何 runtime 都满足），`main.rs` 是唯一持有具体运行时
-  类型的地方（与 `elysper-server` 同款 §3.7 豁免）。
+  类型的地方（与 `elysper-app-server` 同款 §3.7 豁免）。
   验证：`crates/elysper-mcp-server/tests/stdio_roundtrip.rs`
   5/5（spawn binary 后驱动完整 wire）+ `crates/elysper-mcp-server/
   tests/pi-integration.ts`（Node.js 跨语言 smoke，
@@ -352,16 +375,17 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   `cargo run --example search_tool_demo -p elysper-tool-search`
   （尾行 `SEARCH-TOOL: OK`）。Spec：
   `docs/superpowers/specs/2026-09-19-wheel-cron-search-persistence-design.md` §3。
-- **elysper-server 的六域封装**（`crates/elysper-server/src/search/`）：
+- **elysper-app-server 的六域封装**（`crates/elysper-app-server/src/search/`）：
   服务器层把 tool / mcp / skill / memory / agent / session 六个目录
   投影成 `elysper-search` 的引擎（`SearchDoc` + `CatalogEngine`
   自刷新快照；memory / session 走 `ErasedEngine` 适配器直接委托各自
   检索）。一个 `SearchService` 提供两个视图：**agent 视图**（五域，
   不含 session）经 `register_search_tool` 成为模型可调的 `search`
   工具，所以冷启动上下文只需广告工具目录而不必全量枚举；
-  **HTTP 视图**（六域）由 `GET /api/v1/search` 投影，前端各资源的搜索
-  都走这一个引擎。用户/租户语义只存在于服务器层：HTTP handler 把
-  `RequestUserId` 放进 `QueryContext::extra`，session 域据此限域；
+  **全库视图**（六域）由 `search/all` JSON-RPC 方法投影，前端各资源的
+  搜索都走这一个引擎。用户/租户语义只存在于服务器层：方法 handler 把
+  `default_user_id()`（单用户 `"dev"`）作为 `EXTRA_USER_SCOPE` 放进
+  `QueryContext::extra`，session 域据此限域；
   agent 视图不暴露会话正文（模型调用没有可限域的请求上下文）。
   接线后 MCP 工具默认降到 `ToolExposure::Deferred`（per-request
   schema 体积变小，调用一次即升级）。
@@ -387,7 +411,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
 ## 3.8 时间与 ID 的使用准则
 
 - **生产代码**：`SharedClock::system()` 构造一次，传 `Arc<SharedClock>`
-  给所有需要的组件（`elysper-server` 的 `AppState` 就是这一份时钟的下游）。
+  给所有需要的组件（`elysper-app-server` 的 `AppState` 就是这一份时钟的下游）。
   `SharedIdGen::ulid()` 或 `SharedIdGen::ulid_prefixed("tag")` 同理。
 - **测试代码**：`SharedClock::fixed_at(t)` /
   `SharedClock::fixed_from_rfc3339(s)` 注入固定时间；
@@ -399,7 +423,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
   `OperationSnapshot::new_at`、`JournalEntry::success_at`、
   `parse_retry_after_at`），默认形式再走 `SystemClock`。
 - **门禁**：`make check-clock` 对 **lib crate** 生产代码里
-  `chrono::Utc::now()` 的出现次数做棘轮。`elysper-server` 是 **app**
+  `chrono::Utc::now()` 的出现次数做棘轮。`elysper-app-server` 是 **app**
   crate（§3.1：libs 用 thiserror，apps 用 anyhow），应用层直接读墙钟
   合规；`#[cfg(test)]` 块也豁免（测试不走 trait 注入的固定时钟）。当
   前基线 **0**（排除注释、`#[cfg(test)]`、app crate 后的 lib 生产调用）；
@@ -422,7 +446,7 @@ CI（[.github/workflows/rust-quality.yml](.github/workflows/rust-quality.yml)）
 
 **本项目不保留任何前端自动化测试套件，验证一律用 Playwright MCP 直接驱动浏览器。**
 
-1. 起真实前端（`npm run dev`，必要时 `cargo run -p elysper-server`）。
+1. 起真实前端（`npm run dev`，必要时 `cargo run -p elysper-app-server -- serve`）。
 2. 用 MCP 打开页面、执行交互、读取 DOM 与真实渲染结果作为证据。
 3. 纯函数同样如此：Vite 把 `src/**` 作为模块直接提供，页面内
    `await import('/src/lib/foo.ts')` 即可断言，无需测试 harness。

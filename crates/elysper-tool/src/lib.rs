@@ -94,6 +94,10 @@
 //!   plus the registry's `ToolEntry::dynamic` passthrough.
 //! - [`surface`] — the projection that turns the registry into the wire
 //!   `ToolDefinition`s, including deferred schemas.
+//! - [`plugin`] — the `tools` service: [`ToolRegistryPlugin`] publishes
+//!   the registry as a native kernel plugin under [`KEY_TOOLS`]. It
+//!   installs no tool; registering a brick is the brick plugin's
+//!   `apply`, and its effect handle is what revokes the registration.
 //! - [`output`] / [`full_output`] — the render contract, and the
 //!   stash-then-fetch path for results too large to commit.
 //! - [`workspace`] — path confinement for file-touching tools. A
@@ -122,6 +126,9 @@
 pub mod full_output;
 pub mod mcp_self;
 pub mod output;
+/// The `tools` service: [`ToolRegistryPlugin`] publishes the registry
+/// under [`KEY_TOOLS`].
+pub mod plugin;
 pub mod registry;
 pub mod restriction;
 pub mod schema_builder;
@@ -144,6 +151,7 @@ pub use full_output::{
 };
 pub use mcp_self::{MCP_SELF_TOOL_PREFIX, is_mcp_self_tool};
 pub use output::{RenderKind, ToolOutputDefinition};
+pub use plugin::{KEY_TOOLS, ToolRegistryPlugin};
 pub use registry::{
     DispatchPlan,
     DispatchRefusal,

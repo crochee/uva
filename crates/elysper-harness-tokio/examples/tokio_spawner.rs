@@ -19,7 +19,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use futures::StreamExt;
 use elysper_core::{AtomicCancelToken, CancelToken, Error};
 use elysper_harness::{Agent, AgentInput, ReActAgent};
 use elysper_harness_tokio::TokioSpawner;
@@ -32,6 +31,7 @@ use elysper_provider::{
     ProviderConfig,
 };
 use elysper_tool::ToolRegistry;
+use futures::StreamExt;
 
 /// Scripted provider: emits a single final answer so the loop
 /// exits after one iteration. The example proves the spawner

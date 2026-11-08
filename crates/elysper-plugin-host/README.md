@@ -54,6 +54,7 @@ fn config() -> RemotePluginConfig {
         authority: Authority::Reduced,
         risk: Risk::Low,
         call_timeout_ms: Some(5_000),
+        env: None,
     }
 }
 

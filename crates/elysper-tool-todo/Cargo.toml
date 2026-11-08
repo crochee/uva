@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+elysper-kernel.workspace = true
 elysper-tool.workspace = true
 async-trait.workspace = true
 serde.workspace = true

@@ -24,6 +24,11 @@ ulid.workspace = true
 # through the injectable clock rather than `chrono::Utc::now`.
 elysper-core.workspace = true
 elysper-provider.workspace = true
+# The `sessions` service is a native kernel plugin, so this crate
+# implements the kernel's `Plugin` contract. The kernel is runtime-free
+# (`cordis-rs` has an empty dependency table), so the crate stays
+# runtime-free.
+elysper-kernel.workspace = true
 
 # The one runtime-neutral async toolkit: the file lock, the
 # `select!` that races a summary against its deadline, and the

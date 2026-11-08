@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react';
 // Backend bind address; overridable via `ELYSPER_BACKEND_PORT`
 // env var so dev-time runs against `:8081` etc. work without
 // editing the file. Default `:8080` matches the
-// `elysper-server` CLI default (`--port 8080`).
+// `elysper-app-server serve` CLI default (`--port 8080`).
 const BACKEND_PORT = process.env.ELYSPER_BACKEND_PORT || '8080';
 const BACKEND_TARGET = `http://localhost:${BACKEND_PORT}`;
 
@@ -12,14 +12,12 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      // REST management API (tools/skills/providers/etc.)
-      '/api': BACKEND_TARGET,
-      // Anthropic Messages protocol. The chat page sends its turns to
-      // `/v1/messages` — the protocol's own path, mounted at the
-      // server's root — so the dev server has to forward it just like
-      // `/api`. Without this the request is answered by Vite (a 404
-      // with no body) and every turn fails to open a stream.
-      '/v1': BACKEND_TARGET,
+      // The one JSON-RPC socket: every management call and every
+      // session event rides this WebSocket. `ws: true` is what makes
+      // Vite upgrade the connection instead of answering it with an
+      // HTTP error; without it the client's first `new WebSocket`
+      // dies and the app boots offline.
+      '/rpc': { target: BACKEND_TARGET, ws: true },
       // Readiness probe (server-health badge polls this)
       '/readyz': BACKEND_TARGET,
       // Liveness probe (kept for orchestrator-style checks)

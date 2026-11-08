@@ -31,11 +31,11 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
 use elysper::{
     prelude::*,
     session::{LogWriter, SessionSink, in_memory::InMemorySessionSink},
 };
+use futures::StreamExt;
 
 // ---------------------------------------------------------------------
 // 1. The provider: the one piece the framework cannot supply.

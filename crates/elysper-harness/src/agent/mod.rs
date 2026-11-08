@@ -2,9 +2,9 @@
 use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
-use futures::Stream;
 pub use elysper_core::agent::AgentDescriptor;
 use elysper_core::{CancelToken, registry::RegistryItem};
+use futures::Stream;
 
 use crate::{events::AgentEvent, input::AgentInput};
 

@@ -1,8 +1,8 @@
 //! Runs `TodoWriteTool` over a three-item task list and prints the
 //! rendered checklist.
-use serde_json::json;
 use elysper_tool::{Context, Tool};
 use elysper_tool_todo::TodoWriteTool;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() {

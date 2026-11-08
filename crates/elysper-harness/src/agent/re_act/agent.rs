@@ -2,12 +2,12 @@
 use std::{path::PathBuf, pin::Pin, sync::Arc};
 
 use async_trait::async_trait;
-use futures::{Stream, channel::mpsc};
 use elysper_context::ContextManager;
 use elysper_core::{agent::AgentDescriptor, registry::RegistryItem};
 use elysper_provider::ModelProvider;
 use elysper_session::LogWriter;
 use elysper_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
+use futures::{Stream, channel::mpsc};
 
 use crate::{
     AgentCaps,
@@ -19,6 +19,7 @@ use crate::{
     events::AgentEvent,
     input::AgentInput,
     prompt::PromptContext,
+    seams::Seams,
 };
 
 /// Concrete [`Agent`](crate::agent::Agent) implementing the ReAct loop. Holds an [`AgentCaps`] bundle; per-run state (cancel +
@@ -200,11 +201,30 @@ impl ReActAgent {
     /// deployment's boot, which owns the composition — reports them
     /// instead of reading the host's diagnostic history.
     pub fn with_host(
-        mut self,
+        self,
         host: crate::agent::host::Host,
     ) -> Result<Self, Vec<crate::agent::host::Diagnostic>> {
-        let refused = host.bind(Arc::clone(&self.caps.tools.registry));
-        self.caps.control.host = host;
+        self.with_seams(Seams::new(host))
+    }
+
+    /// Install the agent's seam layer.
+    ///
+    /// The loop dispatches through this layer and no other interception
+    /// surface. A caller that already holds a [`Seams`] — the shape the
+    /// kernel-plugin path builds — installs it here; the legacy
+    /// [`ReActAgent::with_host`] wraps a [`Host`](crate::agent::host::Host)
+    /// in one.
+    ///
+    /// Binding follows the same contract as `with_host`: the layer's
+    /// tools join this agent's registry here, and a refused bind is
+    /// returned so the caller — the deployment's boot, which owns the
+    /// composition — reports it.
+    pub fn with_seams(
+        mut self,
+        seams: Seams,
+    ) -> Result<Self, Vec<crate::agent::host::Diagnostic>> {
+        let refused = seams.bind(Arc::clone(&self.caps.tools.registry));
+        self.caps.control.seams = seams;
         if refused.is_empty() {
             Ok(self)
         } else {

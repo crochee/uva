@@ -1,8 +1,8 @@
 //! System-prompt assembly: [`PromptContext::assemble`] builds the deterministic prompt (base instructions + identity, then plugin sections as Markdown headings, then the XML-delimited skills / peer-agent catalogues), while the volatile runtime facts ride the snapshot message instead so the provider cache stays hot.
 mod snapshot;
 
-pub(crate) use snapshot::RuntimeContext;
 use elysper_provider::Message;
+pub(crate) use snapshot::RuntimeContext;
 
 use crate::agent::{AgentDescriptor, host::PromptSection};
 

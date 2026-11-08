@@ -6,7 +6,6 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt as _;
 use elysper_context::{AgentState, ContextManager, TruncatingContextManager};
 use elysper_core::{Error as CoreError, SystemClock};
 use elysper_harness::{
@@ -34,6 +33,7 @@ use elysper_session::{
     SessionSink,
     in_memory::InMemorySessionSink,
 };
+use futures::StreamExt as _;
 
 use super::{ChainOfThoughtStrategy, DEFAULT_COT_STEPS};
 

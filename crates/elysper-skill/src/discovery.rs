@@ -4,15 +4,18 @@
 //! Mirrors `opencode/packages/opencode/src/skill/index.ts`:
 //!
 //! 1. **Project skills** at `<workspace>/.agents/skills/**/SKILL.md`
-//! 2. **User skills** at `~/.claude/skills/**/SKILL.md`
-//!    and `~/.agents/skills/**/SKILL.md`
+//!    and inside the project's plugin bundles
+//!    (`<workspace>/.agents/plugins/<bundle>/skills/`)
+//! 2. **Global skills** at `~/.agents/skills/**/SKILL.md`, inside
+//!    the global plugin bundles, and at the legacy
+//!    `~/.elysper/skills/**/SKILL.md`
 //!
-//! The project root wins over the user root when two skills
-//! share a name (matches the opencode precedence: project
-//! overrides personal). A user-skill that fails to parse is
-//! silently dropped — same leniency opencode / Grok Build
-//! apply to broken third-party skills so a malformed file
-//! never poisons the whole registry.
+//! The project roots win over the global roots when two skills
+//! share a name (matches the opencode precedence: project overrides
+//! personal). The `~/.claude/skills` compatibility root is gone.
+//! A user-skill that fails to parse is silently dropped — same
+//! leniency opencode / Grok Build apply to broken third-party
+//! skills so a malformed file never poisons the whole registry.
 //!
 //! Discovery is cheap (`read_dir` + an existence check), and
 //! is invoked by:
@@ -29,73 +32,55 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::skill::Skill;
+use elysper_core::layout::{self, Domain};
+
+use crate::skill::{SKILL_FILE, Skill};
 
 /// Project-level skills root (relative to the workspace root).
 ///
-/// Matches Anthropic's `<workspace>/.claude/skills/` and
-/// OpenCode's `<workspace>/.agents/skills/` conventions;
-/// Elysper uses `.agents/` so the directory is shared with
-/// other agent definitions (subagents, hooks, etc).
+/// Matches OpenCode's `<workspace>/.agents/skills/` convention;
+/// Elysper uses `.agents/` so the directory is shared with other
+/// agent definitions (subagents, tasks, MCP declarations).
 pub const PROJECT_SKILLS_DIR: &str = ".agents/skills";
-
-/// User-level skills roots, scanned in this order.
-///
-/// Mirrors `opencode/packages/opencode/src/skill/index.ts`'s
-/// `EXTERNAL_SKILL_PATTERN` set: `.claude/skills/` first
-/// (Anthropic Agent Skills convention), then `.agents/skills/`
-/// (OpenCode / Codex convention). The first match wins; later
-/// duplicates are dropped silently.
-const USER_SKILLS_DIRS: &[&str] = &[".claude/skills", ".agents/skills"];
 
 /// Discover all skills visible to the given workspace.
 ///
-/// `workspace_root` is the project root the agent runs in;
-/// user-level skills are read from `$HOME/{.claude,.agents}/skills`.
-/// Project skills take precedence over user skills when two
-/// files share a name.
+/// `workspace_root` is the project root the agent runs in. The
+/// sources come from [`elysper_core::layout`], so the skills obey
+/// exactly the precedence the layout defines: the project's own
+/// `skills/` directory, the project's plugin bundles, the global
+/// `~/.agents/skills/` directory, the global plugin bundles, and —
+/// last — the legacy `~/.elysper/skills/` directory.
 ///
-/// Returned order: project skills first (in `read_dir` order),
-/// then user skills. The caller is free to sort before
+/// Returned order: the sources in precedence order, and within a
+/// source the `read_dir` order. The caller is free to sort before
 /// rendering the `<available_skills>` block.
 pub fn discover_skills(workspace_root: &Path) -> Vec<Skill> {
-    let project = discover_project_skills(workspace_root);
-    let user = discover_user_skills();
-    merge_project_then_user(project, user)
-}
-
-/// Collect every well-formed `SKILL.md` under
-/// `<workspace>/.agents/skills/`. Two project skills sharing
-/// a name are deduped — the first one encountered wins.
-fn discover_project_skills(workspace_root: &Path) -> Vec<Skill> {
-    let paths = walk_skill_dirs(&workspace_root.join(PROJECT_SKILLS_DIR));
-    collect_skills(paths, "project")
-}
-
-/// Collect every well-formed `SKILL.md` under
-/// `$HOME/.claude/skills/` and `$HOME/.agents/skills/` in that
-/// order, deduped by name across both roots — the earlier root
-/// (`.claude`) wins, mirroring the opencode precedence. The
-/// cross-root pass matters because the two trees routinely hold
-/// the same skills: `.claude/skills/<name>` is often a symlink
-/// into `.agents/skills/<name>`, and each root's own walk cannot
-/// see the other's duplicates. Returns an empty list when `$HOME`
-/// is unset.
-fn discover_user_skills() -> Vec<Skill> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Vec::new();
-    };
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut out = Vec::new();
-    for rel in USER_SKILLS_DIRS {
-        let paths = walk_skill_dirs(&home.join(rel));
-        for skill in collect_skills(paths, "user") {
-            if seen.insert(skill.name.clone()) {
-                out.push(skill);
-            }
+    let mut found = Vec::new();
+    for source in layout::sources(workspace_root, Domain::Skills) {
+        let paths = walk_skill_dirs(&source.path);
+        let label = source_label(&source);
+        for skill in collect_skills(paths, label) {
+            found.push((skill.name.clone(), skill));
         }
     }
-    out
+    // The first source that offers a name wins: the layout already
+    // ordered the sources by precedence.
+    layout::merge_by_name(found, |(name, _)| name.as_str())
+        .into_iter()
+        .map(|(_, skill)| skill)
+        .collect()
+}
+
+/// The label a source's skills are collected under, for the
+/// malformed-file warning.
+fn source_label(source: &layout::SourceDir) -> &'static str {
+    match (&source.layer, &source.plugin) {
+        (layout::Layer::Project, None) => "project",
+        (layout::Layer::Project, Some(_)) => "project plugin",
+        (layout::Layer::Global, None) => "global",
+        (layout::Layer::Global, Some(_)) => "global plugin",
+    }
 }
 
 /// Parse a batch of `SKILL.md` paths into [`Skill`] values,
@@ -121,23 +106,6 @@ fn collect_skills(paths: Vec<PathBuf>, source: &'static str) -> Vec<Skill> {
             }
         }
     }
-    out
-}
-
-/// Concatenate project and user skills, dropping any user
-/// skill whose name collides with a project skill (project
-/// wins — matches the opencode precedence).
-fn merge_project_then_user(
-    project: Vec<Skill>,
-    user: Vec<Skill>,
-) -> Vec<Skill> {
-    let project_names: HashSet<String> =
-        project.iter().map(|s| s.name.clone()).collect();
-    let mut out = project;
-    out.extend(
-        user.into_iter()
-            .filter(|s| !project_names.contains(&s.name)),
-    );
     out
 }
 
@@ -173,7 +141,7 @@ fn walk_recursive(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let skill_md = path.join("SKILL.md");
+            let skill_md = path.join(SKILL_FILE);
             if skill_md.is_file() {
                 out.push(skill_md);
             }
@@ -190,7 +158,7 @@ mod tests {
     fn write_skill(dir: &Path, name: &str, body: &str) -> PathBuf {
         let skill_dir = dir.join(name);
         std::fs::create_dir_all(&skill_dir).unwrap();
-        let skill_md = skill_dir.join("SKILL.md");
+        let skill_md = skill_dir.join(SKILL_FILE);
         std::fs::write(&skill_md, body).unwrap();
         skill_md
     }
@@ -283,34 +251,23 @@ mod tests {
         });
     }
 
-    /// A skill reachable through **both** user roots (the common
-    /// `.claude/skills/<name>` → `.agents/skills/<name>` symlink
-    /// layout) MUST appear once: each root's walk only dedups
-    /// within itself, so the cross-root pass is what keeps the
+    /// A skill reachable through **both** a global root and a bundle
+    /// MUST appear once: each source's walk only dedups within
+    /// itself, so the cross-source pass is what keeps the
     /// `<available_skills>` manifest — and anything else indexing
     /// discovery output — free of duplicate rows.
     #[test]
-    fn user_skill_visible_through_both_roots_appears_once() {
+    fn a_skill_visible_through_two_sources_appears_once() {
         with_scoped_home(|home| {
             let dir = tempfile::tempdir().unwrap();
-            let agents_root = home.join(".agents").join("skills");
             write_skill(
-                &agents_root,
+                &home.join(".agents").join("skills"),
                 "shared",
                 "---\nname: shared\ndescription: Shared.\n---\n\nBody.\n",
             );
-            // The `.claude` root points at the same skill.
-            let claude_root = home.join(".claude").join("skills");
-            std::fs::create_dir_all(&claude_root).unwrap();
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(
-                agents_root.join("shared"),
-                claude_root.join("shared"),
-            )
-            .unwrap();
-            #[cfg(not(unix))]
+            // The bundle declares the same name.
             write_skill(
-                &claude_root,
+                &dir.path().join(".agents/plugins/bundle/skills"),
                 "shared",
                 "---\nname: shared\ndescription: Shared.\n---\n\nBody.\n",
             );
@@ -324,31 +281,35 @@ mod tests {
             assert_eq!(
                 shared.len(),
                 1,
-                "a skill visible through both user roots must appear once, \
-                 got: {:?}",
+                "a skill declared by two sources must appear once, got: {:?}",
                 skills.iter().map(|s| &s.name).collect::<Vec<_>>()
             );
         });
     }
 
-    /// User-level skills at `$HOME/.claude/skills/` and
-    /// `$HOME/.agents/skills/` MUST be discoverable alongside
-    /// project skills (Anthropic / OpenCode / Codex
-    /// convention). Project skills win on name collisions.
+    /// Global skills at `$HOME/.agents/skills/` MUST be
+    /// discoverable alongside project skills, and the project layer
+    /// MUST win on a name collision.
+    ///
+    /// The `~/.claude/skills` compatibility root is **gone**: the
+    /// global layer is `~/.agents` (canonical) and `~/.elysper`
+    /// (legacy), and nothing else.
     #[test]
-    fn discovers_user_skills_from_home() {
+    fn discovers_global_skills_from_home() {
         with_scoped_home(|home| {
             let dir = tempfile::tempdir().unwrap();
 
             write_skill(
-                &home.join(".claude").join("skills"),
-                "user-claude",
-                "---\nname: user-claude\ndescription: From .claude.\n---\n\nBody.\n",
-            );
-            write_skill(
                 &home.join(".agents").join("skills"),
                 "user-agents",
                 "---\nname: user-agents\ndescription: From .agents.\n---\n\nBody.\n",
+            );
+            // The retired compatibility root: a skill here must NOT
+            // be discovered.
+            write_skill(
+                &home.join(".claude").join("skills"),
+                "user-claude",
+                "---\nname: user-claude\ndescription: From .claude.\n---\n\nBody.\n",
             );
             write_skill(
                 &dir.path().join(PROJECT_SKILLS_DIR),
@@ -359,9 +320,12 @@ mod tests {
             let skills = discover_skills(dir.path());
             let names: Vec<&str> =
                 skills.iter().map(|s| s.name.as_str()).collect();
-            assert!(names.contains(&"user-claude"), "got: {names:?}");
             assert!(names.contains(&"user-agents"), "got: {names:?}");
             assert!(names.contains(&"project"), "got: {names:?}");
+            assert!(
+                !names.contains(&"user-claude"),
+                "the .claude compatibility root is gone: {names:?}"
+            );
         });
     }
 }

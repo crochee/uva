@@ -152,7 +152,7 @@ export function SchedulesPage() {
             </div>
             <div className="nt-vis-meta-cluster__row">
               <span>API</span>
-              <span>/api/v1/schedules</span>
+              <span>schedules/list</span>
             </div>
           </div>
         }

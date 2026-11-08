@@ -74,10 +74,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use elysper_core::blocking::Blocking;
 use futures::{channel::oneshot, lock::Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use elysper_core::blocking::Blocking;
 
 use crate::{
     fs::FsBackend,
@@ -726,6 +726,14 @@ impl SessionSink for JsonlSessionSink {
         JsonlSessionSink::read_tail(self, window).await
     }
 
+    async fn read_since(
+        &self,
+        from: u64,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
+        JsonlSessionSink::read_since(self, from, window).await
+    }
+
     async fn read_head(&self) -> Result<Option<Value>, SessionError> {
         JsonlSessionSink::read_head(self).await
     }
@@ -831,6 +839,94 @@ impl JsonlSessionSink {
                     window,
                     reached_start,
                 );
+            }
+            budget = budget.saturating_mul(4);
+        }
+    }
+
+    /// The rows after ordinal `from`, read from the end of the file.
+    ///
+    /// The scan stops at the first row at or before `from`, so the
+    /// cost is proportional to the rows that arrived since the
+    /// cursor — not to the window the caller asked for. A subscriber
+    /// that polls for new rows therefore reads the new rows, not the
+    /// same tail over and over.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::ReadFailed`] when the file cannot be read or a
+    /// row cannot be parsed — the same contract as
+    /// [`SessionSink::read`].
+    pub async fn read_since(
+        &self,
+        from: u64,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
+        if window == 0 {
+            return Ok(Vec::new());
+        }
+        // The file-level gate, before a single row is read: a row
+        // read under this build's semantics out of a log another
+        // version wrote is a row this build misinterprets.
+        {
+            let state = self.state.lock().await;
+            if let Some(found) = state.unsupported_version() {
+                return Err(SessionError::UnsupportedSchemaVersion {
+                    found,
+                    supported: CURRENT_SCHEMA_VERSION,
+                });
+            }
+        }
+        let path = self.events_path();
+        let mut budget = TAIL_READ_CHUNK;
+        loop {
+            let chunk = self
+                .fs
+                .read_tail(&path, budget)
+                .await
+                .map_err(SessionError::ReadFailed)?;
+            let reached_start = chunk.start == 0;
+            if reached_start {
+                // The read began at the file's first byte, so the
+                // first complete line is the header — gate on it the
+                // same way `read` does.
+                Self::ensure_supported_schema_version(&chunk.bytes)?;
+            }
+            // Every row the chunk holds, in chronological order. The
+            // window does not bound this read: the boundary row is
+            // what ends it.
+            let rows =
+                Self::rows_from_tail(&chunk.bytes, usize::MAX, reached_start)?;
+            // The boundary: the newest row at or before the cursor.
+            // The rows are chronological, so it is the last row that
+            // is not newer than the cursor — everything after it is
+            // new.
+            if let Some(index) = rows.iter().rposition(|row| {
+                row_ordinal(row).is_some_and(|ordinal| ordinal <= from)
+            }) {
+                let mut new_rows = rows[index + 1..].to_vec();
+                // The window bounds what the caller receives, and the
+                // oldest rows come first: a reader that advances its
+                // cursor past them asks again for the rest, so no row
+                // is lost.
+                new_rows.truncate(window);
+                return Ok(new_rows);
+            }
+            if rows.first().is_some_and(|row| row_ordinal(row).is_none()) {
+                // A log written before ordinals carries no ordinal at
+                // all: the caller has to read it positionally, so the
+                // scan stops here rather than reading a whole log the
+                // caller will not use.
+                let mut new_rows = rows;
+                new_rows.truncate(window);
+                return Ok(new_rows);
+            }
+            if reached_start {
+                // Every row is newer than the cursor: the log's start
+                // is the boundary.
+                let mut new_rows = rows;
+                new_rows.truncate(window);
+                return Ok(new_rows);
             }
             budget = budget.saturating_mul(4);
         }
@@ -1168,6 +1264,16 @@ fn inspect_log(path: &Path) -> LogFacts {
         count
     };
     LogFacts { next_seq }
+}
+
+/// The row's stamped ordinal, when it carries one.
+///
+/// A log written before ordinals numbers its rows by position, so the
+/// ordinal is absent — `None`, not a zero. A row without an ordinal
+/// is never a boundary: the caller that needs the distinction reads
+/// the absence.
+fn row_ordinal(row: &Value) -> Option<u64> {
+    row.get("seq").and_then(Value::as_u64)
 }
 
 #[cfg(test)]

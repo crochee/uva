@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage Dockerfile for cross-compiling elysper-server to
+# Multi-stage Dockerfile for cross-compiling elysper-app-server to
 # Windows PE (x86_64-pc-windows-gnu).
 #
 # Pattern mirrors `Dockerfile.server` (musl) and `Dockerfile.mcp`:
@@ -14,7 +14,7 @@
 #
 # 镜像只用于出产物, 不运行: 末尾 `FROM scratch AS artifact` 把 PE 拷出,
 # 由 `docker buildx build --target artifact --output type=local,dest=dist .`
-# 直接落地 dist/elysper-server.exe. 镜像本体不持久化.
+# 直接落地 dist/elysper-app-server.exe. 镜像本体不持久化.
 #
 # Build identity 同样由 `build.rs` 通过 cargo:rustc-env= 烘进二进制,
 # 与 Dockerfile.server / release.yml 走同一份协议 (ELYSPER_GIT_SHA /
@@ -81,7 +81,7 @@ ENV CARGO_PROFILE_RELEASE_LTO=thin \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo chef cook --release --target x86_64-pc-windows-gnu \
-        -p elysper-server --bin elysper-server \
+        -p elysper-app-server --bin elysper-app-server \
         --recipe-path recipe.json
 
 ########## Stage 3: builder —— 本仓库 crate (增量: 只编 crates/) ##########
@@ -101,10 +101,10 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo build --release --locked --target x86_64-pc-windows-gnu \
-        -p elysper-server \
-    && cp target/x86_64-pc-windows-gnu/release/elysper-server.exe \
-        /elysper-server.exe
+        -p elysper-app-server \
+    && cp target/x86_64-pc-windows-gnu/release/elysper-app-server.exe \
+        /elysper-app-server.exe
 
 ########## Stage 4: artifact —— scratch 导出层 (--target artifact 入口) ##########
 FROM scratch AS artifact
-COPY --from=builder /elysper-server.exe /elysper-server.exe
+COPY --from=builder /elysper-app-server.exe /elysper-app-server.exe

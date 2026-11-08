@@ -809,8 +809,9 @@ export interface EvalTestResult {
  */
 
 export interface TaskDelegation {
-  /** Synthetic id derived from the session event sequence number
-   *  so the URL `/tasks/:id` survives a refresh. */
+  /** Synthetic id `<parentSessionId>:<childSessionId>` — names one
+   *  delegation for good, so the URL `/tasks/:id` survives a
+   *  refresh. */
   id: string;
   /** Session that produced this delegation. */
   parent_session_id: string;

@@ -204,8 +204,8 @@ impl FakeProvider {
         S: Into<String>,
         V: serde::Serialize,
     {
-        use serde_json::json;
         use elysper_provider::{ContentPart, TextContent, ToolUse};
+        use serde_json::json;
         let tool_input =
             serde_json::to_value(&tool_input).unwrap_or_else(|_| json!({}));
         let response_with_tool = Content::parts(vec![

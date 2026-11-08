@@ -54,14 +54,16 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use serde_json::{Value, json};
 use elysper_core::Error;
+use serde_json::{Value, json};
 
 pub mod client;
+pub mod config_file;
 pub mod control;
 pub mod http;
 pub mod loopback;
 pub mod naming;
+pub mod plugin;
 pub mod server;
 pub mod stdio;
 pub mod supervisor;
@@ -81,6 +83,7 @@ pub use control::{MCP_TOOL_NAME, McpControlTool, register_mcp_control_tool};
 pub use http::{HttpTransportFactory, StreamableHttpTransport};
 pub use loopback::{LoopbackServer, LoopbackTransport, loopback_pair};
 pub use naming::{NamingPolicy, public_tool_name, resolve_prefix};
+pub use plugin::{KEY_MCP, McpPlugin};
 pub use server::{ServerInfo, ServerTool, serve};
 pub use stdio::{StdioTransport, StdioTransportFactory};
 pub use supervisor::{

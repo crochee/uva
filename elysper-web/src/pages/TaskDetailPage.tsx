@@ -15,9 +15,9 @@ const TASK_HERO_MODIFIER = 'nt-vis-hero--tool';
  *
  * Live data: `GET /api/v1/tasks/{id}` returns one
  * `TaskDelegation`, where `id` is the synthetic
- * `<sessionId>:<eventSeq>` the list page derives. The parent
- * session is linked so the user can jump to the transcript the
- * delegation came from.
+ * `<parentSessionId>:<childSessionId>` the list page derives.
+ * The parent session is linked so the user can jump to the
+ * transcript the delegation came from.
  */
 export function TaskDetailPage() {
   const { id } = useParams<{ id: string }>();

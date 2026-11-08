@@ -1,0 +1,184 @@
+[package]
+name = "elysper-app-server"
+description = "Reference agent runtime for elysper: a headless JSON-RPC 2.0 core on stdio, plus a WebSocket gateway in front of it"
+# Application crate, not a library: it is the wiring showcase, and the
+# 40k lines behind it are not a crates.io contract. `elysper` (the
+# facade) stays publishable — it is the documented consumer entry point.
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+# build.rs bakes the git SHA / build time / target triple into
+# `build_info.rs` via `cargo:rustc-env=`; see `build.rs` for the
+# source-priority chain. Cargo re-runs it whenever any of the three
+# env vars changes (`cargo:rerun-if-env-changed=...` in build.rs).
+build = "build.rs"
+[features]
+# Only `test-utils` remains. Observability is not feature-gated on
+# this crate: OTel OTLP tracing, Prometheus RED metrics, the
+# `/metrics` endpoint, and the `track_metrics` middleware are all
+# always-on *for the server*, which is why both telemetry features are
+# named here explicitly — the server must not lose OTLP if the crate's
+# default set ever changes. The fallback to console tracing when
+# neither gRPC nor HTTP OTLP is configured lives inside
+# `elysper_telemetry::init_tracing`.
+#
+# `test-utils` forwards to the facade's `test-support` feature so
+# `elysper::test_support::FakeProvider` is nameable from the
+# for-test fixture. No direct `elysper-test-support` dependency:
+# every call site goes through the facade (single-dependency rule).
+test-utils = ["elysper/test-support"]
+# Bake the web front-end's built files into the binary, so the
+# gateway can serve them without a sidecar directory. Off by
+# default: the ordinary build ships no front-end, and the
+# deployment serves one with `--web-dir`.
+embed-web = ["dep:rust-embed"]
+
+[dependencies]
+# Single-facade dependency rule (R121): the application crate talks to
+# the AI agent SDK lib through `elysper` (the facade) only. The
+# facade's feature set is the canonical "assemble the full server"
+# set — every plugin tool, every model adapter, every optional
+# integration (skill, attachment, MCP, telemetry) — and adding a new
+# crate below the facade only requires a one-line feature change here.
+# A library consumer that wants a smaller build drops the features at
+# the `elysper` line; this crate has no reason to.
+elysper = { workspace = true, features = [
+  "core",
+  "provider",
+  "provider-anthropic",
+  "provider-openai",
+  "context",
+  "tool",
+  "tool-read",
+  "tool-write",
+  "tool-shell",
+  "tool-todo",
+  "tool-web",
+  "tool-task",
+  "tool-scheduler",
+  "tool-search",
+  "session",
+  "steering",
+  "harness",
+  # The server is the repo's tokio host: it installs the runtime's
+  # implementations of the `Sleeper` / `Spawner` seams (a retry
+  # backoff costs a timer entry, not an OS thread).
+  "harness-tokio",
+  "skill",
+  "agents",
+  "attachment",
+  "mcp",
+  "plugin-host",
+  "telemetry",
+  "search",
+  "scheduler",
+  "eval",
+  "workflow",
+  "cron",
+  "semantic-cache",
+  "tool-memo",
+  "resilience",
+  "strategy-plan-execute",
+  "strategy-cot",
+  "strategy-best-of-n",
+  "reflection",
+  "budget",
+  # The config-driven assembly layer behind the built-in native
+  # plugins (model-adapter catalogue + tier-1 chain). The R121
+  # single-facade rule applies here too: never a direct
+  # elysper-runtime dependency.
+  "runtime",
+  # The plugin kernel: `profile` binds each assembled entry to a
+  # `PluginFactory`, and `build_plugins` returns the kernel's `Plugin`
+  # trait objects. Enabled through the facade, never as a direct
+  # dependency (the single-facade rule above).
+  "kernel",
+] }
+validator.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+axum.workspace = true
+tower-http = { workspace = true, features = ["fs"] }
+# The one application crate: `rt-multi-thread` (worker pool), `macros`
+# (`#[tokio::main]`, `select!`, tests), `net` (`TcpListener`),
+# `signal` (Ctrl-C), `sync` (broadcast / mpsc / RwLock), `time` (the
+# follow projection's poll deadlines), `io-util` (line-buffered
+# stdio), `io-std` (the JSON-RPC core's stdin/stdout), `process`
+# (the gateway's core subprocess), `fs` (static assets, log files).
+tokio = { workspace = true, features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "signal",
+  "sync",
+  "time",
+  "io-util",
+  "io-std",
+  "process",
+  "fs",
+] }
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+# The frame codec's error enum; the rest of the crate keeps `anyhow`.
+thiserror.workspace = true
+tracing.workspace = true
+futures.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde_yaml.workspace = true
+rust-embed = { workspace = true, optional = true }
+dotenvy.workspace = true
+clap.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+base64.workspace = true
+regex.workspace = true
+schemars.workspace = true
+# The env-content overlay is a throwaway file on disk.
+tempfile.workspace = true
+
+[dev-dependencies]
+# The test fixtures build scripted event streams with the
+# `async_stream!` macro; the production paths do not use it.
+async-stream.workspace = true
+# The observability example drives the W3C propagator directly.
+opentelemetry.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util"] }
+axum.workspace = true
+elysper.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies.elysper-app-server]
+path = "."
+features = ["test-utils"]
+
+# Both tests spawn the real binary with a `type = "demo"` provider,
+# which exists only under `test-utils` (the keyless echo provider is
+# not a production provider type). The self dev-dependency above
+# enables the feature for a test build; requiring it here makes that
+# dependency explicit, so a plain run can never silently build a
+# binary the fixture cannot boot if the wiring changes.
+[[test]]
+name = "lease_handover"
+required-features = ["test-utils"]
+
+[[test]]
+name = "stdio_roundtrip"
+required-features = ["test-utils"]
+
+# The transport hot-path benchmarks: the Content-Length codec, the typed
+# parse, and the frame-size bound. Same `harness = false` discipline as
+# the harness/kernel benches—a table by default, ratios under `--check`.
+[[bench]]
+name = "framing"
+harness = false

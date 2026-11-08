@@ -1,4 +1,3 @@
-use serde_json::{Value, json};
 use elysper_provider::{
     Content,
     ContentPart,
@@ -7,6 +6,7 @@ use elysper_provider::{
     TextContent,
     ToolUse,
 };
+use serde_json::{Value, json};
 
 use super::{HistoryError, derive_history, surface_message};
 use crate::{

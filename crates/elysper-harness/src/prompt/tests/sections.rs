@@ -17,6 +17,7 @@ use super::{
 use crate::{
     AgentCaps,
     agent::host::{Host, PromptSection},
+    seams::Seams,
 };
 
 fn section(title: &str, body: &str) -> PromptSection {
@@ -26,13 +27,14 @@ fn section(title: &str, body: &str) -> PromptSection {
     }
 }
 
-// An `AgentCaps` whose host holds `host`'s registrations: the shape the
-// loop's constructor sees when it snapshots the run's manifest.
+// An `AgentCaps` whose seam layer wraps `host`'s registrations: the
+// shape the loop's constructor sees when it snapshots the run's
+// manifest.
 fn caps_with_host(host: Host) -> AgentCaps {
     let provider: Arc<dyn elysper_provider::ModelProvider> =
         Arc::new(elysper_test_support::FakeProvider::new(Vec::new()));
     let mut caps = AgentCaps::for_provider(provider);
-    caps.control.host = host;
+    caps.control.seams = Seams::new(host);
     caps
 }
 
@@ -216,13 +218,15 @@ fn the_run_manifest_carries_the_host_registrations() {
 fn a_section_registered_between_runs_appears_on_the_next_run() {
     let mut host = Host::new();
     let _first = host.prompt_section(section("First", "one"));
-    let mut caps = caps_with_host(host);
+    let caps = caps_with_host(host.clone());
 
     let run_one = caps.run_prompt_context(None);
     assert_eq!(run_one.sections().len(), 1);
 
     // Registered while the first run's manifest is already snapshotted.
-    let _second = caps.control.host.prompt_section(section("Second", "two"));
+    // The host clone shares the seam layer's table, so the registration
+    // is visible to the next snapshot without touching the run in flight.
+    let _second = host.prompt_section(section("Second", "two"));
     let run_two = caps.run_prompt_context(None);
 
     assert_eq!(

@@ -4,8 +4,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::json;
+use elysper_session::SessionSink;
 use elysper_tool::{Context, ToolOutput, ToolRegistry};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::{support::*, *};
@@ -168,5 +169,93 @@ async fn parallel_safe_tool_emits_progress_and_result_in_llm_order() {
         results,
         vec![Some("slow".to_string()), Some("fast".to_string())],
         "ToolResult order must follow LLM tool-call order"
+    );
+}
+
+// A tool that waits for the duration its input names.
+struct DelayTool;
+
+#[async_trait]
+impl elysper_tool::Tool for DelayTool {
+    fn name(&self) -> &str {
+        "delay"
+    }
+
+    fn description(&self) -> &str {
+        "waits for the duration its input names"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    async fn call(
+        &self,
+        input: serde_json::Value,
+        _ctx: &Context,
+    ) -> ToolOutput {
+        let millis = input["ms"].as_u64().unwrap_or(0);
+        tokio::time::sleep(std::time::Duration::from_millis(millis)).await;
+        ToolOutput::text("done")
+    }
+}
+
+// The tool results are committed in the assistant's order, not in
+// the order the calls finished.
+//
+// The batch runs under a concurrency bound, so the calls finish in
+// whatever order they finish. The rows the log holds are still the
+// assistant's order: a commit that followed the completion order
+// would make the transcript's results read differently from the tool
+// calls they answer.
+#[tokio::test]
+async fn tool_results_are_committed_in_the_assistants_order() {
+    // Descending delays: the calls finish in the *reverse* of their
+    // source order, so a completion-ordered commit would write
+    // c3, c2, c1.
+    let tool_use1 = ToolUse {
+        id: "c1".into(),
+        name: "delay".into(),
+        input: json!({"ms": 150}),
+    };
+    let tool_use2 = ToolUse {
+        id: "c2".into(),
+        name: "delay".into(),
+        input: json!({"ms": 100}),
+    };
+    let tool_use3 = ToolUse {
+        id: "c3".into(),
+        name: "delay".into(),
+        input: json!({"ms": 50}),
+    };
+    let sink =
+        Arc::new(elysper_session::in_memory::InMemorySessionSink::new("s"));
+    let writer = Arc::new(elysper_session::LogWriter::new(
+        sink.clone(),
+        Arc::new(elysper_core::SystemClock),
+    ));
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![tool_use1, tool_use2, tool_use3]),
+        empty_response(),
+    ]));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(elysper_tool::ToolEntry::new(Arc::new(DelayTool)));
+    let agent = ReActAgent::new(provider, registry).with_log_writer(writer);
+    let mut stream = agent
+        .run(AgentInput::text("run"), Arc::new(CancellationToken::new()))
+        .await;
+    while futures::StreamExt::next(&mut stream).await.is_some() {}
+
+    let rows = sink.read().await.expect("read");
+    let order: Vec<&str> = rows
+        .iter()
+        .filter(|row| row["type"] == "tool_result")
+        .filter_map(|row| row["data"]["tool_call_id"].as_str())
+        .collect();
+    assert_eq!(
+        order,
+        vec!["c1", "c2", "c3"],
+        "the log's tool results must follow the assistant's tool-call \
+         order, not the order the calls finished"
     );
 }

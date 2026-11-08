@@ -2,7 +2,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use parking_lot::Mutex;
 use elysper_core::{
     Clock,
     breaker::{BreakerConfig, BreakerState, Outcome},
@@ -16,6 +15,7 @@ use elysper_provider::{
     ProviderConfig,
     StreamChunk,
 };
+use parking_lot::Mutex;
 
 use crate::classify::{
     ClassifyFn,

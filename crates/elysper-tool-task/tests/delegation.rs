@@ -15,7 +15,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use elysper_core::{CancelToken, Error, registry::Registry};
 use elysper_harness::{
     Agent,
@@ -43,6 +42,7 @@ use elysper_provider::{
 };
 use elysper_tool::ToolRegistry;
 use elysper_tool_task::{MAX_SUBAGENT_DEPTH, TaskDelegator};
+use futures::StreamExt;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 

@@ -19,7 +19,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
 use elysper_eval::{
     EvalAgent,
     EvalError,
@@ -30,6 +29,7 @@ use elysper_eval::{
     SyncMetricAdapter,
     TestCase,
 };
+use parking_lot::Mutex;
 
 /// Scores `1.0` when the output fits the word budget, decaying
 /// linearly past it.

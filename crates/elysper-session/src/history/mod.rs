@@ -24,8 +24,8 @@
 
 use std::collections::HashSet;
 
-use serde_json::Value;
 use elysper_provider::{Content, ContentPart, Message, Role};
+use serde_json::Value;
 
 use crate::{log_surface::try_fold_log_surface, surface::FoldError};
 

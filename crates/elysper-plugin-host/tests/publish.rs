@@ -16,9 +16,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use futures::executor::block_on;
-use parking_lot::Mutex;
-use serde_json::{Value, json};
 use elysper_harness::Host;
 use elysper_plugin_host::{
     Authority,
@@ -30,6 +27,9 @@ use elysper_plugin_host::{
 };
 use elysper_plugin_protocol::{PluginCapabilities, methods};
 use elysper_tool::{Context, Risk, Tool};
+use futures::executor::block_on;
+use parking_lot::Mutex;
+use serde_json::{Value, json};
 
 /// Answers the handshake declaring `publish`, serves one tool, and
 /// publishes one event right after the tool list. The host installs
@@ -119,6 +119,7 @@ fn publishing_config(script: &str, publish: bool) -> RemotePluginConfig {
         authority: Authority::Reduced,
         risk: Risk::Low,
         call_timeout_ms: None,
+        env: None,
     }
 }
 
