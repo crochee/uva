@@ -35,9 +35,8 @@
  *      shape is identical to the history path so the chat UI
  *      can render both without special-casing.
  *
- * The exported `seedChatFromSession` is the entry point used
- * by `SessionDetailPage` and `SessionsPage` when the user
- * clicks "Continue chat": it merges the reconstructed messages
+ * The exported `seedChatFromSession` is the entry point a
+ * caller uses to merge a reconstructed transcript
  * into whatever the local chat store already has, preferring
  * the existing entry (the user may have chatted in this
  * session and we'd rather not duplicate).
@@ -185,9 +184,8 @@ const LEGACY_ARTIFACT_KIND_TOOL_RESULT = 'tool_result';
  * any non-JSON prose, even if it happens to contain the
  * literal strings `"id"` and `"input"`.
  *
- * Exported so both the chat-side reconstruction
- * (`historyToChatMessages`) and the session-detail renderer
- * (`SessionDetailPage`) can apply the same rule.
+ * Exported so the chat-side reconstruction
+ * (`historyToChatMessages`) applies the same rule everywhere.
  *
  * Logging: every key branch emits a `console.debug` line so
  * future investigations can trace exactly why a given
@@ -813,7 +811,7 @@ function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessa
     const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
     const agent = typeof obj?.agent_name === 'string' ? obj.agent_name : 'unknown';
     const depth = typeof obj?.depth === 'number' ? obj.depth : 1;
-    const link = childId ? ` [查看子会话 →](/sessions/${childId})` : '';
+    const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
     out.push({
       id: crypto.randomUUID(),
       role: 'subagent',
@@ -835,7 +833,7 @@ function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessa
     const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
     const status = typeof obj?.status === 'string' ? obj.status : 'completed';
     const label = status === 'completed' ? '已完成' : status === 'cancelled' ? '已取消' : '未完成';
-    const link = childId ? ` [查看子会话 →](/sessions/${childId})` : '';
+    const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
     out.push({
       id: crypto.randomUUID(),
       role: 'subagent',
@@ -889,7 +887,7 @@ function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessa
     // content. The `task` tool's SubagentSummary (link card
     // mounted on the tool_block) is the user's only entry point
     // to the child from this transcript; the child's full trace
-    // lives at `/sessions/<childId>`, where the unwrapped log
+    // lives at `/chat/<childId>`, where the unwrapped log
     // goes through `EVENT_MODEL` and is rendered in full.
     //
     // The underlying event rows are still in the session log (not

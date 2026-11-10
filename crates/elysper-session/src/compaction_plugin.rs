@@ -3,7 +3,10 @@
 //!
 //! # A wrapper, not a policy
 //!
-//! [`CompactionPlugin`] publishes the host-built [`Compactor`] under
+//! [`CompactionPlugin`] builds a
+//! [`SummaryCompactor`] over the
+//! provider it injects (`llm.default`) and the model and policy its
+//! [`CompactionPluginConfig`] carries, then publishes it under
 //! [`KEY_COMPACTION`]. Selection (which span to shadow, what the
 //! summary says) and the pairing rule that keeps every tool call with
 //! its result
@@ -21,14 +24,20 @@
 //! resolved value is `Arc<Arc<dyn Compactor>>`; one deref is the
 //! compactor.
 //!
+//! The provider arrives the same way: `llm.default` is stored as an
+//! `Arc<dyn ModelProvider>`, so `apply` resolves
+//! `ctx.require::<Arc<dyn ModelProvider>>(KEY_LLM_DEFAULT)` and keeps
+//! the inner handle.
+//!
 //! # Lifecycle
 //!
-//! The plugin returns its provide handle from
+//! The manifest injects `llm.default`, so the kernel mounts the
+//! compactor after the provider and parks it while the provider is
+//! absent. The plugin returns its provide handle from
 //! [`apply`](elysper_kernel::Plugin::apply), so unloading it revokes
 //! the service. A loop that injected `compaction` then has no
-//! summariser and falls back to its existing truncation path instead of
-//! inventing a second selection rule. The compactor arrives with the
-//! plugin value, so the manifest injects nothing.
+//! summariser and falls back to its existing truncation path instead
+//! of inventing a second selection rule.
 
 use std::sync::Arc;
 
@@ -41,8 +50,9 @@ use elysper_kernel::{
     PluginManifest,
     RuntimeKind,
 };
+use elysper_provider::{ModelProvider, plugin::KEY_LLM_DEFAULT};
 
-use crate::compaction::Compactor;
+use crate::compaction::{CompactionSettings, Compactor, SummaryCompactor};
 
 /// The service key the `compaction` service is registered under.
 ///
@@ -51,8 +61,22 @@ use crate::compaction::Compactor;
 /// kernel validates are one constant.
 pub const KEY_COMPACTION: &str = "compaction";
 
-/// The plugin id the `context-compactor` manifest declares.
+// The plugin id the `context-compactor` manifest declares.
 const CONTEXT_COMPACTOR_ID: &str = "context-compactor";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// The configuration [`CompactionPlugin`] builds its compactor from.
+///
+/// The provider is not part of the config: it is the `llm.default`
+/// service the plugin injects, so a provider swap parks and remounts
+/// the compactor instead of leaving it summarising through a stale
+/// handle.
+pub struct CompactionPluginConfig {
+    /// The model the summary request names.
+    pub model: String,
+    /// The host's compaction policy.
+    pub settings: CompactionSettings,
+}
 
 /// The `context-compactor` kernel plugin: provides [`KEY_COMPACTION`].
 ///
@@ -61,24 +85,21 @@ const CONTEXT_COMPACTOR_ID: &str = "context-compactor";
 /// unload contract.
 pub struct CompactionPlugin {
     manifest: PluginManifest,
-    compactor: Arc<dyn Compactor>,
+    config: CompactionPluginConfig,
 }
 
 impl CompactionPlugin {
-    /// Publish `compactor` as the `compaction` service.
-    ///
-    /// The host builds the compactor (the default
-    /// [`SummaryCompactor`](crate::compaction::SummaryCompactor) or a
-    /// deployment's own); the plugin only publishes it.
-    pub fn new(compactor: Arc<dyn Compactor>) -> Self {
+    #[must_use]
+    /// Build the plugin over `config`; [`apply`](KernelPlugin::apply)
+    /// constructs the [`SummaryCompactor`] from it and the injected
+    /// provider.
+    pub fn new(config: CompactionPluginConfig) -> Self {
         let mut manifest =
             PluginManifest::new(CONTEXT_COMPACTOR_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.provides.push(KEY_COMPACTION.to_string());
-        Self {
-            manifest,
-            compactor,
-        }
+        manifest.inject.push(KEY_LLM_DEFAULT.to_string());
+        Self { manifest, config }
     }
 }
 
@@ -88,8 +109,15 @@ impl KernelPlugin for CompactionPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        Ok(vec![
-            ctx.provide(KEY_COMPACTION, Arc::clone(&self.compactor))?,
-        ])
+        let provider =
+            ctx.require::<Arc<dyn ModelProvider>>(KEY_LLM_DEFAULT)?;
+        let compactor: Arc<dyn Compactor> = Arc::new(
+            SummaryCompactor::new(
+                Arc::clone(&*provider),
+                self.config.model.clone(),
+            )
+            .with_settings(self.config.settings),
+        );
+        Ok(vec![ctx.provide(KEY_COMPACTION, compactor)?])
     }
 }

@@ -1,15 +1,19 @@
 //! The `attachments` service as a native kernel plugin.
 //!
-//! The service is the host-built [`AttachmentStore`]. These tests prove
-//! the kernel hands out exactly that store, that an image (and an audio
-//! blob) round-trips through it into a provider `ContentPart` carrying
-//! the original bytes, and that unloading withdraws the service a
-//! multimodal consumer depends on.
+//! The plugin builds its [`AttachmentStore`] from
+//! [`AttachmentPluginConfig`] inside `apply`. These tests mount the
+//! plugin over a temporary root and prove the resolved service stores
+//! and returns bytes, stamps entries from the configured clock, that an
+//! image (and an audio blob) round-trips through it into a provider
+//! `ContentPart` carrying the original bytes, that a refused root
+//! degrades to the in-memory store, and that unloading withdraws the
+//! service a multimodal consumer depends on.
 
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use elysper_attachment::{
+    AttachmentPluginConfig,
     AttachmentStore,
     attachment_to_content_part,
     plugin::{AttachmentPlugin, KEY_ATTACHMENTS},
@@ -30,28 +34,80 @@ use elysper_provider::{
 
 fn mount_attachments(
     ctx: &Context,
-    store: &Arc<AttachmentStore>,
+    dir: &std::path::Path,
+) -> elysper_kernel::MountHandle {
+    mount_attachments_with(
+        ctx,
+        AttachmentPluginConfig {
+            dir: dir.to_path_buf(),
+            clock: None,
+        },
+    )
+}
+
+fn mount_attachments_with(
+    ctx: &Context,
+    config: AttachmentPluginConfig,
 ) -> elysper_kernel::MountHandle {
     mount_all(
         ctx,
-        &[Arc::new(AttachmentPlugin::new(Arc::clone(store)))
-            as Arc<dyn KernelPlugin>],
+        &[Arc::new(AttachmentPlugin::new(config)) as Arc<dyn KernelPlugin>],
     )
     .expect("mount `attachments`")
 }
 
 #[test]
-fn provides_the_store_and_unload_removes_it() {
+fn the_configured_clock_stamps_saved_entries() {
+    let root = tempfile::tempdir().expect("a temporary root");
     let ctx = Context::new();
-    let store = Arc::new(AttachmentStore::default());
-    let mounted = mount_attachments(&ctx, &store);
+    let clock =
+        elysper_core::SharedClock::fixed_from_rfc3339("2026-01-02T03:04:05Z");
+    let mounted = mount_attachments_with(
+        &ctx,
+        AttachmentPluginConfig {
+            dir: root.path().to_path_buf(),
+            clock: Some(clock),
+        },
+    );
+
+    let store = ctx
+        .require::<AttachmentStore>(KEY_ATTACHMENTS)
+        .expect("`attachments` resolves");
+    let ref_ = store
+        .save_image(b"\x89PNG\r\n\x1a\nclocked", "image/png")
+        .expect("the store accepts a png");
+
+    assert_eq!(
+        ref_.saved_at.to_rfc3339(),
+        "2026-01-02T03:04:05+00:00",
+        "the configured clock, not the wall clock, stamps the entry"
+    );
+
+    drop(mounted);
+    assert!(ctx.require::<AttachmentStore>(KEY_ATTACHMENTS).is_err());
+}
+
+#[test]
+fn provides_a_working_store_and_unload_removes_it() {
+    let root = tempfile::tempdir().expect("a temporary root");
+    let ctx = Context::new();
+    let mounted = mount_attachments(&ctx, root.path());
 
     let service = ctx
         .require::<AttachmentStore>(KEY_ATTACHMENTS)
         .expect("`attachments` resolves");
-    assert!(
-        Arc::ptr_eq(&service, &store),
-        "the service must be the store the plugin was built with"
+
+    // The service is a functioning store, not merely a registered value.
+    let bytes = b"\x89PNG\r\n\x1a\nelysper service probe";
+    let ref_ = service
+        .save_image(bytes, "image/png")
+        .expect("the service saves a png");
+    assert_eq!(ref_.hash, sha256_hex(bytes));
+    assert_eq!(
+        service
+            .read_image(&ref_)
+            .expect("the service returns the bytes"),
+        bytes
     );
 
     drop(mounted);
@@ -63,9 +119,9 @@ fn provides_the_store_and_unload_removes_it() {
 
 #[test]
 fn image_part_roundtrips() {
+    let root = tempfile::tempdir().expect("a temporary root");
     let ctx = Context::new();
-    let store = Arc::new(AttachmentStore::default());
-    let mounted = mount_attachments(&ctx, &store);
+    let mounted = mount_attachments(&ctx, root.path());
 
     let service = ctx
         .require::<AttachmentStore>(KEY_ATTACHMENTS)
@@ -103,8 +159,14 @@ fn image_part_roundtrips() {
 }
 
 #[test]
-fn audio_blob_roundtrips() {
-    let store = AttachmentStore::default();
+fn audio_blob_roundtrips_through_the_mounted_service() {
+    let root = tempfile::tempdir().expect("a temporary root");
+    let ctx = Context::new();
+    let mounted = mount_attachments(&ctx, root.path());
+    let store = ctx
+        .require::<AttachmentStore>(KEY_ATTACHMENTS)
+        .expect("`attachments` resolves");
+
     let bytes = b"RIFF\x24\x00\x00\x00WAVEfmt ";
     let ref_ = store
         .save_blob(bytes, "audio/wav")
@@ -128,13 +190,71 @@ fn audio_blob_roundtrips() {
         bytes,
         "the provider block carries the stored bytes unchanged"
     );
+
+    drop(mounted);
+}
+
+#[test]
+fn the_configured_directory_is_the_storage_root() {
+    let root = tempfile::tempdir().expect("a temporary root");
+    let bytes = b"\x89PNG\r\n\x1a\npersisted across mounts";
+
+    let saved = {
+        let ctx = Context::new();
+        let _mounted = mount_attachments(&ctx, root.path());
+        let store = ctx
+            .require::<AttachmentStore>(KEY_ATTACHMENTS)
+            .expect("`attachments` resolves");
+        store
+            .save_image(bytes, "image/png")
+            .expect("the store accepts a png")
+    };
+
+    // A fresh plugin over the same root sees the bytes the first mount
+    // wrote, so `apply` really rooted the store at the configured path.
+    let ctx = Context::new();
+    let _mounted = mount_attachments(&ctx, root.path());
+    let store = ctx
+        .require::<AttachmentStore>(KEY_ATTACHMENTS)
+        .expect("`attachments` resolves");
+    assert_eq!(
+        store
+            .read_image(&saved)
+            .expect("the remounted store reads back"),
+        bytes
+    );
+}
+
+#[test]
+fn a_refused_root_degrades_to_the_in_memory_store() {
+    let root = tempfile::tempdir().expect("a temporary root");
+    // A path that is a file, not a directory: `new_fs` refuses it.
+    let blocked = root.path().join("blocked");
+    std::fs::write(&blocked, b"not a directory").expect("write the blocker");
+
+    let ctx = Context::new();
+    let mounted = mount_attachments(&ctx, &blocked);
+    let store = ctx
+        .require::<AttachmentStore>(KEY_ATTACHMENTS)
+        .expect("the mount degrades instead of failing");
+
+    let bytes = b"\x89PNG\r\n\x1a\ndegraded to memory";
+    let ref_ = store
+        .save_image(bytes, "image/png")
+        .expect("the in-memory fallback stores");
+    assert_eq!(
+        store.read_image(&ref_).expect("the fallback reads back"),
+        bytes
+    );
+
+    drop(mounted);
 }
 
 #[test]
 fn unload_withdraws_the_service_multimodal_input_depends_on() {
+    let root = tempfile::tempdir().expect("a temporary root");
     let ctx = Context::new();
-    let store = Arc::new(AttachmentStore::default());
-    let mounted = mount_attachments(&ctx, &store);
+    let mounted = mount_attachments(&ctx, root.path());
     let image_part = ContentPart::Image(elysper_provider::ImageContent {
         data: "aW1hZ2U=".to_string(),
         mime_type: "image/png".to_string(),
@@ -148,10 +268,6 @@ fn unload_withdraws_the_service_multimodal_input_depends_on() {
 
     drop(mounted);
 
-    // Boundary: no in-tree consumer gates `ContentPart::Image` on this
-    // service yet (the app-server holds its own `AttachmentStore` in
-    // `AppState`), so the refusal a wired consumer would report is
-    // exactly this failed resolution.
     assert!(
         ctx.require::<AttachmentStore>(KEY_ATTACHMENTS).is_err(),
         "an image-carrying message has no attachment service to resolve"
@@ -160,7 +276,10 @@ fn unload_withdraws_the_service_multimodal_input_depends_on() {
 
 #[test]
 fn manifest_matches_provided_key() {
-    let plugin = AttachmentPlugin::new(Arc::new(AttachmentStore::default()));
+    let plugin = AttachmentPlugin::new(AttachmentPluginConfig {
+        dir: std::path::PathBuf::from("/tmp/attachments-manifest-probe"),
+        clock: None,
+    });
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "attachments");
@@ -170,7 +289,7 @@ fn manifest_matches_provided_key() {
     assert_eq!(KEY_ATTACHMENTS, "attachments");
     assert!(
         manifest.inject.is_empty(),
-        "the store arrives with the plugin value; it injects nothing"
+        "the store is built in apply; it injects nothing"
     );
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.abi.is_none());

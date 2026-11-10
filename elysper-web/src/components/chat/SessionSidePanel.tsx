@@ -27,6 +27,8 @@ import {
   type PanelSubagent,
   type PanelTodoState,
 } from '../../lib/session-panel-data';
+import { SlotRegion } from '../ui-schema/SlotRegion';
+import { UnplacedSlots } from '../ui-schema/UnplacedSlots';
 
 export interface SessionSidePanelProps {
   todos: PanelTodoState | null;
@@ -146,7 +148,7 @@ export function SessionSidePanel({
                 {sub.childSessionId ? (
                   <Link
                     className="nt-chat-panel__subagent-link"
-                    to={`/sessions/${sub.childSessionId}`}
+                    to={`/chat/${encodeURIComponent(sub.childSessionId)}`}
                     data-testid={`subagent-link-${sub.childSessionId}`}
                   >
                     查看子会话 →
@@ -189,6 +191,16 @@ export function SessionSidePanel({
           <p className="nt-chat-panel__empty">还没有写出的文件。</p>
         )}
       </section>
+
+      {/* The deployment's `chat.sidebar` slot: schema-rendered data, not
+          code. Empty when no `[ui]` row registers into it. */}
+      <SlotRegion slot="chat.sidebar" />
+      {/* The session-scoped extension point and the bucket for slots this
+          build does not place. They used to live on the deleted session
+          detail page; the chat panel is now the only session surface, so
+          both placements stay alive here (one store, one fetch). */}
+      <SlotRegion slot="session.detail.extensions" />
+      <UnplacedSlots />
     </aside>
   );
 }

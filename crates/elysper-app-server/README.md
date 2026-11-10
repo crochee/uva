@@ -186,11 +186,50 @@ cargo run -p elysper-app-server -- --profile ./profile.toml --dump-config
 volatile-only 变更不重挂，已开始的 turn 继续用其已解析的服务句柄。
 `hmr = false` 的变更只记录「需要重启」。
 
-`[ui]` 条目必须是 `ui.` 命名空间、`ui-bundle` 运行时；`ui/schema`
-方法把它们投影为 `{version, components[{slot, kind, props}]}`。前端
-只渲染注册表内的 kind（`panel` / `list` / `key-value`），未知 kind
-显示占位；v1 永不执行远端 JavaScript 或 CSS，装载器拒绝 `script` /
-`stylesheet` 等字段。
+### 启用位与事务性变更（刀 7）
+
+每一行还可以写 `enabled`：
+
+```toml
+[core]
+entries = [
+  { id = "skills", runtime = "native", enabled = false },
+  { id = "eval", runtime = "native",
+    enabled = { service = "skill-checks", check = "is_enabled", arg = "code-review" } },
+]
+```
+
+三态是 `true`（缺省）/ `false` / 判定表 `{ service, check, arg }`。装配边界
+（`build_plugins` / `mount_all` / `load_ui_manifest` 之前）把 profile 过滤成
+**effective 行集**：`false` 的行与判定不可用的行都不进 Fiber 树，UI 段同样
+过滤；启用位翻转因此复用 `diff_profiles` 的 `removed` / `added` 语义。判定
+服务由插件以 `Arc<dyn EnableChecks>` 发布（第一个实现是 `skills` 行的
+`skill-checks`，读 SKILL.md 的 `metadata.enabled`），boot 分两波挂载以解开
+「判定服务由本代插件提供」的鸡蛋问题。
+
+显式写入（JSON-RPC `profile/set` 与自管 MCP 的 `profile` 工具）走同一条
+`AppState::profile_apply` 事务：内存重解析整层栈 → `overridden` 检测（home
+patch / CLI overlay 拥有该字段时不写）→ 试装（build 在 unload 之前，失败
+不动树）→ 原子 `rename` 替换文档层 → 审计并广播无 `session_id` 的
+`profile/changed`。结果是 `applied` / `restart-required`（`mcp` 行变更，
+远端监督需进程重启）/ `overridden` / `failed`。`hmr = false` 的部署上显式
+写入仍然生效（`apply_resolved` 不看该标志）；文件监听入口
+`reload_profile` 保留旧的「只报需要重启」语义。写入会重排 `profile.toml`
+并丢失操作员注释（文档是设置面的生成物）。
+
+`[ui]` 条目必须是 `ui.` 命名空间、`ui-bundle` 运行时；行的 `config` 可以
+声明插槽（`slots = [{ id = "chat.sidebar", cardinality = "many" }]`，
+`cardinality` 取 `one` / `many`，缺省 `many`）并向已声明的插槽注册组件
+（`components = [{ slot, kind, props }]`）。插槽 id 与宿主无关：浏览器渲染成
+DOM、终端渲染成 ratatui 部件，两个宿主读同一份 `ui/schema`
+（`{ slots: [{id, cardinality, owner}], schemas: [{version, components}] }`）。
+装配是 Effect 语义：声明与注册各持一个句柄，drop 即回滚；向未声明的插槽
+注册、重复声明已占用的插槽、`one` 槽注册第二条，都在激活阶段（boot / HMR
+reload）直接失败。核心装载器拒绝任何 `ui.*` 服务键（`build_one` →
+`ProfileError::NamespaceViolation`）。前端只渲染注册表内的 kind（`panel` /
+`list` / `key-value`），未知 kind 显示占位；v1 永不执行远端 JavaScript 或
+CSS，装载器拒绝 `script` / `scripts` / `javascript` / `stylesheet` / `css`
+字段（行 config 顶层、每个插槽声明、每个 component 对象都查）。
 
 ## CI 契约
 

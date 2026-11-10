@@ -50,3 +50,11 @@ research/
 
 # `embed-web` staging: build.rs copies `elysper-web/dist` here.
 crates/elysper-app-server/web-dist/
+# Desktop shell build inputs: the Tauri sidecar staging copy (the
+# bundler wants a target-triple suffix) and tauri's generated schemas.
+# `desktop/dist` is already covered by the repo-wide `dist` pattern.
+desktop/src-tauri/binaries/
+desktop/src-tauri/gen/
+
+# Playwright MCP session artifacts (AI-tool state, not project assets)
+.playwright-mcp/

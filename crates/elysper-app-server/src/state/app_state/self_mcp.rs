@@ -17,7 +17,7 @@
 //!
 //! One MCP tool per domain, action-discriminated (`{"action":
 //! "list" | "get" | …}`) — the same shape the `mcp` control tool
-//! and the `schedule` tool established. Nine tools total,
+//! and the `schedule` tool established. Ten tools total,
 //! registered under the server name `self`, so the naming
 //! policy exposes them as `mcp__self__agents`,
 //! `mcp__self__skills`, … and the boot-time `mcp__*` flip
@@ -49,10 +49,20 @@ use elysper::{
         register_mcp_tools,
         serve,
     },
+    tool::ToolAnnotations,
 };
 use serde_json::{Value, json};
 
-use crate::state::AppState;
+use crate::{
+    profile::{
+        CapabilityAction,
+        CapabilityDomain,
+        Enabled,
+        ProfileAction,
+        RowEdit,
+    },
+    state::AppState,
+};
 
 /// Server name the tools register under (`mcp__self__<tool>`,
 /// namespaced via [`elysper::tool::MCP_SELF_TOOL_PREFIX`]).
@@ -109,7 +119,7 @@ pub(crate) async fn register_self_mcp(state: &Arc<AppState>) {
     }
 }
 
-/// Build the nine domain tools over one shared state handle.
+/// Build the ten domain tools over one shared state handle.
 fn self_mcp_tools(state: Arc<AppState>) -> Vec<ServerTool> {
     vec![
         agents_tool(Arc::clone(&state)),
@@ -120,7 +130,8 @@ fn self_mcp_tools(state: Arc<AppState>) -> Vec<ServerTool> {
         evals_tool(Arc::clone(&state)),
         tasks_tool(Arc::clone(&state)),
         models_tool(Arc::clone(&state)),
-        attachments_tool(state),
+        attachments_tool(Arc::clone(&state)),
+        profile_tool(state),
     ]
 }
 
@@ -261,6 +272,7 @@ async fn create_agent(
         descriptor.clone(),
         descriptor.max_iterations,
     )
+    .await
     .map_err(|e| e.to_string())?;
     let entry = elysper::harness::AgentEntry::new(agent);
     state
@@ -943,4 +955,137 @@ fn attachments_tool(state: Arc<AppState>) -> ServerTool {
             }
         },
     )
+}
+
+// --- profile ------------------------------------------------------------
+
+/// The profile domain: the settings surface's read model plus the one
+/// transactional write path.
+///
+/// The whole tool carries MCP's `destructiveHint`, because the `set` /
+/// `create` / `delete` actions write the document and the tree. MCP's
+/// annotations are per tool, not per action, so the read actions are
+/// held by the same approval as the writes — a conservative upper
+/// bound, never a way around the stance.
+fn profile_tool(state: Arc<AppState>) -> ServerTool {
+    ServerTool::new(
+        "profile",
+        "Read and change this deployment's plugin profile: list every \
+         row with its effective status, get one row, or set a row's \
+         enabled/config. Create/delete agent and skill definitions \
+         through the same transaction. Writes are approval-gated: the \
+         tool declares MCP's destructiveHint, so the call is Risk::High.",
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "set", "create", "delete"],
+                    "description": "Defaults to list."
+                },
+                "id": {"type": "string"},
+                "enabled": {
+                    "description": "true, false, or a check table."
+                },
+                "config": {
+                    "type": "object",
+                    "description": "Replacement config, whole."
+                },
+                "domain": {
+                    "type": "string",
+                    "enum": ["agent", "skill"],
+                },
+                "definition": {
+                    "type": "object",
+                    "description": "Agent descriptor or {name, content}."
+                },
+            },
+            "required": ["action"],
+        }),
+        move |args| {
+            let state = Arc::clone(&state);
+            async move {
+                match action_of(&args).as_str() {
+                    "list" => Ok(pretty(&json!(state.profile_rows()))),
+                    "get" => {
+                        let id = str_field(&args, "id")
+                            .ok_or("get requires `id`")?;
+                        state
+                            .profile_row(&id)
+                            .map(|row| pretty(&json!(row)))
+                            .ok_or_else(|| {
+                                format!("the profile has no row `{id}`")
+                            })
+                    }
+                    "set" => {
+                        let id = str_field(&args, "id")
+                            .ok_or("set requires `id`")?;
+                        let enabled = args
+                            .get("enabled")
+                            .cloned()
+                            .map(serde_json::from_value::<Enabled>)
+                            .transpose()
+                            .map_err(|error| format!("enabled: {error}"))?;
+                        let config = args.get("config").cloned();
+                        if enabled.is_none() && config.is_none() {
+                            return Err(
+                                "set requires `enabled` and/or `config`"
+                                    .to_string(),
+                            );
+                        }
+                        let outcome = state
+                            .profile_apply(
+                                "agent",
+                                ProfileAction::Edit(RowEdit::Set {
+                                    id,
+                                    enabled,
+                                    config,
+                                }),
+                            )
+                            .await;
+                        Ok(pretty(&json!(outcome)))
+                    }
+                    "create" | "delete" => {
+                        let domain = capability_domain(&args)?;
+                        let action = if action_of(&args) == "create" {
+                            CapabilityAction::Create {
+                                domain,
+                                definition: args
+                                    .get("definition")
+                                    .cloned()
+                                    .ok_or("create requires `definition`")?,
+                            }
+                        } else {
+                            CapabilityAction::Delete {
+                                domain,
+                                id: str_field(&args, "id")
+                                    .ok_or("delete requires `id`")?,
+                            }
+                        };
+                        let outcome = state
+                            .profile_apply(
+                                "agent",
+                                ProfileAction::Capability(action),
+                            )
+                            .await;
+                        Ok(pretty(&json!(outcome)))
+                    }
+                    other => Err(format!("unknown action: {other}")),
+                }
+            }
+        },
+    )
+    .with_annotations(ToolAnnotations {
+        destructive_hint: Some(true),
+        ..ToolAnnotations::default()
+    })
+}
+
+fn capability_domain(args: &Value) -> Result<CapabilityDomain, String> {
+    serde_json::from_value(
+        args.get("domain")
+            .cloned()
+            .ok_or("create/delete require `domain`")?,
+    )
+    .map_err(|error| format!("domain: {error}"))
 }

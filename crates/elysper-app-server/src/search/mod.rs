@@ -33,6 +33,7 @@
 mod adapters;
 mod catalog;
 mod doc;
+pub mod plugin;
 
 use std::sync::Arc;
 
@@ -267,7 +268,7 @@ mod tests {
         // deliberately not the session corpus (user data with no
         // request to scope it to).
         assert_eq!(
-            state.search.domains(),
+            state.search().expect("search row mounted").domains(),
             vec!["agent", "mcp", "memory", "skill", "tool"]
                 .into_iter()
                 .map(String::from)
@@ -275,7 +276,7 @@ mod tests {
         );
         // The HTTP projection serves all six, session included.
         assert_eq!(
-            state.search.http_domains(),
+            state.search().expect("search row mounted").http_domains(),
             vec!["agent", "mcp", "memory", "session", "skill", "tool"]
                 .into_iter()
                 .map(String::from)
@@ -305,7 +306,8 @@ mod tests {
         )
         .await;
         state
-            .memory
+            .memory()
+            .expect("the fixture mounts the memory row")
             .store(elysper::context::MemoryEntry::now(
                 "m-pdf",
                 "用户偏好把 pdf 解析为纯文本",
@@ -315,15 +317,25 @@ mod tests {
 
         // Cross-domain: the memory entry and (for a file-flavoured
         // query) tool docs answer the same query.
-        let hits = state.search.search("pdf", 10, None, None).await;
+        let hits = state
+            .search()
+            .expect("search row mounted")
+            .search("pdf", 10, None, None)
+            .await;
         let memory_hit = hits
             .iter()
             .find(|h| h.domain == "memory")
             .expect("memory domain must answer a cross-domain query");
-        assert_eq!(memory_hit.id, "m-pdf");
+        // The file tier assigns its own entry ids; the route
+        // contract is the surfaced preview, not the storage key.
+        assert!(!memory_hit.id.is_empty());
         assert!(memory_hit.preview.is_some());
 
-        let tool_hits = state.search.search("file", 10, None, None).await;
+        let tool_hits = state
+            .search()
+            .expect("search row mounted")
+            .search("file", 10, None, None)
+            .await;
         assert!(
             tool_hits.iter().any(|h| h.domain == "tool"),
             "plugin tools must be searchable: {:?}",
@@ -332,7 +344,8 @@ mod tests {
 
         // Domain filter: tools only, memory must not answer.
         let tools_only = state
-            .search
+            .search()
+            .expect("search row mounted")
             .search("pdf", 10, Some(vec!["tool".into()]), None)
             .await;
         assert!(tools_only.iter().all(|h| h.domain == "tool"));

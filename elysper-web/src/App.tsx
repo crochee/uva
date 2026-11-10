@@ -11,59 +11,18 @@ import { SkeletonList } from './components/ui/SkeletonList';
 import './styles/page.css';
 import './styles/page-visual.css';
 
-// Each page is loaded as a separate chunk so the initial
-// download only includes ChatPage + MainLayout + AppShell.
-// Subsequent navigations lazy-load the destination page on
-// demand. ChatPage itself stays eager because it's the default
-// route — there's no point delaying the first render behind
-// a Suspense boundary.
-const ToolsPage = lazy(() => import('./pages/ToolsPage').then((m) => ({ default: m.ToolsPage })));
-const ToolDetailPage = lazy(() =>
-  import('./pages/ToolDetailPage').then((m) => ({ default: m.ToolDetailPage })),
-);
-const SkillsPage = lazy(() =>
-  import('./pages/SkillsPage').then((m) => ({ default: m.SkillsPage })),
-);
-const SkillDetailPage = lazy(() =>
-  import('./pages/SkillDetailPage').then((m) => ({ default: m.SkillDetailPage })),
-);
-const SessionsPage = lazy(() =>
-  import('./pages/SessionsPage').then((m) => ({ default: m.SessionsPage })),
-);
-const SessionDetailPage = lazy(() =>
-  import('./pages/SessionDetailPage').then((m) => ({ default: m.SessionDetailPage })),
-);
-const AgentsPage = lazy(() =>
-  import('./pages/AgentsPage').then((m) => ({ default: m.AgentsPage })),
-);
-const AgentDetailPage = lazy(() =>
-  import('./pages/AgentDetailPage').then((m) => ({ default: m.AgentDetailPage })),
-);
-const SchedulesPage = lazy(() =>
-  import('./pages/SchedulesPage').then((m) => ({ default: m.SchedulesPage })),
-);
-const ScheduleDetailPage = lazy(() =>
-  import('./pages/ScheduleDetailPage').then((m) => ({ default: m.ScheduleDetailPage })),
-);
-const WorkflowsPage = lazy(() =>
-  import('./pages/WorkflowsPage').then((m) => ({ default: m.WorkflowsPage })),
-);
-const WorkflowDetailPage = lazy(() =>
-  import('./pages/WorkflowDetailPage').then((m) => ({ default: m.WorkflowDetailPage })),
-);
-const EvalsPage = lazy(() => import('./pages/EvalsPage').then((m) => ({ default: m.EvalsPage })));
-const EvalDetailPage = lazy(() =>
-  import('./pages/EvalDetailPage').then((m) => ({ default: m.EvalDetailPage })),
-);
-const TasksPage = lazy(() => import('./pages/TasksPage').then((m) => ({ default: m.TasksPage })));
-const TaskDetailPage = lazy(() =>
-  import('./pages/TaskDetailPage').then((m) => ({ default: m.TaskDetailPage })),
+// The router tree is conversation-first (design §6.1): three routes and
+// a catch-all. The settings surface is the only lazy chunk — the
+// capability catalogues that used to be pages are sections inside it
+// (D34), and ChatPage stays eager because it is the default route.
+const SettingsPage = lazy(() =>
+  import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })),
 );
 
-// Eager ChatPage import — kept below the lazy declarations so
-// the `lazy()` references above stay top-of-file for code-
-// review visibility, but ES modules hoist `import` statements
-// above any runtime code regardless of textual position.
+// Eager ChatPage import — kept below the lazy declaration so the
+// lazy references stay top-of-file for code-review visibility, but ES
+// modules hoist `import` statements above any runtime code regardless
+// of textual position.
 import { ChatPage } from './pages/ChatPage';
 
 /**
@@ -110,11 +69,11 @@ export default function App() {
 /**
  * Lives inside `<BrowserRouter>` so hooks that depend on the
  * router context (`useNavigate`, `useLocation`, etc.) can run
- * during render. Today only the keyboard-shortcuts handler needs
- * to be inside the router; the rest of the tree (routes,
- * layout, outlet) is plain JSX. Splitting it out keeps the
- * `App` function itself router-agnostic while still letting
- * router-coupled hooks participate in its render path.
+ * during render.
+ *
+ * Every removed catalogue page lands on the catch-all redirect: a
+ * bookmarked `/tools` or a stale in-app link opens the conversation
+ * instead of a dead route.
  */
 function RouterShell({ isServerAvailable }: { isServerAvailable: boolean }) {
   useKeyboardShortcuts();
@@ -125,131 +84,12 @@ function RouterShell({ isServerAvailable }: { isServerAvailable: boolean }) {
         <Route path="/chat" element={<ChatPage />} />
         <Route path="/chat/:sessionId" element={<ChatPage />} />
         <Route path="/chat/:sessionId/agent/:agentName" element={<ChatPage />} />
+        <Route path="/settings" element={<Navigate to="/settings/general" replace />} />
         <Route
-          path="/tools"
+          path="/settings/:section"
           element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-tools" />}>
-              <ToolsPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/tools/:name"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-tool-detail" />}>
-              <ToolDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/agents"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-agents" />}>
-              <AgentsPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/agents/:name"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-agent-detail" />}>
-              <AgentDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/skills"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-skills" />}>
-              <SkillsPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/skills/:name"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-skill-detail" />}>
-              <SkillDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/sessions"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-sessions" />}>
-              <SessionsPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/sessions/:id"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-session-detail" />}>
-              <SessionDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/schedules"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-schedules" />}>
-              <SchedulesPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/schedules/:id"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-schedule-detail" />}>
-              <ScheduleDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/workflows"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-workflows" />}>
-              <WorkflowsPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/workflows/:id"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-workflow-detail" />}>
-              <WorkflowDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/evals"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-evals" />}>
-              <EvalsPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/evals/:name"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-eval-detail" />}>
-              <EvalDetailPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/tasks"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-tasks" />}>
-              <TasksPage />
-            </Suspense>
-          }
-        />
-        <Route
-          path="/tasks/:id"
-          element={
-            <Suspense fallback={<RouteFallback testId="page-fallback-task-detail" />}>
-              <TaskDetailPage />
+            <Suspense fallback={<RouteFallback testId="page-fallback-settings" />}>
+              <SettingsPage />
             </Suspense>
           }
         />
@@ -260,11 +100,10 @@ function RouterShell({ isServerAvailable }: { isServerAvailable: boolean }) {
 }
 
 /**
- * Shown inside `<Suspense>` while a lazy chunk for a list /
- * detail page is in flight. Re-uses `<SkeletonList>` so the
- * fallback looks like the eventual content (a list of card
- * placeholders) — no surprise layout shift when the chunk
- * resolves.
+ * Shown inside `<Suspense>` while the settings chunk is in flight.
+ * Re-uses `<SkeletonList>` so the fallback looks like the eventual
+ * content (a list of card placeholders) — no surprise layout shift when
+ * the chunk resolves.
  */
 function RouteFallback({ testId }: { testId: string }) {
   return (

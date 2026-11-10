@@ -14,9 +14,7 @@ use elysper::{
         SharedSessionSearch,
         manager::SessionRegistry,
     },
-    skill::SkillRegistry,
     tool::ToolRegistry,
-    tool_task::TaskDelegator,
 };
 
 use super::{
@@ -30,14 +28,8 @@ use super::{
     usage::UsageMetrics,
 };
 use crate::{
-    composition::kernel::{
-        KernelHost,
-        mount_profile,
-        native_profile,
-        scheduler_service,
-    },
+    composition::kernel::{BootServices, mount_profile, native_profile},
     session::controller::SessionController,
-    state::boot::build_prompt_context,
 };
 
 impl AppState {
@@ -107,11 +99,6 @@ impl AppState {
             JsonlSessionSearch::new(workspace_root.join("sessions"))
                 .with_blocking(crate::spawner::server_blocking()),
         );
-        // Mirror the production wiring: an in-memory long-term
-        // tier (tests seed entries through `Memory::store`) and
-        // the cross-domain search service over it.
-        let memory: Arc<dyn elysper::context::Memory> =
-            Arc::new(elysper::context::InMemoryMemory::new());
 
         let agent_registry = Arc::new(AgentRegistry::new());
         // Test state: register the canonical ReAct descriptor
@@ -127,104 +114,83 @@ impl AppState {
             )))
             .await;
 
-        let attachment_store = Arc::new(
-            elysper::attachment::AttachmentStore::new_fs(
-                workspace_root.join(".attachments"),
-            )
-            .unwrap_or_else(|_| {
-                elysper::attachment::AttachmentStore::default()
-            }),
-        );
+        let agent_registry = Arc::new(AgentRegistry::new());
+        // Test state: register the canonical ReAct descriptor
+        // (without holding a live provider) so the registry has
+        // at least one entry and the peer-agent manifest snapshot
+        // excludes it via the `self_name` filter.
+        let _ = agent_registry
+            .put(AgentEntry::new(Arc::new(
+                elysper::harness::ReActAgent::new(
+                    Arc::clone(&default_provider),
+                    Arc::new(ToolRegistry::new()),
+                ),
+            )))
+            .await;
 
-        let search =
-            crate::search::SearchService::build(crate::search::SearchSources {
-                tool_registry: Arc::clone(&tool_registry),
-                agent_registry: Arc::clone(&agent_registry),
-                workspace_root: workspace_root.clone(),
-                memory: Arc::clone(&memory),
-                session_search: Arc::clone(&session_search),
-                clock: clock.clone(),
-            });
-        {
-            elysper::tool_search::register_search_tool(
-                &tool_registry,
-                search.registry(),
-            );
-        }
-
-        // The three management subsystems under test. Schedules,
-        // workflows and evals use the real stores rooted at the
-        // test workspace — the persistence round-trip is part of
-        // what these tests verify.
-        let schedules = SchedulesState::build(&workspace_root);
+        // The fixture's management surfaces read the services the
+        // rows publish (see the reads after the mount).
         let workflows = WorkflowsState::build(&workspace_root);
-        let eval_runner = Arc::new(
-            elysper::eval::EvalRunner::new()
-                .metric(Box::new(elysper::eval::SyncMetricAdapter(
-                    elysper::eval::KeywordMetric,
-                )))
-                .with_clock(clock.clone()),
-        );
-        let evals = EvalsState::build_with_runner(
-            &workspace_root,
-            Arc::clone(&eval_runner),
-        );
 
-        let skill_registry =
-            Arc::new(SkillRegistry::discover_files(&workspace_root));
-        let sandbox_backend: Arc<dyn elysper::tool_shell::SandboxBackend> =
-            Arc::new(elysper::tool_shell::NoopBackend::new());
-        let compactor: Arc<dyn elysper::session::Compactor> =
-            Arc::new(elysper::session::SummaryCompactor::new(
-                Arc::clone(&default_provider),
-                default_model.clone(),
-            ));
-        let scheduler_service = scheduler_service(Arc::clone(&schedules.store));
-        let delegator =
-            Arc::new(TaskDelegator::new(Arc::clone(&agent_registry)));
-        let mcp_supervisor = Arc::new(elysper::mcp::McpSupervisor::new());
-        let kernel_host = Arc::new(KernelHost {
-            workspace_root: workspace_root.clone(),
-            provider_catalogue: Arc::clone(&provider_catalogue),
+        let boot_services = Arc::new(BootServices {
             tool_registry: Arc::clone(&tool_registry),
-            session_registry: Arc::clone(&session_manager),
-            sandbox_backend,
-            sandbox_policy: elysper::tool_shell::ExecutionPolicy::default(),
-            delegator,
-            compactor,
-            approval_policy: elysper::harness::ApprovalPolicy::default(),
-            mcp_supervisor: Arc::clone(&mcp_supervisor),
-            skill_registry,
-            eval_runner,
-            scheduler_service,
-            attachment_store: Arc::clone(&attachment_store),
+            agent_registry: Arc::clone(&agent_registry),
             plugin_host: plugin_host.clone(),
             // The fixture composes no host plugins, so there is
             // nothing for the entry to adopt; the row still mounts,
             // proving the empty set is the no-op the boot shape
             // promises a deployment without `[plugins]`.
             process_registrations: std::sync::Mutex::new(None),
-            // Transitional agent-loop inputs (die with the host).
-            default_strategy: None,
-            default_tool_restriction: None,
-            compaction_boot: None,
-            // The server's tokio spawner: a run built through the
-            // agent-loop factory detaches onto the runtime, exactly
-            // like the production boot.
-            spawner: Some(crate::spawner::server_spawner()),
-            delegators: Vec::new(),
         });
-        let profile = native_profile();
+        let mut profile = native_profile();
+        // The fixture's row config carries the demo provider the
+        // deployment catalogue would otherwise inject under `cfg(test)`;
+        // the factory builds it from the row like a real deployment.
+        let value = serde_json::json!({
+            "workspace": {
+                "providers": {
+                    "demo": {
+                        "type": "demo",
+                        "api_key_env": "NONE",
+                        "default_model": default_model,
+                    }
+                },
+                "default_provider": "demo",
+                "default_model": default_model,
+            }
+        });
+        if let Some(row) = profile
+            .core
+            .iter_mut()
+            .find(|entry| entry.id == "model-adapter")
+        {
+            row.config = value;
+        }
         let (kernel, mounted) = mount_profile(
-            Arc::clone(&kernel_host),
+            Arc::clone(&boot_services),
             &profile,
             elysper::core::SharedClock::system(),
+            crate::composition::kernel::BootExtras {
+                workspace_root: workspace_root.clone(),
+                blocking: Some(crate::spawner::server_blocking()),
+                compaction: Some(elysper::session::CompactionPluginConfig {
+                    model: default_model.clone(),
+                    settings: elysper::session::CompactionSettings::default(),
+                }),
+                sessions_dir: Some(
+                    session_manager.sessions_root().to_path_buf(),
+                ),
+            },
         )
         .expect("the fixture's native plugin set mounts");
 
-        let prompt_context = Arc::new(
-            build_prompt_context(&kernel, &agent_registry, "agent").await,
-        );
+        // The effective assembly the fixture's tree corresponds to.
+        let assembly = {
+            let checks = crate::profile::KernelChecks(&kernel);
+            crate::profile::effective(&profile, &checks).profile
+        };
+        let ui_tree = crate::ui::tree::load_ui_tree(&assembly.ui)
+            .expect("the fixture's UI segment loads");
 
         let active_sessions: Arc<
             DashMap<(String, String), Arc<SessionController>>,
@@ -243,6 +209,34 @@ impl AppState {
                 &agent_registry,
             )),
         );
+        let mcp_supervisor = kernel
+            .require::<elysper::mcp::McpSupervisor>(elysper::mcp::KEY_MCP)
+            .expect("the fixture mounts the mcp row");
+        // The fixture's route surfaces read the services the rows
+        // published (one store / one engine), exactly like the boot.
+        let schedules = SchedulesState::from_store(
+            Arc::clone(
+                kernel
+                    .require::<elysper::scheduler::SchedulerService>(
+                        elysper::scheduler::KEY_SCHEDULER,
+                    )
+                    .expect("the fixture mounts the scheduler row")
+                    .store(),
+            ),
+            elysper::core::SharedClock::system(),
+        );
+        let eval_runner = kernel
+            .require::<elysper::eval::EvalRunner>(elysper::eval::KEY_EVAL)
+            .expect("the fixture mounts the eval row");
+        let evals = EvalsState::build_with_runner(&workspace_root, eval_runner);
+        let session_manager = kernel
+            .require::<SessionRegistry>(elysper::session::KEY_SESSIONS)
+            .expect("the fixture mounts the session-store row");
+        let attachment_store = kernel
+            .require::<elysper::attachment::AttachmentStore>(
+                elysper::attachment::KEY_ATTACHMENTS,
+            )
+            .expect("the fixture mounts the attachments row");
         let mcp = McpRuntime::detached(mcp_supervisor);
         Self {
             clock,
@@ -258,20 +252,20 @@ impl AppState {
             provider_catalogue: parking_lot::RwLock::new(provider_catalogue),
             operations_config,
             system_prompt: elysper::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
-            prompt_context,
             server_config,
             default_max_iterations: elysper::harness::DEFAULT_MAX_ITERATIONS,
             default_compaction: None,
-            default_strategy: None,
-            default_tool_restriction: None,
             tool_surface: AppliedToolSurface::default(),
             tool_defs_cache: parking_lot::RwLock::new(None),
             mcp,
             kernel,
-            kernel_host,
-            mount: parking_lot::Mutex::new(vec![mounted]),
+            boot_services,
+            mount: parking_lot::Mutex::new(mounted.into_groups()),
             profile: parking_lot::RwLock::new(profile),
-            ui_schemas: parking_lot::RwLock::new(Vec::new()),
+            assembly: parking_lot::RwLock::new(assembly),
+            profile_store: None,
+            profile_write: tokio::sync::Mutex::new(()),
+            ui_tree: parking_lot::RwLock::new(ui_tree),
             // The fixture composes no host plugins; its host is empty
             // and already bound above.
             plugin_host,
@@ -287,8 +281,6 @@ impl AppState {
             default_agent_name: parking_lot::RwLock::new(None),
             usage_metrics: Arc::new(UsageMetrics::default()),
             attachment_store,
-            memory,
-            search,
             schedules,
             workflows,
             workflow_host,

@@ -25,6 +25,9 @@
   --bg-secondary: #ffffff;
   --bg-tertiary: #f4f4f5;
   --bg-elevated: #ffffff;
+  /* The user message bubble's fill: one step off the assistant's
+     surface so a right-aligned quote reads as a distinct voice. */
+  --bubble: #eef2f7;
 
   /* ---- Brand ---- */
   --brand-primary: #2563eb; /* logo mark fill + stroke */
@@ -420,6 +423,7 @@ textarea:focus-visible {
     --bg-secondary: #11141a;
     --bg-tertiary: #1a1e26;
     --bg-elevated: #161a22;
+    --bubble: #1e2530;
 
     --text-primary: #e6e8ee;
     --text-secondary: #aab0bd;
@@ -476,6 +480,7 @@ textarea:focus-visible {
   --bg-secondary: #11141a;
   --bg-tertiary: #1a1e26;
   --bg-elevated: #161a22;
+  --bubble: #1e2530;
 
   --text-primary: #e6e8ee;
   --text-secondary: #aab0bd;

@@ -95,3 +95,28 @@
   font-size: var(--fs-sm);
   color: var(--accent-red);
 }
+
+/* A slot region is placed by the host page (sidebar, session detail);
+   the region itself adds no chrome — the section or panel around it
+   owns the spacing. */
+
+.nt-uischema__slot-region {
+  margin-top: var(--spacing-sm);
+}
+
+/* The unplaced bucket groups components by slot id. */
+
+.nt-uischema__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.nt-uischema__group-title {
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}

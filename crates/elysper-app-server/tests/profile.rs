@@ -21,6 +21,8 @@ use elysper::kernel::{
 };
 use elysper_app_server::profile::{
     BootContext,
+    Capability,
+    Enabled,
     Entry,
     Patch,
     Plugin,
@@ -110,6 +112,7 @@ impl PluginFactory for FakeFactory {
     fn build(
         &self,
         _config: &Value,
+        _capabilities: &[Capability],
         _boot: &BootContext,
     ) -> Result<Arc<dyn Plugin>, PluginError> {
         Ok(Arc::new(FakePlugin {
@@ -159,6 +162,7 @@ fn entry(id: &str, config: Value) -> Entry {
         runtime: RuntimeKind::Native,
         config,
         capabilities: Vec::new(),
+        enabled: Enabled::On,
     }
 }
 
@@ -527,7 +531,10 @@ fn dump_with_the_boot_factories_prints_manifest_services() {
 
     assert_eq!(parsed["core"][0]["provides"], json!(["tools"]));
     assert_eq!(parsed["core"][0]["inject"], json!([]));
-    assert_eq!(parsed["core"][1]["provides"], json!(["skills"]));
+    assert_eq!(
+        parsed["core"][1]["provides"],
+        json!(["skills", "skill-checks"])
+    );
     assert_eq!(parsed["core"][1]["inject"], json!(["tools"]));
     // A row with no registered factory is explicit, not omitted.
     assert_eq!(parsed["core"][2]["provides"], json!([]));
@@ -538,6 +545,37 @@ fn dump_with_the_boot_factories_prints_manifest_services() {
 }
 
 // -- hot reload ------------------------------------------------------
+
+#[test]
+fn a_ui_bundle_row_never_reaches_the_core_loader() {
+    // `segment_of` routes every `ui-bundle` row into `Segment::Ui`, so
+    // a UI row cannot reach `build_plugins` (and the core loader's
+    // `ui.` namespace check) by riding the core list.
+    let profile = Profile::from_toml_str(
+        r#"
+        [core]
+        entries = [{ id = "tools", runtime = "native" }]
+
+        [ui]
+        entries = [{ id = "ui.shell", runtime = "ui-bundle", config = {} }]
+        "#,
+    )
+    .expect("profile parses");
+
+    let resolved =
+        resolve(&[ProfileSource::Profile(profile)], None).expect("resolves");
+    assert_eq!(resolved.ui.len(), 1);
+    assert_eq!(resolved.ui[0].id, "ui.shell");
+    assert_eq!(resolved.core.len(), 1);
+    assert!(
+        resolved
+            .core
+            .iter()
+            .all(|entry| entry.runtime != RuntimeKind::UiBundle),
+        "no `ui-bundle` row rides the core list: {:?}",
+        resolved.core
+    );
+}
 
 #[test]
 fn hmr_remounts_only_affected_fiber() {

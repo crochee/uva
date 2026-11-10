@@ -3,6 +3,7 @@ import { Box, Flex } from '@radix-ui/themes';
 import { Header } from './Header';
 import { Sidebar } from './Sidebar';
 import { CommandPalette } from '../ui/CommandPalette';
+import { ShortcutHelp } from '../ui/ShortcutHelp';
 import { useMediaQuery } from '../../hooks/useMediaQuery';
 import { useSidebarCollapse } from '../../hooks/useSidebarCollapse';
 
@@ -28,12 +29,12 @@ const NARROW_VIEWPORT_QUERY = '(max-width: 767px)';
  * to reflow both, and keeping it out of the router means switching
  * pages (a new `<Outlet>` child) never resets it.
  *
- * `<CommandPalette />` is mounted here for the same reason: it is
- * shell chrome (it owns its own open state and its `Ctrl/Cmd+K`
- * binding), it must be reachable from every page, and as a child of
- * the layout route it stays mounted across navigations — so
- * selection state and in-flight fetches survive a route change the
- * palette itself triggered.
+ * `<CommandPalette />` and `<ShortcutHelp />` are mounted here for the
+ * same reason: they are shell chrome (each owns its own open state and
+ * its `Ctrl/Cmd+K` / `?` binding), they must be reachable from every
+ * page, and as children of the layout route they stay mounted across
+ * navigations — so selection state and in-flight fetches survive a
+ * route change the palette itself triggered.
  */
 export function MainLayout({ isServerAvailable }: MainLayoutProps) {
   const { collapsed, toggle } = useSidebarCollapse();
@@ -44,6 +45,7 @@ export function MainLayout({ isServerAvailable }: MainLayoutProps) {
   return (
     <Box style={{ height: '100vh', background: 'var(--bg-primary)' }}>
       <CommandPalette />
+      <ShortcutHelp />
       <Header isServerAvailable={isServerAvailable} />
       <Flex className="nt-app-shell-row" style={{ height: 'calc(100vh - var(--size-header))' }}>
         <Sidebar collapsed={collapsed || isNarrow} onToggle={isNarrow ? undefined : toggle} />

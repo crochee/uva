@@ -27,6 +27,12 @@ use super::Outbound;
 
 /// The notification method a session's events travel on.
 pub const SESSION_EVENT: &str = "session/event";
+/// The notification a profile write broadcasts after it commits.
+///
+/// It carries no `session_id`: the gateway broadcasts an unscoped
+/// notification to every live connection, so the settings page and any
+/// other client see one write.
+pub const PROFILE_CHANGED: &str = "profile/changed";
 /// The notification method a held call is projected on.
 ///
 /// It is a notification, not a request: the client answers with the

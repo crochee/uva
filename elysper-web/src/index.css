@@ -4,3 +4,13 @@
 #root {
   height: 100%;
 }
+
+/* Density is a local display preference (settings · 通用). The
+   compact setting tightens the spacing scale the whole shell shares;
+   the comfortable default is the token file's own values. */
+[data-density='compact'] {
+  --space-1: 2px;
+  --space-2: 6px;
+  --space-3: 10px;
+  --space-4: 12px;
+}

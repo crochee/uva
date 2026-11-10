@@ -3,11 +3,14 @@
 //!
 //! # The service is the store
 //!
-//! [`AttachmentPlugin`] publishes the host-built [`AttachmentStore`]
-//! under [`KEY_ATTACHMENTS`]. An image or audio upload is saved by hash,
-//! its [`ImageAttachmentRef`] travels in the
-//! message instead of inline bytes, and the provider adapter renders it
-//! with [`attachment_to_content_part`]
+//! [`AttachmentPlugin`] builds the [`AttachmentStore`] from
+//! [`AttachmentPluginConfig::dir`] and
+//! [`AttachmentPluginConfig::clock`] inside
+//! [`apply`](elysper_kernel::Plugin::apply) and publishes it under
+//! [`KEY_ATTACHMENTS`]. An image or audio upload is saved by hash, its
+//! [`ImageAttachmentRef`] travels in the message instead of inline
+//! bytes, and the provider adapter renders it with
+//! [`attachment_to_content_part`]
 //! for `ContentPart::Image` / `ContentPart::Audio`. The plugin adds no
 //! storage policy of its own: the store's backends, MIME allow-list,
 //! size limit, and hash verification are what a consumer gets.
@@ -23,11 +26,11 @@
 //! # The consumer boundary is the app-server's
 //!
 //! Nothing in this crate decides that a message *may* carry an image:
-//! the session/HTTP layer that admits a request holds the store and is
-//! where the rejection policy lives. The plugin's contribution is the
-//! service seam, so that consumer can resolve the store from the kernel
-//! instead of an `AppState` field; until it does, unloading the plugin
-//! withdraws the service without changing the already-booted app-server.
+//! the session/HTTP layer that admits a request resolves the store from
+//! the kernel, and that is where the rejection policy lives. The
+//! plugin's contribution is the service seam, so that consumer holds no
+//! `AppState` field of its own; unloading the plugin withdraws the
+//! service.
 //!
 //! # The service value's shape
 //!
@@ -40,10 +43,12 @@
 //! The plugin returns its provide handle from
 //! [`apply`](elysper_kernel::Plugin::apply), so unloading it revokes
 //! the service; stored bytes stay where the backend put them. The store
-//! arrives with the plugin value, so the manifest injects nothing.
+//! is built from [`AttachmentPluginConfig`] during `apply`, so the
+//! manifest injects nothing.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
+use elysper_core::SharedClock;
 use elysper_kernel::{
     Context,
     EffectHandle,
@@ -66,6 +71,23 @@ pub const KEY_ATTACHMENTS: &str = "attachments";
 /// The plugin id the `attachments` manifest declares.
 const ATTACHMENTS_ID: &str = "attachments";
 
+/// What the `attachments` plugin builds its store from.
+#[derive(Clone, Debug, Default)]
+pub struct AttachmentPluginConfig {
+    /// The root directory the filesystem-backed store writes under.
+    ///
+    /// `apply` creates the directory if absent. A root the store
+    /// refuses — or an empty path, which has no root at all — degrades
+    /// the plugin to an in-memory store rather than failing the mount.
+    pub dir: PathBuf,
+    /// The wall-clock source the store stamps `saved_at` from.
+    ///
+    /// `None` leaves the store on its default system clock; the boot
+    /// hands over the deployment's shared clock so attachment
+    /// timestamps agree with the rest of the app.
+    pub clock: Option<SharedClock>,
+}
+
 /// The `attachments` kernel plugin: provides [`KEY_ATTACHMENTS`].
 ///
 /// Mount it with [`elysper_kernel::mount_all`]. See the [module
@@ -73,24 +95,23 @@ const ATTACHMENTS_ID: &str = "attachments";
 /// boundary.
 pub struct AttachmentPlugin {
     manifest: PluginManifest,
-    /// The store the service hands out.
-    ///
-    /// Public because the host keeps the same handle for its HTTP
-    /// routes; the service publishes exactly this value.
-    pub store: Arc<AttachmentStore>,
+    config: AttachmentPluginConfig,
 }
 
 impl AttachmentPlugin {
-    /// Publish `store` as the `attachments` service.
+    #[must_use]
+    /// Build the plugin over the store root and clock `config` names.
     ///
-    /// The host builds the store over its data root (or an in-memory
-    /// backend for tests); the plugin only publishes it.
-    pub fn new(store: Arc<AttachmentStore>) -> Self {
+    /// The store itself is constructed in
+    /// [`apply`](elysper_kernel::Plugin::apply): the mount is the
+    /// moment the deployment's configuration becomes the running
+    /// service, including the wall clock its refs are stamped from.
+    pub fn new(config: AttachmentPluginConfig) -> Self {
         let mut manifest =
             PluginManifest::new(ATTACHMENTS_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.provides.push(KEY_ATTACHMENTS.to_string());
-        Self { manifest, store }
+        Self { manifest, config }
     }
 }
 
@@ -100,8 +121,16 @@ impl KernelPlugin for AttachmentPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        Ok(vec![
-            ctx.provide_arc(KEY_ATTACHMENTS, Arc::clone(&self.store))?,
-        ])
+        let store = if self.config.dir.as_os_str().is_empty() {
+            AttachmentStore::default()
+        } else {
+            AttachmentStore::new_fs(&self.config.dir)
+                .unwrap_or_else(|_| AttachmentStore::default())
+        };
+        let store = match &self.config.clock {
+            Some(clock) => store.with_clock(clock.clone()),
+            None => store,
+        };
+        Ok(vec![ctx.provide_arc(KEY_ATTACHMENTS, Arc::new(store))?])
     }
 }

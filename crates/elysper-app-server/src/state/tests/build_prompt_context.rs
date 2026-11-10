@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use elysper::{
     kernel::{Context, MountHandle, Plugin as KernelPlugin, mount_all},
-    skill::{SkillPlugin, SkillRegistry},
+    skill::SkillPlugin,
     tool::{ToolRegistry, ToolRegistryPlugin},
 };
 
@@ -27,9 +27,9 @@ async fn skills_context(root: &std::path::Path) -> (Context, MountHandle) {
     let tools = Arc::new(ToolRegistry::new());
     let plugins: Vec<Arc<dyn KernelPlugin>> = vec![
         Arc::new(ToolRegistryPlugin::new(Arc::clone(&tools))),
-        Arc::new(SkillPlugin::new(Arc::new(SkillRegistry::discover_files(
-            root,
-        )))),
+        Arc::new(SkillPlugin::new(elysper::skill::SkillPluginConfig {
+            workspace_root: root.to_path_buf(),
+        })),
     ];
     let mounted = mount_all(&ctx, &plugins).expect("mount `tools` + `skills`");
     (ctx, mounted)

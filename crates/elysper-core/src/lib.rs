@@ -61,6 +61,8 @@ pub mod breaker;
 pub mod cancel;
 pub mod clock;
 pub mod cursor;
+/// The enablement-judge contract a profile row can delegate to.
+pub mod enable;
 pub mod error;
 pub mod full_output;
 pub mod idgen;

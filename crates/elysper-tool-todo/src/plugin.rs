@@ -20,7 +20,7 @@
 //!
 //! # A refused registration fails loudly
 //!
-//! [`register_entry_with_token`](elysper_tool::ToolRegistry::register_entry_with_token)
+//! [`register_core_entry_with_token`](elysper_tool::ToolRegistry::register_core_entry_with_token)
 //! returns `None` when a Core tool already owns the name. `apply` turns
 //! that into a [`PluginError`](elysper_kernel::PluginError) naming the
 //! tool and the core owner, so the mount rolls back rather than
@@ -90,7 +90,7 @@ impl KernelPlugin for TodoWriteToolPlugin {
         let name = self.tool.name();
         let entry: Arc<dyn Tool> = self.tool.clone();
         let Some(token) =
-            tools.register_entry_with_token(ToolEntry::new(entry))
+            tools.register_core_entry_with_token(ToolEntry::new(entry))
         else {
             return Err(PluginError::new(format!(
                 "the `{KEY_TOOLS}` registry refused to register the \

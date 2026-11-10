@@ -14,7 +14,8 @@ use std::{
     time::SystemTime,
 };
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Map, Value};
 
 use super::model::{Entry, PluginFactories, Profile};
 
@@ -92,7 +93,7 @@ fn stamp(path: &Path) -> io::Result<Option<FileStamp>> {
 /// `added`, `removed`, and `remounted` name **core** ids only: a UI
 /// bundle change is the frontend loader's concern and never remounts a
 /// core fiber.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ProfileDiff {
     /// Ids present in the new assembly but not the old one.
     pub added: Vec<String>,
@@ -236,14 +237,60 @@ fn classify(
         diff.remounted.push(new.id.clone());
         return;
     }
-    if old.config == new.config {
+    if equivalent(&old.config, &new.config) {
         return;
     }
     let volatile = factories.volatile_fields(&new.id);
-    if masked(&old.config, volatile) == masked(&new.config, volatile) {
+    if equivalent(
+        &masked(&old.config, volatile),
+        &masked(&new.config, volatile),
+    ) {
         diff.volatile_changed.push(new.id.clone());
     } else {
         diff.remounted.push(new.id.clone());
+    }
+}
+
+/// Whether two configurations mean the same thing.
+///
+/// JSON `null` has no TOML form: a null-valued key is dropped when a
+/// document is serialized and cannot come back. Such a key is
+/// *unrepresentable state*, not a configuration difference — without
+/// this, every document round trip over a materialized config (the
+/// boot rows carry unset credentials) reads as a change and remounts
+/// the row plus everything that injects it.
+fn equivalent(left: &Value, right: &Value) -> bool {
+    let left = toml_view(left);
+    let right = toml_view(right);
+    left == right || (is_empty(&left) && is_empty(&right))
+}
+
+/// Whether a configuration carries nothing at all.
+fn is_empty(config: &Value) -> bool {
+    config.is_null() || config.as_object().is_some_and(Map::is_empty)
+}
+
+/// A configuration as TOML can express it: null-valued keys dropped.
+fn toml_view(config: &Value) -> Value {
+    match config {
+        Value::Object(map) => {
+            let mut view = Map::new();
+            for (key, value) in map {
+                if value.is_null() {
+                    continue;
+                }
+                let value = toml_view(value);
+                if value.is_null() {
+                    continue;
+                }
+                view.insert(key.clone(), value);
+            }
+            Value::Object(view)
+        }
+        Value::Array(items) => {
+            Value::Array(items.iter().map(toml_view).collect())
+        }
+        other => other.clone(),
     }
 }
 

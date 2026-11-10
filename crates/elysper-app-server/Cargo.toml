@@ -101,6 +101,11 @@ elysper = { workspace = true, features = [
   # trait objects. Enabled through the facade, never as a direct
   # dependency (the single-facade rule above).
   "kernel",
+  # The opt-in Wasm component runtime behind the `wasm` profile row.
+  # This is the one feature that resolves `wasmtime`; the row is
+  # opt-in, so the binary pays for the JIT only when a deployment
+  # declares one.
+  "wasm",
 ] }
 validator.workspace = true
 async-trait.workspace = true

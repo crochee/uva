@@ -55,7 +55,7 @@ use wasmtime::{
     Engine,
     Store,
     Trap,
-    component::{Component, Instance, Linker},
+    component::{Component, Func, Instance, Linker, Type, Val},
 };
 
 use crate::{
@@ -311,33 +311,13 @@ impl WasmRuntime {
         )?;
         let instance =
             linker.instantiate(&mut store, component).map_err(|error| {
-                WasmError::new(
-                    WasmErrorKind::UnsatisfiedImport,
-                    format!("component instantiation failed: {error}"),
-                )
+                classify_instantiation(component, declared, &self.engine, error)
             })?;
         // Look the exports up now: a component missing either contract
-        // function is rejected at mount, not on the first model call.
-        instance
-            .get_typed_func::<(), (String,)>(&mut store, "describe")
-            .map_err(|error| {
-                WasmError::new(
-                    WasmErrorKind::DescribeFailed,
-                    format!(
-                        "component exports no `describe: func() -> string`: {error}"
-                    ),
-                )
-            })?;
-        instance
-            .get_typed_func::<(String,), (String,)>(&mut store, "execute")
-            .map_err(|error| {
-                WasmError::new(
-                    WasmErrorKind::ExecuteFailed,
-                    format!(
-                        "component exports no `execute: func(input: string) -> string`: {error}"
-                    ),
-                )
-            })?;
+        // function (or exporting it with another signature) is rejected
+        // at mount, not on the first model call.
+        lookup_string_func(&instance, &mut store, "describe", false)?;
+        lookup_string_func(&instance, &mut store, "execute", true)?;
         Ok(Session { store, instance })
     }
 
@@ -389,6 +369,43 @@ impl WasmComponent {
     #[must_use]
     pub fn schema(&self) -> &ToolSchema {
         &self.schema
+    }
+
+    /// Replace the guest's schema fields that `overrides` names.
+    ///
+    /// Called once by [`WasmToolPlugin`](crate::WasmToolPlugin) at
+    /// mount, before the tool is registered.
+    ///
+    /// # Errors
+    ///
+    /// [`WasmErrorKind::InvalidManifest`] for an empty name or a
+    /// `parameters` value that is not a JSON object.
+    pub(crate) fn apply_schema_override(
+        &mut self,
+        overrides: &ToolSchemaOverride,
+    ) -> Result<(), WasmError> {
+        if let Some(name) = &overrides.name {
+            if name.is_empty() {
+                return Err(WasmError::new(
+                    WasmErrorKind::InvalidManifest,
+                    "the tool schema override names the tool with an empty string",
+                ));
+            }
+            name.clone_into(&mut self.schema.name);
+        }
+        if let Some(description) = &overrides.description {
+            description.clone_into(&mut self.schema.description);
+        }
+        if let Some(parameters) = &overrides.parameters {
+            if !parameters.is_object() {
+                return Err(WasmError::new(
+                    WasmErrorKind::InvalidManifest,
+                    "the tool schema override's `parameters` is not a JSON object",
+                ));
+            }
+            self.schema.parameters = parameters.clone();
+        }
+        Ok(())
     }
 
     /// The cache key of the compiled component
@@ -443,22 +460,27 @@ impl WasmComponent {
         }
         let session = guard.as_mut().expect("a session was just installed");
         arm(&self.runtime.limits, &mut session.store)?;
-        let function = session
-            .instance
-            .get_typed_func::<(String,), (String,)>(
-                &mut session.store,
-                "execute",
-            )
-            .map_err(|error| {
-                WasmError::new(
-                    WasmErrorKind::ExecuteFailed,
-                    format!("component lost its `execute` export: {error}"),
-                )
-            })?;
-        let result = function.call(&mut session.store, (input.to_owned(),));
+        let function = lookup_string_func(
+            &session.instance,
+            &mut session.store,
+            "execute",
+            true,
+        )?;
+        let mut results = [Val::String(String::new())];
+        let result = function.call(
+            &mut session.store,
+            &[Val::String(input.to_owned())],
+            &mut results,
+        );
         let denied = session.store.data_mut().take_memory_denied();
         match result {
-            Ok((output,)) => {
+            Ok(()) => {
+                let [Val::String(output)] = results else {
+                    return Err(WasmError::new(
+                        WasmErrorKind::ExecuteFailed,
+                        "`execute` returned a value that is not one `string`",
+                    ));
+                };
                 self.execute_calls.fetch_add(1, Ordering::Relaxed);
                 serde_json::from_str(&output).map_err(|error| {
                     WasmError::new(
@@ -484,7 +506,12 @@ impl WasmComponent {
         error: wasmtime::Error,
         memory_denied: bool,
     ) -> WasmError {
-        classify_standalone(error, memory_denied, &self.runtime.limits)
+        classify_standalone(
+            error,
+            memory_denied,
+            &self.runtime.limits,
+            WasmErrorKind::ExecuteFailed,
+        )
     }
 }
 
@@ -550,6 +577,22 @@ impl Tool for WasmComponent {
             }
         }
     }
+}
+
+/// Host-side overrides for the schema `describe()` returned.
+///
+/// A deployment can rename a tool or replace its advertised parameters
+/// from the profile row's `tool` block without recompiling the
+/// component. Every `Some` field replaces the guest's answer; the
+/// override is applied once, at mount.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolSchemaOverride {
+    /// Replacement tool name.
+    pub name: Option<String>,
+    /// Replacement description.
+    pub description: Option<String>,
+    /// Replacement JSON Schema (must be an object).
+    pub parameters: Option<serde_json::Value>,
 }
 
 /// One tool's schema, as `describe()` returned it.
@@ -665,27 +708,132 @@ fn arm(
     Ok(())
 }
 
+/// Look up one string-shaped export and verify its component signature.
+///
+/// `takes_input` selects `execute`'s shape (`(input: string) ->
+/// string`) over `describe`'s (`() -> string`). A missing export or a
+/// signature mismatch is reported with the matching
+/// [`WasmErrorKind::DescribeFailed`] / [`WasmErrorKind::ExecuteFailed`],
+/// never a generic trap.
+fn lookup_string_func(
+    instance: &Instance,
+    store: &mut Store<StoreState>,
+    name: &str,
+    takes_input: bool,
+) -> Result<Func, WasmError> {
+    let (kind, signature) = if takes_input {
+        (
+            WasmErrorKind::ExecuteFailed,
+            "execute: func(input: string) -> string",
+        )
+    } else {
+        (WasmErrorKind::DescribeFailed, "describe: func() -> string")
+    };
+    let Some(function) = instance.get_func(&mut *store, name) else {
+        return Err(WasmError::new(
+            kind,
+            format!("component exports no `{signature}`"),
+        ));
+    };
+    let ty = function.ty(&*store);
+    let mut params = ty.params();
+    let params_ok = if takes_input {
+        matches!(params.next(), Some((_, Type::String)))
+            && params.next().is_none()
+    } else {
+        params.len() == 0
+    };
+    let mut results = ty.results();
+    let results_ok = matches!(results.next(), Some(Type::String))
+        && results.next().is_none();
+    if params_ok && results_ok {
+        Ok(function)
+    } else {
+        Err(WasmError::new(
+            kind,
+            format!("component export `{name}` does not match `{signature}`"),
+        ))
+    }
+}
+
 fn call_describe(
     session: &mut Session,
     limits: &WasmLimits,
 ) -> Result<String, WasmError> {
     arm(limits, &mut session.store)?;
-    let function = session
-        .instance
-        .get_typed_func::<(), (String,)>(&mut session.store, "describe")
-        .map_err(|error| {
-            WasmError::new(
-                WasmErrorKind::DescribeFailed,
-                format!(
-                    "component exports no `describe: func() -> string`: {error}"
-                ),
-            )
-        })?;
-    let result = function.call(&mut session.store, ());
+    let function = lookup_string_func(
+        &session.instance,
+        &mut session.store,
+        "describe",
+        false,
+    )?;
+    let mut results = [Val::String(String::new())];
+    let result = function.call(&mut session.store, &[], &mut results);
     let denied = session.store.data_mut().take_memory_denied();
     match result {
-        Ok((schema,)) => Ok(schema),
-        Err(error) => Err(classify_standalone(error, denied, limits)),
+        Ok(()) => {
+            let [Val::String(schema)] = results else {
+                return Err(WasmError::new(
+                    WasmErrorKind::DescribeFailed,
+                    "`describe` returned a value that is not one `string`",
+                ));
+            };
+            Ok(schema)
+        }
+        Err(error) => Err(classify_standalone(
+            error,
+            denied,
+            limits,
+            WasmErrorKind::DescribeFailed,
+        )),
+    }
+}
+
+/// Classify an instantiation failure.
+///
+/// Prefer naming the import the manifest failed to grant
+/// ([`WasmErrorKind::MissingCapability`]); otherwise name the import the
+/// linker cannot satisfy ([`WasmErrorKind::UnsatisfiedImport`]). The
+/// walk over the component's imports keeps the message deterministic
+/// instead of depending on Wasmtime's error prose.
+fn classify_instantiation(
+    component: &Component,
+    declared: &CapabilitySet,
+    engine: &Engine,
+    error: wasmtime::Error,
+) -> WasmError {
+    let imports: Vec<String> = component
+        .component_type()
+        .imports(engine)
+        .map(|(name, _extern)| name.to_string())
+        .collect();
+    for name in &imports {
+        if let Some(capability) = capability_for_import(name)
+            && !declared.contains(capability)
+        {
+            return WasmError::new(
+                WasmErrorKind::MissingCapability,
+                format!(
+                    "component imports `{name}`, which requires the `{capability}` capability \
+                     the manifest does not declare"
+                ),
+            );
+        }
+    }
+    match imports
+        .iter()
+        .find(|name| capability_for_import(name).is_none())
+    {
+        Some(name) => WasmError::new(
+            WasmErrorKind::UnsatisfiedImport,
+            format!(
+                "component imports `{name}`, which the host's linker does not provide: {error}"
+            ),
+        ),
+        None => WasmError::new(
+            WasmErrorKind::UnsatisfiedImport,
+            format!("component instantiation failed: {error}"),
+        ),
     }
 }
 
@@ -693,6 +841,7 @@ fn classify_standalone(
     error: wasmtime::Error,
     memory_denied: bool,
     limits: &WasmLimits,
+    fallback: WasmErrorKind,
 ) -> WasmError {
     // The trap itself is the authority: a guest that was refused memory
     // and then ran out of fuel (or missed its deadline) reports the trap
@@ -730,10 +879,26 @@ fn classify_standalone(
             ),
         );
     }
-    WasmError::new(WasmErrorKind::Trap, format!("guest trapped: {error}"))
+    if error.downcast_ref::<Trap>().is_some() {
+        return WasmError::new(
+            WasmErrorKind::Trap,
+            format!("guest trapped: {error}"),
+        );
+    }
+    // A non-trap error here is a call-setup failure (wrong argument or
+    // result arity/type): report the contract that was violated.
+    WasmError::new(fallback, format!("component call failed: {error}"))
 }
 
-/// Check the component's imports against the manifest's grants.
+/// Refuse a *granted* capability this host cannot supply.
+///
+/// An undeclared import is deliberately not refused here: the linker
+/// simply does not define it, so instantiation fails and
+/// [`classify_instantiation`] names both the import and the missing
+/// capability. This pass handles the one case instantiation cannot
+/// diagnose as precisely — a capability the manifest grants but no
+/// built-in host or [`CapabilityHost`](crate::CapabilityHost) supplies
+/// (`net:http` without an installed transport).
 fn check_capabilities(
     runtime: &WasmRuntime,
     component: &Component,
@@ -748,19 +913,12 @@ fn check_capabilities(
         let Some(capability) = capability_for_import(&name) else {
             continue;
         };
-        if !declared.contains(capability) {
-            return Err(WasmError::new(
-                WasmErrorKind::MissingCapability,
-                format!(
-                    "component imports `{name}`, which requires the `{capability}` capability \
-                     the manifest does not declare"
-                ),
-            ));
-        }
-        if !capability_is_supplied(
-            capability,
-            runtime.capability_host.as_deref(),
-        ) {
+        if declared.contains(capability)
+            && !capability_is_supplied(
+                capability,
+                runtime.capability_host.as_deref(),
+            )
+        {
             return Err(WasmError::new(
                 WasmErrorKind::UnsupportedCapability,
                 format!(

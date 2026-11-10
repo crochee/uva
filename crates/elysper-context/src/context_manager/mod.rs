@@ -109,6 +109,9 @@ impl UsageMeter {
 /// session from the resolved [`ModelConfig`] and hands it to
 /// every `prepare` call. Implementations read it for
 /// context-budget information and may mutate it to publish their
+#[derive(Clone)]
+/// Snapshot of the agent's runtime state passed to [`ContextManager`].
+///
 /// own observations (the post-prepare token estimate, whether
 /// anything was dropped).
 pub struct AgentState {

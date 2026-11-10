@@ -150,6 +150,7 @@ async fn mcptool_surfaces_transport_failure_as_error_output() {
         name: "echo".into(),
         description: "d".into(),
         input_schema: json!({"type": "object"}),
+        annotations: None,
     };
     let tool = client.tool(&spec, Arc::clone(&client));
     transport.fail_next("kaput");

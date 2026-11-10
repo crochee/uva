@@ -1,0 +1,748 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>原型 · 三个宿主等价的能力矩阵</title>
+<style>
+  :root {
+    --bg: #11131a;
+    --panel: #171a23;
+    --panel-2: #1d212c;
+    --line: #2a2f3d;
+    --fg: #e6e9f0;
+    --muted: #98a0b3;
+    --accent: #6ea8fe;
+    --ok: #4ec9a5;
+    --warn: #e0b341;
+    --bad: #f2726f;
+    --full: #4ec9a5;
+    --adapted: #6ea8fe;
+    --na: #7d8496;
+    --planned: #e0b341;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 -apple-system, "Segoe UI", "Noto Sans CJK SC", "PingFang SC", sans-serif;
+    padding: 32px 28px 96px;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .2px; }
+  h2 { font-size: 16px; margin: 26px 0 10px; color: var(--fg); }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  .question {
+    background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 14px 16px; margin: 18px 0 24px; color: #cdd4e4;
+  }
+  .question b { color: var(--fg); }
+  .question p { margin: 8px 0 0; }
+  .proto {
+    display: inline-block; font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--warn); border: 1px solid #4a3f22; background: #241f12; border-radius: 4px;
+    padding: 2px 7px; vertical-align: 3px; margin-left: 8px;
+  }
+  .tabs { display: flex; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+  .tab {
+    background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+    padding: 9px 12px; font-size: 14px; cursor: pointer; font-family: inherit;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+  .scenario {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 18px;
+  }
+  .scenario p { margin: 0 0 10px; color: #c4cbd9; }
+  .steps { display: flex; flex-direction: column; gap: 6px; }
+  .step {
+    display: flex; gap: 10px; align-items: flex-start; text-align: left; width: 100%;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 11px; color: var(--fg); font: inherit; font-size: 14px; cursor: pointer;
+  }
+  .step:hover { border-color: #3b4356; }
+  .step[disabled] { opacity: .45; cursor: default; }
+  .step .n {
+    flex: 0 0 20px; height: 20px; border-radius: 50%; background: #2b3243; color: var(--muted);
+    font-size: 12px; display: grid; place-items: center; margin-top: 1px;
+  }
+  .step.done .n { background: #1d4034; color: var(--ok); }
+  .step .t { flex: 1; }
+  .row { display: flex; gap: 18px; flex-wrap: wrap; align-items: stretch; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 16px; min-width: 132px;
+  }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 26px; font-weight: 600; margin-top: 2px; }
+  .stat.bad .v { color: var(--bad); }
+  .stat.good .v { color: var(--ok); }
+  .last {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; color: #c8cfe0; margin-bottom: 14px; min-height: 42px;
+  }
+  .last b { color: var(--accent); }
+  table { border-collapse: separate; border-spacing: 0; width: 100%; background: var(--panel);
+          border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--panel-2); font-size: 12px; color: var(--muted); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.dom { width: 116px; color: var(--fg); }
+  td.dom small { display: block; color: var(--muted); font-size: 11px; }
+  .cell { border: 1px solid transparent; border-radius: 6px; padding: 6px 8px; cursor: pointer; }
+  .cell:hover { border-color: #3b4356; }
+  .cell.sel { border-color: var(--accent); background: #1b2231; }
+  .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; color: #10121a; font-weight: 600; }
+  .badge.full { background: var(--full); }
+  .badge.adapted { background: var(--adapted); }
+  .badge.na { background: var(--na); color: #e6e9f0; }
+  .badge.planned { background: var(--planned); }
+  .meta { color: var(--muted); font-size: 11.5px; margin-top: 4px; word-break: break-all; }
+  .viol { color: var(--bad); font-size: 11.5px; margin-top: 3px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-top: 16px; }
+  .panel h3 { margin: 0 0 10px; font-size: 14px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 7px; }
+  button.act {
+    background: #232a38; border: 1px solid var(--line); color: var(--fg); border-radius: 6px;
+    padding: 7px 11px; font: inherit; font-size: 13.5px; cursor: pointer;
+  }
+  button.act:hover:not([disabled]) { border-color: var(--accent); }
+  button.act[disabled] { opacity: .4; cursor: default; }
+  button.act.danger:hover:not([disabled]) { border-color: var(--bad); color: #ffd7d6; }
+  button.act.primary { background: #1d3a5c; border-color: #2f5a8c; }
+  .viol-list { margin: 0; padding: 0; list-style: none; }
+  .viol-list li { padding: 7px 10px; border-left: 3px solid var(--bad); background: #241a1c;
+                 border-radius: 0 6px 6px 0; margin-bottom: 6px; font-size: 13.5px; }
+  .viol-list li .rule { color: var(--bad); font-weight: 600; margin-right: 6px; }
+  .ok-note { color: var(--ok); font-size: 13.5px; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .hint { color: var(--muted); font-size: 12.5px; margin: 6px 0 0; }
+  .foot { color: #6d7488; font-size: 12px; margin-top: 26px; border-top: 1px solid var(--line); padding-top: 14px; }
+  code { background: #222736; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>三个宿主等价：能力矩阵 <span class="proto">原型 · 一次性</span></h1>
+  <p class="sub">用一张表表达"终端 TUI / 浏览器 Web / 桌面 Desktop 各自能做什么"，并用五条规则守住它。</p>
+
+  <div class="question">
+    <p><b>这份 demo 要回答的问题：</b>"三个宿主等价"这套定义与门禁规则，站得住吗？</p>
+    <p>表有 <b>13 个核心能力域</b>（会话、对话、Agent、技能、工具、任务、计划、工作流、评测、模型、插件目录、搜索、UI 扩展），
+       每行三列（三个宿主）。每格是四种状态之一：<b>完整</b>（能力齐、呈现等价）、
+       <b>适配</b>（能力齐、但按介质换了呈现，比如终端里的表格）、<b>待做</b>（能力还不齐）、
+       <b>不适用</b>（这个介质压根用不上，必须写明理由）。</p>
+    <p>五条规则：① 每行三列都要有值；② 待做格必须带<b>锚点</b>（说清打算什么时候做），不适用格必须带<b>理由</b>；
+       ③ 完整 / 适配格必须指向磁盘上<b>真实存在</b>的证据文件；④ <b>缺口数</b>（待做 + 不适用）只能下降，不能回升；
+       ⑤ 格子里引用的服务器方法名必须真的存在。</p>
+    <p>波次推进时，缺口怎么降、非法格会不会被拦住——点按钮自己推。</p>
+  </div>
+
+  <div class="tabs" id="tabs" role="tablist"></div>
+  <div class="scenario" id="scenario"></div>
+
+  <div class="stats" id="stats"></div>
+  <div class="last" id="last"></div>
+
+  <div id="violations"></div>
+
+  <h2>能力矩阵</h2>
+  <table id="matrix">
+    <thead>
+      <tr><th>能力域</th><th>终端 TUI</th><th>浏览器 Web</th><th>桌面 Desktop</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <div class="legend">
+    <span><span class="badge full">完整</span> 能力齐、呈现等价</span>
+    <span><span class="badge adapted">适配</span> 能力齐、呈现按介质不同</span>
+    <span><span class="badge planned">待做</span> 能力不齐（需锚点）</span>
+    <span><span class="badge na">不适用</span> 该介质用不上（需理由）</span>
+    <span>点任意格子可选中它，下面的按钮作用于选中格。</span>
+  </div>
+
+  <div class="panel">
+    <h3>自由试验</h3>
+    <div class="btns" id="freeplay"></div>
+    <p class="hint">选中格：<span id="selection">（未选）</span></p>
+  </div>
+
+  <div class="foot">
+    原型（一次性，不入库）：逻辑在页面里那段 <code>Model</code> 模块里，是纯函数、无 DOM，可原样搬进未来的门禁脚本；
+    页面外壳是扔掉的。数据取自本仓真实事实：服务器注册了 <b id="regcount">66</b> 个 JSON-RPC 方法，证据路径来自仓库真实文件。
+  </div>
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────────────────
+   纯模型：不含 DOM，可原样搬进未来的门禁实现
+   ───────────────────────────────────────────────────────────────────────── */
+const Model = (() => {
+  'use strict';
+
+  const HOSTS = [
+    { key: 'tui',     label: '终端 TUI',  note: 'ratatui' },
+    { key: 'web',     label: '浏览器 Web', note: 'React SPA' },
+    { key: 'desktop', label: '桌面 Desktop', note: 'Tauri WebView' },
+  ];
+
+  const DOMAINS = [
+    { key: 'sessions',  label: '会话' },
+    { key: 'chat',      label: '对话' },
+    { key: 'agents',    label: 'Agent' },
+    { key: 'skills',    label: '技能' },
+    { key: 'tools',     label: '工具' },
+    { key: 'tasks',     label: '任务' },
+    { key: 'schedules', label: '计划' },
+    { key: 'workflows', label: '工作流' },
+    { key: 'evals',     label: '评测' },
+    { key: 'models',    label: '模型' },
+    { key: 'plugins',   label: '插件目录' },
+    { key: 'search',    label: '搜索' },
+    { key: 'ui',        label: 'UI 扩展' },
+  ];
+
+  /* 服务器实际注册的 JSON-RPC 方法（2026-11-09 实测 66 个） */
+  const REGISTRY = [
+    'agents/create','agents/default','agents/delete','agents/get','agents/list',
+    'anthropic/messages','approval/respond','attachments/create','attachments/delete','attachments/get',
+    'chat/cancel','chat/feedback','chat/message/send','chat/operation','chat/regenerate',
+    'chat/session/create','chat/usage','evals/create','evals/delete','evals/get','evals/list','evals/run',
+    'health/livez','health/ping','health/readyz','health/version','models/list','plugins/list',
+    'schedules/create','schedules/delete','schedules/get','schedules/list','schedules/patch','schedules/tick',
+    'search/all','session/unfollow','sessions/compact','sessions/delete','sessions/events','sessions/export',
+    'sessions/follow','sessions/fork','sessions/get','sessions/list','sessions/resume','sessions/search',
+    'sessions/status','sessions/usage','skills/create','skills/delete','skills/get','skills/list','skills/reload',
+    'tasks/get','tasks/list','tools/get','tools/list','tools/register','tools/unregister','ui/schema',
+    'workflows/create','workflows/delete','workflows/get','workflows/list','workflows/replace','workflows/run',
+  ];
+
+  /* 磁盘上真实存在的文件（原型内的一份快照；真实门禁会读文件系统） */
+  const DISK_SEED = [
+    'elysper-web/src/pages/SessionsPage.tsx','elysper-web/src/pages/ChatPage.tsx',
+    'elysper-web/src/pages/AgentsPage.tsx','elysper-web/src/pages/SkillsPage.tsx',
+    'elysper-web/src/pages/ToolsPage.tsx','elysper-web/src/pages/TasksPage.tsx',
+    'elysper-web/src/pages/SchedulesPage.tsx','elysper-web/src/pages/WorkflowsPage.tsx',
+    'elysper-web/src/pages/EvalsPage.tsx','elysper-web/src/api/client.ts',
+    'elysper-web/src/components/plugins/DeploymentPlugins.tsx',
+    'elysper-web/src/components/ui-schema/UiSchemaPanel.tsx',
+    'crates/elysper-tui/src/transport.rs','crates/elysper-tui/src/app.rs','crates/elysper-tui/src/render.rs',
+    'docs/design/2026-11-09-desktop-frontend-tree-design.md',
+  ];
+
+  const STATUSES = ['full','adapted','n-a','planned'];
+  const GAP_STATUSES = ['planned','n-a'];
+
+  const DOMAIN_LABEL = Object.fromEntries(DOMAINS.map(d => [d.key, d.label]));
+  const HOST_LABEL = Object.fromEntries(HOSTS.map(h => [h.key, h.label]));
+
+  /* 每个域在前端路由表里覆盖到的方法（决定"这一域算不算完整"） */
+  const DOMAIN_METHODS = {
+    sessions:  ['sessions/list','sessions/get','sessions/delete','sessions/status','sessions/usage','sessions/export','sessions/fork','sessions/events','sessions/resume','sessions/compact'],
+    chat:      ['chat/session/create','chat/message/send','chat/cancel','chat/regenerate','chat/feedback'],
+    agents:    ['agents/list','agents/default','agents/create','agents/get','agents/delete'],
+    skills:    ['skills/list','skills/create','skills/reload','skills/get','skills/delete'],
+    tools:     ['tools/list','tools/register','tools/get','tools/unregister'],
+    tasks:     ['tasks/list','tasks/get'],
+    schedules: ['schedules/list','schedules/create','schedules/get','schedules/patch','schedules/delete','schedules/tick'],
+    workflows: ['workflows/list','workflows/create','workflows/get','workflows/replace','workflows/delete','workflows/run'],
+    evals:     ['evals/list','evals/create','evals/get','evals/delete','evals/run'],
+    models:    ['models/list'],
+    plugins:   ['plugins/list'],
+    search:    ['search/all'],
+    ui:        ['ui/schema'],
+  };
+
+  const WEB_EVIDENCE = {
+    sessions: 'elysper-web/src/pages/SessionsPage.tsx',
+    chat: 'elysper-web/src/pages/ChatPage.tsx',
+    agents: 'elysper-web/src/pages/AgentsPage.tsx',
+    skills: 'elysper-web/src/pages/SkillsPage.tsx',
+    tools: 'elysper-web/src/pages/ToolsPage.tsx',
+    tasks: 'elysper-web/src/pages/TasksPage.tsx',
+    schedules: 'elysper-web/src/pages/SchedulesPage.tsx',
+    workflows: 'elysper-web/src/pages/WorkflowsPage.tsx',
+    evals: 'elysper-web/src/pages/EvalsPage.tsx',
+    models: 'elysper-web/src/api/client.ts',
+    plugins: 'elysper-web/src/components/plugins/DeploymentPlugins.tsx',
+    search: 'elysper-web/src/api/client.ts',
+    ui: 'elysper-web/src/components/ui-schema/UiSchemaPanel.tsx',
+  };
+
+  const DESIGN = 'docs/design/2026-11-09-desktop-frontend-tree-design.md';
+
+  function initialState() {
+    const matrix = {};
+    for (const d of DOMAINS) {
+      matrix[d.key] = {};
+      // 浏览器：今天就覆盖全部 13 个域
+      matrix[d.key].web = {
+        status: 'full', evidence: WEB_EVIDENCE[d.key], anchor: '', reason: '',
+        methods: DOMAIN_METHODS[d.key].slice(),
+      };
+      // 桌面：壳还没落地（迁移设计 §8 刀 3），整列待做
+      matrix[d.key].desktop = {
+        status: 'planned', evidence: '', anchor: DESIGN + ' §8 刀 3', reason: '',
+        methods: [],
+      };
+      // 终端：只有会话与对话两块，其余待做
+      const tuiPartial = d.key === 'sessions'
+        ? { methods: ['sessions/follow','sessions/events','session/unfollow'], evidence: 'crates/elysper-tui/src/transport.rs' }
+        : d.key === 'chat'
+          ? { methods: ['chat/session/create','chat/message/send','chat/cancel','approval/respond'], evidence: 'crates/elysper-tui/src/app.rs' }
+          : { methods: [], evidence: '' };
+      matrix[d.key].tui = {
+        status: 'planned',
+        evidence: tuiPartial.evidence,
+        anchor: DESIGN + ' §8 刀 5',
+        reason: '',
+        methods: tuiPartial.methods,
+      };
+    }
+    const state = {
+      matrix,
+      baseline: 0,
+      disk: new Set(DISK_SEED),
+      waves: {
+        desktop: {
+          name: '桌面壳落地（刀 3）',
+          detail: '桌面复用同一份前端 ⇒ 13 个域一次补齐。',
+          apply: (s) => {
+            for (const d of DOMAINS) {
+              const cell = s.matrix[d.key].desktop;
+              cell.status = 'full';
+              cell.evidence = WEB_EVIDENCE[d.key];
+              cell.methods = DOMAIN_METHODS[d.key].slice();
+              cell.anchor = '';
+            }
+            s.disk.add('desktop/src/main.rs');
+          },
+        },
+        tuiChat: {
+          name: '终端补会话与对话（刀 5）',
+          detail: '通用列表 + 通用详情 + 每域列配置表 ⇒ 会话与对话两域能力齐。',
+          apply: (s) => {
+            for (const key of ['sessions','chat']) {
+              const cell = s.matrix[key].tui;
+              cell.status = 'adapted';
+              cell.evidence = 'crates/elysper-tui/src/views/list.rs';
+              cell.methods = DOMAIN_METHODS[key].slice();
+              cell.anchor = '';
+            }
+            s.disk.add('crates/elysper-tui/src/views/list.rs');
+            s.disk.add('crates/elysper-tui/src/views/detail.rs');
+            s.disk.add('crates/elysper-tui/src/domains.rs');
+          },
+        },
+        tuiCatalog: {
+          name: '终端补目录九域（刀 6）',
+          detail: '每域一张列配置表（数据），不加界面 ⇒ 目录域能力齐。',
+          apply: (s) => {
+            const rest = ['agents','skills','tools','tasks','schedules','workflows','evals','models','plugins','search','ui'];
+            for (const key of rest) {
+              const cell = s.matrix[key].tui;
+              cell.status = 'adapted';
+              cell.evidence = 'crates/elysper-tui/src/domains.rs';
+              cell.methods = DOMAIN_METHODS[key].slice();
+              cell.anchor = '';
+            }
+            s.disk.add('crates/elysper-tui/src/domains.rs');
+          },
+        },
+      },
+      selection: { domain: 'sessions', host: 'tui' },
+    };
+    state.baseline = gapCount(state);
+    return state;
+  }
+
+  function cells(state) {
+    const out = [];
+    for (const d of DOMAINS) {
+      for (const h of HOSTS) out.push({ domain: d.key, host: h.key, cell: state.matrix[d.key][h.key] });
+    }
+    return out;
+  }
+
+  function gapCount(state) {
+    return cells(state).filter(c => c.cell && GAP_STATUSES.includes(c.cell.status)).length;
+  }
+
+  /* 五条规则 */
+  function violations(state) {
+    const out = [];
+    for (const d of DOMAINS) {
+      for (const h of HOSTS) {
+        const cell = state.matrix[d.key][h.key];
+        const where = `${DOMAIN_LABEL[d.key]} × ${HOST_LABEL[h.key]}`;
+        if (!cell) {
+          out.push({ rule: '规则①', where, msg: '这一格是空的——每行三列都要有值。' });
+          continue;
+        }
+        if (cell.status === 'planned' && !cell.anchor.trim()) {
+          out.push({ rule: '规则②', where, msg: '标成"待做"却没有锚点——说不清打算什么时候做。' });
+        }
+        if (cell.status === 'n-a' && !cell.reason.trim()) {
+          out.push({ rule: '规则②', where, msg: '标成"不适用"却没有理由。' });
+        }
+        if ((cell.status === 'full' || cell.status === 'adapted')) {
+          if (!cell.evidence.trim()) {
+            out.push({ rule: '规则③', where, msg: '标成完整/适配却没有证据文件。' });
+          } else if (!state.disk.has(cell.evidence)) {
+            out.push({ rule: '规则③', where, msg: `证据文件在磁盘上不存在：${cell.evidence}` });
+          }
+        }
+        for (const m of cell.methods) {
+          if (!REGISTRY.includes(m)) {
+            out.push({ rule: '规则⑤', where, msg: `引用了服务器没有注册的方法：${m}` });
+          }
+        }
+      }
+    }
+    const gap = gapCount(state);
+    if (gap > state.baseline) {
+      out.push({ rule: '规则④', where: '全局', msg: `缺口数回升：当前 ${gap}，基线 ${state.baseline}。缺口只能下降。` });
+    }
+    return out;
+  }
+
+  function clone(state) {
+    const matrix = {};
+    for (const d of DOMAINS) {
+      matrix[d.key] = {};
+      for (const h of HOSTS) {
+        const c = state.matrix[d.key][h.key];
+        matrix[d.key][h.key] = c ? { ...c, methods: c.methods.slice() } : null;
+      }
+    }
+    return { ...state, matrix, disk: new Set(state.disk) };
+  }
+
+  function reduce(state, action) {
+    const s = clone(state);
+    let note = '';
+    const sel = s.selection;
+    const cell = () => s.matrix[sel.domain][sel.host];
+
+    switch (action.type) {
+      case 'select':
+        s.selection = { domain: action.domain, host: action.host };
+        note = `选中：${DOMAIN_LABEL[action.domain]} × ${HOST_LABEL[action.host]}`;
+        break;
+
+      case 'wave': {
+        const wave = s.waves[action.wave];
+        wave.apply(s);
+        note = `应用波次「${wave.name}」——${wave.detail}`;
+        break;
+      }
+
+      case 'rebaseline':
+        s.baseline = gapCount(s);
+        note = `基线下调到当前缺口数 ${s.baseline}（棘轮只降不升）。`;
+        break;
+
+      case 'status': {
+        const c = cell();
+        c.status = action.status;
+        note = `${DOMAIN_LABEL[sel.domain]} × ${HOST_LABEL[sel.host]} 改为「${action.label}」。`;
+        break;
+      }
+
+      case 'clearEvidence':
+        cell().evidence = '';
+        note = '清掉了选中格的证据文件。';
+        break;
+
+      case 'clearAnchor':
+        cell().anchor = '';
+        note = '清掉了选中格的锚点。';
+        break;
+
+      case 'clearReason':
+        cell().reason = '';
+        note = '清掉了选中格的理由。';
+        break;
+
+      case 'badMethod':
+        cell().methods = ['chat/send_message'];
+        note = '给选中格塞了一个服务器没有注册的方法名（chat/send_message）。';
+        break;
+
+      case 'removeCell':
+        s.matrix[sel.domain][sel.host] = null;
+        note = `删掉了 ${DOMAIN_LABEL[sel.domain]} × ${HOST_LABEL[sel.host]} 这一格。`;
+        break;
+
+      case 'removeColumn':
+        for (const d of DOMAINS) s.matrix[d.key][sel.host] = null;
+        note = `删掉了 ${HOST_LABEL[sel.host]} 整列。`;
+        break;
+
+      case 'reset':
+        return { state: initialState(), note: '恢复到今天的状态。' };
+    }
+    return { state: s, note };
+  }
+
+  return { HOSTS, DOMAINS, STATUSES, REGISTRY, DOMAIN_METHODS, initialState, gapCount, violations, reduce, DOMAIN_LABEL, HOST_LABEL };
+})();
+
+/* ─────────────────────────────────────────────────────────────────────────
+   页面外壳（一次性，扔掉的部分）
+   ───────────────────────────────────────────────────────────────────────── */
+const STATUS_LABEL = { full: '完整', adapted: '适配', 'n-a': '不适用', planned: '待做' };
+const STATUS_CLASS = { full: 'full', adapted: 'adapted', 'n-a': 'na', planned: 'planned' };
+
+const SCENARIOS = [
+  {
+    name: '① 今天的状态',
+    desc: '起点：浏览器覆盖 13 个域；桌面壳还没落地；终端只有会话与对话两块，其余待做。缺口数与基线相等 ⇒ 没有违规。',
+    steps: [
+      { label: '看矩阵：终端列几乎全是"待做"', act: { type: 'noop' } },
+      { label: '看缺口数（应该等于基线，没有违规）', act: { type: 'noop' } },
+      { label: '选中"会话 × 终端"，看它只用到 3 个方法（10 个里的 3 个）', act: { type: 'select', domain: 'sessions', host: 'tui' } },
+      { label: '选中"UI 扩展 × 浏览器"，看它的证据文件指向哪个页面', act: { type: 'select', domain: 'ui', host: 'web' } },
+    ],
+  },
+  {
+    name: '② 推进波次',
+    desc: '每落一个波次，缺口下降，然后基线跟着下调（棘轮只降不升）。三个波次之后缺口归零。',
+    steps: [
+      { label: '应用波次：桌面壳落地（13 个域一次补齐）', act: { type: 'wave', wave: 'desktop' } },
+      { label: '把基线下调到新的缺口数', act: { type: 'rebaseline' } },
+      { label: '应用波次：终端补会话与对话', act: { type: 'wave', wave: 'tuiChat' } },
+      { label: '把基线下调到新的缺口数', act: { type: 'rebaseline' } },
+      { label: '应用波次：终端补目录九域', act: { type: 'wave', wave: 'tuiCatalog' } },
+      { label: '把基线下调到新的缺口数（缺口归零）', act: { type: 'rebaseline' } },
+    ],
+  },
+  {
+    name: '③ 非法格会被拦住吗',
+    desc: '五种非法状态逐一试一遍：每一步都该亮出对应的规则。',
+    steps: [
+      { label: '把"会话 × 终端"标成待做，但不给锚点 → 规则②', act: { type: 'select', domain: 'sessions', host: 'tui' } },
+      { label: '清掉它的锚点', act: { type: 'clearAnchor' } },
+      { label: '把"技能 × 浏览器"改成待做（证据会失效）→ 规则③', act: { type: 'select', domain: 'skills', host: 'web' } },
+      { label: '清掉它的证据文件', act: { type: 'clearEvidence' } },
+      { label: '把"工具 × 浏览器"的证据指向一个不存在的文件 → 规则③', act: { type: 'select', domain: 'tools', host: 'web' } },
+      { label: '清掉证据（= 没有证据）再改成"完整"', act: { type: 'clearEvidence' } },
+      { label: '给"计划 × 浏览器"塞一个服务器没有的方法名 → 规则⑤', act: { type: 'select', domain: 'schedules', host: 'web' } },
+      { label: '塞入假方法名', act: { type: 'badMethod' } },
+      { label: '删掉"评测 × 浏览器"这一整格 → 规则①', act: { type: 'select', domain: 'evals', host: 'web' } },
+      { label: '删掉这一格', act: { type: 'removeCell' } },
+    ],
+  },
+  {
+    name: '④ 棘轮拒绝回退',
+    desc: '把已经补齐的能力退回"待做"，缺口数回升——规则④应当拦下。',
+    steps: [
+      { label: '应用波次：终端补会话与对话（先补上）', act: { type: 'wave', wave: 'tuiChat' } },
+      { label: '把基线下调到新的缺口数', act: { type: 'rebaseline' } },
+      { label: '选中"会话 × 终端"', act: { type: 'select', domain: 'sessions', host: 'tui' } },
+      { label: '把它退回"待做"（缺口回升）', act: { type: 'status', status: 'planned', label: '待做' } },
+      { label: '看规则④：缺口数回升被拒', act: { type: 'noop' } },
+    ],
+  },
+];
+
+let state = Model.initialState();
+let scenarioIdx = 0;
+let stepIdx = 0;
+let lastNote = '初始状态：缺口数与基线相等，没有违规。';
+
+function el(id) { return document.getElementById(id); }
+
+function renderTabs() {
+  const tabs = el('tabs');
+  tabs.innerHTML = '';
+  SCENARIOS.forEach((sc, i) => {
+    const b = document.createElement('button');
+    b.className = 'tab';
+    b.textContent = sc.name;
+    b.setAttribute('aria-selected', String(i === scenarioIdx));
+    b.onclick = () => { scenarioIdx = i; stepIdx = 0; renderTabs(); renderScenario(); render(); };
+    tabs.appendChild(b);
+  });
+}
+
+function renderScenario() {
+  const sc = SCENARIOS[scenarioIdx];
+  const box = el('scenario');
+  box.innerHTML = '';
+  const p = document.createElement('p');
+  p.textContent = sc.desc;
+  box.appendChild(p);
+  const steps = document.createElement('div');
+  steps.className = 'steps';
+  sc.steps.forEach((st, i) => {
+    const b = document.createElement('button');
+    b.className = 'step' + (i < stepIdx ? ' done' : '');
+    b.disabled = i !== stepIdx;
+    b.innerHTML = '<span class="n">' + (i < stepIdx ? '✓' : (i + 1)) + '</span><span class="t"></span>';
+    b.querySelector('.t').textContent = st.label;
+    b.onclick = () => {
+      if (st.act.type !== 'noop') {
+        const r = Model.reduce(state, st.act);
+        state = r.state;
+        lastNote = r.note;
+      }
+      stepIdx++;
+      renderScenario(); render();
+    };
+    steps.appendChild(b);
+  });
+  box.appendChild(steps);
+}
+
+function renderStats() {
+  const gap = Model.gapCount(state);
+  const vios = Model.violations(state);
+  const stats = el('stats');
+  stats.innerHTML = '';
+  const add = (k, val, cls) => {
+    const d = document.createElement('div');
+    d.className = 'stat' + (cls ? ' ' + cls : '');
+    d.innerHTML = '<div class="k"></div><div class="v"></div>';
+    d.querySelector('.k').textContent = k;
+    d.querySelector('.v').textContent = val;
+    stats.appendChild(d);
+  };
+  add('缺口数（待做 + 不适用）', gap, gap > state.baseline ? 'bad' : 'good');
+  add('基线（只能降）', state.baseline);
+  add('违规条数', vios.length, vios.length ? 'bad' : 'good');
+  add('能力格总数', Model.DOMAINS.length * Model.HOSTS.length);
+}
+
+function renderViolations() {
+  const vios = Model.violations(state);
+  const box = el('violations');
+  box.innerHTML = '';
+  if (!vios.length) {
+    box.innerHTML = '<div class="panel"><h3>规则检查</h3><div class="ok-note">✓ 五条规则全部通过，没有违规。</div></div>';
+    return;
+  }
+  const p = document.createElement('div');
+  p.className = 'panel';
+  const h = document.createElement('h3');
+  h.textContent = '规则检查（' + vios.length + ' 条违规）';
+  p.appendChild(h);
+  const ul = document.createElement('ul');
+  ul.className = 'viol-list';
+  vios.forEach(v => {
+    const li = document.createElement('li');
+    li.innerHTML = '<span class="rule"></span><span class="w"></span> — <span class="m"></span>';
+    li.querySelector('.rule').textContent = v.rule;
+    li.querySelector('.w').textContent = v.where;
+    li.querySelector('.m').textContent = v.msg;
+    ul.appendChild(li);
+  });
+  p.appendChild(ul);
+  box.appendChild(p);
+}
+
+function renderMatrix() {
+  const tbody = el('matrix').querySelector('tbody');
+  tbody.innerHTML = '';
+  const vios = Model.violations(state);
+  for (const d of Model.DOMAINS) {
+    const tr = document.createElement('tr');
+    const td0 = document.createElement('td');
+    td0.className = 'dom';
+    td0.textContent = d.label;
+    const methods = Model.DOMAIN_METHODS[d.key];
+    const small = document.createElement('small');
+    small.textContent = methods.length + ' 个方法';
+    td0.appendChild(small);
+    tr.appendChild(td0);
+
+    for (const h of Model.HOSTS) {
+      const td = document.createElement('td');
+      const cell = state.matrix[d.key][h.key];
+      const wrap = document.createElement('div');
+      wrap.className = 'cell' + (state.selection.domain === d.key && state.selection.host === h.key ? ' sel' : '');
+      wrap.onclick = () => {
+        const r = Model.reduce(state, { type: 'select', domain: d.key, host: h.key });
+        state = r.state; lastNote = r.note; render();
+      };
+      if (!cell) {
+        wrap.innerHTML = '<span class="badge na">空</span><div class="viol">这一格被删掉了 → 规则①</div>';
+      } else {
+        const badge = document.createElement('span');
+        badge.className = 'badge ' + STATUS_CLASS[cell.status];
+        badge.textContent = STATUS_LABEL[cell.status];
+        wrap.appendChild(badge);
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const bits = [];
+        if (cell.methods.length) bits.push('用到 ' + cell.methods.length + ' 个方法');
+        if (cell.evidence) bits.push('证据：' + cell.evidence);
+        if (cell.anchor) bits.push('锚点：' + cell.anchor);
+        if (cell.reason) bits.push('理由：' + cell.reason);
+        meta.textContent = bits.join(' · ');
+        wrap.appendChild(meta);
+        const cellVios = vios.filter(v => v.where === d.label + ' × ' + h.label);
+        if (cellVios.length) {
+          const vv = document.createElement('div');
+          vv.className = 'viol';
+          vv.textContent = cellVios.map(v => v.rule).join(' / ');
+          wrap.appendChild(vv);
+        }
+      }
+      td.appendChild(wrap);
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+function renderFreeplay() {
+  const box = el('freeplay');
+  box.innerHTML = '';
+  const mk = (label, act, cls) => {
+    const b = document.createElement('button');
+    b.className = 'act' + (cls ? ' ' + cls : '');
+    b.textContent = label;
+    b.onclick = () => {
+      const r = Model.reduce(state, act);
+      state = r.state; lastNote = r.note; render();
+    };
+    box.appendChild(b);
+  };
+  mk('应用波次：桌面壳落地', { type: 'wave', wave: 'desktop' }, 'primary');
+  mk('应用波次：终端补会话与对话', { type: 'wave', wave: 'tuiChat' }, 'primary');
+  mk('应用波次：终端补目录九域', { type: 'wave', wave: 'tuiCatalog' }, 'primary');
+  mk('基线下调到当前缺口数', { type: 'rebaseline' });
+  mk('选中格 → 完整', { type: 'status', status: 'full', label: '完整' });
+  mk('选中格 → 适配', { type: 'status', status: 'adapted', label: '适配' });
+  mk('选中格 → 待做', { type: 'status', status: 'planned', label: '待做' });
+  mk('选中格 → 不适用', { type: 'status', status: 'n-a', label: '不适用' });
+  mk('清掉选中格证据', { type: 'clearEvidence' }, 'danger');
+  mk('清掉选中格锚点', { type: 'clearAnchor' }, 'danger');
+  mk('清掉选中格理由', { type: 'clearReason' }, 'danger');
+  mk('塞入服务器没有的方法名', { type: 'badMethod' }, 'danger');
+  mk('删掉选中格', { type: 'removeCell' }, 'danger');
+  mk('删掉选中宿主整列', { type: 'removeColumn' }, 'danger');
+  mk('恢复初始状态', { type: 'reset' }, 'danger');
+
+  const sel = state.selection;
+  el('selection').textContent = Model.DOMAIN_LABEL[sel.domain] + ' × ' + Model.HOST_LABEL[sel.host];
+}
+
+function render() {
+  el('regcount').textContent = Model.REGISTRY.length;
+  renderStats();
+  el('last').innerHTML = '<b>刚才发生了什么：</b>' + lastNote;
+  renderViolations();
+  renderMatrix();
+  renderFreeplay();
+}
+
+renderTabs();
+renderScenario();
+render();
+</script>
+</body>
+</html>

@@ -45,6 +45,7 @@ pub async fn boot_core(
     config_path: Option<&PathBuf>,
     profile: Option<Profile>,
     bind_overrides: BindOverrides,
+    profile_store: Option<crate::profile::ProfileStore>,
 ) -> Result<BootedCore, String> {
     let server_config =
         crate::config::resolve_server_config(&workspace_root, config_path);
@@ -53,6 +54,7 @@ pub async fn boot_core(
         workspace_root,
         server_config,
         profile,
+        profile_store,
     )
     .await?;
     Ok(BootedCore { state, address })

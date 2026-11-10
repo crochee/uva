@@ -39,7 +39,7 @@ async fn schedule_tool_is_registered_and_unload_removes_only_its_entry() {
     let ctx = Context::new();
     let dir = TempDir::new().expect("temp dir");
     let store = Arc::new(ScheduleStore::new(dir.path()));
-    let service = Arc::new(SchedulerService::new(Arc::clone(&store)));
+    let _service = Arc::new(SchedulerService::new(Arc::clone(&store)));
     let tools = Arc::new(ToolRegistry::new());
 
     // A foreign `schedule` entry: unloading the brick must not take it.
@@ -61,8 +61,11 @@ async fn schedule_tool_is_registered_and_unload_removes_only_its_entry() {
     let mounted = mount_all(
         &ctx,
         &[
-            Arc::new(SchedulerPlugin::new(Arc::clone(&service)))
-                as Arc<dyn KernelPlugin>,
+            Arc::new(SchedulerPlugin::new(
+                elysper_scheduler::SchedulerPluginConfig {
+                    schedules_dir: dir.path().to_path_buf(),
+                },
+            )) as Arc<dyn KernelPlugin>,
             Arc::new(ScheduleToolPlugin::new()) as Arc<dyn KernelPlugin>,
         ],
     )
@@ -87,7 +90,12 @@ async fn schedule_tool_is_registered_and_unload_removes_only_its_entry() {
         )
         .await;
     assert_eq!(output.is_error, None, "`create` must succeed");
-    let jobs = store.list();
+    // The brick injects the mounted `scheduler` service, so the job
+    // lands in the service's store (the one the row built).
+    let scheduler = ctx
+        .require::<SchedulerService>(KEY_SCHEDULER)
+        .expect("scheduler service");
+    let jobs = scheduler.store().list();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].name, "nightly");
 
@@ -161,7 +169,7 @@ fn mount_fails_loudly_when_a_core_tool_owns_the_name() {
     let ctx = Context::new();
     let dir = TempDir::new().expect("temp dir");
     let store = Arc::new(ScheduleStore::new(dir.path()));
-    let service = Arc::new(SchedulerService::new(Arc::clone(&store)));
+    let _service = Arc::new(SchedulerService::new(Arc::clone(&store)));
     let tools = Arc::new(ToolRegistry::new());
     assert!(
         tools.register_core_entry(ToolEntry::new(Arc::new(
@@ -178,8 +186,11 @@ fn mount_fails_loudly_when_a_core_tool_owns_the_name() {
     .expect("mount `tools`");
     let scheduler_mount = mount_all(
         &ctx,
-        &[Arc::new(SchedulerPlugin::new(Arc::clone(&service)))
-            as Arc<dyn KernelPlugin>],
+        &[Arc::new(SchedulerPlugin::new(
+            elysper_scheduler::SchedulerPluginConfig {
+                schedules_dir: dir.path().to_path_buf(),
+            },
+        )) as Arc<dyn KernelPlugin>],
     )
     .expect("mount `scheduler`");
 

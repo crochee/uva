@@ -389,6 +389,37 @@ impl ToolRegistry {
         Some(token)
     }
 
+    /// Register a core tool and return the withdrawal token.
+    ///
+    /// The same immutability the plain core registration gives —
+    /// the name cannot be shadowed by a later dynamic registration —
+    /// plus the token a plugin's effect needs to withdraw it. The
+    /// core tool's first registration is authoritative: a second one
+    /// under a core-owned name is refused with `None`.
+    pub fn register_core_entry_with_token(
+        &self,
+        entry: ToolEntry,
+    ) -> Option<RegistrationToken> {
+        let name = elysper_core::RegistryItem::name(&entry).to_string();
+        let mut inner = self.inner.write();
+        if core_occupies(&inner, &name) {
+            return None;
+        }
+        let token = RegistrationToken(inner.next_registration);
+        inner.next_registration += 1;
+        inner.tools.entry(name).or_default().push(ProviderEntry {
+            provider_token: token.clone(),
+            provenance: ToolProvenance::Core,
+            is_hidden: entry.is_hidden(),
+            exposure: entry.exposure(),
+            tool: entry.tool_instance(),
+        });
+        drop(inner);
+        self.version
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(token)
+    }
+
     /// Register a `ToolEntry` directly and return the token that
     /// identifies it.
     ///

@@ -1,0 +1,12 @@
+# The desktop shell's own workspace.
+#
+# Deliberately NOT a member of the repository root workspace (design
+# D3 / C2): root `make lint-rust` runs `cargo clippy --all-features
+# --all`, which would compile this GUI target — and webkit2gtk would
+# become a prerequisite for every contributor running `make ci`. The
+# accepted cost is a second lockfile and a second feature resolution
+# (design §10 R-6); `desktop/Cargo.lock` is committed, matching the
+# repo's position that application workspaces lock their deps.
+[workspace]
+members = ["src-tauri"]
+resolver = "2"

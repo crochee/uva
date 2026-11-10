@@ -27,6 +27,7 @@ pub mod agents;
 pub mod automation;
 pub mod chat;
 pub mod misc;
+pub mod profile;
 pub mod sessions;
 
 use serde::de::DeserializeOwned;
@@ -56,5 +57,6 @@ pub fn register_all(router: &mut RpcRouter) {
     automation::register(router);
     chat::register(router);
     misc::register(router);
+    profile::register(router);
     sessions::register(router);
 }

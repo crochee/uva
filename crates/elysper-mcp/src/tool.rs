@@ -8,6 +8,7 @@ use elysper_core::Error;
 use elysper_tool::{
     Context,
     Tool,
+    ToolAnnotations,
     ToolOutput,
     output::{RenderKind, ToolOutputDefinition},
     traits::ExecutionMode,
@@ -87,6 +88,10 @@ impl Tool for McpTool {
 
     fn parameters(&self) -> Value {
         self.spec.input_schema.clone()
+    }
+
+    fn annotations(&self) -> Option<ToolAnnotations> {
+        self.spec.annotations
     }
 
     fn mode(&self) -> ExecutionMode {

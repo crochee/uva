@@ -42,6 +42,8 @@ pub use context_manager::{
     TruncatingContextManager,
     UsageMeter,
 };
+/// The `memory` kernel plugin: publishes [`KEY_MEMORY`].
+pub mod plugin;
 pub use memory::{
     FileMemory,
     FileMemoryConfig,
@@ -55,3 +57,4 @@ pub use memory::{
     MemoryKind,
     MemoryScope,
 };
+pub use plugin::{KEY_MEMORY, MemoryPlugin};

@@ -5,11 +5,13 @@ elysper-context::FileMemoryConfig
 elysper-context::FileMemoryEntry
 elysper-context::FileMemoryError
 elysper-context::InMemoryMemory
+elysper-context::KEY_MEMORY
 elysper-context::MAX_MEMORY_INDEX_LINES
 elysper-context::Memory
 elysper-context::MemoryEntry
 elysper-context::MemoryError
 elysper-context::MemoryKind
+elysper-context::MemoryPlugin
 elysper-context::MemoryScope
 elysper-context::NoopContextManager
 elysper-context::SharedContextManager
@@ -224,6 +226,7 @@ elysper-session::CompactionPass
 elysper-session::CompactionPassError
 elysper-session::CompactionPlan
 elysper-session::CompactionPlugin
+elysper-session::CompactionPluginConfig
 elysper-session::CompactionRef
 elysper-session::CompactionSettings
 elysper-session::Compactor
@@ -266,6 +269,7 @@ elysper-session::SessionMetadataHeader
 elysper-session::SessionSearch
 elysper-session::SessionSink
 elysper-session::SessionSnapshot
+elysper-session::SessionStoreConfig
 elysper-session::SessionStorePlugin
 elysper-session::SharedSessionSearch
 elysper-session::SharedSurfaceLedger

@@ -125,6 +125,9 @@ fn apply_replacement(
     if let Some(config) = &replacement.config {
         entry.config = config.clone();
     }
+    if let Some(enabled) = &replacement.enabled {
+        entry.enabled = enabled.clone();
+    }
     let destination = segment_of(&entry);
     let target = segment_mut(profile, destination);
     let at = if destination == segment {

@@ -1,11 +1,11 @@
 /**
  * Visual primitives for list / detail pages.
  *
- * Pages had drifted toward the same flat Card + heading +
- * MetadataTable treatment, which was functional but had no
+ * Earlier list pages had drifted toward the same flat card + heading
+ * + key/value table treatment, which was functional but had no
  * visual hierarchy. These primitives give every entity type
  * (skill / tool / agent / session) the same colourful surface
- * treatment while leaving pages free to compose them as they
+ * treatment while leaving callers free to compose them as they
  * see fit.
  *
  * This module re-exports everything pages need from one
@@ -193,8 +193,8 @@ export function Section({ title, glyph, meta, children, testId }: SectionProps) 
  * ----------------------------------------------------------------
  *
  * Single key/value card for the property grid used at the
- * top of detail pages. Replaces one row of the legacy
- * MetadataTable with a denser, more visual surface.
+ * top of detail surfaces. Replaces one row of a legacy
+ * metadata table with a denser, more visual surface.
  */
 
 interface PropertyProps {
@@ -220,8 +220,7 @@ export function Property({ label, value, accent, testId }: PropertyProps) {
  * ----------------------------------------------------------------
  *
  * Inline anchor styled like a "← Back" link. Lives above
- * the hero on detail pages and above the search-card on
- * SessionsPage.
+ * the hero on detail surfaces.
  */
 
 interface BackLinkProps {
@@ -243,9 +242,9 @@ export function BackLink({ to, children, testId }: BackLinkProps) {
  * Card grid
  * ----------------------------------------------------------------
  *
- * Light wrapper around the responsive grid so pages don't
+ * Light wrapper around the responsive grid so callers don't
  * repeat the class names. `wide` bumps the min column
- * width for a 2-column-heavy layout (AgentsPage).
+ * width for a 2-column-heavy layout.
  */
 
 interface CardGridProps {

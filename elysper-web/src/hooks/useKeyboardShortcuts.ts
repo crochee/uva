@@ -1,8 +1,15 @@
 import { useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 /**
- * Maps sidebar navigation items to keyboard shortcuts.
+ * Maps the shell's destinations to keyboard shortcuts. There are two
+ * now — the conversation and settings — because the capability
+ * catalogues are settings sections, not pages (D34).
+ *
+ * Besides the `g` prefix, this hook owns the single-key shell chords
+ * from design D30: `:` opens the command palette, `/` focuses the
+ * search for the current mode, and `Esc` leaves the settings surface.
+ * `?` lives in `<ShortcutHelp>` because it owns that panel's state.
  *
  * The convention is "g + <letter>" (a Vim / GitHub-style
  * two-key prefix) so we never steal single keys from form
@@ -25,14 +32,7 @@ interface ShortcutEntry {
 
 const SHORTCUTS: ReadonlyArray<ShortcutEntry> = [
   { key: 'c', path: '/chat' },
-  { key: 't', path: '/tools' },
-  { key: 'g', path: '/agents' },
-  { key: 'k', path: '/skills' },
-  { key: 's', path: '/sessions' },
-  { key: 'h', path: '/schedules' },
-  { key: 'w', path: '/workflows' },
-  { key: 'e', path: '/evals' },
-  { key: 'd', path: '/tasks' },
+  { key: 's', path: '/settings/general' },
 ];
 
 const PREFIX_WINDOW_MS = 1_000;
@@ -65,6 +65,8 @@ export function isEditableTarget(target: EventTarget | null): boolean {
  */
 export function useKeyboardShortcuts(): void {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const inSettings = pathname.startsWith('/settings');
   // Refs hold the timing state. A ref avoids the "stale
   // closure over a counter" trap and lets us reset cleanly on
   // each mount.
@@ -77,6 +79,27 @@ export function useKeyboardShortcuts(): void {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
 
       if (isEditableTarget(event.target)) return;
+
+      // Single-key shell chords, before the `g` prefix machine so `g :`
+      // cannot be swallowed as a navigation.
+      if (event.key === ':') {
+        event.preventDefault();
+        window.dispatchEvent(new CustomEvent('elysper:palette-open'));
+        return;
+      }
+      if (event.key === '/') {
+        event.preventDefault();
+        window.dispatchEvent(
+          new CustomEvent(inSettings ? 'elysper:settings-search' : 'elysper:search-open'),
+        );
+        return;
+      }
+      if (event.key === 'Escape' && inSettings) {
+        // A dialog's Escape handler stops propagation before this
+        // window listener runs, so an open panel keeps precedence.
+        navigate('/chat');
+        return;
+      }
 
       const now = Date.now();
       const inPrefixWindow = now < prefixExpiresAtRef.current;
@@ -106,5 +129,5 @@ export function useKeyboardShortcuts(): void {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [navigate]);
+  }, [navigate, inSettings]);
 }

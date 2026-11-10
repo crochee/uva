@@ -1,4 +1,4 @@
-//! The host: the one registry every interception point reads.
+//! The host: the typed registration frontend over the seam chains.
 //!
 //! A host belongs to one agent — `ReActAgent::with_host` installs it
 //! — so two agents never share one policy. Every registration
@@ -7,23 +7,32 @@
 //! registration, so a plugin can be uninstalled without rebuilding
 //! the agent.
 //!
-//! ## One pipeline, one snapshot
+//! ## Where each kind dispatches
 //!
-//! Every extension point is a registration here: an observing
-//! [`Hook`](crate::agent::host::Hook), a fail-closed
-//! [`Gate`](crate::agent::host::Gate), a synchronous
-//! [`Guard`](elysper_steering::Guard), an advisory
-//! [`Hint`](elysper_steering::Hint), a
-//! [`Tracker`](elysper_steering::tracker::Tracker), an
-//! [`OutputTransformer`](elysper_steering::OutputTransformer), a
-//! request / result transformer, a system-prompt section, a tool and
-//! a delegating tool. There is no second steering container: the loop
-//! consults this table at each boundary.
+//! Every extension point is a registration here; where it runs is
+//! the kind's home:
 //!
-//! The dispatchable tables are published as one immutable
+//! | Kind | Home |
+//! |---|---|
+//! | [`Hook`](crate::agent::host::Hook) | middleware on the six pass chains, plus the residual hooks table for the five observation points (`before_run`, `after_run`, `before_provider_call`, `on_error`, `on_compaction`) |
+//! | [`Gate`](crate::agent::host::Gate) | middleware on the six pass chains, fail-closed |
+//! | [`RequestTransformer`](crate::agent::host::RequestTransformer) | middleware on the `llm/request` chain |
+//! | [`Guard`](elysper_steering::Guard) | the guard pipeline (`tool_guards`), a sibling of `tool/pre-execute` — data-plane, stays a table |
+//! | [`Hint`](elysper_steering::Hint) | a scoped read the run queries, not a pass — stays a table |
+//! | [`Tracker`](elysper_steering::tracker::Tracker) | a table object the loop reads at its boundaries — stays |
+//! | [`OutputTransformer`](elysper_steering::OutputTransformer) | a rewrite of the run's final text — stays a table |
+//! | [`ResultTransformer`](crate::agent::host::ResultTransformer) | a rewrite of a tool result outside the pass payload — stays a table |
+//! | [`PromptSection`](crate::agent::host::PromptSection) | a collection the prompt assembly snapshots once per run, not a chain pass — stays a table |
+//! | tool | the bound [`ToolRegistry`](elysper_tool::ToolRegistry), via token |
+//! | delegator | the loop's delegator table |
+//!
+//! A chain registration's lifetime is the returned handle's, exactly
+//! like a table row's: the middleware withdraws with the row.
+//!
+//! The remaining tables are published as one immutable
 //! `HostSnapshot`; a registration change builds a new snapshot and
-//! swaps it. A hot path therefore clones one `Arc` and reads it
-//! without taking a lock.
+//! swaps it. A reading hot path therefore clones one `Arc` and reads
+//! it without taking a lock.
 //!
 //! ## The arbitration rules
 //!
@@ -130,12 +139,6 @@ impl Arbitration {
                 }
             }
         }
-    }
-
-    /// Fold another pass into this one.
-    pub(crate) fn merge(&mut self, other: Arbitration) {
-        self.asks.extend(other.asks);
-        self.absorb(other.decision);
     }
 
     /// Whether a decision ended the pass: a block or a termination.
@@ -374,6 +377,17 @@ struct HostInner {
     // The kernel chains the seam keys front for. One root context the
     // chains (and their reversible registrations) live on.
     seams: crate::seams::SeamChains,
+    // The chain middleware handles of the registrations whose kind
+    // dispatches on a seam chain (hooks, gates, request
+    // transformers), keyed by registration id so a withdrawal or a
+    // panic-disable removes the chain entries with the table row.
+    chain_regs: Mutex<
+        std::collections::HashMap<u64, Vec<elysper_kernel::EffectHandle>>,
+    >,
+    // Registrations whose kind has no table row (gates, request
+    // transformers): they live only as chain middleware, so the
+    // count of registrations the host holds includes them.
+    chain_only: Mutex<std::collections::HashSet<u64>>,
     state: Mutex<HostState>,
     // The published dispatch tables. Rebuilt on every change.
     snapshot: RwLock<Arc<HostSnapshot>>,
@@ -387,13 +401,14 @@ struct HostInner {
 
 #[derive(Default)]
 struct HostState {
+    // Hooks live twice by design: once as chain middleware for the
+    // six pass seams, once in this residual table for the five
+    // observation points, which have no chain.
     hooks: Vec<Entry<Arc<dyn Hook>>>,
-    gates: Vec<Entry<Arc<dyn Gate>>>,
     guards: Vec<Entry<Arc<dyn Guard>>>,
     hints: Vec<Entry<Arc<dyn Hint>>>,
     trackers: Vec<Entry<Arc<dyn Tracker>>>,
     output_transformers: Vec<Entry<Arc<dyn OutputTransformer>>>,
-    request_transformers: Vec<Entry<Arc<dyn RequestTransformer>>>,
     result_transformers: Vec<Entry<Arc<dyn ResultTransformer>>>,
     prompt_sections: Vec<Entry<PromptSection>>,
     tools: Vec<ToolRow>,
@@ -409,16 +424,13 @@ struct HostState {
 #[derive(Default)]
 pub(crate) struct HostSnapshot {
     pub(crate) hooks: Vec<Entry<Arc<dyn Hook>>>,
-    pub(crate) gates: Vec<Entry<Arc<dyn Gate>>>,
     pub(crate) guards: Vec<Arc<dyn Guard>>,
     pub(crate) hints: Vec<Arc<dyn Hint>>,
     pub(crate) trackers: Vec<Arc<dyn Tracker>>,
     pub(crate) output_transformers: Vec<Arc<dyn OutputTransformer>>,
-    pub(crate) request_transformers: Vec<Entry<Arc<dyn RequestTransformer>>>,
     pub(crate) result_transformers: Vec<Entry<Arc<dyn ResultTransformer>>>,
     pub(crate) prompt_sections: Vec<PromptSection>,
     pub(crate) has_event_registrations: bool,
-    pub(crate) has_request_rewriters: bool,
     pub(crate) has_result_rewriters: bool,
 }
 
@@ -430,18 +442,6 @@ impl HostSnapshot {
             .filter(|entry| !entry.disabled)
             .cloned()
             .collect();
-        let gates: Vec<_> = state
-            .gates
-            .iter()
-            .filter(|entry| !entry.disabled)
-            .cloned()
-            .collect();
-        let request_transformers: Vec<_> = state
-            .request_transformers
-            .iter()
-            .filter(|entry| !entry.disabled)
-            .cloned()
-            .collect();
         let result_transformers: Vec<_> = state
             .result_transformers
             .iter()
@@ -449,12 +449,9 @@ impl HostSnapshot {
             .cloned()
             .collect();
         Self {
-            has_event_registrations: !hooks.is_empty() || !gates.is_empty(),
-            has_request_rewriters: !hooks.is_empty()
-                || !request_transformers.is_empty(),
+            has_event_registrations: !hooks.is_empty(),
             has_result_rewriters: !result_transformers.is_empty(),
             hooks,
-            gates,
             guards: state
                 .guards
                 .iter()
@@ -485,7 +482,6 @@ impl HostSnapshot {
                 .filter(|entry| !entry.disabled)
                 .map(|entry| entry.value.clone())
                 .collect(),
-            request_transformers,
             result_transformers,
         }
     }
@@ -565,6 +561,8 @@ impl Host {
         Self {
             inner: Arc::new(HostInner {
                 seams: crate::seams::SeamChains::new(),
+                chain_regs: Mutex::new(std::collections::HashMap::new()),
+                chain_only: Mutex::new(std::collections::HashSet::new()),
                 state: Mutex::new(HostState::default()),
                 snapshot: RwLock::new(Arc::new(HostSnapshot::default())),
                 next_id: std::sync::atomic::AtomicU64::new(1),
@@ -642,19 +640,65 @@ impl Host {
     }
 
     /// Register an observer.
+    ///
+    /// The registration lands on every seam chain as middleware (the
+    /// six pass seams) *and* in the residual hooks table the five
+    /// observation points dispatch. Dropping the returned handle
+    /// withdraws both.
     pub fn hook(&mut self, hook: Arc<dyn Hook>) -> Registration {
         let name = hook.name().to_string();
-        self.register(RegistrationKind::Hook, name, hook, |state, entry| {
-            state.hooks.push(entry)
-        })
+        let id = self.next_id();
+        let weak = Arc::downgrade(&self.inner);
+        let mut handles = Vec::new();
+        for key in crate::seams::pass_chain_keys() {
+            let Some(chain) = self.inner.seams.get(key) else {
+                continue;
+            };
+            if let Ok(handle) = chain.register(hook_adapter(
+                std::sync::Weak::clone(&weak),
+                id,
+                name.clone(),
+                Arc::clone(&hook),
+            )) {
+                handles.push(handle);
+            }
+        }
+        self.inner.chain_regs.lock().insert(id, handles);
+        self.register_value(
+            RegistrationKind::Hook,
+            name,
+            hook,
+            |state, entry| state.hooks.push(entry),
+            id,
+        )
     }
 
     /// Register a gate.
+    ///
+    /// The registration is middleware on every seam chain: a gate is
+    /// the security capability, fails closed (an `Err` or a panic is
+    /// a block), and short-circuits the pass when it decides.
     pub fn gate(&mut self, gate: Arc<dyn Gate>) -> Registration {
         let name = gate.name().to_string();
-        self.register(RegistrationKind::Gate, name, gate, |state, entry| {
-            state.gates.push(entry)
-        })
+        let id = self.next_id();
+        let weak = Arc::downgrade(&self.inner);
+        let mut handles = Vec::new();
+        for key in crate::seams::pass_chain_keys() {
+            let Some(chain) = self.inner.seams.get(key) else {
+                continue;
+            };
+            if let Ok(handle) = chain.register(gate_adapter(
+                std::sync::Weak::clone(&weak),
+                name.clone(),
+                Arc::clone(&gate),
+            )) {
+                handles.push(handle);
+            }
+        }
+        self.inner.chain_regs.lock().insert(id, handles);
+        self.inner.chain_only.lock().insert(id);
+        self.publish();
+        self.finish_registration(id, RegistrationKind::Gate)
     }
 
     /// Register a synchronous guard.
@@ -699,17 +743,33 @@ impl Host {
     }
 
     /// Register a request transformer.
+    ///
+    /// The registration is middleware on the `llm/request` chain: it
+    /// rewrites the pass's parameters in place and lets the chain
+    /// continue. A failure is recorded and skipped; a panic disables
+    /// the registration.
     pub fn request_transformer(
         &mut self,
         transformer: Arc<dyn RequestTransformer>,
     ) -> Registration {
         let name = transformer.name().to_string();
-        self.register(
-            RegistrationKind::RequestTransformer,
-            name,
-            transformer,
-            |state, entry| state.request_transformers.push(entry),
-        )
+        let id = self.next_id();
+        let weak = Arc::downgrade(&self.inner);
+        let mut handles = Vec::new();
+        if let Some(chain) = self.inner.seams.get(crate::seams::LLM_REQUEST)
+            && let Ok(handle) = chain.register(request_transformer_adapter(
+                std::sync::Weak::clone(&weak),
+                id,
+                name.clone(),
+                Arc::clone(&transformer),
+            ))
+        {
+            handles.push(handle);
+        }
+        self.inner.chain_regs.lock().insert(id, handles);
+        self.inner.chain_only.lock().insert(id);
+        self.publish();
+        self.finish_registration(id, RegistrationKind::RequestTransformer)
     }
 
     /// Register a result transformer.
@@ -914,51 +974,6 @@ impl Host {
         arbitration
     }
 
-    /// Run every gate in registration order.
-    pub async fn dispatch_gates(
-        &self,
-        event: &HookEvent,
-        ctx: &HookContext<'_>,
-    ) -> Arbitration {
-        let snapshot = self.snapshot();
-        let mut arbitration = Arbitration::default();
-        for entry in &snapshot.gates {
-            let outcome = AssertUnwindSafe(entry.value.check(event, ctx))
-                .catch_unwind()
-                .await;
-            let decision = match outcome {
-                Ok(Ok(decision)) => {
-                    self.accept(event, decision, entry.value.name())
-                }
-                Ok(Err(reason)) => {
-                    self.record(
-                        DiagnosticKind::GateFailed,
-                        entry.value.name(),
-                        format!("the gate failed: {reason}"),
-                    );
-                    blocked(entry.value.name(), "the gate failed")
-                }
-                Err(_) => {
-                    self.record(
-                        DiagnosticKind::GateFailed,
-                        entry.value.name(),
-                        "the gate panicked",
-                    );
-                    blocked(entry.value.name(), "the gate panicked")
-                }
-            };
-            match decision {
-                HookDecision::Allow => {}
-                HookDecision::Ask { reason } => arbitration.asks.push(reason),
-                other => {
-                    arbitration.decision = other;
-                    break;
-                }
-            }
-        }
-        arbitration
-    }
-
     /// Run the guard pipeline: registration order, first denial wins,
     /// a panic is a denial.
     pub fn dispatch_guards(
@@ -1081,37 +1096,6 @@ impl Host {
         out
     }
 
-    /// Run the request transformers in registration order.
-    pub async fn apply_request_transformers(
-        &self,
-        params: &mut RequestParams,
-        ctx: &HookContext<'_>,
-    ) {
-        let snapshot = self.snapshot();
-        for entry in &snapshot.request_transformers {
-            let outcome = AssertUnwindSafe(entry.value.transform(params, ctx))
-                .catch_unwind()
-                .await;
-            match outcome {
-                Ok(Ok(())) => {}
-                Ok(Err(reason)) => {
-                    self.record(
-                        DiagnosticKind::TransformerFailed,
-                        entry.value.name(),
-                        reason,
-                    );
-                }
-                Err(_) => {
-                    self.disable(
-                        RegistrationKind::RequestTransformer,
-                        entry.id,
-                        entry.value.name(),
-                    );
-                }
-            }
-        }
-    }
-
     /// Run the result transformers in registration order.
     ///
     /// Returns the transformers that ran when the aggregate output
@@ -1164,19 +1148,7 @@ impl Host {
         decision: HookDecision,
         source: &str,
     ) -> HookDecision {
-        if event.accepts(&decision) {
-            return decision;
-        }
-        self.record(
-            DiagnosticKind::UnsupportedDecision,
-            source,
-            format!(
-                "`{}` does not accept {}",
-                event_name(event),
-                describe(&decision)
-            ),
-        );
-        HookDecision::Allow
+        self.inner.accept(event, decision, source)
     }
 
     /// The prompt sections, in registration order.
@@ -1212,13 +1184,13 @@ impl Host {
     #[must_use]
     pub fn registration_count(&self) -> usize {
         let state = self.inner.state.lock();
+        let chain_only = self.inner.chain_only.lock().len();
         state.hooks.len()
-            + state.gates.len()
+            + chain_only
             + state.guards.len()
             + state.hints.len()
             + state.trackers.len()
             + state.output_transformers.len()
-            + state.request_transformers.len()
             + state.result_transformers.len()
             + state.prompt_sections.len()
             + state.tools.len()
@@ -1229,12 +1201,6 @@ impl Host {
     #[must_use]
     pub fn has_event_registrations(&self) -> bool {
         self.snapshot().has_event_registrations
-    }
-
-    /// Whether the host can change the request's parameters.
-    #[must_use]
-    pub fn has_request_rewriters(&self) -> bool {
-        self.snapshot().has_request_rewriters
     }
 
     /// Whether the host can change a tool result.
@@ -1280,6 +1246,17 @@ impl Host {
         push: impl FnOnce(&mut HostState, Entry<T>),
     ) -> Registration {
         let id = self.next_id();
+        self.register_value(kind, name, value, push, id)
+    }
+
+    fn register_value<T>(
+        &mut self,
+        kind: RegistrationKind,
+        name: String,
+        value: T,
+        push: impl FnOnce(&mut HostState, Entry<T>),
+        id: u64,
+    ) -> Registration {
         {
             let mut state = self.inner.state.lock();
             push(
@@ -1350,22 +1327,64 @@ impl Host {
 }
 
 impl HostInner {
-    // Withdraw one registration and publish the new tables.
+    // Record one diagnostic into the state's ring.
+    fn record(
+        &self,
+        kind: DiagnosticKind,
+        source: &str,
+        detail: impl Into<String>,
+    ) {
+        let mut state = self.state.lock();
+        state.diagnostics.push(Diagnostic {
+            kind,
+            source: source.to_string(),
+            detail: detail.into(),
+        });
+        let overflow = state.diagnostics.len().saturating_sub(DIAGNOSTIC_LIMIT);
+        state.diagnostics.drain(..overflow);
+    }
+
+    // Apply one decision at one point.
+    fn accept(
+        &self,
+        event: &HookEvent,
+        decision: HookDecision,
+        source: &str,
+    ) -> HookDecision {
+        if event.accepts(&decision) {
+            return decision;
+        }
+        self.record(
+            DiagnosticKind::UnsupportedDecision,
+            source,
+            format!(
+                "`{}` does not accept {}",
+                event_name(event),
+                describe(&decision)
+            ),
+        );
+        HookDecision::Allow
+    }
+
+    // Withdraw one registration and publish the new tables. Chain
+    // middleware handles live in `chain_regs`; dropping them removes
+    // the middleware from its chain.
     fn withdraw(&self, kind: RegistrationKind, id: u64) {
         {
+            let handles = self.chain_regs.lock().remove(&id);
+            drop(handles);
+            self.chain_only.lock().remove(&id);
             let mut state = self.state.lock();
             match kind {
                 RegistrationKind::Hook => retain_id(&mut state.hooks, id),
-                RegistrationKind::Gate => retain_id(&mut state.gates, id),
+                RegistrationKind::Gate => {}
                 RegistrationKind::Guard => retain_id(&mut state.guards, id),
                 RegistrationKind::Hint => retain_id(&mut state.hints, id),
                 RegistrationKind::Tracker => retain_id(&mut state.trackers, id),
                 RegistrationKind::OutputTransformer => {
                     retain_id(&mut state.output_transformers, id);
                 }
-                RegistrationKind::RequestTransformer => {
-                    retain_id(&mut state.request_transformers, id);
-                }
+                RegistrationKind::RequestTransformer => {}
                 RegistrationKind::ResultTransformer => {
                     retain_id(&mut state.result_transformers, id);
                 }
@@ -1436,6 +1455,14 @@ fn triggered_hint(
         }
     }))
     .map_err(|_| ())
+}
+
+// Record a gate that could not answer: the pass fails closed, the
+// diagnostic says why.
+fn gate_failed(host: &std::sync::Weak<HostInner>, name: &str, why: String) {
+    if let Some(host) = host.upgrade() {
+        host.record(DiagnosticKind::GateFailed, name, why);
+    }
 }
 
 // The block a failing gate produces.
@@ -1513,4 +1540,250 @@ impl Hook for elysper_steering::LoggingHook {
         }
         HookDecision::Allow
     }
+}
+
+// -- seam-chain adapters -------------------------------------------------
+//
+// The typed registrations the seam chains dispatch. Each layer
+// reconstructs the `HookContext` from the pass payload (a state
+// snapshot plus the shareable sink and cancel handles), applies the
+// same arbitration the table dispatch had — accept-filtering, panic
+// isolation, fail-closed gates — and maps the decision onto the
+// chain vocabulary: `Ask` is recorded on the pass and the chain
+// continues, a deciding ruling short-circuits it.
+
+use std::panic::AssertUnwindSafe as HostAdapterUnwindSafe;
+
+type ChainCtx = Arc<elysper_kernel::WaterfallCtx>;
+type ChainNext = elysper_kernel::Next;
+type ChainResult =
+    Result<elysper_kernel::Outcome, elysper_kernel::WaterfallError>;
+
+fn hook_adapter(
+    host: std::sync::Weak<HostInner>,
+    id: u64,
+    name: String,
+    hook: Arc<dyn Hook>,
+) -> elysper_kernel::Middleware {
+    Arc::new(move |ctx, next| {
+        Box::pin(hook_layer(
+            std::sync::Weak::clone(&host),
+            id,
+            name.clone(),
+            Arc::clone(&hook),
+            ctx,
+            Arc::clone(&next),
+        ))
+    })
+}
+
+async fn hook_layer(
+    host: std::sync::Weak<HostInner>,
+    id: u64,
+    name: String,
+    hook: Arc<dyn Hook>,
+    ctx: ChainCtx,
+    next: ChainNext,
+) -> ChainResult {
+    let Some(pass) = crate::seams::SeamPass::payload(&ctx) else {
+        return next(ctx).await;
+    };
+    let event = pass.event().clone();
+    let observed =
+        HostAdapterUnwindSafe(hook.observe(&event, &pass.hook_context()))
+            .catch_unwind()
+            .await;
+    let decision = match observed {
+        Ok(decision) => decision,
+        Err(_) => {
+            return panicked(
+                &host,
+                RegistrationKind::Hook,
+                id,
+                &name,
+                ctx,
+                &next,
+            )
+            .await;
+        }
+    };
+    let decision = match host.upgrade() {
+        Some(host) => host.accept(&event, decision, &name),
+        None => decision,
+    };
+    rule(ctx, next, pass, decision).await
+}
+
+fn gate_adapter(
+    host: std::sync::Weak<HostInner>,
+    name: String,
+    gate: Arc<dyn Gate>,
+) -> elysper_kernel::Middleware {
+    Arc::new(move |ctx, next| {
+        Box::pin(gate_layer(
+            std::sync::Weak::clone(&host),
+            name.clone(),
+            Arc::clone(&gate),
+            ctx,
+            Arc::clone(&next),
+        ))
+    })
+}
+
+async fn gate_layer(
+    host: std::sync::Weak<HostInner>,
+    name: String,
+    gate: Arc<dyn Gate>,
+    ctx: ChainCtx,
+    next: ChainNext,
+) -> ChainResult {
+    let Some(pass) = crate::seams::SeamPass::payload(&ctx) else {
+        return next(ctx).await;
+    };
+    let event = pass.event().clone();
+    let checked =
+        HostAdapterUnwindSafe(gate.check(&event, &pass.hook_context()))
+            .catch_unwind()
+            .await;
+    let decision = match checked {
+        Ok(Ok(decision)) => decision,
+        Ok(Err(reason)) => {
+            gate_failed(&host, &name, format!("the gate failed: {reason}"));
+            blocked(&name, "the gate failed")
+        }
+        Err(_) => {
+            gate_failed(&host, &name, "the gate panicked".to_owned());
+            blocked(&name, "the gate panicked")
+        }
+    };
+    let decision = match host.upgrade() {
+        Some(host) => host.accept(&event, decision, &name),
+        None => decision,
+    };
+    rule(ctx, next, pass, decision).await
+}
+
+fn request_transformer_adapter(
+    host: std::sync::Weak<HostInner>,
+    id: u64,
+    name: String,
+    transformer: Arc<dyn RequestTransformer>,
+) -> elysper_kernel::Middleware {
+    Arc::new(move |ctx, next| {
+        Box::pin(request_transformer_layer(
+            std::sync::Weak::clone(&host),
+            id,
+            name.clone(),
+            Arc::clone(&transformer),
+            ctx,
+            Arc::clone(&next),
+        ))
+    })
+}
+
+async fn request_transformer_layer(
+    host: std::sync::Weak<HostInner>,
+    id: u64,
+    name: String,
+    transformer: Arc<dyn RequestTransformer>,
+    ctx: ChainCtx,
+    next: ChainNext,
+) -> ChainResult {
+    let Some(pass) = crate::seams::SeamPass::payload(&ctx) else {
+        return next(ctx).await;
+    };
+    let HookEvent::BeforeRequest { provider, params } = pass.event() else {
+        return next(ctx).await;
+    };
+    let mut params = params.clone();
+    let transformed = HostAdapterUnwindSafe(
+        transformer.transform(&mut params, &pass.hook_context()),
+    )
+    .catch_unwind()
+    .await;
+    match transformed {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => {
+            if let Some(host) = host.upgrade() {
+                host.record(DiagnosticKind::TransformerFailed, &name, reason);
+            }
+            return next(ctx).await;
+        }
+        Err(_) => {
+            return panicked(
+                &host,
+                RegistrationKind::RequestTransformer,
+                id,
+                &name,
+                ctx,
+                &next,
+            )
+            .await;
+        }
+    }
+    let rewritten = crate::seams::SeamPass::rewrite(
+        &ctx,
+        HookEvent::BeforeRequest {
+            provider: provider.clone(),
+            params,
+        },
+    );
+    next(rewritten).await
+}
+
+// Apply one accepted decision to the chain: `Allow` continues,
+// `Ask` is recorded and continues, a deciding ruling short-circuits,
+// and `ReplaceParams` rewrites the request parameters in place.
+async fn rule(
+    ctx: ChainCtx,
+    next: ChainNext,
+    pass: Arc<crate::seams::SeamPass>,
+    decision: HookDecision,
+) -> ChainResult {
+    match decision {
+        HookDecision::Allow => next(ctx).await,
+        HookDecision::Ask { reason } => {
+            pass.ask(reason);
+            next(ctx).await
+        }
+        HookDecision::ReplaceParams(params) => {
+            if let HookEvent::BeforeRequest { provider, .. } = pass.event() {
+                let rewritten = crate::seams::SeamPass::rewrite(
+                    &ctx,
+                    HookEvent::BeforeRequest {
+                        provider: provider.clone(),
+                        params,
+                    },
+                );
+                return next(rewritten).await;
+            }
+            next(ctx).await
+        }
+        deciding => Ok(elysper_kernel::Outcome::ShortCircuit(
+            elysper_kernel::EventValue::new(crate::seams::SeamRuling::from(
+                deciding,
+            )),
+        )),
+    }
+}
+
+// A registration panicked: withdraw it, record the diagnostic, and
+// let the chain continue without it.
+async fn panicked(
+    host: &std::sync::Weak<HostInner>,
+    kind: RegistrationKind,
+    id: u64,
+    name: &str,
+    ctx: ChainCtx,
+    next: &ChainNext,
+) -> ChainResult {
+    if let Some(host) = host.upgrade() {
+        host.withdraw(kind, id);
+        host.record(
+            DiagnosticKind::Disabled,
+            name,
+            "the registration panicked; it is disabled",
+        );
+    }
+    next(ctx).await
 }

@@ -26,6 +26,7 @@
 
 use std::{future::Future, sync::Arc};
 
+use elysper_tool::ToolAnnotations;
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 
@@ -70,6 +71,9 @@ pub struct ServerTool {
     pub input_schema: Value,
     /// The call handler.
     pub handler: ToolHandler,
+    /// MCP's advisory annotations; the client projects them onto the
+    /// local tool so `Tool::risk` can read the destructive hint.
+    pub annotations: Option<ToolAnnotations>,
 }
 
 impl ServerTool {
@@ -93,7 +97,17 @@ impl ServerTool {
             description: description.into(),
             input_schema,
             handler,
+            annotations: None,
         }
+    }
+
+    /// Attach MCP's advisory annotations to the tool's `tools/list`
+    /// entry. An older client ignores the field; this crate's client
+    /// carries it onto [`crate::tool::McpTool`].
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.annotations = Some(annotations);
+        self
     }
 
     /// The `tools/list` entry shape (identical to what a remote
@@ -105,6 +119,7 @@ impl ServerTool {
             name: self.name.clone(),
             description: self.description.clone(),
             input_schema: self.input_schema.clone(),
+            annotations: self.annotations,
         }
     }
 }
@@ -287,6 +302,39 @@ mod tests {
 
         let unknown = client.tools_call("nope", json!({})).await;
         assert!(unknown.is_err(), "unknown tool must be an error");
+    }
+
+    /// MCP's native `annotations` object travels from a served tool's
+    /// declaration, through `tools/list`, onto the local `McpTool` —
+    /// where `Tool::risk` reads it (a destructive hint is `Risk::High`,
+    /// which the approval stance holds).
+    #[tokio::test]
+    async fn annotations_travel_from_the_server_to_the_tool_risk() {
+        use elysper_tool::{Tool as _, ToolAnnotations, traits::Risk};
+
+        let (client_transport, server) = loopback_pair("self");
+        let tool = ServerTool::new(
+            "mutate",
+            "mutates the deployment",
+            json!({"type": "object"}),
+            |_| async { Ok("done".to_string()) },
+        )
+        .with_annotations(ToolAnnotations {
+            destructive_hint: Some(true),
+            ..ToolAnnotations::default()
+        });
+        tokio::spawn(serve(server, ServerInfo::new("self", "0.1"), vec![tool]));
+        let client = McpClient::new(client_transport);
+        client.initialize().await.expect("initialize");
+        let specs = client.tools_list().await.expect("tools/list");
+        assert_eq!(
+            specs[0].annotations.and_then(|a| a.destructive_hint),
+            Some(true),
+            "the annotation survives the tools/list round trip"
+        );
+        let tool =
+            crate::tool::McpTool::new(specs[0].clone(), Arc::clone(&client));
+        assert_eq!(tool.risk(&json!({})), Risk::High);
     }
 
     /// `register_mcp_tools` publishes the served tools into a real

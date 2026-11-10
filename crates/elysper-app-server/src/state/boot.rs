@@ -171,40 +171,19 @@ pub(crate) fn resolve_strategy(
     registry.resolve(configured)
 }
 
-/// R50: reads `agents.<name>.strategy` and resolves it to a strategy
-/// instance for the run factory and the registered agents.
+/// R50: the raw strategy **alias** `agents.<name>.strategy` names.
 ///
-/// `None` when unset (ReAct), and also when the name is not one this
-/// build ships: the operator's typo is logged at `warn` and the agent
-/// falls back rather than the server refusing to start — the same
-/// fail-soft contract `[tools]` and `[mcp_servers]` follow.
-pub(crate) fn load_default_strategy(
+/// The `agent-loop` row's config carries the alias, not a strategy
+/// object: the row resolves it through [`resolve_strategy`] when it
+/// builds its loop, so the configuration keeps its own vocabulary
+/// (`chain-of-thought`, `best-of-n`, `react`, …) all the way to the
+/// row. `None` when unset.
+pub(crate) fn load_default_strategy_alias(
     cfg: Option<&crate::config::ServerConfig>,
     default_agent_name: Option<&str>,
-) -> Option<Arc<dyn elysper::harness::agent::ReasoningStrategy>> {
+) -> Option<String> {
     let name = default_agent_name?;
-    let configured = cfg?.agents.get(name)?.strategy.as_deref()?;
-    match resolve_strategy(configured) {
-        Ok(strategy) => {
-            tracing::info!(
-                target: "elysper.agent",
-                agent = %name,
-                strategy = strategy.name(),
-                "configured reasoning strategy"
-            );
-            Some(strategy)
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "elysper.agent",
-                agent = %name,
-                configured,
-                error = %err,
-                "unknown strategy in config; falling back to react"
-            );
-            None
-        }
-    }
+    cfg?.agents.get(name)?.strategy.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -226,15 +205,14 @@ pub(crate) fn load_default_strategy(
 /// list is logged at `warn` and skipped, so one broken
 /// integration cannot block boot.
 pub(crate) async fn register_configured_mcp_servers(
+    supervisor: Arc<elysper::mcp::McpSupervisor>,
     registry: &ToolRegistry,
     now: chrono::DateTime<chrono::Utc>,
     workspace_root: &std::path::Path,
 ) -> (
-    Arc<elysper::mcp::McpSupervisor>,
     Vec<(String, Arc<elysper::mcp::McpClient>)>,
     Vec<elysper::mcp::ServerHealth>,
 ) {
-    let supervisor = Arc::new(elysper::mcp::McpSupervisor::new());
     for (name, entry) in load_mcp_declarations(workspace_root) {
         if !entry.is_enabled() {
             tracing::info!(
@@ -251,7 +229,7 @@ pub(crate) async fn register_configured_mcp_servers(
     let tick = supervisor.tick(registry, now).await;
     log_tick_health(&tick.health);
     let clients = supervisor.healthy_clients().await;
-    (supervisor, clients, tick.health)
+    (clients, tick.health)
 }
 
 /// Every MCP server the deployment declares, in precedence order.
@@ -290,7 +268,7 @@ pub(crate) async fn register_configured_mcp_servers(
 /// registry already holds — the built-in `agent`, or an earlier
 /// layer's definition — is left alone: first writer wins, which is
 /// also what `merge_by_name` gives every other domain.
-pub(crate) fn register_file_agents(state: &crate::state::AppState) {
+pub(crate) async fn register_file_agents(state: &crate::state::AppState) {
     for discovered in elysper::agents::discover(&state.workspace_root) {
         let descriptor = discovered.definition.descriptor();
         let name = descriptor.name.clone();
@@ -307,7 +285,9 @@ pub(crate) fn register_file_agents(state: &crate::state::AppState) {
         // synchronous contract is the one used here too.
         let agent = match crate::routes::agents::build_react_agent(
             state, descriptor, None,
-        ) {
+        )
+        .await
+        {
             Ok(agent) => agent,
             Err(error) => {
                 tracing::warn!(

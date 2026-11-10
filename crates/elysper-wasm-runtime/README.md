@@ -31,8 +31,10 @@ is cached.
   or `http-request` (the component model requires kebab-case import
   names). The linker defines a host function only when the manifest
   declares the matching capability (`log`, `fs:read`, `net:http`); an
-  undeclared import fails the mount before instantiation with
-  `MissingCapability`, naming the capability. `log` is implicit;
+  undeclared import fails the mount before any guest instruction
+  executes with `MissingCapability`, naming both the import and the
+  capability; an import the linker does not know fails instantiation
+  with `UnsatisfiedImport`, also naming the import. `log` is implicit;
   `fs-read` confines reads to the runtime's workspace root. `net:http`
   is not built in: the embedding host installs a `CapabilityHost` with
   `WasmRuntime::with_capability_host` and defines the `http-request`
@@ -81,3 +83,9 @@ let bytes = std::fs::read("echo.wasm")?;
 let plugin = WasmToolPlugin::new(Arc::clone(&runtime), bytes, manifest)?;
 // Mount `plugin` with `elysper_kernel::mount_all` next to `ToolRegistryPlugin`.
 ```
+
+A host that renames the tool or narrows its parameter schema can chain
+`WasmToolPlugin::with_schema_override(ToolSchemaOverride { .. })`; the
+override is applied once, after `describe()` and before registration.
+The app-server exposes the same object from a `wasm` profile row's
+optional `tool` config block.

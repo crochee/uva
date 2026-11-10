@@ -7,7 +7,7 @@
 use crate::state::{
     AppliedToolSurface,
     apply_tools_config,
-    plugin_tool_registry,
+    seeded_tool_registry,
 };
 
 /// The boot contract: unknown names are skipped (warned)
@@ -15,7 +15,7 @@ use crate::state::{
 /// registry.
 #[tokio::test]
 async fn apply_tools_config_skips_unknown_names_and_reports_the_surface() {
-    let registry = plugin_tool_registry();
+    let registry = seeded_tool_registry();
     let config = crate::config::ToolsConfig {
         deferred: vec!["shell".to_string(), "ghost".to_string()],
         hidden: vec!["TodoWrite".to_string()],
@@ -72,7 +72,7 @@ async fn apply_tools_config_skips_unknown_names_and_reports_the_surface() {
 /// later key wins for a tool named by several of them.
 #[tokio::test]
 async fn apply_tools_config_write_order_gives_later_keys_precedence() {
-    let registry = plugin_tool_registry();
+    let registry = seeded_tool_registry();
     let config = crate::config::ToolsConfig {
         deferred: vec!["read".to_string()],
         hidden: vec!["write".to_string()],
@@ -105,7 +105,7 @@ async fn apply_tools_config_write_order_gives_later_keys_precedence() {
 /// A deployment with no `[tools]` section is a no-op.
 #[tokio::test]
 async fn apply_tools_config_without_a_section_is_a_noop() {
-    let registry = plugin_tool_registry();
+    let registry = seeded_tool_registry();
     let version = registry.version();
 
     let applied =

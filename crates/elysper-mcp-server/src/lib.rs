@@ -290,6 +290,7 @@ fn bridge(tool: Arc<dyn Tool>, ctx: Arc<Context>) -> ServerTool {
     let name = tool.name().to_string();
     let description = tool.description().to_string();
     let input_schema = tool.parameters();
+    let annotations = tool.annotations();
     let handler = Arc::new(move |input: Value| {
         let tool = Arc::clone(&tool);
         let ctx = Arc::clone(&ctx);
@@ -303,6 +304,7 @@ fn bridge(tool: Arc<dyn Tool>, ctx: Arc<Context>) -> ServerTool {
         description,
         input_schema,
         handler,
+        annotations,
     }
 }
 
@@ -406,6 +408,7 @@ fn overview_tool(
             .to_string(),
         input_schema,
         handler,
+        annotations: None,
     }
 }
 

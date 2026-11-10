@@ -1,10 +1,9 @@
 /**
  * Shared chat-style message renderer.
  *
- * Used by the live `/chat/:sessionId` page (where segments
- * are streamed in real time) and by `/sessions/:id` (where
- * segments are reconstructed from the persisted
- * `session.history` transcript). Both surfaces share the
+ * Used by the live `/chat/:sessionId` page (where segments are
+ * streamed in real time) and by the transcript rebuild the same page
+ * performs from the persisted `session.history` rows. Both surfaces share the
  * same visual contract so the user reads a tool call, a
  * tool result, a thinking segment, and a markdown text body
  * the same way regardless of which page they're looking at.
@@ -34,6 +33,7 @@ import { CompactionMarker } from './CompactionMarker';
 import type { ChatFile, ChatImage, MessageSegment } from '../../api/chat-message';
 import type { SessionPart } from '../../api/types';
 import { basename, childSessionIdOf, parseTodoItems } from '../../lib/session-panel-data';
+import { thinkingIsLive } from '../../lib/thinking-state';
 
 const TOOL_TIMEOUT_MS = 180_000;
 
@@ -453,7 +453,10 @@ function SubagentSummary({ segment }: { segment: MessageSegment }): JSX.Element 
       </div>
       {prompt ? <p className="nt-chat__subagent-card-prompt">{prompt}</p> : null}
       {childSessionId ? (
-        <Link className="nt-chat__subagent-card-link" to={`/sessions/${childSessionId}`}>
+        <Link
+          className="nt-chat__subagent-card-link"
+          to={`/chat/${encodeURIComponent(childSessionId)}`}
+        >
           查看子会话 →
         </Link>
       ) : null}
@@ -502,6 +505,7 @@ const SegmentView = memo(function SegmentView({
   segment,
   now,
   approval,
+  live = false,
 }: {
   segment: MessageSegment;
   now: number;
@@ -509,13 +513,29 @@ const SegmentView = memo(function SegmentView({
    *  whose call is held renders the card inside itself, so approving is
    *  done against the exact call it applies to. */
   approval?: ApprovalCardProps;
+  /** The message is the assistant's in-progress turn: a thinking block
+   *  opens and scrolls while it streams, then folds when the turn ends. */
+  live?: boolean;
 }): JSX.Element {
-  // All collapsible segments (thinking, tool_call, tool_result, tool_block)
-  // start collapsed. Thinking is verbose and only relevant when the user
-  // explicitly wants to inspect the reasoning; tool blocks are JSON dumps
-  // that the user expands to inspect on demand. The user can click the
-  // header to expand any of them.
-  const [expanded, setExpanded] = useState(false);
+  // Collapsible segments start collapsed — except thinking on a live
+  // turn, which opens so the user can watch the reasoning land. When the
+  // turn stops being live the effect folds it once; a later manual
+  // expansion is the user's and is not overridden (the dependency only
+  // fires on the flip).
+  const [expanded, setExpanded] = useState(() => live && segment.type === 'thinking');
+  const thinkingBodyRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!live) setExpanded(false);
+  }, [live]);
+
+  // Follow the tail of a live thinking block. `scrollHeight` is read
+  // after paint so the newest delta is counted.
+  useEffect(() => {
+    const body = thinkingBodyRef.current;
+    if (!live || body === null) return;
+    body.scrollTop = body.scrollHeight;
+  }, [live, segment.content]);
 
   // Artifact segments are rendered by ArtifactSegment; delegate
   // before any of the collapsible / plain-text branches so the
@@ -660,39 +680,55 @@ const SegmentView = memo(function SegmentView({
     );
   }
 
-  const label =
-    segment.type === 'thinking'
-      ? '思考过程'
-      : segment.type === 'tool_result'
-        ? `工具${segment.toolName ? ` · ${segment.toolName}` : ''} · 结果`
-        : `工具${segment.toolName ? ` · ${segment.toolName}` : ''}`;
+  const isThinking = segment.type === 'thinking';
+  // Thinking has two states (design §6.1): while the turn is live it is
+  // open and reads `已思考（输出中…）`; afterwards it folds to the one-line
+  // `已思考 >` the user can reopen. The arrow glyph is the chevron in
+  // the label itself, so the icon span is skipped here.
+  const label = isThinking
+    ? expanded
+      ? live
+        ? '已思考（输出中…）'
+        : '已思考'
+      : '已思考 >'
+    : segment.type === 'tool_result'
+      ? `工具${segment.toolName ? ` · ${segment.toolName}` : ''} · 结果`
+      : `工具${segment.toolName ? ` · ${segment.toolName}` : ''}`;
 
   // A collapsed thinking block shows its opening line as a muted
   // preview: enough to recognise what the model was working on
   // without expanding, and — crucially — enough to tell the
   // scratchpad apart from the answer at a glance.
   const thinkingPreview =
-    segment.type === 'thinking' && !expanded && segment.content
+    isThinking && !expanded && segment.content
       ? segment.content.trim().split('\n')[0].slice(0, 160)
       : null;
 
   return (
     <>
-      <div className={`nt-chat__segment nt-chat__segment--${segment.type}`}>
+      <div
+        className={`nt-chat__segment nt-chat__segment--${segment.type}${
+          isThinking && live ? ' nt-chat__segment--live' : ''
+        }`}
+        data-testid={isThinking ? 'thinking-block' : undefined}
+        data-live={isThinking && live ? '' : undefined}
+      >
         <button
           className="chat-toggle"
           onClick={() => setExpanded(!expanded)}
           type="button"
           aria-expanded={expanded}
         >
-          <span className={`nt-chat__segment-icon ${expanded ? 'expanded' : ''}`}>▸</span>
+          {isThinking ? null : (
+            <span className={`nt-chat__segment-icon ${expanded ? 'expanded' : ''}`}>▸</span>
+          )}
           <span className="nt-chat__segment-label">{label}</span>
         </button>
         {thinkingPreview ? (
           <span className="nt-chat__thinking-preview">{thinkingPreview}</span>
         ) : null}
         {expanded && (
-          <div className="nt-chat__segment-content">
+          <div className="nt-chat__segment-content" ref={isThinking ? thinkingBodyRef : undefined}>
             {segment.content ? <Markdown source={segment.content} /> : null}
             {segment.images && segment.images.length > 0 && (
               <SegmentImages images={segment.images} />
@@ -706,10 +742,9 @@ const SegmentView = memo(function SegmentView({
 
 /**
  * Minimal message shape accepted by `ChatMessageList`. The
- * chat page builds it from streamed events; the session
- * detail page builds it via `reconstructMessagesFromSession`.
- * Both produce the same shape so the rendering below is
- * identical.
+ * chat page builds it from streamed events and, after a reload, from
+ * `reconstructMessagesFromSession` — both produce the same shape so the
+ * rendering below is identical.
  */
 export interface ChatMessageViewItem {
   id: string;
@@ -725,9 +760,8 @@ export interface ChatMessageViewItem {
 /**
  * Render a flat list of chat-style messages — each with a
  * `> USER` / `> ASSISTANT` header, a status pill, and one row
- * per segment. Used by both `/chat/:sessionId` (with streaming
- * state) and `/sessions/:id` (with reconstructed history) so
- * the user reads the same visual contract on both pages.
+ * per segment. The chat page feeds it both the live stream and the
+ * reconstructed history, so a reload and a running turn read the same.
  *
  * `now` is a tick-driven wall-clock value so per-segment
  * tool-block timeout indicators can re-evaluate without each
@@ -760,38 +794,57 @@ export const ChatMessageList = memo(function ChatMessageList({
       aria-live="polite"
       aria-relevant="additions text"
     >
-      {messages.map((msg) => (
-        <div
-          key={msg.id}
-          className={`nt-chat__message nt-chat__message--${msg.role}`}
-          data-role={msg.role}
-          data-testid={`message-${msg.role}`}
-          data-streaming={
-            msg.isStreaming === true && msg.role === 'assistant' && msg.status === 'working'
-          }
-        >
-          <div className="nt-chat__message-meta">
-            <span className="nt-chat__message-role">
-              {msg.role === 'user'
-                ? '> USER'
-                : msg.role === 'subagent'
-                  ? `> SUB-AGENT${msg.subagentDepth ? ` · depth ${msg.subagentDepth}` : ''}`
-                  : '> ASSISTANT'}
-            </span>
-            <span className="nt-chat__message-actions">
-              <CopyButton segments={msg.segments} />
-            </span>
-            {msg.status && (
-              <span className={`nt-chat__message-status status-${msg.status}`}>{msg.status}</span>
-            )}
+      {messages.map((msg) => {
+        // The same predicate the row's `data-streaming` stamps: only the
+        // assistant's live turn gets an open, scrolling thinking block.
+        const live = thinkingIsLive(msg);
+        const segments = msg.segments.map((segment) => (
+          <SegmentView
+            key={segment.id}
+            segment={segment}
+            now={now}
+            approval={approval}
+            live={live}
+          />
+        ));
+        return (
+          <div
+            key={msg.id}
+            className={`nt-chat__message nt-chat__message--${msg.role}`}
+            data-role={msg.role}
+            data-testid={`message-${msg.role}`}
+            data-streaming={live}
+          >
+            <div className="nt-chat__message-meta">
+              <span className="nt-chat__message-role">
+                {msg.role === 'user'
+                  ? '> USER'
+                  : msg.role === 'subagent'
+                    ? `> SUB-AGENT${msg.subagentDepth ? ` · depth ${msg.subagentDepth}` : ''}`
+                    : '> ASSISTANT'}
+              </span>
+              <span className="nt-chat__message-actions">
+                <CopyButton segments={msg.segments} />
+              </span>
+              {msg.status && (
+                <span className={`nt-chat__message-status status-${msg.status}`}>{msg.status}</span>
+              )}
+            </div>
+            <div className="nt-chat__message-content">
+              {msg.role === 'user' ? (
+                // The user's message is a right-aligned bubble (design
+                // §6.1); the meta row stays outside it, so the copy button
+                // and status pill are not part of the quoted text.
+                <div className="nt-chat__bubble" data-testid="user-bubble">
+                  {segments}
+                </div>
+              ) : (
+                segments
+              )}
+            </div>
           </div>
-          <div className="nt-chat__message-content">
-            {msg.segments.map((segment) => (
-              <SegmentView key={segment.id} segment={segment} now={now} approval={approval} />
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 });

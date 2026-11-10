@@ -1,41 +1,40 @@
-//! The default tool surface, composed brick by brick from the
-//! plugin crates, plus the `AppliedToolSurface` record of what
-//! the `[tools]` config section did to it at boot.
+//! The tool registry's container and the `AppliedToolSurface` record
+//! of what the `[tools]` config section did to it at boot.
+//!
+//! The built-in bricks register themselves: each is a profile row
+//! (`read` / `write` / `shell` / `todo` / `web`) whose plugin
+//! registers its tool as **core** in `apply`. The boot only creates
+//! the empty registry the rows share.
 
-use std::sync::Arc;
+use elysper::tool::ToolRegistry;
 
-use elysper::{
-    tool::{ToolEntry, ToolRegistry},
-    tool_read::ReadTool,
-    tool_shell::ShellTool,
-    tool_todo::TodoWriteTool,
-    tool_web::WebFetchTool,
-    tool_write::WriteTool,
-};
-
-/// The server's default tool surface, composed brick by brick from
-/// the plugin crates — `elysper-tool` itself ships no agent-facing
-/// set (only the harness's synthetic contracts and the registry
-/// passthrough).
+/// The empty registry the tool-plugin rows register into.
 ///
-/// One line per brick: drop a line to drop a tool, and the plugin
-/// crate that backs it leaves the binary with it.
-///
-/// Every brick is registered as **core**: the name then cannot be
-/// taken by a later registration, so a `POST`, a host tool or a
-/// plugin that claims `shell` is refused instead of shadowing the
-/// binary's own implementation. Registering these as ordinary
-/// entries would leave the guard in place but unreachable — the
-/// registry would append the intruder under the same name and the
-/// later entry would win.
+/// The bricks are profile rows now: dropping a row drops its tool,
+/// and each brick registers as **core**, so the name cannot be taken
+/// by a later registration — a `POST`, a host tool or a plugin that
+/// claims `shell` is refused instead of shadowing the binary's own
+/// implementation.
 pub(crate) fn plugin_tool_registry() -> ToolRegistry {
+    ToolRegistry::new()
+}
+
+/// The empty registry with the five bricks registered as core, for
+/// tests that exercise the `[tools]` surface or MCP registration
+/// without mounting the kernel. The rows do the same in `apply`.
+#[cfg(test)]
+pub(crate) fn seeded_tool_registry() -> ToolRegistry {
+    use std::sync::Arc;
+
+    use elysper::tool::ToolEntry;
+
     let registry = ToolRegistry::new();
     for entry in [
-        ToolEntry::new(Arc::new(ReadTool::new())),
-        ToolEntry::new(Arc::new(WriteTool::new())),
-        ToolEntry::new(Arc::new(ShellTool::new())),
-        ToolEntry::new(Arc::new(TodoWriteTool::new())),
-        ToolEntry::new(Arc::new(WebFetchTool::new())),
+        ToolEntry::new(Arc::new(elysper::tool_read::ReadTool::new())),
+        ToolEntry::new(Arc::new(elysper::tool_write::WriteTool::new())),
+        ToolEntry::new(Arc::new(elysper::tool_shell::ShellTool::new())),
+        ToolEntry::new(Arc::new(elysper::tool_todo::TodoWriteTool::new())),
+        ToolEntry::new(Arc::new(elysper::tool_web::WebFetchTool::new())),
     ] {
         assert!(
             registry.register_core_entry(entry),
@@ -94,7 +93,6 @@ impl AppliedToolSurface {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use elysper::tool::{Context, Tool, ToolEntry, ToolOutput};
     use serde_json::{Value, json};
@@ -124,15 +122,31 @@ mod tests {
     }
 
     #[test]
-    fn a_built_in_name_is_core_so_a_plugin_cannot_shadow_it() {
-        let registry = plugin_tool_registry();
-        for name in ["read", "write", "shell", "TodoWrite", "web_fetch"] {
-            assert!(
-                registry.core_owns(name),
-                "{name} must be registered as core, or the guard is \
-                 unreachable and a plugin shadows the built-in"
-            );
-        }
+    fn a_brick_row_registers_core_so_a_plugin_cannot_shadow_it() {
+        // The rows are the built-ins' home: mount the brick plugin
+        // exactly as the kernel does, then prove the core guard.
+        use std::sync::Arc;
+
+        use elysper::kernel::{Context, mount_all};
+        let registry = Arc::new(plugin_tool_registry());
+        let registry_plugin =
+            elysper::tool::ToolRegistryPlugin::new(Arc::clone(&registry));
+        let ctx = Context::new();
+        let bricks: Vec<Arc<dyn elysper::kernel::Plugin>> = vec![
+            Arc::new(registry_plugin),
+            Arc::new(elysper::tool_read::ReadToolPlugin::new()),
+            Arc::new(elysper::tool_write::WriteToolPlugin::new()),
+            Arc::new(elysper::tool_shell::ShellToolPlugin::new()),
+            Arc::new(elysper::tool_todo::TodoWriteToolPlugin::new()),
+            Arc::new(elysper::tool_web::WebFetchToolPlugin::new()),
+        ];
+        let _mounted =
+            mount_all(&ctx, &bricks).expect("the registry + bricks mount");
+        assert!(
+            registry.core_owns("read"),
+            "read must be registered as core by its row, or the guard \
+             is unreachable and a plugin shadows the built-in"
+        );
         assert!(
             !registry.register_entry(ToolEntry::new(Arc::new(Intruder))),
             "a registration claiming a built-in name must be refused"

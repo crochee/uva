@@ -46,7 +46,7 @@ use sha2::{Digest, Sha256};
 /// The `attachments` kernel service: the store as a plugin.
 pub mod plugin;
 
-pub use plugin::{AttachmentPlugin, KEY_ATTACHMENTS};
+pub use plugin::{AttachmentPlugin, AttachmentPluginConfig, KEY_ATTACHMENTS};
 
 /// Default maximum attachment size: 8 MiB.
 ///

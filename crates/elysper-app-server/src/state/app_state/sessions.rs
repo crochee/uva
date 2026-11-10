@@ -362,6 +362,11 @@ impl AppState {
                     .to_string(),
             });
         };
+        let self_name = self
+            .default_agent_name
+            .read()
+            .clone()
+            .unwrap_or_else(|| "agent".to_owned());
         let agent_loop = self.agent_loop().ok_or_else(|| {
             elysper::core::Error::Internal {
                 message: "the agentLoop service is unavailable; \
@@ -380,7 +385,7 @@ impl AppState {
             Arc::clone(&catalogue) as Arc<dyn elysper::provider::ProviderResolver>,
         )
         .with_host(Some(self.plugin_host.clone()))
-        .with_prompt_context(self.prompt_context.clone())
+        .with_prompt_context(self.prompt_context(&self_name).await)
         .with_max_iterations(self.default_max_iterations)
         // R34: every run agent advertises the configured surface
         // (`max_visible` is request-side, so the registry alone cannot

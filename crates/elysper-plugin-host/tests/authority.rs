@@ -44,7 +44,7 @@ use elysper_session::{
     SessionSink,
     in_memory::InMemorySessionSink,
 };
-use elysper_steering::{HookDecision, HookEvent};
+use elysper_steering::HookDecision;
 use elysper_tool::{Risk, ToolOutput, ToolRegistry};
 use futures::{StreamExt, executor::block_on};
 use serde_json::json;
@@ -188,14 +188,6 @@ fn plugin(
     .with_call_timeout(Duration::from_secs(5))
 }
 
-fn before_tool() -> HookEvent {
-    HookEvent::BeforeTool {
-        tool_name: "echo".into(),
-        call_id: "c1".into(),
-        arguments: json!({"text": "ping"}),
-    }
-}
-
 fn text_of(output: &ToolOutput) -> String {
     output
         .content
@@ -222,7 +214,8 @@ fn a_full_authority_plugin_can_block_a_tool_call() {
 
     let arbitration = {
         hook_ctx!(state, sink, cancel, ctx);
-        block_on(host.dispatch_gates(&before_tool(), &ctx))
+        let seams = elysper_harness::seams::Seams::new(host.clone());
+        block_on(seams.tool_pre(&ctx, "echo", "c1", &json!({"text": "ping"})))
     };
     assert_eq!(
         arbitration.decision,
@@ -230,6 +223,13 @@ fn a_full_authority_plugin_can_block_a_tool_call() {
             reason: "policy says no".into()
         },
         "the plugin's veto is the host's decision"
+    );
+    // The veto ran as middleware on the seam chain — the spine is the
+    // dispatch surface an external plugin's gate lands on.
+    assert!(
+        host.waterfall(elysper_harness::seams::TOOL_PRE)
+            .is_some_and(|chain| !chain.is_empty()),
+        "the remote gate registers on the tool/pre-execute waterfall"
     );
 }
 
@@ -250,7 +250,8 @@ fn a_reduced_authority_plugin_registers_no_gate() {
 
     let arbitration = {
         hook_ctx!(state, sink, cancel, ctx);
-        block_on(host.dispatch_gates(&before_tool(), &ctx))
+        let seams = elysper_harness::seams::Seams::new(host.clone());
+        block_on(seams.tool_pre(&ctx, "echo", "c1", &json!({"text": "ping"})))
     };
     assert_eq!(arbitration.decision, HookDecision::Allow);
 }
@@ -270,7 +271,8 @@ fn a_gate_transport_error_blocks_instead_of_allowing() {
 
     let arbitration = {
         hook_ctx!(state, sink, cancel, ctx);
-        block_on(host.dispatch_gates(&before_tool(), &ctx))
+        let seams = elysper_harness::seams::Seams::new(host.clone());
+        block_on(seams.tool_pre(&ctx, "echo", "c1", &json!({"text": "ping"})))
     };
     assert!(
         matches!(arbitration.decision, HookDecision::Block { .. }),

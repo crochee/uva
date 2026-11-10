@@ -13,10 +13,131 @@ pub use elysper::kernel::{
     PluginManifest,
     RuntimeKind,
 };
-use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde::{
+    Deserialize,
+    Deserializer,
+    Serialize,
+    Serializer,
+    de::{self, MapAccess, Visitor},
+};
+use serde_json::Value;
 
 use super::PluginFactory;
+
+/// One row's enablement: on (the default), off, or delegated to a
+/// plugin-provided check.
+///
+/// Wire shape: `true` / absent for [`Enabled::On`], `false` for
+/// [`Enabled::Off`], and a table `{ service, check, arg }` for
+/// [`Enabled::Check`]. Any other shape is a parse error, never a
+/// silent ignore.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Enabled {
+    /// The row assembles. Wire: `true` or absent.
+    #[default]
+    On,
+    /// The row stays out of the fiber tree. Wire: `false`.
+    Off,
+    /// A plugin answers whether the row assembles.
+    Check(EnableCheck),
+}
+
+impl Serialize for Enabled {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::On => serializer.serialize_bool(true),
+            Self::Off => serializer.serialize_bool(false),
+            Self::Check(check) => {
+                use serde::ser::SerializeMap as _;
+                let mut map = serializer.serialize_map(Some(3))?;
+                map.serialize_entry("service", &check.service)?;
+                map.serialize_entry("check", &check.check)?;
+                if !check.arg.is_null() {
+                    map.serialize_entry("arg", &check.arg)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Enabled {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct EnabledVisitor;
+
+        impl<'de> Visitor<'de> for EnabledVisitor {
+            type Value = Enabled;
+
+            fn expecting(
+                &self,
+                formatter: &mut std::fmt::Formatter<'_>,
+            ) -> std::fmt::Result {
+                formatter.write_str(
+                    "`true`, `false`, or a table with `service`, `check`, \
+                     and `arg`",
+                )
+            }
+
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(if value { Enabled::On } else { Enabled::Off })
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut service: Option<String> = None;
+                let mut check: Option<String> = None;
+                let mut arg = Value::Null;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "service" => service = Some(map.next_value()?),
+                        "check" => check = Some(map.next_value()?),
+                        "arg" => arg = map.next_value()?,
+                        other => {
+                            return Err(de::Error::unknown_field(
+                                other,
+                                &["service", "check", "arg"],
+                            ));
+                        }
+                    }
+                }
+                let service = service
+                    .ok_or_else(|| de::Error::missing_field("service"))?;
+                let check =
+                    check.ok_or_else(|| de::Error::missing_field("check"))?;
+                Ok(Enabled::Check(EnableCheck {
+                    service,
+                    check,
+                    arg,
+                }))
+            }
+        }
+
+        deserializer.deserialize_any(EnabledVisitor)
+    }
+}
+
+/// A delegated enablement check: the plugin service that answers it,
+/// the method it answers, and the judge's argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnableCheck {
+    /// The kernel service key a judge provides `EnableChecks` under.
+    pub service: String,
+    /// The method name handed to the judge.
+    pub check: String,
+    /// The judge's argument (a skill id, a server name, …).
+    pub arg: Value,
+}
 
 /// One assembled plugin row.
 ///
@@ -34,6 +155,10 @@ pub struct Entry {
     pub config: Value,
     /// Host capabilities the row declares, if any.
     pub capabilities: Vec<Capability>,
+    /// Whether the row assembles: on, off, or delegated to a plugin
+    /// check. The host filters the row out at the assembly boundary
+    /// before the fiber tree is built.
+    pub enabled: Enabled,
 }
 
 /// A resolved profile: the ordered core assembly, the ordered UI
@@ -61,6 +186,8 @@ pub struct EntryPatch {
     pub runtime: Option<RuntimeKind>,
     /// The new configuration object, replacing the old one whole.
     pub config: Option<Value>,
+    /// The new enablement, when the replacement changes it.
+    pub enabled: Option<Enabled>,
 }
 
 /// A patch document.
@@ -213,10 +340,6 @@ pub enum ProfileError {
 
 // -- wire documents --------------------------------------------------
 
-fn default_config() -> Value {
-    Value::Object(Map::new())
-}
-
 #[derive(Debug, Deserialize)]
 struct WireProfile {
     #[serde(default)]
@@ -243,6 +366,8 @@ struct WireEntry {
     config: Option<Value>,
     #[serde(default)]
     capabilities: Vec<Capability>,
+    #[serde(default)]
+    enabled: Option<Enabled>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +378,8 @@ struct WireEntryPatch {
     runtime: Option<String>,
     #[serde(default)]
     config: Option<Value>,
+    #[serde(default)]
+    enabled: Option<Enabled>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -278,8 +405,15 @@ impl Entry {
         Ok(Self {
             id: wire.id,
             runtime: parse_runtime(&wire.runtime)?,
-            config: wire.config.unwrap_or_else(default_config),
+            // A document row without a `config` key has *no opinion*:
+            // it inherits (`null`), the same value `to_toml` writes
+            // back. An explicit empty table still means "empty
+            // configuration" — the two are different layer statements,
+            // and conflating them made the second `profile/set` after
+            // a materialization remount the whole assembly.
+            config: wire.config.unwrap_or(Value::Null),
             capabilities: wire.capabilities,
+            enabled: wire.enabled.unwrap_or_default(),
         })
     }
 }
@@ -414,6 +548,7 @@ impl Patch {
                 id: row.id,
                 runtime,
                 config: row.config,
+                enabled: row.enabled,
             });
         }
         let insert = wire

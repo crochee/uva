@@ -48,7 +48,7 @@ export interface PanelSubagent {
   status: 'running' | 'succeeded' | 'failed' | 'aborted';
   /** Child session id, parsed from the tool result's
    *  `[subagent session: …]` line — present once the result
-   *  landed. Links the panel row to `/sessions/<id>`. */
+   *  landed. Links the panel row to `/chat/<id>`. */
   childSessionId?: string;
 }
 

@@ -1,16 +1,19 @@
 //! The crate's two services as native kernel plugins: `sessions` (the
 //! registry) and `compaction` (the compactor).
 //!
-//! The `sessions` plugin holds the registry and nothing else: callers
-//! take a per-run `SessionSink` / writer from it, and the service is
-//! the same registry the host built. The `compaction` plugin publishes
-//! a host-built [`Compactor`]; it adds no selection logic of its own,
-//! so the tool-call / result pairing rule stays where it is enforced
-//! (`balanced_cut_at_or_before`).
+//! The `sessions` plugin builds its registry from a
+//! [`SessionStoreConfig`]; callers take a per-run `SessionSink` /
+//! writer from the resolved service. The `compaction` plugin builds a
+//! [`SummaryCompactor`](elysper_session::SummaryCompactor) over the
+//! `llm.default` provider it injects and the model and policy its
+//! [`CompactionPluginConfig`] carries; it adds no selection logic of
+//! its own, so the tool-call / result pairing rule stays where it is
+//! enforced (`balanced_cut_at_or_before`).
 
 use std::sync::Arc;
 
-use elysper_core::CancelToken;
+use async_trait::async_trait;
+use elysper_core::Error;
 use elysper_kernel::{
     Context,
     PLUGIN_PROTOCOL_VERSION,
@@ -19,34 +22,87 @@ use elysper_kernel::{
     mount_all,
 };
 use elysper_provider::{
+    CompletionRequest,
+    CompletionResponse,
     Content,
     ContentPart,
     Message,
+    ModelConfig,
+    ModelProvider,
+    ProviderConfig,
     Role,
     ToolUse,
-    estimate_messages_token_count,
+    plugin::KEY_LLM_DEFAULT,
 };
 use elysper_session::{
-    CompactionError,
-    CompactionOutcome,
-    CompactionPlan,
+    CompactionSettings,
     Compactor,
     SessionSink,
     TokenBudget,
-    balanced_cut_at_or_before,
     balanced_message_cut,
-    compaction_plugin::{CompactionPlugin, KEY_COMPACTION},
+    compaction_plugin::{
+        CompactionPlugin,
+        CompactionPluginConfig,
+        KEY_COMPACTION,
+    },
     manager::SessionRegistry,
-    plugin::{KEY_SESSIONS, SessionStorePlugin},
+    plugin::{KEY_SESSIONS, SessionStoreConfig, SessionStorePlugin},
 };
-use futures::future::BoxFuture;
+
+/// A provider that answers every completion with one line of text.
+///
+/// The plugin only needs the handle to build its compactor; the
+/// assertions drive `plan`, which never calls the provider.
+struct StubProvider;
+
+#[async_trait]
+impl ModelProvider for StubProvider {
+    async fn initialize(
+        &mut self,
+        _config: ProviderConfig,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "stub"
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        ModelConfig {
+            name: "stub-model".to_string(),
+            provider: "stub".to_string(),
+            context_window: 200_000,
+            max_output_tokens: 4_096,
+            supports_tools: true,
+            supports_streaming: false,
+            supports_reasoning: false,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, Error> {
+        Ok(CompletionResponse {
+            content: Content::text("summary"),
+            ..CompletionResponse::default()
+        })
+    }
+}
+
+fn session_store_config(dir: &std::path::Path) -> SessionStoreConfig {
+    SessionStoreConfig {
+        sessions_dir: dir.to_path_buf(),
+        blocking: None,
+    }
+}
 
 #[test]
 fn provides_service_and_unload_removes_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let ctx = Context::new();
-    let registry = Arc::new(SessionRegistry::new(dir.path().to_path_buf()));
-    let plugin = SessionStorePlugin::new(Arc::clone(&registry));
+    let plugin = SessionStorePlugin::new(session_store_config(dir.path()));
 
     let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
         .expect("mount `session-store`");
@@ -55,18 +111,28 @@ fn provides_service_and_unload_removes_it() {
     let service = ctx
         .require::<SessionRegistry>(KEY_SESSIONS)
         .expect("`sessions` resolves");
-    assert!(
-        Arc::ptr_eq(&service, &registry),
-        "the service must be the registry the plugin was built with"
+    assert_eq!(
+        service.sessions_root(),
+        dir.path(),
+        "the plugin builds its registry over the configured root"
     );
 
-    // The registry half: a run takes its sink from the service.
+    // The registry half: a run takes its sink from the service, and
+    // the sink the built registry hands out actually writes.
     let sink: Arc<dyn SessionSink> = service.sink("user", "session");
     assert_eq!(sink.id(), "session");
     assert!(
         Arc::ptr_eq(&service.sink("user", "session"), &sink),
         "one session resolves to one sink"
     );
+    futures::executor::block_on(async {
+        sink.append(&serde_json::json!({"type": "Test", "data": {"n": 1}}))
+            .await
+            .expect("the sink the plugin built appends");
+        let rows = sink.read().await.expect("the sink reads back");
+        assert_eq!(rows.len(), 1, "one appended row round-trips");
+        assert_eq!(rows[0]["data"]["n"], 1);
+    });
 
     drop(mounted);
     assert!(
@@ -78,8 +144,7 @@ fn provides_service_and_unload_removes_it() {
 #[test]
 fn manifest_matches_provided_key() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let registry = Arc::new(SessionRegistry::new(dir.path().to_path_buf()));
-    let plugin = SessionStorePlugin::new(registry);
+    let plugin = SessionStorePlugin::new(session_store_config(dir.path()));
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "session-store");
@@ -89,7 +154,7 @@ fn manifest_matches_provided_key() {
     assert_eq!(KEY_SESSIONS, "sessions");
     assert!(
         manifest.inject.is_empty(),
-        "the plugin owns the registry; it injects nothing"
+        "the plugin builds the registry from its config; it injects nothing"
     );
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.abi.is_none());
@@ -98,44 +163,12 @@ fn manifest_matches_provided_key() {
 
 // --- the `compaction` service ----------------------------------------
 
-/// A compactor that plans the span up to the first balanced cut at or
-/// before the third message. The span therefore includes one tool call
-/// *and* its result, and the cut is never allowed to orphan either
-/// half.
-struct PairPreservingCompactor;
-
-impl Compactor for PairPreservingCompactor {
-    fn plan(
-        &self,
-        history: &[Message],
-        _budget: TokenBudget,
-    ) -> Option<CompactionPlan> {
-        let cut = balanced_cut_at_or_before(history, 3.min(history.len()));
-        if cut == 0 {
-            return None;
-        }
-        let shadowed = history[..cut].to_vec();
-        Some(CompactionPlan {
-            range: 0..cut,
-            shadowed_seqs: Vec::new(),
-            keep_recent: history.len() - cut,
-            shadowed_tokens: estimate_messages_token_count(&shadowed),
-            shadowed,
-        })
-    }
-
-    fn summarize(
-        &self,
-        _plan: &CompactionPlan,
-        _cancel: Arc<dyn CancelToken>,
-    ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
-        Box::pin(async { Err(CompactionError::EmptySummary) })
-    }
-}
-
+/// A history whose first message is large enough to cross a small
+/// trigger, with one tool call and its result at the tail so a plan
+/// can be checked for pair preservation.
 fn tool_call_history() -> Vec<Message> {
     vec![
-        Message::user("please read the file"),
+        Message::user("please read the file ".repeat(200)),
         Message::new(
             Role::Assistant,
             Content::Single(ContentPart::ToolUse(ToolUse {
@@ -144,15 +177,33 @@ fn tool_call_history() -> Vec<Message> {
                 input: serde_json::json!({"path": "a.txt"}),
             })),
         ),
-        Message::tool(Content::text("file body"), "c1"),
+        Message::tool(Content::text("file body ".repeat(100)), "c1"),
         Message::assistant("done"),
     ]
+}
+
+fn compactor_config(settings: CompactionSettings) -> CompactionPluginConfig {
+    CompactionPluginConfig {
+        model: "stub-model".to_string(),
+        settings,
+    }
 }
 
 #[test]
 fn compaction_keeps_tool_pairs() {
     let ctx = Context::new();
-    let plugin = CompactionPlugin::new(Arc::new(PairPreservingCompactor));
+    let _llm = ctx
+        .provide(
+            KEY_LLM_DEFAULT,
+            Arc::new(StubProvider) as Arc<dyn ModelProvider>,
+        )
+        .expect("provide `llm.default`");
+    let plugin = CompactionPlugin::new(compactor_config(CompactionSettings {
+        enabled: true,
+        reserve_tokens: 1,
+        keep_recent_tokens: 1,
+        min_messages_between_compaction: 4,
+    }));
 
     let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
         .expect("mount `context-compactor`");
@@ -169,7 +220,7 @@ fn compaction_keeps_tool_pairs() {
                 reserve: 0,
             },
         )
-        .expect("the fake compactor plans a compaction");
+        .expect("the published compactor plans a compaction");
 
     assert_eq!(plan.range, 0..3);
     assert_eq!(plan.keep_recent, 1);
@@ -199,8 +250,45 @@ fn compaction_keeps_tool_pairs() {
 }
 
 #[test]
+fn compaction_config_settings_gate_the_published_compactor() {
+    let ctx = Context::new();
+    let _llm = ctx
+        .provide(
+            KEY_LLM_DEFAULT,
+            Arc::new(StubProvider) as Arc<dyn ModelProvider>,
+        )
+        .expect("provide `llm.default`");
+    let plugin = CompactionPlugin::new(compactor_config(CompactionSettings {
+        enabled: false,
+        ..CompactionSettings::default()
+    }));
+
+    let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
+        .expect("mount `context-compactor`");
+
+    let service = ctx
+        .require::<Arc<dyn Compactor>>(KEY_COMPACTION)
+        .expect("`compaction` resolves");
+    assert!(
+        service
+            .plan(
+                &tool_call_history(),
+                TokenBudget {
+                    window: 8,
+                    reserve: 0,
+                },
+            )
+            .is_none(),
+        "the settings the config carries govern the built compactor"
+    );
+
+    drop(mounted);
+}
+
+#[test]
 fn compaction_manifest_matches_provided_key() {
-    let plugin = CompactionPlugin::new(Arc::new(PairPreservingCompactor));
+    let plugin =
+        CompactionPlugin::new(compactor_config(CompactionSettings::default()));
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "context-compactor");
@@ -208,9 +296,10 @@ fn compaction_manifest_matches_provided_key() {
     assert_eq!(manifest.runtime, RuntimeKind::Native);
     assert_eq!(manifest.provides, vec![KEY_COMPACTION.to_string()]);
     assert_eq!(KEY_COMPACTION, "compaction");
-    assert!(
-        manifest.inject.is_empty(),
-        "the compactor arrives with the plugin value; it injects nothing"
+    assert_eq!(
+        manifest.inject,
+        vec![KEY_LLM_DEFAULT.to_string()],
+        "the compactor is built over the injected default provider"
     );
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.abi.is_none());

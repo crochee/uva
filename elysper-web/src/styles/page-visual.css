@@ -1,7 +1,7 @@
 /**
  * Shared visual language for list and detail pages.
  *
- * Goal: turn the existing flat Card / MetadataTable surfaces
+ * Goal: turn the older flat card / metadata-table surfaces
  * into something with actual hierarchy — colored icon tiles,
  * hero headers, gradient backgrounds, status pills, and a
  * sensible max-width on the page column so the content reads
@@ -427,7 +427,7 @@
  *
  * The whole card is a link — but explicit action buttons stop
  * event propagation so the row link doesn't swallow their
- * clicks (the inline-delete pattern from AgentsPage).
+ * clicks (the inline-delete pattern the old list pages used).
  */
 
 .nt-vis-card {
@@ -631,9 +631,8 @@
 /* ---- Property card grid (detail pages) ---------------------------
  *
  * Two-column grid of small "stat" cards for the most-looked-at
- * fields on detail pages. Replaces the top-of-page
- * `<Card title="Metadata"><MetadataTable ... /></Card>` block
- * with a denser, more visual surface. Collapses to one column
+ * fields on detail pages. Replaces the old top-of-page
+ * metadata-table block with a denser, more visual surface. Collapses to one column
  * below ~640px.
  *
  * The previous `minmax(180px, 1fr)` was too aggressive — on a
@@ -875,11 +874,10 @@
   gap: var(--spacing-xs);
 }
 
-/* ---- Inline mini-card (Sessions page search card) ----------------
+/* ---- Inline mini-card ----------------
  *
- * The "Search memory" card on SessionsPage is a self-contained
- * surface — give it the same section styling without forcing a
- * page-wide hero.
+ * A self-contained search-ish surface gets the same section styling
+ * without forcing a page-wide hero.
  */
 
 .nt-vis-search-card {

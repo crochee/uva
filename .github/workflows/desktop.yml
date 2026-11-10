@@ -1,0 +1,121 @@
+name: desktop
+
+# The desktop shell's own gates. desktop/ is deliberately outside the
+# root workspace (design C2/D3): root `make lint-rust`'s --all-features
+# must not compile GUI targets, so THIS workflow carries fmt / clippy /
+# test for the shell — plus `cargo deny`, because the root
+# `make check-deny` only sees the root workspace's lockfile (C10).
+# The apt package names are Ubuntu's; contributors on Arch install
+# webkit2gtk-4.1 via pacman (C1) and run `make -C desktop lint`.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "elysper-web/**"
+      - "Cargo.toml"
+      - "deny.toml"
+      - ".github/workflows/desktop.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "desktop/**"
+      - "crates/**"
+      - "elysper-web/**"
+      - "Cargo.toml"
+      - "deny.toml"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  shell:
+    name: fmt + clippy + test + cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Tauri's Linux build needs the webkit2gtk stack. These are the
+      # apt (Ubuntu) names from the design doc's knife 3 scope; the
+      # shell crate is the only place in the repo that needs them.
+      - name: Install webkit system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly toolchain (rustfmt.toml requires nightly fmt)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: elysper-web/package-lock.json
+
+      # tauri's codegen embeds frontendDist at compile time, so the
+      # dist copy must exist before ANY cargo command (Review Focus
+      # #1). This mirrors `make -C desktop frontend`.
+      - name: Build the web front-end and sync the dist copy
+        run: |
+          cd elysper-web && npm ci && npm run build
+          rm -rf ../desktop/dist && cp -R dist ../desktop/dist
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: ${{ runner.os }}-cargo-desktop-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-desktop-
+            ${{ runner.os }}-cargo-
+
+      - name: cargo fetch
+        working-directory: desktop
+        run: cargo fetch
+
+      - name: fmt
+        working-directory: desktop
+        run: cargo +nightly fmt --all --check
+
+      - name: clippy
+        working-directory: desktop
+        run: cargo clippy --all-targets --all-features --tests --all -- -D warnings
+
+      - name: test
+        working-directory: desktop
+        run: cargo test -p elysper-desktop --lib
+
+      # Same install pattern as rust-quality.yml. The check runs over
+      # the DESKTOP lockfile (the root one never sees tauri's tree),
+      # with the repo's single deny.toml as the policy (C10).
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+
+      - name: cargo deny (licenses / bans / sources)
+        run: cargo deny --manifest-path desktop/Cargo.toml --config deny.toml --workspace check licenses bans sources

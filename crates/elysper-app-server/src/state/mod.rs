@@ -24,9 +24,12 @@ mod boot;
 pub(crate) mod tests;
 
 #[cfg(any(test, feature = "test-utils"))]
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) use app_state::catalogue_for_deployment;
 #[cfg(test)]
 pub(crate) use app_state::plugin_tool_registry;
+#[cfg(test)]
+pub(crate) use app_state::seeded_tool_registry;
 pub use app_state::{
     AppState,
     AppliedToolSurface,
@@ -36,6 +39,12 @@ pub use app_state::{
     UsageMetrics,
     UsageSnapshot,
 };
+// The boot's row-config seams: the value the boot materializes into a
+// row, and the step that fills an empty row with it. The tests pin
+// both — a deployment's profile row and the server config must not
+// disagree about who owns a row's configuration.
+#[cfg(test)]
+pub(crate) use app_state::{agent_loop_row_config, materialize_row_config};
 
 /// Active session controllers keyed by `(user_id, session_id)`.
 ///
@@ -55,13 +64,18 @@ pub type ActiveSessions = dashmap::DashMap<
 /// with the number of sessions the process has ever opened.
 pub type SessionSpawnGates =
     dashmap::DashMap<(String, String), std::sync::Weak<tokio::sync::Mutex<()>>>;
+// The strategy resolver the `agent-loop` row's config needs: it
+// turns the alias the deployment's agent table names into a strategy.
+// It is a crate-internal step of the boot, so it travels the same
+// `pub(crate)` path as the rest.
+pub(crate) use boot::resolve_strategy;
 #[cfg(test)]
 pub(crate) use boot::{
     apply_tools_config,
     build_prompt_context,
     load_default_compaction,
     load_default_max_iterations,
-    load_default_strategy,
+    load_default_strategy_alias,
     load_default_tool_restriction,
     register_configured_mcp_servers,
     unapplied_agent_keys,

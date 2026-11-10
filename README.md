@@ -109,7 +109,7 @@ loop → session writer）在这一份代码里真实跑一遍，并断言工具
 
 ## 仓库分层
 
-The framework is organized as a Rust workspace with **40 members**, all under `crates/`, every one of them a `elysper-*` crate except the `elysper` facade. Of those, the libraries are meant to be composed by consumers; `elysper-app-server` is the application crate and `elysper-mcp-server` the stdio binary — the two places where `tokio` / `axum` may appear in a public signature. The front-end sits next to the workspace as `elysper-web/` with its own `package.json`.
+The framework is organized as a Rust workspace with **44 packages**, all under `crates/`, every one of them a `elysper-*` crate except the `elysper` facade. Of those, the libraries are meant to be composed by consumers; `elysper-app-server` is the application crate, `elysper-tui` its terminal projection, and `elysper-mcp-server` the stdio binary — the places where `tokio` / `axum` may appear in a public signature. The front-end sits next to the workspace as `elysper-web/` with its own `package.json`.
 
 ### Core Crates
 
@@ -136,6 +136,8 @@ The framework is organized as a Rust workspace with **40 members**, all under `c
 | Crate | Description |
 |-------|-------------|
 | [elysper-app-server](crates/elysper-app-server/) | The application crate: `core` (headless JSON-RPC 2.0 on stdio) + `serve` (the gateway: one WebSocket at `/rpc`, HTTP probes, static web) |
+| [elysper-tui](crates/elysper-tui/) | The terminal projection: ratatui + crossterm on the gateway's `/rpc` WebSocket (via `elysper-gateway`), with a pure reducer, the conversation-first shell and Vim keys |
+| [elysper-gateway](crates/elysper-gateway/) | Shared gateway support for the two hosts that own a process: supervision of `elysper-app-server serve` (readiness, backoff, reap) plus the gateway JSON-RPC client; its public face is runtime-free (`futures` only) |
 
 ### Support Crates
 
@@ -170,6 +172,9 @@ listed below, and every path is a real on-disk directory:
 | `crates/elysper-harness` | ReAct loop agent (the "AI" of Elysper) |
 | `crates/elysper-kernel` | Plugin kernel: manifests, dependency-ordered `mount_all`, reversible `EffectHandle`s, per-plugin `dispose_plugin`, and the `ui.` / core namespace boundary |
 | `crates/elysper-app-server` | The application crate: headless JSON-RPC 2.0 core (`core`) + WebSocket gateway (`serve`) — the human entry point; boots the native plugin set through the kernel, polls `profile.toml` for HMR, and serves `ui/schema` |
+| `crates/elysper-tui` | The terminal projection: connects to the gateway (`serve`'s `/rpc` WebSocket) through `elysper-gateway` — same host path as the browser and the desktop shell — and renders the conversation-first shell with ratatui |
+| `crates/elysper-gateway` | The shared gateway support: process supervision (launch `serve`, probe `/readyz`, backoff, reap) and the gateway JSON-RPC client both hosts reuse |
+| `desktop/` | The Tauri 2 desktop shell, its own workspace: launches `serve` as a sidecar through `elysper-gateway` and opens the same SPA the browser serves |
 | `crates/elysper-attachment` | Multimodal attachment store (filesystem + in-memory backends) |
 | `crates/elysper-mcp` | MCP client (stdio + in-memory transports) and tool publication |
 | `crates/elysper-scheduler` | Cron / interval / once dispatcher (caller owns the timer) + atomic JSON job store |
@@ -521,9 +526,14 @@ One binary, two modes — `elysper-app-server`:
 # serves it — WebSocket /rpc, probes, and the web front-end
 cargo run -p elysper-app-server -- serve --port 8080
 
-# the headless core: JSON-RPC 2.0 on stdin/stdout (LF-framed), for a
-# TUI / desktop shell / any host that wants a sidecar
+# the headless core: JSON-RPC 2.0 on stdin/stdout (Content-Length
+# framed), for a TUI / desktop shell / any host that wants a sidecar
 cargo run -p elysper-app-server -- core --directory .
+
+# the terminal projection: spawns the core and drives it (see
+# crates/elysper-tui/README.md for the manual smoke command)
+ELYSPER_APP_SERVER=target/debug/elysper-app-server \
+  cargo run -p elysper-tui -- --directory .
 ```
 
 ### Server + Web
@@ -574,7 +584,8 @@ Run `make help` for the full list of targets.
 │   ├── elysper-eval/           # eval suites, metrics, judge, reports
 │   ├── elysper-macros/         # #[derive(Tool)]
 │   ├── elysper-test-support/   # deterministic fakes (ReplayProvider, …)
-│   └── elysper-app-server/     # the application crate: stdio JSON-RPC core + gateway
+│   ├── elysper-app-server/     # the application crate: stdio JSON-RPC core + gateway
+│   └── elysper-tui/            # terminal projection: spawns the core, ratatui UI
 └── elysper-web/                # React frontend
     │   ├── api/                # /rpc WebSocket JSON-RPC client modules
     │   ├── components/         # UI components (ui/, layout/)

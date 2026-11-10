@@ -7,7 +7,7 @@
 #   - 与 `make fmt-check` / `make check-web` 互不重叠（rustfmt + 前端
 #     prettier）；组成 "rustfmt + prettier + markdownlint" 三件套。
 #
-# scope 决定：显式列举 41 个 crate README + 顶层 CONTRIBUTORS.md（不是
+# scope 决定：显式列举 42 个 crate README + 顶层 CONTRIBUTORS.md（不是
 # glob 排除模式）— 这样新加一个目录不会"无意中"进入 lint 范围，而是
 # 显式决策后才加。这是 rust-lang/tokio 的同一做法。
 #
@@ -63,6 +63,7 @@ jobs:
             crates/elysper-steering/README.md
             crates/elysper-test-support/README.md
             crates/elysper-app-server/README.md
+            crates/elysper-tui/README.md
             crates/elysper-tool-read/README.md
             crates/elysper-tool-write/README.md
             crates/elysper-tool-shell/README.md

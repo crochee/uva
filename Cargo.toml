@@ -42,6 +42,8 @@ members = [
     "crates/elysper-plugin-host",
     "crates/elysper-wasm-runtime",
     "crates/elysper-runtime",
+    "crates/elysper-tui",
+    "crates/elysper-gateway",
 ]
 resolver = "2"
 
@@ -88,6 +90,15 @@ elysper-strategy-plan-execute = { path = "crates/elysper-strategy-plan-execute",
 elysper-reflection = { path = "crates/elysper-reflection", version = "0.1" }
 elysper-budget = { path = "crates/elysper-budget", version = "0.1" }
 elysper-runtime = { path = "crates/elysper-runtime", version = "0.1" }
+# The terminal projection: a ratatui/crossterm front-end that drives the
+# `serve` gateway through the shared gateway crate (the same `/rpc`
+# WebSocket the browser speaks). It is an application crate, so it
+# stays `publish = false`.
+elysper-tui = { path = "crates/elysper-tui", version = "0.1" }
+# Shared gateway support for the hosts: the `serve` process supervisor
+# and its WebSocket JSON-RPC client. `publish = false` — it consumes
+# the app server's CLI contract.
+elysper-gateway = { path = "crates/elysper-gateway", version = "0.1" }
 # The dynamic plugin channel's wire contract. serde-only on purpose:
 # a third-party plugin author depends on this alone, so it must never
 # grow a harness or runtime dependency.
@@ -121,6 +132,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
 async-trait = "0.1"
 futures = "0.3"
+# The gateway WebSocket client's transport: the `handshake` feature
+# only (dialed with `client_async` over a plain TcpStream), so no TLS
+# stack is pulled into the default build.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 # The plugin kernel's framework. The package is `cordis-rs`; the lib
 # target is `cordis`, which is why the rename is mandatory — a bare
@@ -233,6 +248,15 @@ dotenvy = "0.15"
 
 # CLI
 clap = { version = "4.6", features = ["derive", "env"] }
+
+# Terminal UI (`elysper-tui` only). `ratatui`'s default backend is the
+# crossterm one, so the explicit feature keeps the dependency honest
+# without pulling a second terminal backend. Both crates are MIT; the
+# `event-stream` feature (a futures `Stream` of terminal events) is
+# enabled at the `elysper-tui` line, not here, because no other crate
+# reads terminal events.
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+crossterm = "0.28"
 
 # Static assets baked into the binary (the `embed-web` feature of
 # `elysper-app-server`).

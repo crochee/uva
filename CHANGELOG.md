@@ -12,6 +12,255 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Added (SPA information architecture, knife 9)
+
+- **SPA 信息架构重排（对话优先）**：主界面收成会话 / 对话 + 设置分区，旧目录页全部删除；
+  侧栏换成工作区树（默认工作区常驻）+ 跨域搜索 + 用户入口，可 `Ctrl/Cmd+B` 折叠；
+  对话流用户消息右对齐气泡、思考块输出中展开完成后自动折叠；输入区带待办进度与
+  bash 风格 `❯` 提示符；设置面是解析后 profile 的反推（无 settings 文件），九个分区
+  （账户 / 通用 / 插件 / 模型 / 智能体 / 技能与命令 / MCP / Hooks / 自动化）经
+  `src/api/settings-profile.ts` 绑 `profile/list|get|set|create|delete`，开关如实显示
+  `applied` / `restart-required` / `overridden` / `failed` 四态；`/chat` 不再在挂载时
+  铸会话，首条消息才创建。
+
+### Added (UI tree and slot contract, knife 8)
+
+- **UI 树与插槽契约（刀 8）**：`ui-bundle` 行声明插槽（`chat.sidebar`、
+  `session.detail.extensions`…，id 与宿主无关），UI 装载器以 Effect 语义装配
+  （注册即句柄、drop 即回滚，未声明插槽 / 重复声明 / `one` 超基数在激活阶段
+  失败）；`ui/schema` 新增 `slots`；浏览器（`SlotRegion`）与终端（ratatui
+  右列 / 底部块）各渲染一次同一棵树，TUI 因此可扩展。v1 仍永不执行远端
+  JS/CSS。
+
+### Added (profile lifecycle: enablement, transactional writes, built-in MCP)
+
+- **profile 生命周期**：profile 行自带 `enabled`（`true` / `false` / 插件判定
+  `{ service, check, arg }`，判定不可用按 fail-closed 不装配；boot 因此分两波
+  挂载——先静态行，再用挂好的 Context 求值判定行并挂第二波）；动态变更成为
+  事务（内存重解析层栈 → 试装 → 原子替换文件），结果回报 `applied` /
+  `restart-required` / `overridden` / `failed` 四态；创建 / 删除能力经内置
+  MCP 通道与 `profile/*` JSON-RPC 方法走同一条写路径，agent 写动作按
+  `Risk::High` 走既有审批；提交后广播无 `session_id` 的 `profile/changed`。
+- `elysper-core` 新增叶子模块 `enable`（`EnableChecks` 判定契约，不加
+  crate-root re-export，frozen 基线不动）；`elysper-skill` 的 `skills` 行
+  发布第一个判定服务 `skill-checks`（读 SKILL.md 的 `metadata.enabled`）。
+- `elysper-mcp` 贯通协议原生的 `annotations`：`ServerTool` 可声明、
+  `tools/list` 透传、`McpTool` 落到 `Tool::annotations`（旧服务器不带该字段
+  时行为不变）。
+
+### Added (TUI directory browsing, wave 2: the catalog domains)
+
+- **The seven directory domains join the browser with table rows only**
+  (`agents` / `skills` / `tools` / `tasks` / `schedules` / `workflows` /
+  `evals`): each is a `DomainSpec` entry — list method, row pointer,
+  columns, `get` method and operations (`agents/delete`,
+  `skills/delete|reload`, `tools/unregister`, `schedules/tick|delete`,
+  `workflows/run|delete`, `evals/run|delete`; `tasks` is read-only on the
+  server). No new screens.
+- **The bespoke-envelope domains** (`models` → `/models`, `plugins` →
+  `/resolved`, `ui/schema` → `/schemas`) and `search` (required `q`,
+  reachable from the sidebar's 🔍 / `s` and `:search <词>`) decode
+  through the same `rows_pointer` table; their `Enter` flattens the row
+  into the key/value detail page.
+- **The `:json` gate** covers multi-field writes (`create` / `patch` /
+  `replace` / `register`): `json <method> <params>` parses one JSON
+  object, confirms like any write, and only sends methods in the
+  client-side copy of the server registry (`KNOWN_METHODS`, which the
+  tests keep in sync with every declared domain method). Approval
+  `y`/`n` keeps its precedence over the palette.
+- `docs/host-capabilities.md` §6 records the per-domain TUI landing
+  (method coverage, evidence paths) — the plan's `docs/host-capabilities.yaml`
+  and `make check-host-capabilities` do not exist in this tree; the md
+  is the matrix's source of truth.
+
+### Added (TUI directory browsing, wave 1: sessions + chat)
+
+- **The TUI grows a directory browser.** `crates/elysper-tui/src/domains.rs`
+  is one column table per domain (list method, row pointer, columns, `get`
+  method, per-operation param key); `views/list.rs` renders any domain's
+  `List<T>` envelope through it, `views/detail.rs` flattens any object
+  into a key/value page and draws the write-confirmation modal, and
+  `views/catalog.rs` is the domain → list → detail state machine with the
+  command palette (`:` / `Ctrl+k`). `RequestKind::Catalog(&'static str)`
+  carries any directory method, and `main` intercepts its responses
+  before the reducer so a directory answer can never overwrite the
+  connection status line.
+- **Wave 1 scope**: `sessions` (list / get / usage / status / export /
+  fork / resume / compact / delete) and the conversation's `chat`
+  operations (`regenerate`, `feedback`), with `resume`'s token assembled
+  from the `sessions/follow` baseline. Writes confirm first (`x`/`dd`,
+  palette operations); approval `y`/`n` keeps its precedence.
+- **`o` opens the directory** from the sidebar; `Tab` cycles domains;
+  `r` re-lists; D30's list motions drive the table. A narrow terminal
+  shrinks the rightmost column instead of panicking.
+
+### Added (the capability matrix: every domain traced to a profile row)
+
+- **`docs/host-capabilities.md`** — the knife-4 capability matrix: 15
+  capability domains, each with host landing / data source / owning
+  profile row / behavior when the row is absent. Rows are derived from
+  the resolved profile (`elysper-app-server --dump-config`, measured on
+  a synthetic deployment) and the `~/.agents` layout conventions, not
+  hand-curated; the file also records the one-shot reconciliation (24
+  rows / 20 referenced method names all present in the registry) and
+  the four known design-doc ↔ repo drifts. Docs only — no new gates.
+
+### Added (projection wave 2: the desktop shell)
+
+- **The desktop entry (knife 3).** `desktop/` is a Tauri 2 shell in
+  its own workspace — deliberately not a root-workspace member, so
+  the webkit system stack never becomes a prerequisite for
+  `make ci`. The shell does exactly four things, all through
+  `crates/elysper-gateway`: launch the `elysper-app-server serve`
+  sidecar, wait for `/readyz`, open a window on the gateway's
+  `base_url` (the same `elysper-web/dist` the browser serves), and
+  re-navigate the window when a restarted generation lands on a new
+  address / reap the sidecar when the window closes (no orphans). It
+  speaks no protocol — no `tokio-tungstenite`, and the direct
+  dependency list stays at `tauri` + `elysper-gateway` + `anyhow`.
+  The new `.github/workflows/desktop.yml` carries the shell's own
+  fmt / clippy / test / `cargo deny` gates (closing the gap where
+  the root `cargo deny` never sees the desktop lockfile's
+  gtk/webkit tree).
+
+### Changed (projection wave 2: the TUI joins the gateway)
+
+- **`elysper-tui` no longer talks to a core.** The transport layer now
+  drives `elysper-app-server serve` through `elysper-gateway` — the
+  same `/rpc` WebSocket the browser speaks — instead of spawning
+  `core` and framing `Content-Length` over stdio. Process
+  supervision (spawn, `/readyz`, the 1s → 5s backoff, reaping) moved
+  to the gateway crate; what the TUI keeps is its own domain: the
+  `RequestKind` ↔ method mapping, one spawned task per request (the
+  `Response`-carries-its-`RequestKind` contract is unchanged), a
+  catch-all notification subscription, and the re-issue of the
+  recorded `sessions/follow` whenever the connection is new again
+  (a core `ready` broadcast, a supervisor restart, or the first
+  answered `health/ping` after an outage — the gateway never
+  re-broadcasts a boot a late connection missed, so the liveness
+  probe synthesizes the initial `ready`). `--attach <url>` connects
+  to an already-running gateway without spawning or supervising one;
+  a dropped gateway is reported as unreachable while the client
+  keeps reconnecting on its own. The crate's dependency moved from
+  `elysper-app-server` to `elysper-gateway`; the reducer and the
+  ratatui renderer are untouched. The gateway crate learned two
+  things the TUI needs: `GatewayClient::subscribe_all` (a local
+  catch-all — nothing registered on the wire, nothing replayed) and
+  the reaping of a generation whose `start` was abandoned before its
+  outcome was delivered, so a host quitting during boot leaves no
+  respawning orphan.
+
+### Added (projection wave 2: the shared gateway crate)
+
+- **`elysper-gateway` — the foundation of projection wave 2.** A
+  `publish = false` support crate the TUI and the desktop shell both
+  build on: a supervisor that launches `elysper-app-server serve`,
+  waits for the `/readyz` **status line** (never just "the port
+  accepts a connection"), restarts a dead gateway with the 1s → 5s
+  backoff, and reaps the child on drop; plus a JSON-RPC 2.0 client
+  for the gateway's `/rpc` WebSocket that correlates responses by
+  `id`, fans notifications out to subscribers, and replays every
+  live subscription after a reconnect without double-mounting a
+  handler. The public surface is `futures`-only — `tokio` stays an
+  implementation detail, so no runtime-exemption entry is needed.
+
+### Added (plugin-spine stage 4: the Wasm channel)
+
+- **The Wasm calling convention is dynamic.** `describe` / `execute`
+  are looked up with `Instance::get_func` and invoked through
+  `Func::call(&[Val], &mut [Val])`, so the exports are validated and
+  lifted by name at mount rather than through a typed-func binding. A
+  missing or mistyped export is still a mount-time
+  `DescribeFailed` / `ExecuteFailed`, and an `execute` that answers
+  with a non-string is the same clear error instead of a panic.
+- **Capabilities are enforced at mount, with imports named.** An
+  instantiation failure now classifies the component's imports: a
+  capability the manifest does not declare is `MissingCapability`
+  naming both the import (`http-request`) and the capability
+  (`net:http`); an import the linker does not know is
+  `UnsatisfiedImport` naming the import. In both cases no guest
+  instruction executes.
+- **`WasmToolPlugin::with_schema_override` / `ToolSchemaOverride`.**
+  A deployment can rename a mounted component's tool or replace its
+  advertised parameter schema without recompiling the guest.
+- **The app-server has a `wasm` profile row** (opt-in: it is
+  registered as a factory but not part of `native_profile`). Its
+  config is
+  `{ "component": "<workspace-relative path>", "tool": { "name"?, "description"?, "parameters"? } }`;
+  a `.wat` text component works. The row's `capabilities` are copied
+  into the plugin manifest, so a declared `fs:read` reaches the
+  runtime's linker and an undeclared import fails the mount. The
+  app-server enables the facade's `wasm` feature, the only feature
+  that resolves `wasmtime`.
+- `PluginFactory::build` now receives the profile row's declared
+  `capabilities: &[Capability]`, threaded from `build_one`.
+
+### Changed
+
+- **app-server: capabilities are built by their rows** (plugin-spine
+  stage 3). Every native profile row constructs its object in
+  `apply` from the boot context — sessions, compaction (injects
+  `llm.default`), sandbox, skills, mcp, eval, scheduler, attachments,
+  the five tool bricks, memory and search. `KernelHost` shrinks to the
+  shared container and the registries the search row reads; the boot
+  no longer builds capability objects, only reads the published
+  services back for the projection layer. The `model-adapter` factory
+  no longer falls back to a host catalogue: the boot materializes the
+  row's config from the workspace configuration.
+- **app-server: `KernelHost` is gone** (plugin-spine stage 3). The
+  host is now `BootServices` and holds **containers only**: the shared
+  `ToolRegistry`, the peer-agent `AgentRegistry`, the harness `Host`,
+  and the `[plugins]` composition's registrations. Every capability is
+  built by the row that publishes it: `subagent-backend` builds the
+  `task` delegator over the agent registry, `approval` publishes the
+  default `ApprovalPolicy`, `search` builds its own session index over
+  the boot context's sessions directory, and `agent-loop` builds the
+  deployment's loop from its row config.
+- **The `agent-loop` row is config-driven.** Its row config is
+  `{ "strategy"?: "<alias>", "tool_restriction"?: { "allow"?: [...],
+  "deny"?: [...] }, "compaction"?: { ...CompactionSettings } }`; the
+  boot materializes it from the deployment's agent table
+  (`agents.<default>.strategy` / `allowed_tools` / `denied_tools` /
+  `compaction`) when the profile leaves the row empty, and a profile
+  that already carries a config wins. An unknown strategy alias is
+  logged and falls back to ReAct, as before.
+- **The delegation backend is a service.** The `agent-loop` row
+  resolves the `subagents` service the `subagent-backend` row
+  publishes and installs it as the loop's delegator, and
+  `AGENT_LOOP_INJECTS` names `subagents` — so the kernel mounts the
+  loop after the backend, and a remount of the backend cascades to
+  the loop. The deployment now has **one** `TaskDelegator` instead of
+  two instances over the same registry.
+- The prompt manifest is a live service snapshot
+  (`AppState::prompt_context`), so a skills remount reaches the next
+  session/agent build.
+- Plugin constructors changed accordingly:
+  `SessionStorePlugin::new(SessionStoreConfig)`,
+  `CompactionPlugin::new(CompactionPluginConfig)`,
+  `SandboxPlugin::new(SandboxPluginConfig)`,
+  `SkillPlugin::new(SkillPluginConfig)`, `McpPlugin::new()`,
+  `EvalPlugin::new(EvalPluginConfig)`,
+  `SchedulerPlugin::new(SchedulerPluginConfig)`,
+  `AttachmentPlugin::new(AttachmentPluginConfig)`.
+
+### Changed
+
+- **harness: seam dispatch runs on kernel waterfalls** (plugin-spine
+  stage 2). The `Seams` layer owns seven kernel `Waterfall` chains and
+  dispatches the four loop seams plus the two llm points through them;
+  foreign middleware registers via `Host::waterfall(key)` and rules
+  with `SeamRuling` (`Ask` collects, `Block` / `Terminate`
+  short-circuit; anything unrecognizable fails closed as a block).
+  `Host::hook` / `Host::gate` now land their registrations as chain
+  middleware (the five observation points keep the residual hooks
+  table) and `Host::request_transformer` lands on the `llm/request`
+  chain, so the approval gate and process-plugin vetoes dispatch on
+  `tool/pre-execute` by construction. Guard / hint / tracker /
+  output / result transformers / prompt sections / tools / delegators
+  stay on their tables — the home table is in the host module docs.
+- `AgentState` derives `Clone` (an active seam pass snapshots the run
+  state the chain adapters rebuild a `HookContext` from).
+
 ### Added (plugin-spine stage 1: everything-a-plugin assembly)
 
 - **`elysper-runtime`, the config-driven assembly crate.** The

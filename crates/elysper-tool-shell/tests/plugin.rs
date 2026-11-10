@@ -1,10 +1,12 @@
 //! The shell crate's native kernel plugins: the `sandbox` service and
 //! the `shell` tool brick.
 //!
-//! The `sandbox` plugin publishes the backend/policy pair under
-//! `sandbox`; the one rule the mount enforces is fail-closed: a
-//! confined policy whose backend cannot enforce it fails `apply`
-//! instead of publishing a service that would silently run unconfined.
+//! The `sandbox` plugin builds its backend from a
+//! [`SandboxPluginConfig`] in `apply` and publishes the backend/policy
+//! pair under `sandbox`; the one rule the mount enforces is
+//! fail-closed: a confined policy the configured backend cannot enforce
+//! fails `apply` instead of publishing a service that would silently
+//! run unconfined.
 //!
 //! The `shell` tool brick injects `tools` and files its tool under its
 //! own registration token, so dropping the mount withdraws exactly that
@@ -28,116 +30,75 @@ use elysper_tool::{
     plugin::{KEY_TOOLS, ToolRegistryPlugin},
 };
 use elysper_tool_shell::{
-    BackendAvailability,
     ConfinedCommand,
     ExecutionPolicy,
-    SandboxBackend,
-    SandboxError,
     ShellTool,
-    plugin::{KEY_SANDBOX, SandboxPlugin, SandboxService, ShellToolPlugin},
+    plugin::{
+        KEY_SANDBOX,
+        SandboxBackendKind,
+        SandboxPlugin,
+        SandboxPluginConfig,
+        SandboxService,
+        ShellToolPlugin,
+    },
 };
 
-/// A backend whose availability the test decides.
-///
-/// It never builds an enforcing wrap: every test here exercises the
-/// availability gate, not argv construction (that is
-/// [`elysper_tool_shell::bwrap_profile_args`]'s suite).
-#[derive(Debug)]
-struct StubBackend {
-    availability: BackendAvailability,
-}
-
-impl StubBackend {
-    fn available() -> Self {
-        Self {
-            availability: BackendAvailability::Available,
-        }
-    }
-
-    fn unavailable(reason: &str) -> Self {
-        Self {
-            availability: BackendAvailability::Unavailable {
-                reason: reason.to_string(),
-            },
-        }
-    }
-}
-
-impl SandboxBackend for StubBackend {
-    fn name(&self) -> &str {
-        "stub"
-    }
-
-    fn availability(&self) -> BackendAvailability {
-        self.availability.clone()
-    }
-
-    fn confine(
-        &self,
-        policy: ExecutionPolicy,
-        _workspace_root: &Path,
-    ) -> Result<ConfinedCommand, SandboxError> {
-        Err(SandboxError::unavailable(
+#[test]
+fn confined_policy_with_the_noop_backend_fails_closed() {
+    for policy in [ExecutionPolicy::ReadOnly, ExecutionPolicy::WorkspaceWrite] {
+        let ctx = Context::new();
+        let plugin = SandboxPlugin::new(SandboxPluginConfig {
+            backend: SandboxBackendKind::Noop,
             policy,
-            "the stub backend never confines",
-        ))
-    }
+        });
 
-    fn denial_signatures(&self) -> &'static [&'static str] {
-        &[]
+        let error =
+            mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
+                .expect_err("a confined policy cannot mount the no-op backend");
+
+        let MountError::ApplyFailed { plugin_id, source } = error else {
+            panic!("expected ApplyFailed, got {error:?}");
+        };
+        assert_eq!(plugin_id, "sandbox");
+        let message = source.to_string();
+        assert!(
+            message.contains(policy.as_str()),
+            "the refusal names the policy: {message}"
+        );
+        assert!(
+            message.contains("does not confine"),
+            "the refusal names why the backend cannot guard it: {message}"
+        );
+        assert!(
+            ctx.require::<SandboxService>(KEY_SANDBOX).is_err(),
+            "a failed mount must not leave a `sandbox` service behind"
+        );
     }
 }
 
 #[test]
-fn sandbox_without_backend_fails_closed() {
+fn noop_backend_serves_danger_full_access() {
     let ctx = Context::new();
-    let plugin = SandboxPlugin::new(
-        Arc::new(StubBackend::unavailable("bwrap is not installed")),
-        ExecutionPolicy::ReadOnly,
-    );
-
-    let error = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
-        .expect_err("a confined policy without a usable backend must fail");
-
-    match error {
-        MountError::ApplyFailed { plugin_id, source } => {
-            assert_eq!(plugin_id, "sandbox");
-            let message = source.to_string();
-            assert!(
-                message.contains("bwrap is not installed"),
-                "the refusal names the probe's reason: {message}"
-            );
-            assert!(
-                message.contains("read-only"),
-                "the refusal names the policy: {message}"
-            );
-        }
-        other => panic!("unexpected mount error: {other}"),
-    }
-    assert!(
-        ctx.require::<SandboxService>(KEY_SANDBOX).is_err(),
-        "a failed mount must not leave a `sandbox` service behind"
-    );
-}
-
-#[test]
-fn sandbox_with_available_backend_provides_service() {
-    let ctx = Context::new();
-    let plugin = SandboxPlugin::new(
-        Arc::new(StubBackend::available()),
-        ExecutionPolicy::WorkspaceWrite,
-    );
+    let plugin = SandboxPlugin::new(SandboxPluginConfig::default());
 
     let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
-        .expect("mount `sandbox`");
+        .expect("the default config needs no runner");
     assert_eq!(mounted.len(), 1);
 
     let service = ctx
         .require::<SandboxService>(KEY_SANDBOX)
         .expect("`sandbox` resolves");
-    assert_eq!(service.policy, ExecutionPolicy::WorkspaceWrite);
-    assert_eq!(service.backend.name(), "stub");
-    assert!(service.backend.availability().is_available());
+    assert_eq!(service.policy, ExecutionPolicy::DangerFullAccess);
+    assert_eq!(service.backend.name(), "none");
+    assert!(service.is_enforceable());
+    assert_eq!(
+        service
+            .backend
+            .confine(ExecutionPolicy::DangerFullAccess, Path::new("/"))
+            .expect("the no-op backend serves every unconfined run"),
+        ConfinedCommand::unconfined(),
+        "an unconfined run keeps today's `sh -c` argv"
+    );
 
     drop(mounted);
     assert!(
@@ -147,29 +108,44 @@ fn sandbox_with_available_backend_provides_service() {
 }
 
 #[test]
-fn unconfined_policy_does_not_need_a_backend() {
+fn bwrap_kind_builds_the_bwrap_backend() {
     let ctx = Context::new();
-    let plugin = SandboxPlugin::new(
-        Arc::new(StubBackend::unavailable("bwrap is not installed")),
-        ExecutionPolicy::DangerFullAccess,
-    );
+    let plugin = SandboxPlugin::new(SandboxPluginConfig {
+        backend: SandboxBackendKind::Bwrap,
+        policy: ExecutionPolicy::DangerFullAccess,
+    });
 
     let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
-        .expect("`DangerFullAccess` never needs a confining backend");
+        .expect("an unconfined policy never probes the runner");
     let service = ctx
         .require::<SandboxService>(KEY_SANDBOX)
         .expect("`sandbox` resolves");
-    assert_eq!(service.policy, ExecutionPolicy::DangerFullAccess);
+    assert_eq!(service.backend.name(), "bwrap");
+    assert!(service.is_enforceable());
+    // `DangerFullAccess` bypasses the runner, so this holds even where
+    // bubblewrap is not installed.
+    assert_eq!(
+        service
+            .backend
+            .confine(ExecutionPolicy::DangerFullAccess, Path::new("/"))
+            .expect("an unconfined run never needs the runner"),
+        ConfinedCommand::unconfined()
+    );
 
     drop(mounted);
+    assert!(ctx.require::<SandboxService>(KEY_SANDBOX).is_err());
+}
+
+#[test]
+fn default_config_is_the_noop_unconfined_pair() {
+    let config = SandboxPluginConfig::default();
+    assert_eq!(config.backend, SandboxBackendKind::Noop);
+    assert_eq!(config.policy, ExecutionPolicy::DangerFullAccess);
 }
 
 #[test]
 fn manifest_matches_provided_key() {
-    let plugin = SandboxPlugin::new(
-        Arc::new(StubBackend::available()),
-        ExecutionPolicy::ReadOnly,
-    );
+    let plugin = SandboxPlugin::new(SandboxPluginConfig::default());
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "sandbox");
@@ -179,7 +155,7 @@ fn manifest_matches_provided_key() {
     assert_eq!(KEY_SANDBOX, "sandbox");
     assert!(
         manifest.inject.is_empty(),
-        "the backend and policy arrive with the plugin value; it injects nothing"
+        "the backend kind and policy arrive in the plugin's config; it injects nothing"
     );
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.abi.is_none());
@@ -189,14 +165,13 @@ fn manifest_matches_provided_key() {
 #[test]
 fn registers_the_tool_and_unload_removes_it() {
     let ctx = Context::new();
-    let registry = Arc::new(ToolRegistry::new());
     let tool = ShellTool::new();
     let name = tool.name().to_string();
 
     let mounted = mount_all(
         &ctx,
         &[
-            Arc::new(ToolRegistryPlugin::new(Arc::clone(&registry)))
+            Arc::new(ToolRegistryPlugin::new(Arc::new(ToolRegistry::new())))
                 as Arc<dyn KernelPlugin>,
             Arc::new(ShellToolPlugin::new()) as Arc<dyn KernelPlugin>,
         ],
@@ -207,10 +182,6 @@ fn registers_the_tool_and_unload_removes_it() {
     let service = ctx
         .require::<ToolRegistry>(KEY_TOOLS)
         .expect("`tools` resolves");
-    assert!(
-        Arc::ptr_eq(&service, &registry),
-        "the brick registers through the service's registry"
-    );
     assert!(service.contains(&name), "the brick's tool is dispatchable");
     assert_eq!(service.tool_count(), 1);
     assert!(
@@ -218,12 +189,15 @@ fn registers_the_tool_and_unload_removes_it() {
         "the brick's tool is advertised to the model"
     );
 
+    // Keep a handle on the registry to observe what unloading the group
+    // does to the brick's registration.
+    let observed = Arc::clone(&service);
     drop(mounted);
     assert!(
-        !registry.contains(&name),
+        !observed.contains(&name),
         "unload must withdraw the brick's registration"
     );
-    assert_eq!(registry.tool_count(), 0);
+    assert_eq!(observed.tool_count(), 0);
     assert!(
         ctx.require::<ToolRegistry>(KEY_TOOLS).is_err(),
         "the same mount group owned the `tools` service"
@@ -255,21 +229,29 @@ fn missing_tools_leaves_the_brick_unmounted() {
 #[test]
 fn mount_fails_loudly_when_a_core_tool_owns_the_name() {
     let ctx = Context::new();
-    let registry = Arc::new(ToolRegistry::new());
-    let tool = ShellTool::new();
-    let name = tool.name().to_string();
+    let name = ShellTool::new().name().to_string();
+    // The registry is constructed by its own mount, so the fixture
+    // mounts it first and core-registers through the published service.
+    let registry_mount = mount_all(
+        &ctx,
+        &[
+            Arc::new(ToolRegistryPlugin::new(Arc::new(ToolRegistry::new())))
+                as Arc<dyn KernelPlugin>,
+        ],
+    )
+    .expect("mount `tool-registry`");
+    let registry = ctx
+        .require::<ToolRegistry>(KEY_TOOLS)
+        .expect("`tools` resolves");
     assert!(
-        registry.register_core_entry(ToolEntry::new(Arc::new(tool))),
+        registry
+            .register_core_entry(ToolEntry::new(Arc::new(ShellTool::new()))),
         "the fixture core-registers `{name}`"
     );
 
     let error = mount_all(
         &ctx,
-        &[
-            Arc::new(ToolRegistryPlugin::new(Arc::clone(&registry)))
-                as Arc<dyn KernelPlugin>,
-            Arc::new(ShellToolPlugin::new()) as Arc<dyn KernelPlugin>,
-        ],
+        &[Arc::new(ShellToolPlugin::new()) as Arc<dyn KernelPlugin>],
     )
     .expect_err("the mount must fail, not silently skip `shell`");
 
@@ -286,6 +268,12 @@ fn mount_fails_loudly_when_a_core_tool_owns_the_name() {
         registry.tool_count(),
         1,
         "only the fixture's core entry remains"
+    );
+
+    drop(registry_mount);
+    assert!(
+        ctx.require::<ToolRegistry>(KEY_TOOLS).is_err(),
+        "dropping the provider mount withdraws `tools`"
     );
 }
 

@@ -6,26 +6,27 @@ import { Input } from './Input';
 import { useCursorList } from '../../hooks/useCursorList';
 import { isEditableTarget } from '../../hooks/useKeyboardShortcuts';
 import { shortId } from '../../lib/short-id';
+import { SETTINGS_NAV_SECTIONS } from '../../settings/sections';
 import { api } from '../../api/client';
 import type { AgentDetail, List, SearchHit, SessionSummary } from '../../api/types';
 import './CommandPalette.css';
 
 /**
- * The five top-level destinations, mirroring `Sidebar`'s list. The
- * `shortcut` is the same `g <key>` accelerator the sidebar prints,
- * so the palette teaches the muscle memory instead of competing
- * with it.
+ * The three routes this build has (design §6.1): the conversation, a
+ * fresh session, and settings — plus one row per settings section, so
+ * every capability catalogue the old top-level pages owned is still two
+ * keystrokes away. `shortcut` mirrors the `g <key>` accelerators that
+ * survive (`g c` / `g s`).
  */
 const NAV_COMMANDS: ReadonlyArray<{ path: string; label: string; shortcut: string }> = [
   { path: '/chat', label: 'Go to Chat', shortcut: 'g c' },
-  { path: '/tools', label: 'Go to Tools', shortcut: 'g t' },
-  { path: '/agents', label: 'Go to Agents', shortcut: 'g g' },
-  { path: '/skills', label: 'Go to Skills', shortcut: 'g k' },
-  { path: '/sessions', label: 'Go to Sessions', shortcut: 'g s' },
-  { path: '/schedules', label: 'Go to Schedules', shortcut: 'g h' },
-  { path: '/workflows', label: 'Go to Workflows', shortcut: 'g w' },
-  { path: '/evals', label: 'Go to Evals', shortcut: 'g e' },
-  { path: '/tasks', label: 'Go to Tasks', shortcut: 'g d' },
+  { path: '/chat', label: 'New Session', shortcut: '' },
+  { path: '/settings/general', label: 'Go to Settings', shortcut: 'g s' },
+  ...SETTINGS_NAV_SECTIONS.map((section) => ({
+    path: `/settings/${section.id}`,
+    label: `Open Settings · ${section.label}`,
+    shortcut: '',
+  })),
 ];
 
 /** Group order is fixed (Navigate → server-ranked domain groups)
@@ -101,7 +102,7 @@ function sessionCommands(
     detail: session.status,
     keywords: session.id,
     shortcut: '⏎ open',
-    run: () => navigate(`/sessions/${encodeURIComponent(session.id)}`),
+    run: () => navigate(`/chat/${encodeURIComponent(session.id)}`),
   }));
 }
 function agentCommands(
@@ -115,25 +116,25 @@ function agentCommands(
     detail: agent.description,
     keywords: `${agent.kind} ${agent.domain ?? ''} ${agent.owner ?? ''}`,
     shortcut: '⏎ open',
-    run: () => navigate(`/agents/${encodeURIComponent(agent.name)}`),
+    run: () => navigate('/settings/agents'),
   }));
 }
 
-/** Where a server search hit navigates — same mapping the
- *  Sessions page's unified card uses. */
+/** Where a server search hit navigates. Sessions open in the
+ *  conversation; capability domains open the settings section that now
+ *  owns their catalogue (D34). */
 function searchHitPath(hit: SearchHit): string | null {
   switch (hit.domain) {
     case 'session':
-      return `/sessions/${encodeURIComponent(hit.id)}`;
+      return `/chat/${encodeURIComponent(hit.id)}`;
     case 'skill':
-    case 'agent': {
-      const name = hit.id.split(':')[1];
-      if (!name) return null;
-      return `/${hit.domain === 'skill' ? 'skills' : 'agents'}/${encodeURIComponent(name)}`;
-    }
+      return '/settings/skills';
+    case 'agent':
+      return '/settings/agents';
     case 'tool':
+      return '/settings/plugins';
     case 'mcp':
-      return `/tools/${encodeURIComponent(hit.id)}`;
+      return '/settings/mcp';
     default:
       return null;
   }
@@ -147,8 +148,7 @@ function searchHitPath(hit: SearchHit): string | null {
  *  Domains without a page to land on (memory entries) are
  *  omitted: every palette row runs a navigation, so a row that
  *  could not take the user anywhere would be a dead affordance.
- *  Those hits stay reachable from the Sessions page's search
- *  card, which renders them inline. */
+ *  The sidebar's cross-domain search renders those hits inline. */
 function searchHitCommands(
   hits: ReadonlyArray<SearchHit>,
   navigate: (path: string) => void,
@@ -213,8 +213,18 @@ export function CommandPalette() {
       setOpen((value) => !value);
     }
 
+    // `:` (Vim) opens the same palette. It is dispatched by the global
+    // shortcut hook so the two bindings share one owner of `open`.
+    function handleOpenEvent(): void {
+      setOpen(true);
+    }
+
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('elysper:palette-open', handleOpenEvent);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('elysper:palette-open', handleOpenEvent);
+    };
   }, []);
 
   const close = useCallback(() => setOpen(false), []);
@@ -295,7 +305,9 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
   const commands = useMemo<Command[]>(
     () => [
       ...NAV_COMMANDS.map((item) => ({
-        id: `nav:${item.path}`,
+        // Two rows share `/chat` (`Go to Chat` and `New Session`), so
+        // the path alone is not a unique key.
+        id: `nav:${item.path}:${item.label}`,
         group: GROUP_NAVIGATE,
         label: item.label,
         detail: item.path,

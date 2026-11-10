@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>评审页 · 架构 / 逻辑 / 界面交互</title>
+<style>
+  :root { --bg:#0e1116; --panel:#141821; --panel2:#181d26; --line:#272d3a; --fg:#e6e9f0;
+          --muted:#8a8f9c; --accent:#4a9eda; --ok:#3fb984; --warn:#d9a441; --bad:#e06c6c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.6 -apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif; }
+  .wrap { max-width:1500px; margin:0 auto; padding:22px 20px 104px; }
+  h1 { font-size:21px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 18px; font-size:13px; max-width:120ch; }
+  .proto { display:inline-block; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+           color:#d9a441; border:1px solid #4a3f22; background:#241f12; border-radius:4px;
+           padding:2px 7px; vertical-align:3px; margin-left:8px; }
+  .view { display:none; }
+  .view.on { display:block; }
+
+  .band { border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:12px 14px; margin-bottom:8px; }
+  .band > .bt { font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:10px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .box { border:1px solid var(--line); border-radius:8px; background:var(--panel2); padding:10px 12px; min-width:150px; flex:1; }
+  .box b { display:block; font-size:14px; margin-bottom:3px; }
+  .box span { color:var(--mututed); font-size:12.5px; display:block; line-height:1.5; }
+  .box.hi { border-color:#2f5a8c; background:#16202c; }
+  .box.src { border-color:#3a5a45; background:#151d19; }
+  .box.gate { border-color:#5a4a2a; background:#201c14; }
+  .arrow { text-align:center; color:var(--muted); font-size:12.5px; margin:2px 0 8px; }
+  .arrow b { color:var(--accent); font-weight:600; }
+  .cols { display:grid; grid-template-columns:1.7fr 1fr; gap:14px; align-items:start; }
+  @media (max-width:1080px){ .cols { grid-template-columns:1fr; } }
+  .kv { color:var(--muted); font-size:12.5px; }
+  .kv b { color:var(--fg); font-weight:600; }
+  ul.tight { margin:6px 0 0; padding-left:18px; }
+  ul.tight li { margin:3px 0; color:var(--muted); font-size:12.5px; }
+  ul.tight li b { color:var(--fg); }
+  .term2 { display:inline-block; border:1px solid var(--line); border-radius:4px; padding:0 6px;
+           font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:#9fd6d8; }
+
+  .flow { border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:14px 16px; margin-bottom:12px; }
+  .flow h3 { margin:0 0 3px; font-size:15px; }
+  .flow .cap { color:var(--muted); font-size:12.5px; margin-bottom:12px; }
+  .step { display:flex; gap:0; align-items:stretch; flex-wrap:wrap; }
+  .step .s { flex:1 1 150px; border:1px solid var(--line); border-radius:8px; background:var(--panel2); padding:9px 11px; min-width:140px; }
+  .step .s .who { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .step .s .what { font-size:13px; margin-top:2px; }
+  .step .s.key { border-color:#2f5a8c; background:#16202c; }
+  .step .s.gate { border-color:#5a4a2a; background:#201c14; }
+  .step .s.bad { border-color:#6a3a3a; background:#221717; }
+  .step .arw { align-self:center; padding:0 7px; color:var(--accent); font-size:15px; }
+  .note { margin-top:12px; border-left:3px solid var(--accent); background:#16202c; border-radius:0 6px 6px 0;
+          padding:9px 12px; font-size:12.5px; color:#c3cad6; }
+  .note b { color:var(--fg); }
+  .note.warn { border-left-color:var(--warn); background:#201c14; }
+
+  .screens { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+  .screen { flex:1 1 260px; border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:12px 14px; }
+  .screen h4 { margin:0 0 6px; font-size:14px; }
+  .screen .parts { color:var(--muted); font-size:12.5px; margin:0; padding-left:16px; }
+  .screen .parts li { margin:1px 0; }
+  table { width:100%; border-collapse:separate; border-spacing:0; border:1px solid var(--line);
+          border-radius:10px; overflow:hidden; background:var(--panel); }
+  th, td { text-align:left; padding:8px 11px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top; }
+  th { background:var(--panel2); font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
+  tbody tr:last-child td { border-bottom:0; }
+  td.k { color:var(--accent); white-space:nowrap; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12.5px; }
+  td.w { color:var(--muted); }
+  .prompt { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; color:#c3cad6;
+            background:#10141b; border:1px solid var(--line); border-radius:8px; padding:10px 13px; margin:4px 0 10px; }
+  .prompt .p { color:var(--ok); }
+  .prompt .c { color:var(--muted); }
+  .states { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+  .st { border:1px solid var(--line); border-radius:8px; background:var(--panel2); padding:8px 11px; font-size:12.5px; }
+  .st b { display:block; }
+  .st span { color:var(--muted); font-size:11.5px; }
+
+  .switch { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); display:flex; gap:14px;
+            align-items:center; background:#1b2130; border:1px solid #3b4356; border-radius:999px;
+            padding:9px 16px; box-shadow:0 8px 28px rgba(0,0,0,.5); z-index:9; }
+  .switch button { background:none; border:0; color:var(--fg); font-size:15px; cursor:pointer; padding:0 6px; }
+  .switch .label { font-size:13px; }
+  .switch .key { color:var(--accent); font-weight:700; }
+  .foot { color:#6d7488; font-size:12px; margin-top:26px; border-top:1px solid var(--line); padding-top:12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>投影第二波 · 架构 / 逻辑 / 界面交互 <span class="proto">评审页 · 一次性</span></h1>
+  <p class="sub">
+    三视图：<b>架构</b>（谁在哪、什么是真的）· <b>逻辑</b>（装配与动态变更怎么流）·
+    <b>界面与交互</b>（屏幕、键位、状态机）。左下浮条或 <b>←/→</b> 切页；
+    事实取自仓库代码与本轮的设计裁定。
+  </p>
+
+  <!-- ══════════ 架构 ══════════ -->
+  <div class="view on" id="v-arch">
+    <div class="cols">
+      <div>
+        <div class="band">
+          <div class="bt">宿主层 · 三选一，都存在</div>
+          <div class="row">
+            <div class="box hi"><b>浏览器</b><span>同一份 SPA（Vite 构建）</span></div>
+            <div class="box hi"><b>桌面 WebView</b><span>同一份 SPA（Tauri 2 外壳）</span></div>
+            <div class="box hi"><b>终端 TUI</b><span>同一套界面的终端渲染（ratatui）</span></div>
+          </div>
+          <div class="kv" style="margin-top:10px">
+            <b>同一套界面</b>：侧栏（品牌 · 新会话 · 工作区树 · 搜索 · 用户 · 可折叠 rail）·
+            对话流（气泡 · 思考块 · markdown）· 待办进度 · 输入框 · 设置面。
+            差别只有<b>介质</b>；**每个 UI 宿主都有一棵 UI 树**（见下）。
+          </div>
+        </div>
+
+        <div class="arrow">↓ 同一个协议面：<b>JSON-RPC 2.0 over WebSocket</b>（<code>/rpc</code>）</div>
+
+        <div class="band">
+          <div class="bt">网关 · elysper-app-server serve</div>
+          <div class="row">
+            <div class="box"><b>转帧</b><span>浏览器帧原样转给 core，按 id 回帧</span></div>
+            <div class="box"><b>监管 core</b><span>core 死了按 1s→5s 退避重启，广播 ready</span></div>
+            <div class="box"><b>静态前端</b><span>SPA 与 API 同源 ⇒ 前端零改动</span></div>
+            <div class="box"><b>探针</b><span>/livez · /readyz · /version /metrics</span></div>
+          </div>
+        </div>
+
+        <div class="arrow">↓ <b>Content-Length 分帧</b>（stdio，只在这一段）</div>
+
+        <div class="band">
+          <div class="bt">core · 无头 agent harness</div>
+          <div class="row">
+            <div class="box hi"><b>profile 解析</b><span>层序：bundle → profile → home → CLI</span></div>
+            <div class="box"><b>kernel 脊柱</b><span>Fiber · Effect · Service · Event（cordis 语义）</span></div>
+            <div class="box"><b>native 插件</b><span>agent-loop · model-adapter · tool-* …</span></div>
+            <div class="box hi"><b>族 = 服务契约</b><span>tool 插件提供注册表服务，skill 插件 inject 它（DSH 同款；<b>树是平的</b>）</span></div>
+          </div>
+          <div class="kv" style="margin-top:10px">
+            <b>core 只认 profile</b>：它就是插件树的组装入参。每一行自带
+            <b>enabled</b>（启用与否）+ 自己的参数 ⇒ <b>按需装载</b>：
+            <code>enabled=false</code> 的行不进 Fiber 树。
+          </div>
+        </div>
+
+        <div class="band">
+          <div class="bt">插件树</div>
+          <div class="row">
+            <div class="box"><b>核心树（Rust，进程内）</b><span>永远存在；core 的 Fiber 状态机</span></div>
+            <div class="box hi"><b>UI 树 · 浏览器（JS）</b><span>由 UI 装载器装；声明插槽</span></div>
+            <div class="box hi"><b>UI 树 · 终端（Rust）</b><span>同一个 UI 装载器；<b>终端也有一棵</b>，所以 TUI 可扩展</span></div>
+          </div>
+          <div class="kv" style="margin-top:10px">
+            <b>插槽 id 与宿主无关</b>：<code>ui-bundle</code> 行声明 <code>chat.sidebar</code> 之类，
+            浏览器渲染成 DOM、终端渲染成 ratatui ⇒ 新增一个 UI 插件，<b>两个宿主同时拿到</b>。
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="band">
+          <div class="bt">真源与可写层</div>
+          <ul class="tight">
+            <li><b>一行 = 一个插件的内容</b>（DSH 同款）：插件 + 它的<b>小配置</b></li>
+            <li><b>大配置不进 profile</b>：由<b>插件自己管</b>（自己的文件 / 自己的状态）</li>
+            <li><b>插件按约定自己读排布</b>：skill 插件读 <code>skills/</code>、mcp 插件读 <code>mcp.json</code>；<b>profile 不复制这些数据</b></li>
+            <li><b>plugin 排布</b> = <b>读文件目录的手段与约定</b>（识别能力数据），<b>它不是"插件"</b></li>
+            <li><b>插件</b> = <b>cordis 插件</b> = 树里的单元（核心树的 Fiber / UI 树的 UI 插件）</li>
+            <li><b>profile</b> = <b>最终产物</b>（core 唯一认的组装入参）· 也是<b>唯一可写</b>的地方</li>
+            <li><b>没有 settings</b>：DSH 里 settings 是一个<b>插件提供的服务</b>，不是文件概念</li>
+            <li><b>族 = 服务契约</b>：tool 插件提供注册表服务，skill 插件 inject 它；<b>树是平的</b>（DSH：所有层摊平成一个列表，行序不决定装载序）</li>
+            <li><b>启用位可由插件判定</b>：行上的 <code>enabled</code> 除了真假，还能指向插件的判定 ⇒ 每个 skill 不必都写成 profile 行</li>
+            <li><b>skill 先是数据</b>：skill 插件读 <code>skills/</code> 自己判定启用并注册成工具；要变成插件时再显式加行</li>
+            <li><b>内置 MCP</b> = 改 profile 的通道（<b>装得起来才生效</b>）</li>
+            <li><b>内置默认 agent</b> = 整个 harness 的运转方式，不可停用</li>
+          </ul>
+        </div>
+        <div class="band">
+          <div class="bt">跨树硬边界</div>
+          <ul class="tight">
+            <li>核心装载器<b>拒收</b> <code>ui.*</code> 服务键；UI 装载器<b>拒收</b>核心键</li>
+            <li>违规在<b>装配阶段</b>失败，不是运行时串扰</li>
+            <li>core <b>不感知</b>渲染目标：它只产出协议化事件流</li>
+          </ul>
+        </div>
+        <div class="band">
+          <div class="bt">本轮不动 / 要做</div>
+          <ul class="tight">
+            <li>不动：<b>核心一行不动</b>——kernel 语义、seam 链、wasm 通道、profile 层序本身</li>
+            <li>要做：<b>UI 树（两个宿主）</b>、<b>profile 启用位</b>、<b>事务性变更</b>、<b>对话优先 IA</b></li>
+            <li>要做：<b>删掉旧 19 页</b>（以新原型为准）</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════ 逻辑 ══════════ -->
+  <div class="view" id="v-logic">
+    <div class="flow">
+      <h3>流 1 · 装配（启动时）</h3>
+      <div class="cap">能力与界面同源：同一批 profile 行，既长出能力，也长出界面。</div>
+      <div class="step">
+        <div class="s"><div class="who">输入</div><div class="what">plugin 排布<br /><span class="kv">读目录 → 识别能力数据</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">装配</div><div class="what">生成 profile 行<br /><span class="kv">一行 = 一个插件 + 小配置<br />每行带 enabled</span></div></div>
+        <div class="arw">→</div>
+        <div class="s key"><div class="who">真源</div><div class="what">profile 解析<br /><span class="kv">按 enabled 按需装载</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">kernel</div><div class="what">mount_all（父插件可再挂子树）<br /><span class="kv">Fiber / Effect / Service</span></div></div>
+        <div class="arw">→</div>
+        <div class="s key"><div class="who">产物</div><div class="what">能力可用 ∧ 界面出现<br /><span class="kv">同一批行</span></div></div>
+      </div>
+      <div class="note"><b>关键点</b>：界面不是另一套真相——设置页显示的就是 core 将要装配的那棵树（profile 的反推）。</div>
+    </div>
+
+    <div class="flow">
+      <h3>流 2 · 动态变更（走 MCP，装得起来才生效）</h3>
+      <div class="cap">两阶段：先试装，成功才提交；失败保持变更前。</div>
+      <div class="step">
+        <div class="s"><div class="who">agent / 界面</div><div class="what">调 profile/set<br /><span class="kv">内置 MCP 通道</span></div></div>
+        <div class="arw">→</div>
+        <div class="s gate"><div class="who">写入</div><div class="what">临时 profile<br /><span class="kv">不动正式文件</span></div></div>
+        <div class="arw">→</div>
+        <div class="s key"><div class="who">试装</div><div class="what">mount_all<br /><span class="kv">全组校验，失败全组回滚</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">成功</div><div class="what">提交 + 刷新<br /><span class="kv">替换正式文件、广播"目录变了"</span></div></div>
+      </div>
+      <div class="step" style="margin-top:8px">
+        <div class="s"><div class="who">试装失败</div><div class="what">报错 ∧ <b>保持变更前</b><br /><span class="kv">文件不换、树不动、界面不变</span></div></div>
+        <div class="arw" style="color:var(--bad)">✕</div>
+        <div class="s bad"><div class="who">结果</div><div class="what">沿用旧装配结果<br /><span class="kv">进行中的 turn 用旧句柄完成</span></div></div>
+      </div>
+      <div class="note warn"><b>为什么能动态</b>：组装入参是<b>文件</b>，运行时可改；改的是 profile，profile 就是那棵树的定义。<br />
+        <b>变更结果四态</b>（对齐 DSH 的 <code>application</code>）：<b>applied</b>（已生效，刷新）·
+        <b>restart-required</b>（要重启）· <b>overridden</b>（被更高层覆盖，未生效）·
+        <b>failed</b>（装不起来 ⇒ 报错 ∧ 保持变更前）。界面与 MCP 都按这四态回报。</div>
+    </div>
+
+    <div class="flow">
+      <h3>流 3 · 禁用语义</h3>
+      <div class="cap">「能力与界面都是 profile 的行」的直接推论，也是这套模型的红利。</div>
+      <div class="step">
+        <div class="s"><div class="who">操作</div><div class="what">某行 enabled = false<br /><span class="kv">界面开关 / MCP 都一样</span></div></div>
+        <div class="arw">→</div>
+        <div class="s key"><div class="who">装配</div><div class="what">该行不挂载<br /><span class="kv">不进 Fiber 树</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">能力</div><div class="what">该工具 / agent / MCP 不可用</div></div>
+        <div class="arw">＋</div>
+        <div class="s"><div class="who">界面</div><div class="what">该界面区块不渲染</div></div>
+      </div>
+      <div class="note"><b>不是两套开关</b>：一个开关同时管"能力在不在"和"界面在不在"，因为它们本来就是同一行。</div>
+    </div>
+
+    <div class="flow">
+      <h3>流 4 · 族：服务契约（树是平的）</h3>
+      <div class="cap">DSH 同款：不嵌套。"All layers are flattened into one list… row order carries no load semantics"。</div>
+      <div class="step">
+        <div class="s"><div class="who">profile</div><div class="what">tool 行 + skill 行<br /><span class="kv">各有启用位与小配置</span></div></div>
+        <div class="arw">→</div>
+        <div class="s key"><div class="who">tool 插件</div><div class="what">提供注册表服务<br /><span class="kv">工具面与执行策略归它</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">skill 插件</div><div class="what">inject 注册表<br /><span class="kv">读 skills/、自己判定启用</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">产物</div><div class="what">能力齐 ∧ profile 仍然很小<br /><span class="kv">细粒度不进 profile</span></div></div>
+      </div>
+      <div class="note"><b>为什么不进 profile</b>：逐个 skill 的启用位会把 profile 撑成清单；
+        它属于 <b>skill 插件自己的领域</b>（DSH 的 settings 也是一个插件提供的服务）。<br />
+        <b>怎么判</b>：行上的 <code>enabled</code> 可以指向插件的判定
+        （<code>{ service, check, arg }</code>）——对应 DSH 的 <code>disabled: !!js …</code> 表达式。</div>
+    </div>
+
+    <div class="flow">
+      <h3>流 5 · 三个宿主同一条路</h3>
+      <div class="cap">统一协议面 + 统一 core 监管 ⇒ 三个宿主不是三套实现，是同一套契约的三个渲染。</div>
+      <div class="step">
+        <div class="s"><div class="who">宿主</div><div class="what">浏览器 / 桌面 / 终端<br /><span class="kv">同一套界面</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">网关</div><div class="what">WS /rpc<br /><span class="kv">同一端点</span></div></div>
+        <div class="arw">→</div>
+        <div class="s"><div class="who">core</div><div class="what">同一棵核心树<br /><span class="kv">同一份 profile</span></div></div>
+      </div>
+      <div class="note"><b>UI 树是另一条并行线</b>：UI 装载器按 profile 的 <code>ui-bundle</code> 行
+        给<b>每个 UI 宿主</b>装一棵 UI 树（浏览器 JS / 终端 Rust），插槽 id 共用 ⇒ 终端也能被扩展。</div>
+    </div>
+  </div>
+
+  <!-- ══════════ 界面与交互 ══════════ -->
+  <div class="view" id="v-ui">
+    <div class="screens">
+      <div class="screen">
+        <h4>① 对话（主界面）</h4>
+        <ul class="parts">
+          <li>侧栏：品牌 · 新会话 · 工作区树（<b>默认工作区常驻</b>）· 组标题旁的搜索 · 左下用户 · 折叠 rail</li>
+          <li>顶栏：面包屑 + 状态徽标</li>
+          <li>对话流：用户右对齐气泡 · 思考块 · markdown 回答</li>
+          <li>待办进度 → 输入框</li>
+        </ul>
+      </div>
+      <div class="screen">
+        <h4>② 设置（从左下用户进）</h4>
+        <ul class="parts">
+          <li>侧栏<b>整个变成</b>设置导航：用户卡 · Ctrl+F 搜索 · 分区列表</li>
+          <li>账户 · 通用 · 插件 · 模型 · 智能体 · 技能与命令 · MCP · Hooks · 自动化</li>
+          <li>每行 = <b>profile 的一行</b> + 启用开关（profile 的反推）</li>
+          <li>创建 / 删除能力 = <b>一次内置 MCP 调用</b></li>
+          <li>内置默认 agent 标「内置 · 不可停用」</li>
+        </ul>
+      </div>
+      <div class="screen">
+        <h4>③ 能力目录（插件分区）</h4>
+        <ul class="parts">
+          <li>插件行清单 + 启用开关 + 参数</li>
+          <li>来源卡：这些行由 <code>.agents/plugins</code> 识别、装配进 profile</li>
+          <li>可以创建 / 删除 —— 走 MCP 通道，不直接写文件</li>
+        </ul>
+      </div>
+    </div>
+
+    <h2 style="font-size:15px;margin:20px 0 8px">输入框（bash 式提示符，不做 prompt 建议条）</h2>
+    <div class="prompt"><span class="p">❯</span> <span class="c">~/workspace/elysper</span> 描述你要做的事，<span class="c">/调用指令，@文件或对话</span><span class="p">▏</span></div>
+    <div class="kv">提示符带<b>工作区路径</b>（bash 的 <span class="term2">❯</span> 形态）；上下文标记（如"工作区内修改"、模型）放在框内底行。**"输入框上方的 prompt 建议"本轮不做**。</div>
+
+    <h2 style="font-size:15px;margin:22px 0 8px">交互清单（Vim 优先，VSCode 次之）</h2>
+    <table>
+      <thead><tr><th>场景</th><th>键</th><th>鼠标</th><th>反馈</th></tr></thead>
+      <tbody>
+        <tr><td>列表 · 移动</td><td class="k">j / k</td><td class="w">点行</td><td class="w">选中高亮；详情同步（终端）</td></tr>
+        <tr><td>列表 · 首尾</td><td class="k">gg / G</td><td class="w">—</td><td class="w">跳到首/末行</td></tr>
+        <tr><td>列表 · 翻页</td><td class="k">Ctrl+d / Ctrl+u</td><td class="w">滚轮</td><td class="w">半页滚动</td></tr>
+        <tr><td>列表 · 搜索</td><td class="k">/ · n · N</td><td class="w">点搜索框</td><td class="w">过滤；n/N 跳下一个/上一个匹配</td></tr>
+        <tr><td>打开</td><td class="k">Enter</td><td class="w">双击/点条目</td><td class="w">进入详情</td></tr>
+        <tr><td>复制标识</td><td class="k">y</td><td class="w">—</td><td class="w">复制 id 到剪贴板</td></tr>
+        <tr><td>删除</td><td class="k">x （dd）</td><td class="w">—</td><td class="w">确认浮层（y 确认 / n 取消）</td></tr>
+        <tr><td>命令面板</td><td class="k">:</td><td class="w">点 ⌘K</td><td class="w">跳域 / 执行命令</td></tr>
+        <tr><td>快捷键帮助</td><td class="k">?</td><td class="w">—</td><td class="w">列出本表</td></tr>
+        <tr><td>取消</td><td class="k">Esc</td><td class="w">点空白</td><td class="w">关浮层 / 回上一级</td></tr>
+        <tr><td>侧栏 · 折叠</td><td class="k">Ctrl+b</td><td class="w">点品牌行右侧 ▣</td><td class="w">宽 ⇄ 图标栏；<b>两个宿主状态共享</b></td></tr>
+        <tr><td>工作区</td><td class="k">j / k</td><td class="w">点树节点</td><td class="w">展开/收起；<b>默认工作区常驻</b></td></tr>
+        <tr><td>设置 · 进入</td><td class="k">（点用户）</td><td class="w">点左下用户</td><td class="w">侧栏换成设置导航</td></tr>
+        <tr><td>设置 · 分区</td><td class="k">1–9 / j / k</td><td class="w">点分区</td><td class="w">右栏换成分区内容</td></tr>
+        <tr><td>设置 · 开关</td><td class="k">space</td><td class="w">点开关</td><td class="w">MCP 写 profile → 试装 → <b>能力与界面同时变化</b>；失败则报错并保持原状</td></tr>
+        <tr><td>设置 · 搜索</td><td class="k">Ctrl+f</td><td class="w">点搜索框</td><td class="w">过滤分区</td></tr>
+        <tr><td>设置 · 创建/删除</td><td class="k">n / x</td><td class="w">点按钮</td><td class="w">走 MCP；试装失败 → 报错 + 保持原状</td></tr>
+      </tbody>
+    </table>
+
+    <h2 style="font-size:15px;margin:22px 0 8px">对话流的状态机</h2>
+    <div class="states">
+      <div class="st"><b>空</b><span>bash 提示符 + 待办（若有）</span></div>
+      <div class="arw" style="color:var(--accent)">→</div>
+      <div class="st"><b>思考中</b><span>「已思考」<b>展开</b>，正文边流边滚</span></div>
+      <div class="arw" style="color:var(--accent)">→</div>
+      <div class="st"><b>回答中</b><span>markdown 逐段出现</span></div>
+      <div class="arw" style="color:var(--accent)">→</div>
+      <div class="st"><b>完成</b><span>思考块<b>自动折叠</b>成一行；待办进度更新</span></div>
+    </div>
+    <div class="note" style="margin-top:14px">
+      <b>两个宿主必须同形</b>：同一屏在浏览器与终端里是同一套部件、同一套键位语义；
+      只有"没有气泡 / 没有鼠标"这类介质差异，不允许出现"终端里少一块功能"。
+    </div>
+
+    <div class="foot">
+      评审页（一次性）：来自 <code>docs/design/2026-11-09-desktop-frontend-tree-design.md</code> 的
+      D19–D35；界面原型在 <code>docs/prototypes/shared-interface.prototype.html</code>，分支
+      <code>prototype/interface-contract</code>。
+    </div>
+  </div>
+</div>
+
+<div class="switch">
+  <button id="prev">◀</button>
+  <span class="label"><span class="key" id="vkey">1</span> <span id="vname">架构</span></span>
+  <button id="next">▶</button>
+</div>
+<script>
+const VIEWS = [
+  { key: 'arch', name: '架构' },
+  { key: 'logic', name: '逻辑' },
+  { key: 'ui', name: '界面与交互' },
+];
+let idx = 0;
+function render() {
+  VIEWS.forEach((v, i) => document.getElementById('v-' + v.key).classList.toggle('on', i === idx));
+  document.getElementById('vkey').textContent = String(idx + 1);
+  document.getElementById('vname').textContent = VIEWS[idx].name;
+  const url = new URL(location.href);
+  url.searchParams.set('view', VIEWS[idx].key);
+  history.replaceState(null, '', url);
+}
+document.getElementById('prev').onclick = () => { idx = (idx + VIEWS.length - 1) % VIEWS.length; render(); };
+document.getElementById('next').onclick = () => { idx = (idx + 1) % VIEWS.length; render(); };
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowLeft') { idx = (idx + VIEWS.length - 1) % VIEWS.length; render(); e.preventDefault(); }
+  else if (e.key === 'ArrowRight') { idx = (idx + 1) % VIEWS.length; render(); e.preventDefault(); }
+  else if (['1','2','3'].includes(e.key)) { idx = Number(e.key) - 1; render(); }
+});
+const p = new URLSearchParams(location.search).get('view');
+if (p) { const i = VIEWS.findIndex(v => v.key === p); if (i >= 0) idx = i; }
+render();
+</script>
+</body>
+</html>

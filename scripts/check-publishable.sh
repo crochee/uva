@@ -39,11 +39,11 @@ cd "$(dirname "$0")/.."
 # crate is only publishable once everything it depends on is on the
 # registry.
 #
-# One member is package-only: `elysper-app-server` carries `publish =
-# false` (its surface is a deployment contract, not a crates.io one),
-# so `cargo publish` refuses it. It is still packaged here — the gate
-# is about "installable", and a crate that cannot be packaged cannot
-# be installed either.
+# Two members are package-only: `elysper-app-server` and `elysper-tui`
+# carry `publish = false` (their surfaces are deployment contracts, not
+# crates.io ones), so `cargo publish` refuses them. They are still
+# packaged here — the gate is about "installable", and a crate that
+# cannot be packaged cannot be installed either.
 ORDER=(
   elysper-core elysper-kernel elysper-agents elysper-telemetry elysper-provider
   elysper-attachment
@@ -57,7 +57,7 @@ ORDER=(
   elysper-tool-scheduler elysper-tool-search elysper-tool-shell
   elysper-tool-task elysper-tool-todo elysper-tool-web elysper-tool-write
   elysper-wasm-runtime
-  elysper-workflow elysper elysper-app-server elysper-mcp-server
+  elysper-workflow elysper elysper-app-server elysper-gateway elysper-tui elysper-mcp-server
 )
 
 # The gate must cover every workspace member. A member missing from

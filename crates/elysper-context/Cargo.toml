@@ -13,6 +13,10 @@ keywords.workspace = true
 categories.workspace = true
 [dependencies]
 elysper-core.workspace = true
+# The `memory` plugin: memory mounts on the kernel spine like every
+# other capability. The direction stays context → kernel (the kernel
+# never depends on context; `check-kernel-deps` asserts that side).
+elysper-kernel.workspace = true
 # Context managers consume the provider wire types (`Message`,
 # `ContentPart`, `ModelConfig`) and the cheap token estimator, so
 # the dependency direction is context → provider (one-way).

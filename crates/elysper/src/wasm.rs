@@ -2,8 +2,8 @@
 //!
 //! Enabled by the `wasm` facade feature. The module carries the one
 //! plugin-kernel piece with a JIT: a WebAssembly **component** loaded
-//! into [`WasmRuntime`](crate::wasm::WasmRuntime), registered as a
-//! `Tool` by [`WasmToolPlugin`](crate::wasm::WasmToolPlugin), and
+//! into [`WasmRuntime`], registered as a
+//! `Tool` by [`WasmToolPlugin`], and
 //! confined by the capability sandbox. The default build never resolves
 //! `wasmtime`; `make check-wasm-deps` asserts it.
 

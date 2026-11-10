@@ -18,6 +18,14 @@
 //! enforce it — so the service carries the pair the shell brick
 //! already holds together.
 //!
+//! # Configuration, not a pre-built backend
+//!
+//! The deployment names a [`SandboxBackendKind`] and the
+//! [`ExecutionPolicy`] it wants ([`SandboxPluginConfig`]); [`Plugin::apply`](elysper_kernel::Plugin::apply)
+//! constructs the backend instead of receiving a live one from boot.
+//! The plugin therefore owns construction and probing, and a
+//! deployment profile is a plain value.
+//!
 //! # Fail-closed mounting
 //!
 //! A confined policy is only mountable when its backend reports a
@@ -27,14 +35,18 @@
 //! run commands unconfined. There is no unconfined fallback: the only
 //! policy that needs no backend is
 //! [`ExecutionPolicy::DangerFullAccess`], and a caller asks for it
-//! explicitly.
+//! explicitly. A confined policy paired with
+//! [`SandboxBackendKind::Noop`] is refused for the same reason: the
+//! no-op backend's probe says "available" only in the sense that it
+//! never runs anything, and mounting it for confinement would publish
+//! a service that can only fail later.
 //!
 //! # The service value's shape
 //!
 //! [`SandboxService`] is `Sized`, so `apply` calls
 //! `ctx.provide_arc(KEY_SANDBOX, Arc<SandboxService>)` and a consumer
 //! writes `ctx.require::<SandboxService>(KEY_SANDBOX)`, which yields an
-//! `Arc` pointing at the pair the plugin was built with.
+//! `Arc` pointing at the pair `apply` built from the configuration.
 //!
 //! # Lifecycle
 //!
@@ -43,8 +55,8 @@
 //! the service. A consumer that needed confinement then has no policy
 //! to run under; whether it refuses the call or falls back to a wider
 //! policy is the consumer's decision, never a silent downgrade this
-//! plugin performs. The backend and the policy arrive with the plugin
-//! value, so the manifest injects nothing.
+//! plugin performs. The backend kind and the policy arrive in the
+//! plugin's configuration, so the manifest injects nothing.
 
 use std::sync::Arc;
 
@@ -61,7 +73,13 @@ use elysper_tool::{KEY_TOOLS, Tool, ToolEntry, ToolRegistry};
 
 use crate::{
     ShellTool,
-    sandbox::{BackendAvailability, ExecutionPolicy, SandboxBackend},
+    sandbox::{
+        BackendAvailability,
+        BwrapBackend,
+        ExecutionPolicy,
+        NoopBackend,
+        SandboxBackend,
+    },
 };
 
 /// The service key the `sandbox` service is registered under.
@@ -114,6 +132,52 @@ impl SandboxService {
     }
 }
 
+/// Which confinement backend [`SandboxPlugin`] builds in `apply`.
+///
+/// The deployment names the kind; the plugin owns construction, so no
+/// boot code hands a live backend across the plugin boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxBackendKind {
+    /// The explicit no-confinement bypass ([`NoopBackend`]). Only
+    /// mountable under [`ExecutionPolicy::DangerFullAccess`].
+    Noop,
+    /// bubblewrap confinement ([`BwrapBackend`]).
+    Bwrap,
+}
+
+impl SandboxBackendKind {
+    // Build the backend this kind names. Called once per mount; a
+    // `Bwrap` backend's runner probe is cached on the built value.
+    fn build(self) -> Arc<dyn SandboxBackend> {
+        match self {
+            Self::Noop => Arc::new(NoopBackend::new()),
+            Self::Bwrap => Arc::new(BwrapBackend::new()),
+        }
+    }
+}
+
+/// Configuration for [`SandboxPlugin`].
+///
+/// The default is the historical boot pair: the no-op backend with
+/// [`ExecutionPolicy::DangerFullAccess`], which needs no runner and
+/// keeps today's behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SandboxPluginConfig {
+    /// The backend kind `apply` constructs.
+    pub backend: SandboxBackendKind,
+    /// The boundary a run executes under when nothing overrides it.
+    pub policy: ExecutionPolicy,
+}
+
+impl Default for SandboxPluginConfig {
+    fn default() -> Self {
+        Self {
+            backend: SandboxBackendKind::Noop,
+            policy: ExecutionPolicy::default(),
+        }
+    }
+}
+
 /// The `sandbox` kernel plugin: provides [`KEY_SANDBOX`].
 ///
 /// Mount it with [`elysper_kernel::mount_all`]; a confined policy
@@ -122,31 +186,22 @@ impl SandboxService {
 /// contract.
 pub struct SandboxPlugin {
     manifest: PluginManifest,
-    /// The confinement seam every consumer of the service receives.
-    pub backend: Arc<dyn SandboxBackend>,
-    /// The boundary a run executes under.
-    pub policy: ExecutionPolicy,
+    config: SandboxPluginConfig,
 }
 
 impl SandboxPlugin {
-    /// Publish `backend` / `policy` as the `sandbox` service.
+    #[must_use]
+    /// Build the plugin over `config`.
     ///
-    /// The host builds the backend (from its profile) and picks the
-    /// deployment default; the plugin only validates and publishes the
-    /// pair.
-    pub fn new(
-        backend: Arc<dyn SandboxBackend>,
-        policy: ExecutionPolicy,
-    ) -> Self {
+    /// The backend is constructed in [`apply`](KernelPlugin::apply)
+    /// from the configured kind; that is also where a confined policy
+    /// without an enforcing backend refuses the mount.
+    pub fn new(config: SandboxPluginConfig) -> Self {
         let mut manifest =
             PluginManifest::new(SANDBOX_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.provides.push(KEY_SANDBOX.to_string());
-        Self {
-            manifest,
-            backend,
-            policy,
-        }
+        Self { manifest, config }
     }
 }
 
@@ -156,20 +211,44 @@ impl KernelPlugin for SandboxPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        let service =
-            SandboxService::new(Arc::clone(&self.backend), self.policy);
+        let policy = self.config.policy;
+        let service = SandboxService::new(self.config.backend.build(), policy);
+        // The no-op backend reports `Available` because it never runs
+        // anything; for a confined policy that verdict is not
+        // enforcement, so refuse before the availability gate.
+        if policy.is_confined()
+            && self.config.backend == SandboxBackendKind::Noop
+        {
+            return Err(refusal(
+                policy,
+                service.backend.name(),
+                "the no-op backend does not confine",
+            ));
+        }
         if !service.is_enforceable() {
-            return Err(PluginError::new(format!(
-                "execution policy \"{}\" needs a sandbox but backend \
-                 \"{}\" is unavailable ({}); refusing to publish \
-                 `{KEY_SANDBOX}` and run commands unconfined",
-                self.policy.as_str(),
-                self.backend.name(),
-                availability_detail(&self.backend.availability()),
-            )));
+            return Err(refusal(
+                policy,
+                service.backend.name(),
+                &availability_detail(&service.backend.availability()),
+            ));
         }
         Ok(vec![ctx.provide_arc(KEY_SANDBOX, Arc::new(service))?])
     }
+}
+
+// The one refusal shape: the policy that cannot be guarded, the
+// backend that failed to guard it, and why.
+fn refusal(
+    policy: ExecutionPolicy,
+    backend: &str,
+    detail: &str,
+) -> PluginError {
+    PluginError::new(format!(
+        "execution policy \"{}\" needs a sandbox but backend \
+         \"{backend}\" is unavailable ({detail}); refusing to publish \
+         `{KEY_SANDBOX}` and run commands unconfined",
+        policy.as_str(),
+    ))
 }
 
 /// The probe's own words, so the mount error names why confinement
@@ -227,7 +306,7 @@ impl KernelPlugin for ShellToolPlugin {
         let name = self.tool.name();
         let entry: Arc<dyn Tool> = self.tool.clone();
         let Some(token) =
-            tools.register_entry_with_token(ToolEntry::new(entry))
+            tools.register_core_entry_with_token(ToolEntry::new(entry))
         else {
             return Err(PluginError::new(format!(
                 "the `{KEY_TOOLS}` registry refused to register the \

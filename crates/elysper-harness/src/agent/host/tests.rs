@@ -203,13 +203,6 @@ fn before_tool_event() -> HookEvent {
     }
 }
 
-fn before_run_event() -> HookEvent {
-    HookEvent::BeforeRun {
-        agent_name: "default".to_string(),
-        run_idx: 0,
-    }
-}
-
 #[tokio::test]
 async fn block_wins_over_ask_and_later_gates_do_not_run() {
     let fixture = Fixture::new();
@@ -236,7 +229,9 @@ async fn block_wins_over_ask_and_later_gates_do_not_run() {
         calls: Arc::clone(&calls),
     }));
 
-    let arbitration = host.dispatch_gates(&before_tool_event(), &ctx).await;
+    let arbitration = crate::seams::Seams::new(host)
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
 
     // The block wins over the ask collected before it.
     assert_eq!(
@@ -262,12 +257,15 @@ async fn a_panicking_gate_is_a_block() {
         calls: Arc::new(AtomicUsize::new(0)),
     }));
 
-    let arbitration = host.dispatch_gates(&before_tool_event(), &ctx).await;
+    let seams = crate::seams::Seams::new(host);
+    let arbitration = seams
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
 
     // Fail closed: a gate that could not answer does not get to
     // approve the call.
     assert!(matches!(arbitration.decision, HookDecision::Block { .. }));
-    let diagnostics = host.diagnostics();
+    let diagnostics = seams.host().diagnostics();
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].kind, DiagnosticKind::GateFailed);
     assert_eq!(diagnostics[0].source, "broken");
@@ -284,10 +282,16 @@ async fn a_failing_gate_is_a_block() {
         calls: Arc::new(AtomicUsize::new(0)),
     }));
 
-    let arbitration = host.dispatch_gates(&before_tool_event(), &ctx).await;
+    let seams = crate::seams::Seams::new(host);
+    let arbitration = seams
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
 
     assert!(matches!(arbitration.decision, HookDecision::Block { .. }));
-    assert_eq!(host.diagnostics()[0].kind, DiagnosticKind::GateFailed);
+    assert_eq!(
+        seams.host().diagnostics()[0].kind,
+        DiagnosticKind::GateFailed
+    );
 }
 
 #[tokio::test]
@@ -305,8 +309,9 @@ async fn dropping_the_plugin_handle_unregisters_every_hook() {
     assert_eq!(host.registration_count(), 3);
 
     // The installed registrations run.
-    host.dispatch_hooks(&before_tool_event(), &ctx).await;
-    host.dispatch_gates(&before_tool_event(), &ctx).await;
+    crate::seams::Seams::new(host.clone())
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 
     drop(handle);
@@ -314,8 +319,9 @@ async fn dropping_the_plugin_handle_unregisters_every_hook() {
     assert_eq!(host.registration_count(), 0);
     // The withdrawn observer's effect stops: the counter does not
     // move after the uninstall.
-    host.dispatch_hooks(&before_tool_event(), &ctx).await;
-    host.dispatch_gates(&before_tool_event(), &ctx).await;
+    crate::seams::Seams::new(host)
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
@@ -334,10 +340,11 @@ async fn unsupported_decision_at_a_point_is_a_noop_with_a_diagnostic() {
     }));
 
     // `before_run` cannot block a tool call: there is no call yet.
-    let arbitration = host.dispatch_hooks(&before_run_event(), &ctx).await;
+    let seams = crate::seams::Seams::new(host);
+    let arbitration = seams.run_started(&ctx, "default", 0).await;
 
     assert_eq!(arbitration.decision, HookDecision::Allow);
-    let diagnostics = host.diagnostics();
+    let diagnostics = seams.host().diagnostics();
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].kind, DiagnosticKind::UnsupportedDecision);
     assert_eq!(diagnostics[0].source, "blocker");
@@ -356,16 +363,21 @@ async fn a_panicking_observer_is_disabled_with_a_diagnostic() {
         calls: Arc::clone(&calls),
     }));
 
-    let first = host.dispatch_hooks(&before_tool_event(), &ctx).await;
+    let first = crate::seams::Seams::new(host.clone())
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
     assert_eq!(first.decision, HookDecision::Allow);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // The second pass skips the disabled observer.
-    let second = host.dispatch_hooks(&before_tool_event(), &ctx).await;
+    let seams = crate::seams::Seams::new(host);
+    let second = seams
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
     assert_eq!(second.decision, HookDecision::Allow);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let diagnostics = host.diagnostics();
+    let diagnostics = seams.host().diagnostics();
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].kind, DiagnosticKind::Disabled);
 }
@@ -458,7 +470,9 @@ async fn the_request_transformers_chain() {
     let mut params = RequestParams::from_request(
         &elysper_provider::CompletionRequest::default(),
     );
-    host.apply_request_transformers(&mut params, &ctx).await;
+    crate::seams::Seams::new(host.clone())
+        .llm_request(&ctx, "p", &mut params)
+        .await;
 
     // The last transformer in the chain owns the value.
     assert_eq!(params.model, "second-model");
@@ -483,7 +497,9 @@ async fn a_panicking_transformer_is_disabled_and_the_chain_continues() {
     let mut params = RequestParams::from_request(
         &elysper_provider::CompletionRequest::default(),
     );
-    host.apply_request_transformers(&mut params, &ctx).await;
+    crate::seams::Seams::new(host.clone())
+        .llm_request(&ctx, "p", &mut params)
+        .await;
 
     // The broken transformer is skipped, the healthy one still ran.
     assert_eq!(params.model, "healthy-model");
@@ -733,7 +749,9 @@ async fn an_ask_is_collected_and_reported_together() {
         calls: Arc::new(AtomicUsize::new(0)),
     }));
 
-    let arbitration = host.dispatch_gates(&before_tool_event(), &ctx).await;
+    let arbitration = crate::seams::Seams::new(host)
+        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .await;
 
     assert_eq!(arbitration.decision, HookDecision::Allow);
     assert_eq!(

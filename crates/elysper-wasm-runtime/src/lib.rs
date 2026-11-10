@@ -64,7 +64,13 @@ pub use capabilities::{
     capability_for_import,
     host_supplies,
 };
-pub use component::{ToolSchema, WasmComponent, WasmRuntime, content_hash};
+pub use component::{
+    ToolSchema,
+    ToolSchemaOverride,
+    WasmComponent,
+    WasmRuntime,
+    content_hash,
+};
 pub use limits::{EPOCH_TICK, WasmLimits};
 pub use tool::{WasmSandbox, WasmToolPlugin};
 

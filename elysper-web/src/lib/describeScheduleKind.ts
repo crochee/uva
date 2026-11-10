@@ -1,4 +1,4 @@
-import type { Schedule } from '../api/types';
+import type { JobKind } from '../api/types';
 
 /**
  * Format a schedule kind for the card subtitle. Maps the
@@ -9,7 +9,7 @@ import type { Schedule } from '../api/types';
  * so `ScheduleCard.tsx` only exports components and HMR
  * (`react-refresh/only-export-components`) keeps working.
  */
-export function describeScheduleKind(schedule: Schedule): string {
+export function describeScheduleKind(schedule: { kind: JobKind }): string {
   switch (schedule.kind.kind) {
     case 'interval':
       return `interval · ${schedule.kind.interval_secs}s`;

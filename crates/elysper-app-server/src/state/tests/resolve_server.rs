@@ -2,7 +2,7 @@
 //! that made the `--config <path>` named file drive every
 //! config section.
 
-use crate::state::{load_default_max_iterations, load_default_strategy};
+use crate::state::{load_default_max_iterations, load_default_strategy_alias};
 
 /// RAII guard: clear `ELYSPER_CONFIG_CONTENT` on construction and
 /// restore the prior value on drop. The cargo test harness runs
@@ -82,11 +82,11 @@ async fn resolve_server_config_reads_the_named_file() {
 
     let cfg = crate::config::resolve_server_config(dir.path(), Some(&named))
         .expect("the named file must be read");
-    let strategy = load_default_strategy(Some(&cfg), Some("reviewer"))
-        .expect("the named file's strategy must resolve");
+    let strategy_alias =
+        load_default_strategy_alias(Some(&cfg), Some("reviewer"))
+            .expect("the named file's strategy must carry its alias");
     assert_eq!(
-        strategy.name(),
-        "best-of-n",
+        strategy_alias, "best-of-n",
         "the named file must win over config.toml"
     );
     assert_eq!(
@@ -98,9 +98,8 @@ async fn resolve_server_config_reads_the_named_file() {
     let cfg = crate::config::resolve_server_config(dir.path(), None)
         .expect("config.toml");
     assert_eq!(
-        load_default_strategy(Some(&cfg), Some("reviewer"))
-            .expect("strategy resolves")
-            .name(),
+        load_default_strategy_alias(Some(&cfg), Some("reviewer"))
+            .expect("strategy resolves"),
         "react"
     );
 }

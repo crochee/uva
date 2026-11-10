@@ -17,6 +17,8 @@ import { ChatMessageList, type ChatMessageViewItem } from '../components/chat/Ch
 import { ApprovalCard, type ApprovalCardProps } from '../components/chat/ApprovalCard';
 import { SteerChips, type SteerRecord, type SteerState } from '../components/chat/SteerChip';
 import { SessionSidePanel } from '../components/chat/SessionSidePanel';
+import { TodoProgress } from '../components/chat/TodoProgress';
+import { PromptPrefix } from '../components/chat/PromptPrefix';
 import { deriveArtifacts, deriveSubagents, deriveTodos } from '../lib/session-panel-data';
 import {
   cancelSession as apiCancelSession,
@@ -56,6 +58,7 @@ import {
 } from '../lib/session-to-messages';
 import { useServerHealth, setServerHealth } from '../hooks/useServerHealth';
 import { useToast } from '../hooks/useToast';
+import { shortId } from '../lib/short-id';
 import { ApiError, api } from '../api/client';
 import './ChatPage.css';
 
@@ -768,30 +771,11 @@ export function ChatPage() {
   }>();
   const navigate = useNavigate();
 
-  // Ensure a session exists: if none in URL, mint one and redirect so
-  // the URL is shareable. `navigatedRef` is a one-shot guard against
-  // React 18 StrictMode's dev-only double invocation.
-  const navigatedRef = useRef(false);
-  useEffect(() => {
-    if (routeSessionId) {
-      navigatedRef.current = true;
-      return;
-    }
-    if (navigatedRef.current) return;
-    navigatedRef.current = true;
-    // The follow stream 404s for a session the server does not know,
-    // so the id is minted by `POST /chat/sessions` — never guessed on
-    // the client. Creation is the only path that opens a session.
-    (async () => {
-      try {
-        const id = await createChatSession();
-        navigate(`/chat/${id}`, { replace: true });
-      } catch (err) {
-        setFollowError(err instanceof Error ? err.message : String(err));
-      }
-    })();
-  }, [routeSessionId, navigate]);
-
+  // `/chat` is the new-conversation view: no session is minted until the
+  // user actually sends something. Opening the sidebar's 新会话 (or
+  // leaving settings with Esc) therefore does not leave an empty session
+  // behind; the id is created by `send()` below, and the follow stream
+  // only ever subscribes to a real one.
   const sessionId = routeSessionId;
 
   /**
@@ -806,7 +790,6 @@ export function ChatPage() {
   const [agentName, setAgentName] = useState<string | null>(routeAgentName ?? null);
   const [agentError, setAgentError] = useState<string | null>(null);
   useEffect(() => {
-    if (!sessionId) return;
     if (routeAgentName !== undefined) {
       setAgentName(routeAgentName);
       setAgentError(null);
@@ -819,9 +802,13 @@ export function ChatPage() {
         if (cancelled) return;
         setAgentError(null);
         setAgentName(resp.name);
-        navigate(`/chat/${sessionId}/agent/${encodeURIComponent(resp.name)}`, {
-          replace: true,
-        });
+        // The URL only carries the agent once there is a session to
+        // carry it; the new-conversation view keeps `/chat`.
+        if (sessionId) {
+          navigate(`/chat/${sessionId}/agent/${encodeURIComponent(resp.name)}`, {
+            replace: true,
+          });
+        }
       } catch (err) {
         if (cancelled) return;
         setAgentError(err instanceof Error ? err.message : 'No agents registered.');
@@ -1211,7 +1198,7 @@ export function ChatPage() {
    * and a settled run turns it into the next turn instead of losing it.
    */
   const send = async (delivery: 'queue' | 'steer') => {
-    if (!sessionId || !isServerAvailable || awaitingApproval || sending) return;
+    if (!isServerAvailable || awaitingApproval || sending) return;
     const text = input.trim();
     const hasAttachments = pendingAttachments.length > 0;
     if (delivery === 'steer') {
@@ -1230,13 +1217,23 @@ export function ChatPage() {
       dispatch({ kind: 'steer', id: steerId, text, state: 'accepted' });
     }
     try {
-      const response = await sendChatMessage(sessionId, {
+      // First message of a new conversation: mint the session now (the
+      // server owns the id) and send to it. Earlier visits created a
+      // session on mount, which left an empty session behind every time
+      // `新会话` was clicked.
+      const id = sessionId ?? (await createChatSession());
+      const response = await sendChatMessage(id, {
         text,
         attachments: delivery === 'queue' ? pendingAttachments : undefined,
         delivery,
         agentName: agentName ?? undefined,
         model: selectedModel ?? undefined,
       });
+      if (!sessionId) {
+        navigate(agentName ? `/chat/${id}/agent/${encodeURIComponent(agentName)}` : `/chat/${id}`, {
+          replace: true,
+        });
+      }
       setInput('');
       if (delivery === 'queue') {
         setPendingAttachments([]);
@@ -1578,30 +1575,39 @@ export function ChatPage() {
   return (
     <div className={`nt-chat-shell${panelOpen ? '' : ' nt-chat-shell--collapsed'}`}>
       <div className="nt-chat">
-        <div className="nt-chat__usage-chip" data-testid="usage-chip">
-          <span aria-hidden>🧮</span>
-          <span data-testid="session-state">
-            {awaitingApproval
-              ? '等待审批'
-              : isStreaming
-                ? '运行中'
-                : isConnected
-                  ? '空闲'
-                  : followError
-                    ? '连接中断'
-                    : '连接中…'}
-          </span>
-          {!panelOpen && (
-            <button
-              type="button"
-              className="nt-chat__panel-toggle"
-              onClick={() => setPanelOpen(true)}
-              data-testid="session-panel-open"
-              aria-label="展开进度与产物面板"
-            >
-              进度与产物
-            </button>
-          )}
+        <div className="nt-chat__titlebar" data-testid="chat-titlebar">
+          <div className="nt-chat__titlebar-left">
+            <span className="nt-chat__session-title" data-testid="chat-title">
+              {sessionId ? shortId(sessionId) : '新会话'}
+            </span>
+          </div>
+          <div className="nt-chat__titlebar-right">
+            <div className="nt-chat__usage-chip" data-testid="usage-chip">
+              <span aria-hidden>🧮</span>
+              <span className="nt-chat__status-pill" data-testid="session-state">
+                {awaitingApproval
+                  ? '等待审批'
+                  : isStreaming
+                    ? '运行中'
+                    : isConnected
+                      ? '空闲'
+                      : followError
+                        ? '连接中断'
+                        : '连接中…'}
+              </span>
+            </div>
+            {!panelOpen && (
+              <button
+                type="button"
+                className="nt-chat__panel-toggle"
+                onClick={() => setPanelOpen(true)}
+                data-testid="session-panel-open"
+                aria-label="展开进度与产物面板"
+              >
+                进度与产物
+              </button>
+            )}
+          </div>
         </div>
         {followError && (
           <div className="nt-chat__error-banner" role="alert" aria-live="polite">
@@ -1613,10 +1619,16 @@ export function ChatPage() {
         {viewMessages.length === 0 ? (
           <div className="nt-chat__messages">
             <Card title="System">
-              <p>
-                Welcome to <strong>Elysper</strong>. Type a message below to start a chat. Session:{' '}
-                <code>{sessionId?.slice(0, 8)}</code>
-              </p>
+              {sessionId ? (
+                <p>
+                  Welcome to <strong>Elysper</strong>. Type a message below to start a chat.
+                  Session: <code>{sessionId.slice(0, 8)}</code>
+                </p>
+              ) : (
+                <p>
+                  新会话。<strong>Elysper</strong> 会在你发出第一条消息时创建会话。
+                </p>
+              )}
             </Card>
           </div>
         ) : (
@@ -1725,6 +1737,9 @@ export function ChatPage() {
         )}
 
         <form onSubmit={handleSubmit} className="nt-chat__form">
+          {/* The plan the run is executing, above the input. Zero DOM
+              when the transcript carries no todo list (review focus 3). */}
+          <TodoProgress todos={panelTodos} />
           {agentError && (
             <div
               className="nt-chat__error-banner"
@@ -1798,22 +1813,25 @@ export function ChatPage() {
               ))}
             </ul>
           )}
-          <textarea
-            ref={inputRef}
-            className="nt-chat__input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={
-              awaitingApproval
-                ? '等待审批：先处理上面的未决调用'
-                : 'Type a message... (Enter to send, Shift+Enter for newline)'
-            }
-            rows={3}
-            disabled={!isServerAvailable || awaitingApproval || sending}
-            data-testid="chat-input"
-            aria-label="Message input"
-          />
+          <div className="nt-chat__input-row">
+            <PromptPrefix workspace="默认工作区" context={agentName ?? undefined} />
+            <textarea
+              ref={inputRef}
+              className="nt-chat__input"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                awaitingApproval
+                  ? '等待审批：先处理上面的未决调用'
+                  : 'Type a message... (Enter to send, Shift+Enter for newline)'
+              }
+              rows={3}
+              disabled={!isServerAvailable || awaitingApproval || sending}
+              data-testid="chat-input"
+              aria-label="Message input"
+            />
+          </div>
           <div className="nt-chat__composer-bar">
             <label className="nt-chat__attach-button">
               <input
@@ -1862,9 +1880,17 @@ export function ChatPage() {
                 data-testid="attachment-input"
                 aria-label="Attach files"
               />
-              <span aria-hidden>📎</span>
-              <span>Attach</span>
+              <span aria-hidden className="nt-chat__attach-glyph">
+                +
+              </span>
             </label>
+            <span
+              className="nt-chat__scope-label"
+              title="单工作区：服务器只有一个 workspace_root，暂不支持切换"
+              data-testid="workspace-scope"
+            >
+              <span aria-hidden>🕐</span> 默认工作区
+            </span>
             {models.length > 0 && (
               <div className="nt-chat__model-selector" data-testid="model-selector">
                 <label htmlFor="chat-model-select" className="nt-chat__model-label">
@@ -1969,7 +1995,10 @@ export function ChatPage() {
               data-testid="send-button"
               title={isStreaming ? '排队为下一个回合' : '发送'}
             >
-              {isStreaming ? 'Queue' : 'Send'}
+              <span aria-hidden className="nt-chat__send-glyph">
+                ↑
+              </span>
+              <span className="nt-chat__sr-only">{isStreaming ? 'Queue' : 'Send'}</span>
             </Button>
           </div>
           <div className="nt-chat__context-meter" data-testid="context-meter">

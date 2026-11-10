@@ -44,7 +44,7 @@ use elysper_tool_shell::{
     SandboxError,
 };
 
-use crate::{WasmError, WasmErrorKind, WasmRuntime};
+use crate::{ToolSchemaOverride, WasmError, WasmErrorKind, WasmRuntime};
 
 /// Label of the effect that withdraws the tool registration.
 const WASM_TOOL_EFFECT: &str = "wasm-tool";
@@ -58,6 +58,7 @@ pub struct WasmToolPlugin {
     manifest: PluginManifest,
     runtime: Arc<WasmRuntime>,
     wasm: Arc<[u8]>,
+    schema_override: Option<ToolSchemaOverride>,
 }
 
 impl std::fmt::Debug for WasmToolPlugin {
@@ -104,7 +105,22 @@ impl WasmToolPlugin {
             manifest,
             runtime,
             wasm: Arc::from(wasm.into().into_boxed_slice()),
+            schema_override: None,
         })
+    }
+
+    /// Replace schema fields `describe()` returned, at mount.
+    ///
+    /// A host that exposes the component under another name or wants
+    /// the model to see a narrower parameter schema uses this instead
+    /// of recompiling the guest.
+    #[must_use]
+    pub fn with_schema_override(
+        mut self,
+        overrides: ToolSchemaOverride,
+    ) -> Self {
+        self.schema_override = Some(overrides);
+        self
     }
 }
 
@@ -115,7 +131,7 @@ impl KernelPlugin for WasmToolPlugin {
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
         let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
-        let component = self
+        let mut component = self
             .runtime
             .mount(&self.wasm, &self.manifest.capabilities)
             .map_err(|error| {
@@ -125,6 +141,15 @@ impl KernelPlugin for WasmToolPlugin {
                     error.code()
                 ))
             })?;
+        if let Some(overrides) = &self.schema_override {
+            component.apply_schema_override(overrides).map_err(|error| {
+                PluginError::new(format!(
+                    "plugin `{}` rejected its tool schema override ({}): {error}",
+                    self.manifest.id,
+                    error.code()
+                ))
+            })?;
+        }
         let name = component.name().to_string();
         let Some(token) = tools
             .register_entry_with_token(ToolEntry::new(Arc::new(component)))

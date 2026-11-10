@@ -18,7 +18,7 @@ use elysper_provider::types::{
     ImageContent,
     TextContent,
 };
-use elysper_tool::{ToolEntry, ToolExposure, ToolRegistry};
+use elysper_tool::{ToolAnnotations, ToolEntry, ToolExposure, ToolRegistry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -40,6 +40,9 @@ pub struct McpToolSpec {
     /// JSON Schema for `arguments`.
     #[serde(default = "empty_object_schema", rename = "inputSchema")]
     pub input_schema: Value,
+    /// MCP's advisory annotations, when the server declares them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
 }
 
 fn empty_object_schema() -> Value {

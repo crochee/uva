@@ -49,6 +49,7 @@ async fn boot_registers_self_management_tools() {
         "tasks",
         "models",
         "attachments",
+        "profile",
     ] {
         let name = format!("{}{domain}", elysper::tool::MCP_SELF_TOOL_PREFIX);
         assert!(
@@ -64,6 +65,18 @@ async fn boot_registers_self_management_tools() {
     assert!(
         deferred,
         "self-management tools must be Deferred like every mcp__* tool"
+    );
+    let profile = registry
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.name == "mcp__self__profile")
+        .expect("profile tool must be registered");
+    assert_eq!(
+        profile
+            .annotations
+            .and_then(|annotations| annotations.destructive_hint),
+        Some(true),
+        "the profile tool's writes are held by the approval stance"
     );
 
     // End to end through the whole client stack: the loopback
@@ -102,4 +115,53 @@ async fn boot_registers_self_management_tools() {
         !text.contains("skills task failed"),
         "the blocking-pool read must complete: {text}"
     );
+}
+
+/// The `profile` tool reads the same row model the JSON-RPC surface
+/// does, and its write action lands on the shared transaction.
+#[tokio::test]
+async fn the_profile_tool_reads_rows_and_writes_through_the_transaction() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let session_manager = SessionRegistry::new(dir.path().join("sessions"));
+    let mut state =
+        AppState::for_test(session_manager, dir.path().to_path_buf()).await;
+    state.profile_store = Some(crate::profile::ProfileStore {
+        bundle: None,
+        doc: dir.path().join("profile.toml"),
+        home: None,
+        overlay: None,
+    });
+    let state = Arc::new(state);
+    self_mcp::register_self_mcp(&state).await;
+
+    let entry = state
+        .tool_registry
+        .as_ref()
+        .get("mcp__self__profile")
+        .expect("profile tool must be registered");
+    let tool = entry.tool_instance();
+    let listed: elysper::tool::ToolOutput = tool
+        .call(
+            serde_json::json!({"action": "list"}),
+            &elysper::tool::Context::default(),
+        )
+        .await;
+    assert!(
+        format!("{listed:?}").contains("skills"),
+        "the list action reads the profile rows: {listed:?}"
+    );
+
+    let written: elysper::tool::ToolOutput = tool
+        .call(
+            serde_json::json!({
+                "action": "set",
+                "id": "skills",
+                "config": {"marker": true},
+            }),
+            &elysper::tool::Context::default(),
+        )
+        .await;
+    let text = format!("{written:?}");
+    assert!(text.contains("applied"), "{text}");
+    assert!(dir.path().join("profile.toml").exists());
 }

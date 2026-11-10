@@ -45,13 +45,30 @@ use std::{
 use elysper::core::SharedClock;
 use serde_json::Value;
 
+mod enabled;
+#[cfg(test)]
+mod enabled_tests;
 mod merge;
 mod model;
+mod store;
+#[cfg(test)]
+mod store_tests;
 mod watch;
 
+pub(crate) use enabled::KernelChecks;
+pub use enabled::{
+    CheckAnswer,
+    CheckSource,
+    EffectiveAssembly,
+    SkippedRow,
+    effective,
+    partition_waves,
+};
 pub use merge::{HOME_PATCH_ENV, discover_home_patch, resolve, resolve_files};
 pub use model::{
     Capability,
+    EnableCheck,
+    Enabled,
     Entry,
     EntryPatch,
     Patch,
@@ -63,6 +80,15 @@ pub use model::{
     ProfileError,
     ProfileSource,
     RuntimeKind,
+};
+pub use store::{
+    CapabilityAction,
+    CapabilityDomain,
+    ChangeOutcome,
+    ChangeState,
+    ProfileAction,
+    ProfileStore,
+    RowEdit,
 };
 pub use watch::{ProfileDiff, ProfileWatcher, diff_profiles};
 
@@ -77,6 +103,9 @@ pub struct BootContext {
     workspace_root: PathBuf,
     host: Option<Arc<dyn Any + Send + Sync>>,
     clock: SharedClock,
+    blocking: Option<Arc<dyn elysper::core::blocking::Blocking>>,
+    compaction: Option<elysper::session::CompactionPluginConfig>,
+    sessions_dir: Option<PathBuf>,
 }
 
 impl BootContext {
@@ -88,6 +117,9 @@ impl BootContext {
             workspace_root: workspace_root.into(),
             host: None,
             clock: SharedClock::system(),
+            blocking: None,
+            compaction: None,
+            sessions_dir: None,
         }
     }
 
@@ -108,6 +140,59 @@ impl BootContext {
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
         self.clock = clock;
         self
+    }
+
+    /// Attach the deployment's blocking-pool seam, so a plugin that
+    /// appends to disk hands the work to the runtime instead of a
+    /// fresh OS thread.
+    #[must_use]
+    pub fn with_blocking(
+        mut self,
+        blocking: Option<Arc<dyn elysper::core::blocking::Blocking>>,
+    ) -> Self {
+        self.blocking = blocking;
+        self
+    }
+
+    /// Attach the deployment's compaction policy (the model and
+    /// settings the `context-compactor` row builds its engine from).
+    #[must_use]
+    pub fn with_compaction(
+        mut self,
+        compaction: Option<elysper::session::CompactionPluginConfig>,
+    ) -> Self {
+        self.compaction = compaction;
+        self
+    }
+
+    /// The blocking-pool seam, when the deployment attaches one.
+    #[must_use]
+    pub fn blocking(
+        &self,
+    ) -> Option<Arc<dyn elysper::core::blocking::Blocking>> {
+        self.blocking.clone()
+    }
+
+    /// The compaction policy, when the profile supplies one.
+    #[must_use]
+    pub fn compaction(
+        &self,
+    ) -> Option<&elysper::session::CompactionPluginConfig> {
+        self.compaction.as_ref()
+    }
+
+    /// Attach the session corpus root, when it differs from
+    /// `<workspace_root>/sessions`.
+    #[must_use]
+    pub fn with_sessions_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.sessions_dir = dir;
+        self
+    }
+
+    /// The session corpus root override, if the deployment set one.
+    #[must_use]
+    pub fn sessions_dir(&self) -> Option<&Path> {
+        self.sessions_dir.as_deref()
     }
 
     /// The workspace the runtime owns.
@@ -162,7 +247,13 @@ pub trait PluginFactory: Send + Sync {
     /// The manifest of the plugin this factory builds.
     fn manifest(&self) -> PluginManifest;
 
-    /// Construct the plugin for `config`.
+    /// Construct the plugin for `config` under the row's declared
+    /// `capabilities`.
+    ///
+    /// The capabilities are the profile row's grants, already parsed
+    /// into kernel capability names; a factory whose plugin confines
+    /// itself by them (the Wasm loader) copies them into the plugin's
+    /// manifest.
     ///
     /// # Errors
     ///
@@ -172,6 +263,7 @@ pub trait PluginFactory: Send + Sync {
     fn build(
         &self,
         config: &Value,
+        capabilities: &[Capability],
         boot: &BootContext,
     ) -> Result<Arc<dyn Plugin>, PluginError>;
 
@@ -254,12 +346,12 @@ fn build_one(
             }
         })?;
     }
-    factory.build(&entry.config, boot).map_err(|error| {
-        ProfileError::BuildFailed {
+    factory
+        .build(&entry.config, &entry.capabilities, boot)
+        .map_err(|error| ProfileError::BuildFailed {
             id: entry.id.clone(),
             message: error.to_string(),
-        }
-    })
+        })
 }
 
 /// Validate `config` against the supported subset of JSON Schema.
@@ -486,6 +578,16 @@ fn dump_entries(
         begin_field(out, &field_pad, &mut first);
         out.push_str("\"config\": ");
         write_json(out, &entry.config, indent + 4);
+        if entry.enabled != crate::profile::Enabled::On {
+            begin_field(out, &field_pad, &mut first);
+            out.push_str("\"enabled\": ");
+            write_json(
+                out,
+                &serde_json::to_value(&entry.enabled)
+                    .unwrap_or(Value::Bool(true)),
+                indent + 4,
+            );
+        }
         if let Some(manifest) = &services {
             let provides = manifest
                 .as_ref()

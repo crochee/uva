@@ -1,11 +1,14 @@
 //! Tests for the optional integrations the boot wires —
 //! MCP server registration (R21/R30).
 
+use std::sync::Arc;
+
 use elysper::core::Clock;
 
 use crate::state::{
     plugin_tool_registry,
     register_configured_mcp_servers,
+    seeded_tool_registry,
     tests::support::ScopedHome,
 };
 
@@ -47,8 +50,10 @@ sleep 5
         }),
     );
 
-    let registry = plugin_tool_registry();
-    let (_supervisor, clients, health) = register_configured_mcp_servers(
+    let registry = seeded_tool_registry();
+    let supervisor = Arc::new(elysper::mcp::McpSupervisor::new());
+    let (clients, health) = register_configured_mcp_servers(
+        supervisor,
         &registry,
         elysper::core::SharedClock::system().now(),
         dir.path(),
@@ -85,7 +90,9 @@ sleep 5
         }),
     );
     let registry2 = plugin_tool_registry();
-    let (_supervisor, none, health) = register_configured_mcp_servers(
+    let supervisor = Arc::new(elysper::mcp::McpSupervisor::new());
+    let (none, health) = register_configured_mcp_servers(
+        supervisor,
         &registry2,
         elysper::core::SharedClock::system().now(),
         dir.path(),
@@ -112,8 +119,10 @@ async fn boot_survives_a_broken_mcp_server() {
         }),
     );
 
-    let registry = plugin_tool_registry();
-    let (_supervisor, clients, health) = register_configured_mcp_servers(
+    let registry = seeded_tool_registry();
+    let supervisor = Arc::new(elysper::mcp::McpSupervisor::new());
+    let (clients, health) = register_configured_mcp_servers(
+        supervisor,
         &registry,
         elysper::core::SharedClock::system().now(),
         dir.path(),

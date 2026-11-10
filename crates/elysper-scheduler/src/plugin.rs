@@ -31,11 +31,13 @@
 //!
 //! The plugin returns its provide handle from
 //! [`apply`](elysper_kernel::Plugin::apply), so unloading it revokes
-//! the service. The store and scheduler arrive with the plugin value,
-//! so the manifest injects nothing. Unloading stops nothing at the
-//! store level: the rows stay on disk for the next mount.
+//! the service. [`apply`](elysper_kernel::Plugin::apply) builds the
+//! store and its scheduler from
+//! [`SchedulerPluginConfig::schedules_dir`], so the manifest injects
+//! nothing and the host only names the root. Unloading stops nothing at
+//! the store level: the rows stay on disk for the next mount.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use elysper_kernel::{
@@ -75,8 +77,10 @@ pub struct SchedulerService {
 impl SchedulerService {
     /// Pair `store` with a dispatcher over the same store.
     ///
-    /// The host builds the store over its data root and passes the same
-    /// `Arc` to every consumer before mounting this service.
+    /// [`SchedulerPlugin::apply`](elysper_kernel::Plugin::apply) builds
+    /// the pair from [`SchedulerPluginConfig`]; a consumer resolves the
+    /// service and reaches this store through [`Self::store`], never by
+    /// constructing a second store over the same root.
     #[must_use]
     pub fn new(store: Arc<ScheduleStore>) -> Self {
         let scheduler = Scheduler::new(Arc::clone(&store));
@@ -110,6 +114,19 @@ impl SchedulerService {
     }
 }
 
+/// Configuration for the `scheduler` plugin.
+///
+/// The plugin builds the [`ScheduleStore`] and its [`Scheduler`] over
+/// this root inside [`apply`](elysper_kernel::Plugin::apply), so the
+/// host says where schedules live and nothing more.
+#[derive(Clone, Debug)]
+pub struct SchedulerPluginConfig {
+    /// Root the [`ScheduleStore`] is built over. The store creates the
+    /// directory on its first mutation and appends its own segment for
+    /// the job files.
+    pub schedules_dir: PathBuf,
+}
+
 /// The `scheduler` kernel plugin: provides [`KEY_SCHEDULER`].
 ///
 /// Mount it with [`elysper_kernel::mount_all`]. See the [module
@@ -117,21 +134,19 @@ impl SchedulerService {
 /// contract.
 pub struct SchedulerPlugin {
     manifest: PluginManifest,
-    /// The store/scheduler pair the service hands out.
-    pub service: Arc<SchedulerService>,
+    config: SchedulerPluginConfig,
 }
 
 impl SchedulerPlugin {
-    /// Publish `service` as the `scheduler` service.
-    ///
-    /// The host builds the pair and keeps its own handle for the tick
-    /// loop; the plugin only publishes it.
-    pub fn new(service: Arc<SchedulerService>) -> Self {
+    #[must_use]
+    /// Build the plugin over `config`; the store and dispatcher are
+    /// constructed in `apply`.
+    pub fn new(config: SchedulerPluginConfig) -> Self {
         let mut manifest =
             PluginManifest::new(SCHEDULER_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.provides.push(KEY_SCHEDULER.to_string());
-        Self { manifest, service }
+        Self { manifest, config }
     }
 }
 
@@ -141,8 +156,9 @@ impl KernelPlugin for SchedulerPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        Ok(vec![
-            ctx.provide_arc(KEY_SCHEDULER, Arc::clone(&self.service))?,
-        ])
+        let store =
+            Arc::new(ScheduleStore::new(self.config.schedules_dir.clone()));
+        let service = Arc::new(SchedulerService::new(store));
+        Ok(vec![ctx.provide_arc(KEY_SCHEDULER, service)?])
     }
 }

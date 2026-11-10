@@ -270,5 +270,21 @@ pub fn register_search_tool(
     )
 }
 
+/// Register the `search` tool and return the withdrawal token.
+///
+/// The plugin-shaped registration: the caller keeps the token and
+/// unregisters with it when its effect revokes, so the tool's
+/// lifetime is the row's. `None` means a `Core`-provenance tool
+/// already owns the name.
+pub fn register_search_tool_with_token(
+    tool_registry: &elysper_tool::ToolRegistry,
+    search_registry: Arc<Registry>,
+) -> Option<elysper_tool::RegistrationToken> {
+    tool_registry.register_entry_with_token(
+        ToolEntry::new(Arc::new(SearchTool::new(search_registry)))
+            .with_exposure(ToolExposure::Deferred),
+    )
+}
+
 #[cfg(test)]
 mod tests;

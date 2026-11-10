@@ -1,10 +1,10 @@
 //! The `mcp` service as a native kernel plugin.
 //!
-//! The plugin publishes the supervisor and nothing else. The remote
-//! tools belong to the supervisor's per-server generations, and the
-//! app-server boot loop owns the tick that drives registration and
-//! reconnect: these tests drive the same `tick` by hand, through the
-//! supervisor the service hands out.
+//! The plugin constructs the supervisor and publishes it, and nothing
+//! else. The remote tools belong to the supervisor's per-server
+//! generations, and the app-server boot loop owns the tick that drives
+//! registration and reconnect: these tests drive the same `tick` by
+//! hand, through the supervisor the service hands out.
 //!
 //! The unload boundary is the service withdrawal. Dropping the mount
 //! withdraws `mcp`; it does not walk the supervisor's generations,
@@ -36,10 +36,9 @@ use elysper_tool::{
 };
 
 #[tokio::test]
-async fn provides_the_supervisor_and_unload_removes_it() {
+async fn provides_a_working_supervisor_and_unload_removes_it() {
     let ctx = Context::new();
-    let supervisor = Arc::new(McpSupervisor::new());
-    let plugin = McpPlugin::new(Arc::clone(&supervisor));
+    let plugin = McpPlugin::new();
 
     let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
         .expect("mount `mcp`");
@@ -49,12 +48,12 @@ async fn provides_the_supervisor_and_unload_removes_it() {
         .require::<McpSupervisor>(KEY_MCP)
         .expect("`mcp` resolves");
     assert!(
-        Arc::ptr_eq(&service, &supervisor),
-        "the service must be the supervisor the plugin was built with"
+        service.health().await.is_empty(),
+        "the service answers: a fresh supervisor supervises no servers"
     );
     assert!(
-        service.health().await.is_empty(),
-        "a fresh supervisor supervises no servers"
+        service.healthy_clients().await.is_empty(),
+        "the service answers: no server has a live client yet"
     );
 
     drop(mounted);
@@ -67,25 +66,21 @@ async fn provides_the_supervisor_and_unload_removes_it() {
 #[tokio::test]
 async fn tick_registers_remote_tools_through_the_service() {
     let ctx = Context::new();
-    let supervisor = Arc::new(McpSupervisor::new());
     let registry = Arc::new(ToolRegistry::new());
     let wire = Arc::new(InMemoryTransport::new().with_echo_server());
-    supervisor
+
+    let mounted =
+        mount_all(&ctx, &[Arc::new(McpPlugin::new()) as Arc<dyn KernelPlugin>])
+            .expect("mount `mcp`");
+    let service = ctx
+        .require::<McpSupervisor>(KEY_MCP)
+        .expect("`mcp` resolves");
+    service
         .supervise(
             "srv",
             Arc::new(InMemoryTransportFactory::new(Arc::clone(&wire))) as _,
         )
         .await;
-
-    let mounted = mount_all(
-        &ctx,
-        &[Arc::new(McpPlugin::new(Arc::clone(&supervisor)))
-            as Arc<dyn KernelPlugin>],
-    )
-    .expect("mount `mcp`");
-    let service = ctx
-        .require::<McpSupervisor>(KEY_MCP)
-        .expect("`mcp` resolves");
 
     let tick = service.tick(&registry, Utc::now()).await;
     assert_eq!(tick.health.len(), 1);
@@ -113,17 +108,13 @@ async fn tick_registers_remote_tools_through_the_service() {
 #[tokio::test]
 async fn unmounted_mcp_leaves_the_rest_of_the_system_intact() {
     let ctx = Context::new();
-    let tools = Arc::new(ToolRegistry::new());
-    let supervisor = Arc::new(McpSupervisor::new());
-    let wire = Arc::new(InMemoryTransport::new().with_echo_server());
-    supervisor
-        .supervise("srv", Arc::new(InMemoryTransportFactory::new(wire)) as _)
-        .await;
 
     let mounted = mount_all(
         &ctx,
-        &[Arc::new(ToolRegistryPlugin::new(Arc::clone(&tools)))
-            as Arc<dyn KernelPlugin>],
+        &[
+            Arc::new(ToolRegistryPlugin::new(Arc::new(ToolRegistry::new())))
+                as Arc<dyn KernelPlugin>,
+        ],
     )
     .expect("mount `tool-registry`");
 
@@ -131,13 +122,12 @@ async fn unmounted_mcp_leaves_the_rest_of_the_system_intact() {
         ctx.require::<McpSupervisor>(KEY_MCP).is_err(),
         "without the `mcp` plugin the service does not exist"
     );
-    let service = ctx
+    let tools = ctx
         .require::<ToolRegistry>(KEY_TOOLS)
         .expect("the rest of the system runs without the optional capability");
-    assert!(Arc::ptr_eq(&service, &tools));
     assert!(
         !tools.contains("mcp__srv__echo"),
-        "nothing ticks, so no remote tool is registered"
+        "the service answers and nothing ticks, so no remote tool is registered"
     );
 
     drop(mounted);
@@ -145,7 +135,7 @@ async fn unmounted_mcp_leaves_the_rest_of_the_system_intact() {
 
 #[test]
 fn manifest_matches_provided_key() {
-    let plugin = McpPlugin::new(Arc::new(McpSupervisor::new()));
+    let plugin = McpPlugin::new();
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "mcp");
@@ -155,7 +145,7 @@ fn manifest_matches_provided_key() {
     assert_eq!(KEY_MCP, "mcp");
     assert!(
         manifest.inject.is_empty(),
-        "the supervisor arrives with the plugin value; the plugin injects nothing"
+        "the supervisor is constructed in `apply`; the plugin injects nothing"
     );
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.abi.is_none());

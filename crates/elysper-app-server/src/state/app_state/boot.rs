@@ -17,9 +17,8 @@ use elysper::{
         SharedSessionSearch,
         manager::SessionRegistry,
     },
-    skill::{SkillRegistry, seed_default_skills},
+    skill::seed_default_skills,
     tool::ToolRegistry,
-    tool_task::TaskDelegator,
 };
 
 use super::{
@@ -33,19 +32,13 @@ use super::{
     usage::UsageMetrics,
 };
 use crate::{
-    composition::kernel::{
-        KernelHost,
-        mount_profile,
-        native_profile,
-        scheduler_service,
-    },
+    composition::kernel::{BootServices, mount_profile, native_profile},
     profile::Profile,
     state::boot::{
         apply_tools_config,
-        build_prompt_context,
         load_default_compaction,
         load_default_max_iterations,
-        load_default_strategy,
+        load_default_strategy_alias,
         load_default_tool_restriction,
         register_configured_mcp_servers,
         warn_unapplied_agent_keys,
@@ -53,10 +46,11 @@ use crate::{
 };
 
 /// Resolve the runtime [`WorkspaceConfig`] from the workspace's
-/// `<workspace>/.agents/config.toml` — the transitional fallback input
-/// for a deployment that has not moved its providers into a profile
-/// row yet (the `model-adapter` plugin's config is the authoritative
-/// source once it has one).
+/// `<workspace>/.agents/config.toml`.
+///
+/// The `model-adapter` row's config is authoritative: a profile that
+/// carries the row wins, and the boot materializes the row from this
+/// workspace configuration when the profile leaves it empty.
 fn load_workspace_config(
     workspace_root: &std::path::Path,
 ) -> Result<WorkspaceConfig, anyhow::Error> {
@@ -89,6 +83,7 @@ impl AppState {
             workspace_root,
             server_config,
             None,
+            None,
         )
         .await
     }
@@ -103,6 +98,7 @@ impl AppState {
         workspace_root: PathBuf,
         server_config: Option<crate::config::ServerConfig>,
         resolved_profile: Option<Profile>,
+        profile_store: Option<crate::profile::ProfileStore>,
     ) -> Result<Arc<Self>, String> {
         let workspace_config = load_workspace_config(&workspace_root)
             .unwrap_or_else(|e| {
@@ -144,46 +140,11 @@ impl AppState {
             JsonlSessionSearch::new(workspace_root.join("sessions"))
                 .with_blocking(crate::spawner::server_blocking()),
         );
-        let session_manager = Arc::new(
-            SessionRegistry::new(workspace_root.join("sessions"))
-                .with_blocking(crate::spawner::server_blocking()),
-        );
-        // The built-in tool bricks. The agent-facing `skill` tool is
-        // **not** registered here: the `skills` kernel plugin owns
-        // that registration (token-scoped), so the tool and the
-        // service are withdrawn together. Registering it twice would
-        // make the kernel refuse the plugin's own `apply` — by
-        // design.
-        let tool_registry_built = plugin_tool_registry();
-        // R21/R30: connect the configured MCP servers through the
-        // supervisor and publish their tools. A server that fails
-        // to start is logged (with its health state) and skipped—
-        // boot must never be blocked by an optional integration.
-        // The supervisor is **kept**: it owns the servers' child
-        // processes and reconnects them with bounded backoff. The
-        // previous boot dropped it on the floor, so a server that
-        // died after the first tick never came back.
-        let (mcp_supervisor, mcp_clients, mcp_health) =
-            register_configured_mcp_servers(
-                &tool_registry_built,
-                clock.now(),
-                &workspace_root,
-            )
-            .await;
-        // Smaller per-request load: with cross-domain search wired
-        // below, MCP tools stop carrying their full JSON schemas on
-        // every completion request—they advertise name +
-        // description (`ToolExposure::Deferred`) and the schema
-        // promotes on the first call. Only `Direct` flips, so an
-        // operator's explicit `deferred` / `hidden` verdict stands.
-        for d in tool_registry_built.descriptors().iter().filter(|d| {
-            d.name.starts_with("mcp__")
-                && d.exposure == elysper::tool::ToolExposure::Direct
-        }) {
-            tool_registry_built
-                .set_exposure(&d.name, elysper::tool::ToolExposure::Deferred);
-        }
-        let tool_registry = Arc::new(tool_registry_built);
+        // The shared tool container: the `tool-registry` row
+        // publishes it; the bricks, the mounted plugins and the
+        // composition register into it.
+        let tool_registry = Arc::new(plugin_tool_registry());
+
         // Per-section config: auth, CORS, operations, default
         // agent name, max iterations, compaction, restriction,
         // strategy. The eight fields group by what the boot does
@@ -198,7 +159,6 @@ impl AppState {
             default_max_iterations,
             default_compaction,
             default_tool_restriction,
-            default_strategy,
         } = Self::load_per_section_config(&server_config);
 
         // Default system prompt. The ReAct loop builds its
@@ -264,186 +224,83 @@ impl AppState {
             &mut plugin_host,
         )
         .await;
-        // Multimodal attachment store (R11). Built before the kernel
-        // mount because the `attachments` plugin publishes exactly
-        // this store; the routes and the chat input gate read the
-        // service, not a second copy.
-        let attachments_dir = workspace_root.join(".attachments");
-        let attachment_store = Arc::new(
-            elysper::attachment::AttachmentStore::new_fs(&attachments_dir)
-                .unwrap_or_else(|e| {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to initialise attachments dir; using in-memory store"
-                    );
-                    elysper::attachment::AttachmentStore::default()
-                })
-                .with_clock(clock.clone()),
-        );
-
-        // Long-term memory: files under the workspace's nearest
-        // scopes (`.elysper/memory-local` writes, `.elysper/memory`
-        // as a checked-in overlay). A failed construction (path
-        // guards) degrades to the in-memory tier rather than
-        // blocking boot—same contract as every optional
-        // integration above.
-        let memory: Arc<dyn elysper::context::Memory> =
-            match elysper::context::FileMemory::new(
-                elysper::context::FileMemoryConfig::new(
-                    &workspace_root,
-                    "elysper",
-                )
-                .with_scopes(vec![
-                    elysper::context::MemoryScope::Local,
-                    elysper::context::MemoryScope::Project,
-                ]),
-            ) {
-                Ok(m) => Arc::new(m),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "failed to open file memory; using in-memory tier"
-                    );
-                    Arc::new(elysper::context::InMemoryMemory::new())
-                }
-            };
-
         // The peer registry exists before the mount: the `task`
         // delegator the `subagents` service publishes resolves names
         // through it, and the default member is registered into it
         // after the tool surface has settled.
         let agent_registry = Arc::new(AgentRegistry::new());
 
-        // The cross-domain search engine over six domains—the
-        // same registry serves the model-facing `search` tool
-        // (capability 1) and `GET /api/v1/search` (capability 2).
-        let search =
-            crate::search::SearchService::build(crate::search::SearchSources {
-                tool_registry: Arc::clone(&tool_registry),
-                agent_registry: Arc::clone(&agent_registry),
-                workspace_root: workspace_root.clone(),
-                memory: Arc::clone(&memory),
-                session_search: Arc::clone(&session_search),
-                clock: clock.clone(),
-            });
-        // Capability 1: the agent's discovery tool. Deferred
-        // exposure—the cold-start tool list carries name +
-        // description, and the real schema promotes on the first
-        // call. Registered before `[tools]` is applied so the
-        // surface section can name it.
-        if !elysper::tool_search::register_search_tool(
-            &tool_registry,
-            search.registry(),
-        ) {
-            tracing::warn!("failed to register the search tool: name shadowed");
-        }
-
-        // The four HTTP-backed management subsystems. Schedules,
-        // workflows and evals all persist under the workspace
-        // (schedules/ + workflows/ + evals/); boot loads them and
-        // every mutation writes through.
-        let schedules = SchedulesState::build(&workspace_root);
+        // Workflows persist under the workspace; schedules and evals
+        // are read back from the services their rows publish after
+        // the mount.
         let workflows = WorkflowsState::build(&workspace_root);
-        // One eval engine for the service and the route surface: the
-        // plugin publishes this runner, `EvalsState` drives it, so a
-        // suite report does not depend on which entry point asked.
-        let eval_runner = Arc::new(
-            elysper::eval::EvalRunner::new()
-                .metric(Box::new(elysper::eval::SyncMetricAdapter(
-                    elysper::eval::KeywordMetric,
-                )))
-                .with_clock(clock.clone()),
-        );
-        let evals = EvalsState::build_with_runner(
-            &workspace_root,
-            Arc::clone(&eval_runner),
-        );
 
         // The effective core assembly: the resolved profile when it
         // declares core rows, the built-in set otherwise — an empty
         // resolution (no profile document, no legacy rows) mounts the
         // native set, the same shape a zero-config deployment has
         // always booted with.
-        let effective_profile = match &resolved_profile {
+        let mut effective_profile = match &resolved_profile {
             Some(profile) if !profile.core.is_empty() => profile.clone(),
             _ => native_profile(),
         };
 
-        // The model-adapter inputs, built once here for the pre-mount
-        // consumers: the compactor samples a provider before any
-        // plugin is mounted, and the host's fallback catalogue is
-        // this one. The mounted `llm` / `llm.default` services are
-        // the authoritative values — AppState reads them back from
-        // the kernel below — and the factory rebuilds from the same
-        // row config, so both see the same deployment.
+        // The model-adapter config, resolved once: the mount
+        // materializes it into the row when the profile leaves the
+        // row's config empty, so the plugin builds the deployment's
+        // catalogue itself.
         let model_adapter_config = model_adapter_row_config(
             &effective_profile,
             workspace_config.clone(),
         );
-        let provider_catalogue = Arc::new(super::catalogue_for_deployment(
-            &model_adapter_config.workspace,
-        ));
         let default_model =
             model_adapter_config.workspace.default_model.clone();
-        let default_provider: Arc<dyn ModelProvider> =
-            provider_catalogue.default_handle().map_err(|e| {
-                tracing::error!(error = %e, "Failed to create default provider");
+        // The factory builds from the row config only; an empty row
+        // means "the deployment's workspace configuration".
+        let model_adapter_config = serde_json::to_value(&model_adapter_config)
+            .map_err(|error| {
                 format!(
-                    "No LLM provider available: {e}. Configure.agents/config.toml or set \
-                     OPENAI_API_KEY/ANTHROPIC_API_KEY environment variables."
+                    "the model-adapter row config does not serialize: {error}"
                 )
             })?;
-        let default_provider = elysper::runtime::wrap_tier1_providers(
-            default_provider,
-            &model_adapter_config,
-            clock.clone(),
-            Arc::new(elysper::harness_tokio::TokioSleeper),
+        materialize_row_config(
+            &mut effective_profile,
+            "model-adapter",
+            model_adapter_config,
         );
 
-        // The capability services the native plugins publish. Each is
-        // built from the object the rest of the server already owns.
-        let skill_registry =
-            Arc::new(SkillRegistry::discover_files(&workspace_root));
-        let sandbox_backend: Arc<dyn elysper::tool_shell::SandboxBackend> =
-            Arc::new(elysper::tool_shell::NoopBackend::new());
-        let sandbox_policy = elysper::tool_shell::ExecutionPolicy::default();
-        let mut compactor = elysper::session::SummaryCompactor::new(
-            Arc::clone(&default_provider),
-            default_model.clone(),
+        // The `agent-loop` row's config, materialized from the
+        // deployment's agent table: the strategy **alias**, the
+        // allow/deny tool lists, and the compaction policy. The row
+        // builds its own loop from these, so the boot hands the row a
+        // config instead of a pre-built strategy object.
+        let agent_loop_config = agent_loop_row_config(
+            server_config.as_ref(),
+            default_agent_name_value.as_deref(),
+            default_tool_restriction.as_deref(),
+            default_compaction,
         );
-        if let Some(settings) = default_compaction {
-            compactor = compactor.with_settings(settings);
-        }
-        let compactor: Arc<dyn elysper::session::Compactor> =
-            Arc::new(compactor);
-        let scheduler_service = scheduler_service(Arc::clone(&schedules.store));
-        let delegator =
-            Arc::new(TaskDelegator::new(Arc::clone(&agent_registry)));
-
-        let ui_schemas =
-            crate::ui::schema::load_ui_manifest(&effective_profile.ui)
-                .map_err(|error| error.to_string())?;
+        materialize_row_config(
+            &mut effective_profile,
+            "agent-loop",
+            agent_loop_config,
+        );
 
         // Mount the selected plugin set. `build_plugins` resolves every
-        // row through the host-bound factory directory and `mount_all`
+        // row through the factory directory and `mount_all`
         // validates, orders, and mounts the group; the handles live on
         // `AppState` for the process lifetime (and for the HMR remount
         // loop).
-        let kernel_host = Arc::new(KernelHost {
-            workspace_root: workspace_root.clone(),
-            provider_catalogue: Arc::clone(&provider_catalogue),
+        //
+        // What the boot still owns are the **containers**: the one
+        // tool registry, the peer-agent registry, the harness host,
+        // and the `[plugins]` composition's registrations. Every
+        // capability — the delegation backend, the approval stance,
+        // the session index, the loop's defaults — is built by the
+        // row that publishes it.
+        let boot_services = Arc::new(BootServices {
             tool_registry: Arc::clone(&tool_registry),
-            session_registry: Arc::clone(&session_manager),
-            sandbox_backend,
-            sandbox_policy,
-            delegator,
-            compactor,
-            approval_policy: elysper::harness::ApprovalPolicy::default(),
-            mcp_supervisor: Arc::clone(&mcp_supervisor),
-            skill_registry,
-            eval_runner,
-            scheduler_service,
-            attachment_store: Arc::clone(&attachment_store),
+            agent_registry: Arc::clone(&agent_registry),
             plugin_host: plugin_host.clone(),
             // The kernel entry, not the composition, owns the
             // installed plugins' lifetime from here: mounting the
@@ -452,31 +309,41 @@ impl AppState {
             process_registrations: Mutex::new(Some(
                 plugins.take_registrations(),
             )),
-            // Transitional agent-loop inputs (die with the host):
-            // the values the four assembly sites used to thread.
-            default_strategy: default_strategy.clone(),
-            default_tool_restriction: default_tool_restriction.clone(),
-            compaction_boot: default_compaction
-                .filter(|settings| settings.enabled)
-                .filter(|settings| settings.validate().is_ok())
-                .map(|settings| elysper::runtime::CompactionBoot {
-                    settings,
-                    sleeper: crate::spawner::server_sleeper(),
-                    timeout: elysper::session::DEFAULT_SUMMARY_TIMEOUT,
-                }),
-            spawner: Some(crate::spawner::server_spawner()),
-            delegators: {
-                let delegator: Arc<dyn elysper::harness::DelegatingTool> =
-                    Arc::new(TaskDelegator::new(Arc::clone(&agent_registry)));
-                vec![delegator]
-            },
         });
         let (kernel, mounted) = mount_profile(
-            Arc::clone(&kernel_host),
+            Arc::clone(&boot_services),
             &effective_profile,
             clock.clone(),
+            crate::composition::kernel::BootExtras {
+                workspace_root: workspace_root.clone(),
+                blocking: Some(crate::spawner::server_blocking()),
+                compaction: Some(elysper::session::CompactionPluginConfig {
+                    model: default_model.clone(),
+                    settings: default_compaction.unwrap_or_default(),
+                }),
+                sessions_dir: None,
+            },
         )
         .map_err(|error| error.to_string())?;
+
+        // The effective assembly the mounted tree corresponds to: the
+        // enabled rows only. The boot passes the raw (materialized)
+        // profile to `mount_profile`, which filters and mounts it in two
+        // waves; recomputing the same filter here is idempotent and is
+        // what the HMR diff and the settings page diff against.
+        let assembly = {
+            let checks = crate::profile::KernelChecks(&kernel);
+            crate::profile::effective(&effective_profile, &checks).profile
+        };
+        // The UI segment is assembled from the effective rows, so a
+        // `ui-bundle` row switched off never reaches the loader.
+        let ui_tree = crate::ui::tree::load_ui_tree(&assembly.ui)
+            .map_err(|error| error.to_string())?;
+
+        // The cross-domain search service is the `search` profile
+        // row: its plugin builds the six-domain service from the
+        // injected `tools`/`memory` services and registers the
+        // model-facing `search` tool.
 
         // The `model-adapter` services are the authoritative provider
         // surface: `llm` carries the catalogue, `llm.default` the
@@ -500,6 +367,85 @@ impl AppState {
             })
             .map(|wrapped| Arc::clone(&*wrapped))?;
         let workspace_config = provider_catalogue.workspace().clone();
+        // The capability services the rows published. The boot only
+        // resolves them for the projection layer (`AppState` fields,
+        // routes) — construction happened inside each plugin's
+        // `apply`.
+        let tool_registry = kernel
+            .require::<elysper::tool::ToolRegistry>(elysper::tool::KEY_TOOLS)
+            .map_err(|error| {
+                format!("the tools service is unavailable after mount: {error}")
+            })?;
+        let session_manager = kernel
+            .require::<SessionRegistry>(elysper::session::KEY_SESSIONS)
+            .map_err(|error| {
+                format!(
+                    "the sessions service is unavailable after mount: {error}"
+                )
+            })?;
+        let attachment_store = kernel
+            .require::<elysper::attachment::AttachmentStore>(
+                elysper::attachment::KEY_ATTACHMENTS,
+            )
+            .map_err(|error| {
+                format!(
+                    "the attachments service is unavailable after mount: \
+                     {error}"
+                )
+            })?;
+        let eval_runner = kernel
+            .require::<elysper::eval::EvalRunner>(elysper::eval::KEY_EVAL)
+            .map_err(|error| {
+                format!("the eval service is unavailable after mount: {error}")
+            })?;
+        let scheduler_service = kernel
+            .require::<elysper::scheduler::SchedulerService>(
+                elysper::scheduler::KEY_SCHEDULER,
+            )
+            .map_err(|error| {
+                format!(
+                    "the scheduler service is unavailable after mount: \
+                     {error}"
+                )
+            })?;
+        let mcp_supervisor = kernel
+            .require::<elysper::mcp::McpSupervisor>(elysper::mcp::KEY_MCP)
+            .map_err(|error| {
+                format!("the mcp service is unavailable after mount: {error}")
+            })?;
+
+        // R21/R30: connect the configured MCP servers through the
+        // mounted supervisor; a server that fails to start is logged
+        // with its health state and skipped.
+        let (mcp_clients, mcp_health) = register_configured_mcp_servers(
+            Arc::clone(&mcp_supervisor),
+            tool_registry.as_ref(),
+            clock.now(),
+            &workspace_root,
+        )
+        .await;
+        // Smaller per-request load: MCP tools advertise name +
+        // description (`Deferred`) and promote their schema on the
+        // first call. Only `Direct` flips, so an operator's explicit
+        // verdict stands.
+        for d in tool_registry.descriptors().iter().filter(|d| {
+            d.name.starts_with("mcp__")
+                && d.exposure == elysper::tool::ToolExposure::Direct
+        }) {
+            tool_registry
+                .set_exposure(&d.name, elysper::tool::ToolExposure::Deferred);
+        }
+
+        // The route surfaces read the same store/engine the plugins
+        // published: one schedule store, one eval runner.
+        let schedules = SchedulesState::from_store(
+            Arc::clone(scheduler_service.store()),
+            clock.clone(),
+        );
+        let evals = EvalsState::build_with_runner(
+            &workspace_root,
+            Arc::clone(&eval_runner),
+        );
 
         // The loop is the server's only agent builder; a profile that
         // omits the row must fail here rather than run every session
@@ -553,11 +499,10 @@ impl AppState {
         .await;
 
         // Tool schemas travel on the completion request's `tools`
-        // channel, not in the prompt. The prompt context carries
-        // skills (read from the `skills` service) + peer agents.
-        let prompt_context = Arc::new(
-            build_prompt_context(&kernel, &agent_registry, "agent").await,
-        );
+        // channel, not in the prompt. The prompt manifest is a live
+        // service snapshot (`AppState::prompt_context`), rebuilt per
+        // session/agent build so a skills remount reaches the next
+        // build.
 
         // Sub-agent session router over the same registry + cache
         // the HTTP surface uses: delegated children get sessions
@@ -607,19 +552,19 @@ impl AppState {
             )),
             operations_config,
             system_prompt,
-            prompt_context,
             server_config,
             default_max_iterations,
             default_compaction,
-            default_strategy,
-            default_tool_restriction,
             tool_surface,
             tool_defs_cache: parking_lot::RwLock::new(None),
             kernel,
-            kernel_host,
-            mount: parking_lot::Mutex::new(vec![mounted]),
+            boot_services,
+            mount: parking_lot::Mutex::new(mounted.into_groups()),
             profile: parking_lot::RwLock::new(profile_snapshot),
-            ui_schemas: parking_lot::RwLock::new(ui_schemas),
+            assembly: parking_lot::RwLock::new(assembly),
+            profile_store,
+            profile_write: tokio::sync::Mutex::new(()),
+            ui_tree: parking_lot::RwLock::new(ui_tree),
             mcp,
             plugin_host,
             #[cfg(any(test, feature = "test-utils"))]
@@ -636,8 +581,6 @@ impl AppState {
             ),
             usage_metrics: Arc::new(UsageMetrics::default()),
             attachment_store,
-            memory,
-            search,
             schedules,
             workflows,
             workflow_host,
@@ -663,7 +606,7 @@ impl AppState {
         // them. Registered here — after the state exists (the
         // builder closes over it), before the scheduler starts (a
         // task's agent target must resolve by then).
-        super::super::boot::register_file_agents(&state);
+        super::super::boot::register_file_agents(&state).await;
         // `tasks/<name>/task.md` declarations sync into the store by
         // name; an active store entry with no declaration is
         // exported back to a file, so the store never holds state
@@ -685,8 +628,6 @@ struct PerSectionConfig {
     default_max_iterations: usize,
     default_compaction: Option<elysper::session::CompactionSettings>,
     default_tool_restriction: Option<Arc<elysper::tool::ToolRestriction>>,
-    default_strategy:
-        Option<Arc<dyn elysper::harness::agent::ReasoningStrategy>>,
 }
 
 impl AppState {
@@ -742,22 +683,12 @@ impl AppState {
             default_agent_name_value.as_deref(),
         );
 
-        // R50: resolve the configured reasoning loop from
-        // `agents.<default>.strategy`. An unknown name is
-        // logged and treated as unset (ReAct)—a typo in one
-        // agent's config must not stop the server from booting.
-        let default_strategy = load_default_strategy(
-            server_config.as_ref(),
-            default_agent_name_value.as_deref(),
-        );
-
         PerSectionConfig {
             operations_config,
             default_agent_name_value,
             default_max_iterations,
             default_compaction,
             default_tool_restriction,
-            default_strategy,
         }
     }
 
@@ -851,7 +782,7 @@ impl AppState {
 /// A malformed row config falls back like an absent one — the
 /// factory's build reports the parse failure when the profile
 /// mounts, which is the authoritative error surface.
-fn model_adapter_row_config(
+pub(crate) fn model_adapter_row_config(
     profile: &crate::profile::Profile,
     workspace: elysper::provider::config::WorkspaceConfig,
 ) -> elysper::runtime::ModelAdapterConfig {
@@ -878,5 +809,74 @@ fn model_adapter_row_config(
             workspace,
             ..Default::default()
         }
+    })
+}
+
+/// Materialize a row's config when the profile leaves it empty.
+///
+/// The **profile wins**: a row that already carries a config keeps it,
+/// so a deployment can pin a row's configuration without editing the
+/// server config. An empty row (`null` or `{}`) takes the boot's
+/// materialized value.
+pub(crate) fn materialize_row_config(
+    profile: &mut crate::profile::Profile,
+    id: &str,
+    config: serde_json::Value,
+) {
+    let Some(row) = profile.core.iter_mut().find(|entry| entry.id == id) else {
+        return;
+    };
+    let empty = match &row.config {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
+    };
+    if empty {
+        row.config = config;
+    }
+}
+
+/// The `agent-loop` assembly input: the deployment's agent table,
+/// materialized into the row's `config`.
+///
+/// The row owns its loop, so the boot hands the row the **values** the
+/// agent table carries, not pre-built objects: the strategy alias (the
+/// row resolves it), the allow/deny tool lists, and the compaction
+/// policy. An absent value is `null` — "the deployment configured
+/// nothing", which is not the same as an empty value.
+///
+/// The profile wins: the boot only fills a row whose config is empty.
+pub(crate) fn agent_loop_row_config(
+    server_config: Option<&crate::config::ServerConfig>,
+    default_agent_name: Option<&str>,
+    restriction: Option<&elysper::tool::ToolRestriction>,
+    compaction: Option<elysper::session::CompactionSettings>,
+) -> serde_json::Value {
+    let strategy =
+        load_default_strategy_alias(server_config, default_agent_name);
+    let tool_restriction = restriction.map(|restriction| {
+        serde_json::to_value(restriction).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "the agent-loop row's tool restriction does not \
+                 serialize; the row keeps no restriction"
+            );
+            serde_json::Value::Null
+        })
+    });
+    let compaction = compaction.map(|settings| {
+        serde_json::to_value(settings).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "the agent-loop row's compaction settings do not \
+                 serialize; the row keeps no compactor"
+            );
+            serde_json::Value::Null
+        })
+    });
+    serde_json::json!({
+        "strategy": strategy,
+        "tool_restriction": tool_restriction,
+        "compaction": compaction,
     })
 }

@@ -29,6 +29,7 @@ pub(crate) mod demo_provider;
 pub(crate) mod eval_agent;
 mod evals;
 mod mcp;
+mod profile_apply;
 mod schedules;
 pub(crate) mod self_mcp;
 mod sessions;
@@ -41,6 +42,11 @@ mod workflows;
 #[cfg(any(test, feature = "test-utils"))]
 mod for_test;
 
+// The boot's row-config seams, re-exported for the tests that pin
+// them: the value the boot materializes into the `agent-loop` row and
+// the step that fills an empty row with it.
+#[cfg(test)]
+pub(crate) use boot::{agent_loop_row_config, materialize_row_config};
 /// The catalogue and its selection error live in the runtime
 /// assembly crate; the server consumes them through the facade
 /// (R121).
@@ -54,14 +60,17 @@ pub(crate) use sessions::PARKED_PROMPT_WINDOW;
 pub use tools::AppliedToolSurface;
 #[cfg(test)]
 pub(crate) use tools::plugin_tool_registry;
+#[cfg(test)]
+pub(crate) use tools::seeded_tool_registry;
 pub use usage::{UsageMetrics, UsageSnapshot};
 pub use workflows::WorkflowsState;
 
-/// Build the deployment's catalogue from a workspace config, with the
-/// test/demo seam applied: keyless `demo`/`fake` entries get their
-/// echo handles injected through the catalogue's prebuilt-handle
-/// seam, so test workspaces resolve `demo` without an API key.
-/// Outside test builds the function is the plain catalogue build.
+// The test/demo seam: keyless `demo`/`fake` entries get their echo
+// handles injected through the catalogue's prebuilt-handle seam, so
+// test workspaces resolve `demo` without an API key. Only the test
+// builds (and `test-utils` deployments) construct a catalogue this
+// way today; the boot reads the mounted `llm` service instead.
+#[cfg(any(test, feature = "test-utils"))]
 #[must_use]
 pub(crate) fn catalogue_for_deployment(
     config: &elysper::provider::config::WorkspaceConfig,
@@ -184,7 +193,6 @@ pub struct AppState {
     /// `build_react_agent` call share the same allocation
     /// instead of deep-cloning the full skills + peer-agent
     /// list on each one.
-    pub prompt_context: Arc<elysper::harness::PromptContext>,
     /// Configured default agent name. Loaded from
     /// `config.agent.default` at startup. `None` falls back to
     /// the first agent registered in [`Self::agent_registry`].
@@ -210,17 +218,6 @@ pub struct AppState {
     /// process started with?" without re-reading the file—and so
     /// `max_agents` and the bind address have one source.
     pub server_config: Option<crate::config::ServerConfig>,
-    /// R58: the agent's allow/deny list resolved from
-    /// `agents.<default>.{allowed_tools,denied_tools}` at boot.
-    /// Forwarded to every run and installed on the registered agents.
-    pub default_tool_restriction: Option<Arc<elysper::tool::ToolRestriction>>,
-    /// R50: the reasoning loop resolved from
-    /// `agents.<default>.strategy` at boot. Forwarded to every
-    /// session controller's `RunDependencies` and installed on the
-    /// registered agents, so a session run and a registered agent use
-    /// the same loop. `None` keeps ReAct.
-    pub default_strategy:
-        Option<Arc<dyn elysper::harness::agent::ReasoningStrategy>>,
     /// R21: live MCP clients for the configured servers. Held for
     /// the process lifetime so their child processes stay alive
     /// (`StdioTransport` kills its child on drop) and so a
@@ -238,21 +235,33 @@ pub struct AppState {
     /// in. Consumers resolve services here; the graph is what the
     /// mount validated.
     pub kernel: elysper::kernel::Context,
-    /// The host objects the factory directory builds from, kept so a
+    /// The containers the factory directory builds from, kept so a
     /// hot reload can construct an `added` or `remounted` plugin
     /// without rebuilding the boot.
-    pub(crate) kernel_host: Arc<crate::composition::kernel::KernelHost>,
+    pub(crate) boot_services: Arc<crate::composition::kernel::BootServices>,
     /// The mounted plugin groups. The boot group comes first; an HMR
     /// remount appends one group for the rows it rebuilt, so an
     /// untouched plugin's fiber and effects stay where they were.
     /// Dropping a handle unloads every service in that group.
     pub mount: parking_lot::Mutex<Vec<elysper::kernel::MountHandle>>,
-    /// The effective core assembly: the built-in set when the profile
-    /// declares no explicit row, otherwise the profile's rows. The HMR
-    /// loop diffs against this value.
+    /// The raw resolved profile (rows carry `enabled`); the settings
+    /// page's read model, so a switched-off row stays visible.
     pub profile: parking_lot::RwLock<crate::profile::Profile>,
-    /// The `[ui]` segment projected as render schemas.
-    pub ui_schemas: parking_lot::RwLock<Vec<crate::ui::schema::UiSchema>>,
+    /// The effective assembly the mounted tree corresponds to — enabled
+    /// rows only. Boot and every apply update both; the HMR diff's
+    /// previous side is this value.
+    pub assembly: parking_lot::RwLock<crate::profile::Profile>,
+    /// Layer paths for the transactional write path; `None` in fixtures
+    /// (a write then fails with a clear error instead of guessing a
+    /// document path).
+    pub(crate) profile_store: Option<crate::profile::ProfileStore>,
+    /// Serializes profile writes: one writer, so two surfaces cannot
+    /// interleave a read-modify-write of the document.
+    pub(crate) profile_write: tokio::sync::Mutex<()>,
+    /// The `[ui]` segment assembled into the slot tree. Swapping the
+    /// tree (HMR) drops the old one, which rolls every declaration and
+    /// registration back.
+    pub ui_tree: parking_lot::RwLock<crate::ui::tree::UiTree>,
     /// The deployment's host, built once at boot with
     /// [`Host::default_policy`](elysper::harness::Host::default_policy)
     /// (the steering policy) and shared with every agent.
@@ -329,13 +338,11 @@ pub struct AppState {
     /// Long-term memory tier (files under the workspace's
     /// `.elysper/memory*` scopes). The same handle the search
     /// service's memory domain recalls from.
-    pub memory: Arc<dyn elysper::context::Memory>,
     /// The cross-domain search engine: one `elysper_search`
     /// registry over tool / mcp / skill / memory / agent / session,
     /// registered as the model-facing `search` tool (deferred
     /// exposure—capability 1) and projected by
     /// `GET /api/v1/search` (capability 2).
-    pub search: Arc<crate::search::SearchService>,
     /// Schedules subsystem—disk-backed `ScheduleStore` plus a
     /// runtime-neutral `Scheduler`. Backs
     /// `/api/v1/schedules/{list,get,create,patch,delete,tick}`.
@@ -368,6 +375,17 @@ pub struct AppState {
     /// here instead of calling `chrono::Utc::now()` on its own, so a
     /// test can pin the whole deployment's clock in one place.
     pub clock: elysper::core::SharedClock,
+}
+
+/// The result of one [`AppState::apply_resolved`] reconcile.
+#[derive(Debug, Clone)]
+pub struct Reconciled {
+    /// What changed between the previous effective assembly and the
+    /// new one.
+    pub diff: crate::profile::ProfileDiff,
+    /// The `mcp` row was remounted or removed: supervision needs a
+    /// process restart (see [`AppState::reload_profile`]'s Residuals).
+    pub mcp_touched: bool,
 }
 
 impl AppState {
@@ -407,10 +425,10 @@ impl AppState {
             .find_map(|handle| handle.plugin_state(id))
     }
 
-    /// The UI schemas the frontend loader should render.
+    /// The deployment's UI tree, as the last activation assembled it.
     #[must_use]
-    pub fn ui_schemas(&self) -> Vec<crate::ui::schema::UiSchema> {
-        self.ui_schemas.read().clone()
+    pub fn ui_tree(&self) -> crate::ui::tree::UiTree {
+        self.ui_tree.read().clone()
     }
 
     /// The profile the mounted core set currently corresponds to.
@@ -434,6 +452,12 @@ impl AppState {
     /// take a working plugin down. A mount failure after disposal
     /// remounts the previous rows as a best-effort rollback.
     ///
+    /// The diff's previous side is [`Self::assembly`] — the enabled row
+    /// set the mounted tree actually corresponds to. A row filtered out
+    /// by its `enabled` bit therefore reads as `removed`, and a row
+    /// filtered in reads as `added`; the watcher needs no knowledge of
+    /// the field.
+    ///
     /// # Residuals
     ///
     /// Remounting the `mcp` row republishes the service, but the
@@ -453,23 +477,84 @@ impl AppState {
         &self,
         resolved: crate::profile::Profile,
     ) -> Result<crate::profile::ProfileDiff, String> {
+        Ok(self.reconcile(resolved, false).await?.diff)
+    }
+
+    /// Apply an explicit profile change: the same reconcile as
+    /// [`Self::reload_profile`], but the `hmr` flag does **not** gate
+    /// it.
+    ///
+    /// A write is not a passive file watch: a deployment that runs with
+    /// `hmr = false` still applies the change it was asked to make. The
+    /// watcher entry keeps the old semantics.
+    ///
+    /// # Errors
+    ///
+    /// The same build / UI errors as [`Self::reload_profile`].
+    pub async fn apply_resolved(
+        &self,
+        resolved: crate::profile::Profile,
+    ) -> Result<Reconciled, String> {
+        self.reconcile(resolved, true).await
+    }
+
+    /// The internal shared reconcile.
+    ///
+    /// `ignore_hmr` is the only difference between the watcher entry and
+    /// the explicit-write entry: the diff is computed against an
+    /// HMR-on view of the next effective rows, so a `hmr = false`
+    /// profile still applies.
+    async fn reconcile(
+        &self,
+        next_raw: crate::profile::Profile,
+        ignore_hmr: bool,
+    ) -> Result<Reconciled, String> {
         use std::collections::BTreeSet;
 
         use crate::{
             composition::kernel::profile_factories,
-            profile::{BootContext, build_plugins, diff_profiles},
-            ui::schema::load_ui_manifest,
+            profile::{
+                BootContext,
+                KernelChecks,
+                build_plugins,
+                diff_profiles,
+                effective,
+            },
+            ui::tree::load_ui_tree,
         };
 
-        let next = resolved;
-        let previous = self.current_profile();
-        let factories = profile_factories(Arc::clone(&self.kernel_host));
-        let diff = diff_profiles(&previous, &next, &factories);
+        let factories = profile_factories(
+            Arc::clone(&self.boot_services),
+            self.workspace_root.clone(),
+        );
+        let previous = self.assembly.read().clone();
+        // The boot materializes the two row configs it owns
+        // (`model-adapter`, `agent-loop`) from the deployment config;
+        // a document that leaves them empty keeps that materialization
+        // across reconciles, so an unrelated edit does not look like
+        // "clear the provider configuration".
+        let mut next_raw = next_raw;
+        carry_forward_materialized(&mut next_raw, &previous);
+        let next = {
+            let checks = KernelChecks(&self.kernel);
+            effective(&next_raw, &checks).profile
+        };
+        let diff_view = if ignore_hmr {
+            crate::profile::Profile {
+                hmr: true,
+                ..next.clone()
+            }
+        } else {
+            next.clone()
+        };
+        let diff = diff_profiles(&previous, &diff_view, &factories);
         if diff.restart_required {
-            return Ok(diff);
+            return Ok(Reconciled {
+                diff,
+                mcp_touched: false,
+            });
         }
-        let schemas =
-            load_ui_manifest(&next.ui).map_err(|error| error.to_string())?;
+        let tree = load_ui_tree(&next.ui).map_err(|error| error.to_string())?;
 
         let changed: BTreeSet<&str> = diff
             .added
@@ -478,7 +563,7 @@ impl AppState {
             .map(String::as_str)
             .collect();
         let boot = BootContext::new(self.workspace_root.clone())
-            .with_host(Arc::clone(&self.kernel_host))
+            .with_host(Arc::clone(&self.boot_services))
             .with_clock(self.clock.clone());
         let mount_rows = rows_for(&next, &changed);
         let plugins = build_plugins(&mount_rows, &factories, &boot)
@@ -535,9 +620,16 @@ impl AppState {
             }
         }
 
-        *self.ui_schemas.write() = schemas;
-        *self.profile.write() = next;
-        Ok(diff)
+        let mcp_touched = diff
+            .removed
+            .iter()
+            .chain(diff.remounted.iter())
+            .any(|id| id == elysper::mcp::KEY_MCP);
+
+        *self.ui_tree.write() = tree;
+        *self.profile.write() = next_raw;
+        *self.assembly.write() = next;
+        Ok(Reconciled { diff, mcp_touched })
     }
 
     /// Unload one plugin with the teardown its service needs.
@@ -582,6 +674,49 @@ impl AppState {
             )
             .ok()
             .flatten()
+    }
+
+    /// The mounted `search` service, or `None` when its plugin is
+    /// unloaded.
+    #[must_use]
+    pub fn search(&self) -> Option<Arc<crate::search::SearchService>> {
+        self.kernel
+            .get::<crate::search::SearchService>(
+                crate::search::plugin::KEY_SEARCH,
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// The mounted long-term `memory` service, or `None` when its
+    /// plugin is unloaded.
+    #[must_use]
+    pub fn memory(&self) -> Option<Arc<dyn elysper::context::Memory>> {
+        self.kernel
+            .get::<Arc<dyn elysper::context::Memory>>(
+                elysper::context::KEY_MEMORY,
+            )
+            .ok()
+            .flatten()
+            .map(|service| Arc::clone(service.as_ref()))
+    }
+
+    /// The live prompt manifest: skills from the mounted `skills`
+    /// service, peer agents from the registry. Snapshotted per call,
+    /// so a skills remount reaches the next session build instead of
+    /// advertising withdrawn skills from a boot-frozen allocation.
+    pub async fn prompt_context(
+        &self,
+        self_name: &str,
+    ) -> Arc<elysper::harness::PromptContext> {
+        Arc::new(
+            crate::state::boot::build_prompt_context(
+                &self.kernel,
+                &self.agent_registry,
+                self_name,
+            )
+            .await,
+        )
     }
 
     /// The mounted `agentLoop` service, or `None` when its plugin is
@@ -785,6 +920,41 @@ impl AppState {
     ///   so dispatch has something to resolve.
     pub fn readiness_checks(&self) -> Vec<(&'static str, bool)> {
         vec![("agent_registry", self.agent_registry.first_name().is_some())]
+    }
+}
+
+/// Carry the boot's materialized row configs forward.
+///
+/// A row whose document config is empty takes the previous effective
+/// row's config when that one is non-empty: the boot owns the
+/// materialization, and a document that never spells it out is not
+/// asking to clear it.
+fn carry_forward_materialized(
+    next: &mut crate::profile::Profile,
+    previous: &crate::profile::Profile,
+) {
+    for entry in &mut next.core {
+        let empty = match &entry.config {
+            serde_json::Value::Null => true,
+            serde_json::Value::Object(map) => map.is_empty(),
+            _ => false,
+        };
+        if !empty {
+            continue;
+        }
+        let Some(previous) =
+            previous.core.iter().find(|row| row.id == entry.id)
+        else {
+            continue;
+        };
+        let previous_empty = match &previous.config {
+            serde_json::Value::Null => true,
+            serde_json::Value::Object(map) => map.is_empty(),
+            _ => false,
+        };
+        if !previous_empty {
+            entry.config = previous.config.clone();
+        }
     }
 }
 

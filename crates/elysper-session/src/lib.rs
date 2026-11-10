@@ -77,8 +77,8 @@ pub mod log;
 pub mod log_surface;
 pub mod manager;
 pub mod operation;
-/// The `sessions` service: [`SessionStorePlugin`] publishes the
-/// registry under [`KEY_SESSIONS`].
+/// The `sessions` service: [`SessionStorePlugin`] builds the registry
+/// from [`SessionStoreConfig`] and publishes it under [`KEY_SESSIONS`].
 pub mod plugin;
 pub mod repair;
 pub mod repair_session;
@@ -115,7 +115,11 @@ pub use compaction::{
     should_compact,
     touched_target,
 };
-pub use compaction_plugin::{CompactionPlugin, KEY_COMPACTION};
+pub use compaction_plugin::{
+    CompactionPlugin,
+    CompactionPluginConfig,
+    KEY_COMPACTION,
+};
 pub use events::{
     AttachmentRefRow,
     CompactionLifecycleOutcome,
@@ -158,7 +162,7 @@ pub use operation::{
     SnapshotBus,
     SnapshotReceiver,
 };
-pub use plugin::{KEY_SESSIONS, SessionStorePlugin};
+pub use plugin::{KEY_SESSIONS, SessionStoreConfig, SessionStorePlugin};
 pub use repair::{
     OrphanedCompaction,
     ParkedPromptRecovery,

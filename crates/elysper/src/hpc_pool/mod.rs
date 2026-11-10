@@ -10,7 +10,7 @@
 //! `PoolConfig` / `PoolStats` is `elysper::hpc_pool::*`.
 //!
 //! See the module-level docs in
-//! [`elysper_provider::pool`](elysper_provider::pool)
+//! [`elysper_provider::pool`]
 //! for the contract—the behaviour, the runtime-neutral
 //! guarantees, and the per-host cap all live there.
 //!

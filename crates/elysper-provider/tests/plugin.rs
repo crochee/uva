@@ -14,8 +14,10 @@ use elysper_kernel::{
     mount_all,
 };
 use elysper_provider::{
+    CompletionRequest,
     ModelProvider,
     ProviderResolver,
+    completion_to_sampling,
     plugin::{KEY_LLM, ModelAdapterPlugin},
     traits_stub::ModelProviderStub,
 };
@@ -36,54 +38,51 @@ impl ProviderResolver for OnePair {
     }
 }
 
-/// A plugin over `OnePair`, plus the two handles it must answer with.
-fn fixture() -> (
-    ModelAdapterPlugin,
-    Arc<dyn ProviderResolver>,
-    Arc<dyn ModelProvider>,
-) {
+/// A `model-adapter` plugin whose catalogue offers `openai/gpt-4o`,
+/// answering with a provider that completes with `ok`.
+fn plugin() -> ModelAdapterPlugin {
     let provider: Arc<dyn ModelProvider> =
         Arc::new(ModelProviderStub::text_only("ok"));
-    let resolver: Arc<dyn ProviderResolver> = Arc::new(OnePair {
-        handle: Arc::clone(&provider),
-    });
-    let plugin = ModelAdapterPlugin::new(Arc::clone(&resolver));
-    (plugin, resolver, provider)
+    ModelAdapterPlugin::new(Arc::new(OnePair { handle: provider }))
 }
 
-#[test]
-fn provides_service_and_unload_removes_it() {
+#[tokio::test]
+async fn provides_service_and_unload_removes_it() {
     let ctx = Context::new();
-    let (plugin, resolver, provider) = fixture();
 
-    let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
-        .expect("mount `model-adapter`");
+    let mounted =
+        mount_all(&ctx, &[Arc::new(plugin()) as Arc<dyn KernelPlugin>])
+            .expect("mount `model-adapter`");
     assert_eq!(mounted.len(), 1);
 
-    let service = ctx
+    // Behaviour, not object identity: a consumer of the mounted
+    // service resolves the configured pair and drives the provider it
+    // gets back, so the published catalogue must answer with a live
+    // provider.
+    let llm = ctx
         .require::<Arc<dyn ProviderResolver>>(KEY_LLM)
         .expect("`llm` resolves");
-    assert!(
-        Arc::ptr_eq(service.as_ref(), &resolver),
-        "the service must be the resolver the plugin was built with"
-    );
-
-    // The catalogue half: a known pair answers with the configured
-    // handle, and an unknown pair (either half) is reported as no
-    // longer offered.
-    let resolved = service
+    let provider = llm
         .resolve("openai", "gpt-4o")
         .expect("the configured pair resolves");
-    assert!(
-        Arc::ptr_eq(&resolved, &provider),
-        "the resolver must answer with its configured handle"
+    let response = provider
+        .complete(CompletionRequest::default())
+        .await
+        .expect("the resolved provider answers");
+    assert_eq!(
+        completion_to_sampling(&response).text,
+        "ok",
+        "the service must hand back the catalogue's entry"
     );
+
+    // An unconfigured pair (either half) is reported as no longer
+    // offered rather than falling back to another entry.
     assert!(
-        service.resolve("openai", "unknown-model").is_none(),
+        llm.resolve("openai", "unknown-model").is_none(),
         "an unconfigured model must not resolve"
     );
     assert!(
-        service.resolve("unknown-provider", "gpt-4o").is_none(),
+        llm.resolve("unknown-provider", "gpt-4o").is_none(),
         "an unconfigured provider must not resolve"
     );
 
@@ -96,7 +95,7 @@ fn provides_service_and_unload_removes_it() {
 
 #[test]
 fn manifest_matches_provided_key() {
-    let (plugin, _resolver, _provider) = fixture();
+    let plugin = plugin();
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "model-adapter");

@@ -28,6 +28,7 @@
 //! - [`support`] — the shared fixtures (`StubAgent`,
 //!   `ScopedHome`, `empty_descriptor`, …) only.
 
+mod agent_loop_row;
 mod apply_tools;
 mod boot_surface;
 mod build_prompt_context;
@@ -35,6 +36,7 @@ mod cluster;
 mod for_test;
 mod load_helpers;
 mod load_strategy;
+mod profile_apply;
 mod reload;
 mod resolve_agent_name;
 mod resolve_server;

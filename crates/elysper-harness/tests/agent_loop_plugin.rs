@@ -77,16 +77,6 @@ use tokio_util::sync::CancellationToken;
 
 // --- fixtures ---------------------------------------------------------
 
-/// A factory that never creates an agent: the service tests only need a
-/// stable pointer to prove `agentLoop` resolves to the installed value.
-struct StubLoop;
-
-impl AgentLoopFactory for StubLoop {
-    fn create(&self, _run: &RunConfig) -> Arc<dyn Agent> {
-        unreachable!("the stub factory never creates an agent")
-    }
-}
-
 /// Provide the three keys `agent-loop` injects, for tests that only
 /// exercise mounting and lifecycle.
 fn provide_dependencies(
@@ -599,12 +589,11 @@ async fn run_agent(agent: Arc<dyn Agent>) -> Vec<AgentEvent> {
 
 // --- the service ------------------------------------------------------
 
-#[test]
-fn provides_agent_loop_service() {
+#[tokio::test]
+async fn provides_agent_loop_service() {
     let ctx = Context::new();
     let _deps = provide_dependencies(&ctx);
-    let factory: Arc<dyn AgentLoopFactory> = Arc::new(StubLoop);
-    let plugin = AgentLoopPlugin::new(Arc::clone(&factory));
+    let plugin = AgentLoopPlugin::new(Arc::new(ReActAgentFactory));
 
     assert_eq!(plugin.manifest().id, "agent-loop");
     assert_eq!(plugin.manifest().version, PLUGIN_PROTOCOL_VERSION);
@@ -624,12 +613,35 @@ fn provides_agent_loop_service() {
         .expect("mount `agent-loop`");
     assert_eq!(mounted.len(), 1);
 
-    let resolved = ctx
+    // The service is only proven by what it does: resolve it, ask it
+    // for an agent, and run one turn through that agent.
+    let factory = ctx
         .require::<Arc<dyn AgentLoopFactory>>(KEY_AGENT_LOOP)
         .expect("`agentLoop` resolves");
+    let provider = Arc::new(ScriptedProvider::text("built by the service"));
+    let agent = factory.create(&run_config(
+        provider.clone(),
+        Arc::new(ToolRegistry::new()),
+        Host::new(),
+    ));
+    let events = run_agent(agent).await;
+
+    assert_eq!(
+        provider.call_count(),
+        1,
+        "the resolved factory must build an agent that samples the model"
+    );
+    assert_eq!(
+        final_text(&events),
+        "built by the service",
+        "the agent built from the resolved service must run the turn"
+    );
+
+    drop(mounted);
     assert!(
-        Arc::ptr_eq(resolved.as_ref(), &factory),
-        "the service must be the factory the plugin was built with"
+        ctx.require::<Arc<dyn AgentLoopFactory>>(KEY_AGENT_LOOP)
+            .is_err(),
+        "unloading `agent-loop` must withdraw `agentLoop`"
     );
 }
 
@@ -637,7 +649,7 @@ fn provides_agent_loop_service() {
 fn unload_cascades_consumer_to_pending() {
     let ctx = Context::new();
     let (llm, _tools, _sessions) = provide_dependencies(&ctx);
-    let factory: Arc<dyn AgentLoopFactory> = Arc::new(StubLoop);
+    let factory: Arc<dyn AgentLoopFactory> = Arc::new(ReActAgentFactory);
     let _mounted = mount_all(&ctx, &[loop_plugin(factory)]).expect("mount");
     assert!(
         ctx.require::<Arc<dyn AgentLoopFactory>>(KEY_AGENT_LOOP)
@@ -858,7 +870,7 @@ fn unload_removes_the_agent_loop_service() {
     let ctx = Context::new();
     let _deps = provide_dependencies(&ctx);
 
-    let factory: Arc<dyn AgentLoopFactory> = Arc::new(StubLoop);
+    let factory: Arc<dyn AgentLoopFactory> = Arc::new(ReActAgentFactory);
     let plugin: Arc<dyn KernelPlugin> = Arc::new(SeamPlugin::new(factory));
     let mounted = mount_all(&ctx, &[plugin]).expect("mount the seam plugin");
 

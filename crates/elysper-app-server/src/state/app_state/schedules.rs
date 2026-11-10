@@ -65,6 +65,28 @@ impl SchedulesState {
         }
     }
 
+    /// Build the state over the store the `scheduler` plugin
+    /// published, so the route surface and the background driver share
+    /// one store and one clock. `load` is called once, as in
+    /// [`Self::build`].
+    pub fn from_store(
+        store: Arc<ScheduleStore>,
+        clock: elysper::core::SharedClock,
+    ) -> Self {
+        match store.load() {
+            Ok(n) => tracing::info!("schedules: loaded {n} job(s)"),
+            Err(e) => tracing::warn!(
+                "schedules: load failed ({e}); starting with empty store"
+            ),
+        }
+        let scheduler = Arc::new(Scheduler::new(Arc::clone(&store)));
+        Self {
+            store,
+            scheduler,
+            clock,
+        }
+    }
+
     /// Re-read the store so this node never answers from a cache a
     /// peer's write invalidated. A load failure is reported once and
     /// leaves an empty view rather than a stale one.

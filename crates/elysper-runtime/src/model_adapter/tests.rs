@@ -275,12 +275,18 @@ async fn service_plugin_publishes_catalogue_and_wrapped_default() {
         mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn elysper_kernel::Plugin>])
             .expect("mount the plugin");
 
+    // The service answers as the deployment's catalogue: the
+    // behaviour, not the allocation, is the contract.
     let svc = ctx
         .require::<ProviderCatalogue>(KEY_LLM)
         .expect("llm is the deployment catalogue");
     assert!(
-        Arc::ptr_eq(&svc, &catalogue),
-        "the service is the exact catalogue the plugin was built with"
+        svc.resolve(Some("fake/fake-model")).is_ok(),
+        "the catalogue service resolves the deployment's pair"
+    );
+    assert!(
+        svc.resolve(Some("fake/unknown-model")).is_err(),
+        "a model the deployment does not offer is refused"
     );
 
     let default = ctx

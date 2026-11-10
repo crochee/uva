@@ -157,7 +157,7 @@ static LIST_CACHE: RwLock<Option<(u64, Arc<Vec<AgentEntry>>)>> =
 /// prompt context on `AppState`. Keeps the runtime surface
 /// uniform — every registered agent is a real ReAct agent, no
 /// stub-only path is introduced.
-pub(crate) fn build_react_agent(
+pub(crate) async fn build_react_agent(
     state: &AppState,
     descriptor: AgentDescriptor,
     max_iterations: Option<usize>,
@@ -171,6 +171,7 @@ pub(crate) fn build_react_agent(
         "the agentLoop service is unavailable; the agent is not built"
             .to_owned()
     })?;
+    let prompt_context = state.prompt_context(&descriptor.name).await;
     Ok(factory.create(&elysper::harness::plugin::RunConfig {
         provider: state.default_provider.read().clone(),
         // The node's one registry, not a snapshot: a registered agent
@@ -179,7 +180,7 @@ pub(crate) fn build_react_agent(
         tool_registry: Arc::clone(&state.tool_registry),
         workspace_root: state.workspace_root.clone(),
         descriptor,
-        prompt_context: state.prompt_context.clone(),
+        prompt_context,
         // Honour the per-request cap (`max_iterations` in the
         // POST body) when supplied; otherwise the AppState
         // default (resolved from `agents.<name>.max_steps`)
@@ -340,6 +341,7 @@ pub async fn create_agent(
     };
     let agent =
         build_react_agent(&state, descriptor.clone(), req.max_iterations)
+            .await
             .map_err(|error| {
                 Error::internal(format!("agent build failed: {error}"))
             })?;

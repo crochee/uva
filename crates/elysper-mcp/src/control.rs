@@ -502,6 +502,7 @@ mod tests {
             name: name.to_string(),
             description: String::new(),
             input_schema: serde_json::json!({"type": "object"}),
+            annotations: None,
         }
     }
 

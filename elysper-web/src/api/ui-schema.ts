@@ -13,6 +13,19 @@
 
 import { api } from './client';
 
+/** How many components one slot accepts. */
+export type Cardinality = 'one' | 'many';
+
+/** One slot a `[ui]` row declares. */
+export interface UiSlot {
+  /** The host-agnostic slot id, e.g. `chat.sidebar`. */
+  id: string;
+  /** How many components the slot accepts. */
+  cardinality: Cardinality;
+  /** The declaring `[ui]` row's id. */
+  owner: string;
+}
+
 /** One component a UI row places in a slot. */
 export interface UiComponent {
   /** Where the component renders, e.g. `chat.sidebar`. */
@@ -32,6 +45,9 @@ export interface UiSchema {
 
 /** `ui/schema` response body. */
 export interface UiSchemaResponse {
+  /** The slots the `[ui]` rows declare, in declaration order. */
+  slots: UiSlot[];
+  /** One schema per row, in assembly order. */
   schemas: UiSchema[];
 }
 

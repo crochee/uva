@@ -36,10 +36,10 @@ The frozen surface is that set of names, per crate:
 | Crate | Frozen names |
 |---|---|
 | `elysper-core` | 41 |
-| `elysper-context` | 41 |
+| `elysper-context` | 43 |
 | `elysper-harness` | 64 |
 | `elysper-provider` | 92 |
-| `elysper-session` | 119 |
+| `elysper-session` | 121 |
 | `elysper-steering` | 43 |
 | `elysper-tool` | 48 |
 
@@ -165,7 +165,7 @@ small shared registries and text helpers.
 `parse_judge_score`, `redact_partial`, `redact_partial_with`, `truncate_chars`
 `validate_against_schema`
 
-### elysper-context — 41 names
+### elysper-context — 43 names
 
 The context window: managers, memory, DAG summaries, compaction
 settings.
@@ -178,6 +178,7 @@ settings.
 `SessionMemory`, `SharedContextManager`, `SummariseFn`, `SummarizingContextManager`
 `SummaryId`, `ToolCallArchive`, `ToolCallRecord`, `ToolCallRecordKind`, `TouchedPair`
 `TruncatingContextManager`, `TypedProjectionError`, `UsageMeter`, `ValidationError`
+`KEY_MEMORY`, `MemoryPlugin` — the `memory` kernel plugin's surface
 `events_to_messages`, `repair_session`, `should_compact`, `touched_target`
 `typed_messages_from_sink`
 
@@ -229,7 +230,7 @@ types, credentials, retry classification, cache policy, JSON repair.
 `parse_tool_input_logged`, `parse_tool_input_reported`, `parse_tool_input_with_completion`
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
-### elysper-session — 119 names
+### elysper-session — 121 names
 
 The durable ledger: JSONL sink and version header, events, history fold,
 surface ledger, compaction, search, token metering, typed builders.
@@ -237,7 +238,7 @@ surface ledger, compaction, search, token metering, typed builders.
 `AttachmentRefRow`, `BalanceCache`, `CURRENT_SCHEMA_VERSION`, `CompactionCheckpoint`
 `CompactionError`, `CompactionLifecycleOutcome`, `CompactionLifecycleView`
 `CompactionOutcome`, `CompactionPass`, `CompactionPassError`, `CompactionPlan`
-`CompactionPlugin`, `CompactionRecordView`, `CompactionRef`, `Compactor`
+`CompactionPlugin`, `CompactionPluginConfig`, `CompactionRecordView`, `CompactionRef`, `Compactor`
 `ContextPressure`, `DEFAULT_BUS_CAPACITY`
 `DEFAULT_LIMIT`, `DEFAULT_PRUNE_MIN_CHARS`, `DEFAULT_SUMMARY_TIMEOUT`, `EntryHit`
 `FoldError`, `FoldedSurface`, `HistoryError`, `JsonlSessionSearch`, `KEY_COMPACTION`
@@ -247,7 +248,7 @@ surface ledger, compaction, search, token metering, typed builders.
 `OrphanedCompaction`, `PRUNED_TOOL_RESULT`, `ParkedPromptRecovery`, `PlannedCompaction`
 `ReplaceRange`, `ResolvedReplace`, `SearchError`, `SearchQuery`, `SessionEndReason`
 `SessionError`, `SessionEvent`, `SessionHit`, `SessionMetadataHeader`, `SessionSearch`
-`SessionSink`, `SessionSnapshot`, `SessionStorePlugin`, `SharedSessionSearch`, `SharedSurfaceLedger`
+`SessionSink`, `SessionSnapshot`, `SessionStoreConfig`, `SessionStorePlugin`, `SharedSessionSearch`, `SharedSurfaceLedger`
 `SnapshotBus`, `SnapshotReceiver`, `SummaryCompactor`, `SurfaceLedger`, `SurfaceOp`
 `SurfaceToken`, `TOOL_NOT_STARTED`, `TOOL_OUTCOME_UNKNOWN`, `TURN_INTERRUPTED`
 `TokenBudget`, `TokenMeasurement`, `TokenMeter`, `TokenMeterError`, `TypedEventRecord`

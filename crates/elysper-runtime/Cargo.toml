@@ -26,6 +26,12 @@ elysper-search.workspace = true
 elysper-semantic-cache.workspace = true
 elysper-session.workspace = true
 elysper-tool.workspace = true
+# The delegation backend's service key. The `agent-loop` row consumes
+# the `subagents` service the `subagent-backend` row publishes, so the
+# loop needs the key its owner crate defines — the key never moves
+# into this crate (see the design's "service keys live with their
+# owner" rule).
+elysper-tool-task.workspace = true
 elysper-provider = { workspace = true, features = ["anthropic", "openai"] }
 serde.workspace = true
 tracing.workspace = true

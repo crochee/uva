@@ -1,7 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { useLocation, Link } from 'react-router-dom';
 import { Flex, Badge, Box } from '@radix-ui/themes';
-import { ThemeToggle } from '../ui/ThemeToggle';
 import { useTheme } from '../../hooks/useTheme';
 import { displayVersion } from '../../lib/version';
 
@@ -16,23 +15,28 @@ interface Crumb {
 
 /**
  * Resolve a path into human-readable breadcrumb segments. The
- * first segment is always the top-level page (Chat / Tools /
- * Agents / Skills / Sessions); trailing segments get shortened
- * to the first 8 characters of an id, which is enough to be
- * recognisable in a breadcrumb without flooding the header.
+ * first segment is always the top-level destination (Chat /
+ * Settings); trailing segments get shortened to the first 8
+ * characters of an id, which is enough to be recognisable in a
+ * breadcrumb without flooding the header.
  *
- * The lookup table is intentionally hard-coded — the nav tree
- * is small (5 entries) and changing it should require
- * touching this file as well as `Sidebar.tsx`, which keeps the
- * two surfaces in sync as a code review signal.
+ * The lookup table is intentionally hard-coded — the shell has
+ * two destinations and changing it should require touching this
+ * file as well as `Sidebar.tsx`, which keeps the two surfaces in
+ * sync as a code review signal.
  */
 const PAGE_LABEL: Record<string, string> = {
   chat: 'Chat',
-  tools: 'Tools',
-  agents: 'Agents',
-  skills: 'Skills',
-  sessions: 'Sessions',
+  settings: 'Settings',
 };
+
+/**
+ * Path segments that name a route keyword rather than an id. Linking
+ * one would build a path no route serves (`/chat/:id/agent` is not a
+ * route — the agent name is required), and the catch-all would then mint
+ * a brand-new session from a breadcrumb click.
+ */
+const NON_LINK_SEGMENTS: ReadonlySet<string> = new Set(['agent']);
 
 function crumbsForPath(pathname: string): Crumb[] {
   const segments = pathname.split('/').filter(Boolean);
@@ -43,7 +47,8 @@ function crumbsForPath(pathname: string): Crumb[] {
   let acc = `/${head}`;
   rest.forEach((seg) => {
     acc += `/${seg}`;
-    crumbs.push({ label: seg.length > 12 ? `${seg.slice(0, 8)}…` : seg, to: acc });
+    const label = seg.length > 12 ? `${seg.slice(0, 8)}…` : seg;
+    crumbs.push(NON_LINK_SEGMENTS.has(seg) ? { label } : { label, to: acc });
   });
   return crumbs;
 }
@@ -115,7 +120,6 @@ export function Header({ isServerAvailable }: HeaderProps) {
             <Breadcrumbs items={crumbs} />
           </Flex>
           <Flex align="center" gap="3">
-            <ThemeToggle />
             <Box
               aria-label={`Build ${displayVersion()}`}
               data-testid="build-version"
@@ -168,7 +172,10 @@ function Breadcrumbs({ items }: { items: Crumb[] }) {
           const isLast = i === items.length - 1;
           return (
             <li
-              key={crumb.to ?? crumb.label}
+              // A keyword crumb and the final id can share a label (the
+              // default agent is literally named `agent`), so the index
+              // disambiguates.
+              key={`${i}-${crumb.to ?? crumb.label}`}
               style={{ display: 'inline-flex', alignItems: 'center', gap: 'var(--spacing-xs)' }}
             >
               {crumb.to && !isLast ? (

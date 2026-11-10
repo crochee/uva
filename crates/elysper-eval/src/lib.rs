@@ -75,7 +75,7 @@ pub use metrics::{
     SchemaValidationMetric,
     parse_score,
 };
-pub use plugin::{EvalPlugin, KEY_EVAL};
+pub use plugin::{EvalPlugin, EvalPluginConfig, KEY_EVAL};
 pub use runner::{AsyncMetric, EvalAgent, EvalRunner, SyncMetricAdapter};
 use serde::{Deserialize, Serialize};
 pub use store::EvalStore;

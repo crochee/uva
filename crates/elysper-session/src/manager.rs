@@ -67,6 +67,13 @@ pub struct SessionRegistry {
 
 impl SessionRegistry {
     /// Build a registry rooted at `sessions_root`.
+    ///
+    /// The `session-store` kernel plugin constructs one from its own
+    /// configuration
+    /// ([`SessionStoreConfig`](crate::plugin::SessionStoreConfig))
+    /// inside `apply`, so a host that mounts the plugin never holds the
+    /// registry itself. An embedder that mounts no plugin builds it
+    /// here directly.
     pub fn new(sessions_root: PathBuf) -> Self {
         Self {
             sessions_root,
@@ -86,6 +93,9 @@ impl SessionRegistry {
     /// `elysper-harness-tokio` ships `TokioBlocking`) so appends land
     /// on the runtime's blocking pool instead of a fresh OS thread per
     /// write.
+    /// [`SessionStorePlugin`](crate::plugin::SessionStorePlugin)
+    /// installs the seam from its configuration, so the plugin's
+    /// registry and a host-built one behave identically.
     #[must_use]
     pub fn with_blocking(mut self, blocking: Arc<dyn Blocking>) -> Self {
         self.blocking = blocking;

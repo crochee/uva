@@ -3,7 +3,8 @@
 //!
 //! # The service is the supervisor
 //!
-//! [`McpPlugin`] publishes the host's [`McpSupervisor`] under
+//! [`McpPlugin`] constructs the host's [`McpSupervisor`] inside
+//! [`apply`](elysper_kernel::Plugin::apply) and publishes it under
 //! [`KEY_MCP`]. It adds no protocol logic of its own: the supervisor
 //! already owns each server's live [`McpClient`](crate::McpClient) and
 //! its registered [`McpToolGeneration`](crate::McpToolGeneration), and
@@ -31,14 +32,14 @@
 //! [`McpSupervisor`] is `Sized`, so `apply` calls
 //! `ctx.provide_arc(KEY_MCP, Arc<McpSupervisor>)` and a consumer writes
 //! `ctx.require::<McpSupervisor>(KEY_MCP)`, which yields an `Arc`
-//! pointing at the supervisor the plugin was built with.
+//! pointing at the supervisor the plugin constructed for this mount.
 //!
 //! # Lifecycle
 //!
 //! The plugin returns its provide handle from
 //! [`apply`](elysper_kernel::Plugin::apply), so unloading it revokes
-//! the service. The supervisor arrives with the plugin value; the
-//! manifest injects nothing.
+//! the service. The supervisor is built by `apply` rather than handed
+//! to the plugin value; the manifest injects nothing.
 
 use std::sync::Arc;
 
@@ -61,7 +62,7 @@ use crate::supervisor::McpSupervisor;
 /// kernel validates are one constant.
 pub const KEY_MCP: &str = "mcp";
 
-/// The plugin id the `mcp` manifest declares.
+// The plugin id the `mcp` manifest declares.
 const MCP_ID: &str = "mcp";
 
 /// The `mcp` kernel plugin: provides [`KEY_MCP`].
@@ -72,26 +73,23 @@ const MCP_ID: &str = "mcp";
 /// unload contract.
 pub struct McpPlugin {
     manifest: PluginManifest,
-    /// The supervisor the host built from its MCP configuration.
-    ///
-    /// Public because the boot loop keeps its own handle to tick it;
-    /// this is the same `Arc` the service resolves to.
-    pub supervisor: Arc<McpSupervisor>,
 }
 
 impl McpPlugin {
-    /// Publish `supervisor` as the `mcp` service.
-    ///
-    /// The host builds the supervisor (one per node) and keeps its own
-    /// handle for the tick loop.
-    pub fn new(supervisor: Arc<McpSupervisor>) -> Self {
+    /// Build the plugin; `apply` constructs a default
+    /// [`McpSupervisor`] for each mount.
+    #[must_use]
+    pub fn new() -> Self {
         let mut manifest = PluginManifest::new(MCP_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.provides.push(KEY_MCP.to_string());
-        Self {
-            manifest,
-            supervisor,
-        }
+        Self { manifest }
+    }
+}
+
+impl Default for McpPlugin {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -101,8 +99,7 @@ impl KernelPlugin for McpPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        Ok(vec![
-            ctx.provide_arc(KEY_MCP, Arc::clone(&self.supervisor))?,
-        ])
+        let supervisor = Arc::new(McpSupervisor::new());
+        Ok(vec![ctx.provide_arc(KEY_MCP, supervisor)?])
     }
 }

@@ -3,9 +3,10 @@
 //! One binary, two modes:
 //!
 //! - `core` (the default) — the headless agent runtime: JSON-RPC
-//!   2.0 on stdin/stdout, one JSON object per line. This is the
-//!   mode a TUI, a desktop shell or any other host spawns as a
-//!   sidecar.
+//!   2.0 on stdin/stdout, one Content-Length-framed message per
+//!   `Content-Length: <n>\r\n\r\n<payload>` frame (see `rpc::framing`).
+//!   This is the mode a TUI, a desktop shell or any other host
+//!   spawns as a sidecar.
 //! - `serve` — the gateway: it spawns **one** core subprocess and
 //!   serves it over a WebSocket (`/rpc`), alongside the HTTP probes
 //!   and the web front-end's static files.
@@ -240,6 +241,23 @@ impl ProfileInputs {
     /// Paths that do not exist yet are still watched: a profile or
     /// patch created while the process runs counts as a change on the
     /// next poll.
+    /// The transactional write path's layer paths.
+    ///
+    /// The document layer is the explicit `--profile` or
+    /// `<directory>/profile.toml` (the same default `resolve` reads);
+    /// the other three are whatever the deployment declared.
+    fn store(&self) -> elysper_app_server::profile::ProfileStore {
+        elysper_app_server::profile::ProfileStore {
+            bundle: self.bundle.clone(),
+            doc: self
+                .profile
+                .clone()
+                .unwrap_or_else(|| self.directory.join("profile.toml")),
+            home: elysper_app_server::profile::discover_home_patch(),
+            overlay: self.patch.clone(),
+        }
+    }
+
     fn watched_paths(&self) -> Vec<PathBuf> {
         let mut paths = Vec::new();
         if let Some(bundle) = &self.bundle {
@@ -289,6 +307,7 @@ async fn run_core(
         inputs.config.as_ref(),
         Some(profile.clone()),
         BindOverrides::default(),
+        Some(inputs.store()),
     )
     .await
     .map_err(|e| anyhow::anyhow!("failed to boot the core: {e}"))?;

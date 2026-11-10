@@ -1,0 +1,28 @@
+[package]
+name = "elysper-desktop"
+description = "The Tauri desktop shell: supervise the gateway sidecar and host its webview"
+# Application crate behind a cross-workspace path dependency on a
+# `publish = false` crate; nothing here belongs on a registry.
+publish = false
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# The whole point of the shell is to own nothing: process supervision
+# (spawn `serve`, wait for /readyz with a 30s budget, backoff restart,
+# reap) lives in the shared gateway crate (design D14). Cross-workspace
+# path dep — see the workspace root comment for the accepted cost.
+elysper-gateway = { path = "../../crates/elysper-gateway" }
+# `wry` is the webview backend C1 verified locally (2.12.5).
+tauri = { version = "2.12", features = ["wry"] }
+# App boundary: errors bubble as context strings, nothing to match
+# (AGENTS.md §3.1). `GatewayError` is mapped with context here.
+anyhow = "1.0"
+# The dependency whitelist (design knife 3) is an upper bound, not a
+# shopping list: `tokio` would only buy a second readiness timeout the
+# supervisor already enforces, and nothing speaks JSON, so `serde_json`
+# stays out until something actually uses it.
+
+[build-dependencies]
+tauri-build = "2.0"

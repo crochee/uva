@@ -354,9 +354,38 @@ fn rejects_component_without_granted_capability() {
         "unexpected import rejection: {error}"
     );
     assert_eq!(error.code(), "missing_capability");
+    let message = error.to_string();
     assert!(
-        error.to_string().contains("net:http"),
+        message.contains("net:http"),
         "the error names the missing capability: {error}"
+    );
+    assert!(
+        message.contains("http-request"),
+        "the error names the rejected import: {error}"
+    );
+}
+
+#[test]
+fn an_unknown_import_fails_at_instantiation_naming_the_import() {
+    let runtime = runtime_with(WasmLimits::default());
+    let wasm = component(
+        r#"(import "mystery-import" (func $mystery (param "x" string) (result string)))"#,
+        ECHO,
+    );
+
+    let error = runtime
+        .mount(&wasm, &[])
+        .expect_err("the linker cannot define an unknown import");
+
+    assert_eq!(
+        error.kind(),
+        WasmErrorKind::UnsatisfiedImport,
+        "unexpected instantiation failure: {error}"
+    );
+    assert_eq!(error.code(), "unsatisfied_import");
+    assert!(
+        error.to_string().contains("mystery-import"),
+        "the error names the import: {error}"
     );
 }
 
@@ -406,6 +435,11 @@ fn fuel_exhaustion_returns_stable_error() {
 
     assert_eq!(error.kind(), WasmErrorKind::FuelExhausted);
     assert_eq!(error.code(), "fuel_exhausted");
+    assert_eq!(
+        mount.execute_calls(),
+        0,
+        "a trapped call is never counted as a successful execution"
+    );
 }
 
 #[test]
@@ -651,4 +685,57 @@ async fn wasm_plugin_registers_a_tool_and_unload_revokes_it() {
     );
     drop(tools_mount);
     assert!(ctx.require::<ToolRegistry>(KEY_TOOLS).is_err());
+}
+
+#[tokio::test]
+async fn a_fuel_exhausting_tool_call_reports_the_kind_in_its_metadata() {
+    let ctx = Context::new();
+    let tools = Arc::new(ToolRegistry::new());
+    let tools_mount = mount_all(
+        &ctx,
+        &[Arc::new(ToolRegistryPlugin::new(Arc::clone(&tools)))
+            as Arc<dyn KernelPlugin>],
+    )
+    .expect("mount the `tools` service");
+
+    let runtime = runtime_with(WasmLimits {
+        fuel: 2_000_000,
+        ..WasmLimits::default()
+    });
+    let mut manifest =
+        PluginManifest::new("loop-wasm", PLUGIN_PROTOCOL_VERSION);
+    manifest.runtime = RuntimeKind::Wasm;
+    manifest.abi = Some(WasmAbi::Json);
+    let plugin = WasmToolPlugin::new(
+        Arc::clone(&runtime),
+        component("", LOOP_FOREVER),
+        manifest,
+    )
+    .expect("build the plugin");
+    let mounted = mount_all(&ctx, &[Arc::new(plugin) as Arc<dyn KernelPlugin>])
+        .expect("mount the looping Wasm tool plugin");
+
+    let tool = tools
+        .get("echo")
+        .expect("the registered tool resolves")
+        .tool_instance();
+    let output = tool.call(json!({}), &ToolContext::default()).await;
+
+    assert_eq!(
+        output.is_error,
+        Some(true),
+        "fuel exhaustion is a tool error, not a result"
+    );
+    assert_eq!(
+        output
+            .metadata
+            .get("wasm_error_kind")
+            .and_then(Value::as_str),
+        Some("fuel_exhausted"),
+        "the tool output carries the stable kind: {:?}",
+        output.metadata
+    );
+    drop(tool);
+    drop(mounted);
+    drop(tools_mount);
 }

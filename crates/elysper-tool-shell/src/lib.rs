@@ -94,7 +94,14 @@ pub mod sandbox;
 pub mod plugin;
 
 mod risk;
-pub use plugin::{KEY_SANDBOX, SandboxPlugin, SandboxService, ShellToolPlugin};
+pub use plugin::{
+    KEY_SANDBOX,
+    SandboxBackendKind,
+    SandboxPlugin,
+    SandboxPluginConfig,
+    SandboxService,
+    ShellToolPlugin,
+};
 pub use sandbox::{
     BackendAvailability,
     BwrapBackend,

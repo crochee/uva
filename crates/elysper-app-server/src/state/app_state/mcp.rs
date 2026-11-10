@@ -175,25 +175,28 @@ mod tests {
     #[tokio::test]
     async fn shutdown_stops_the_tick_and_unregisters_remote_tools() {
         let ctx = Context::new();
-        let supervisor = Arc::new(McpSupervisor::new());
         let wire = Arc::new(InMemoryTransport::new().with_echo_server());
-        supervisor
-            .supervise(
-                "srv",
-                Arc::new(InMemoryTransportFactory::new(Arc::clone(&wire))) as _,
-            )
-            .await;
         let registry = Arc::new(ToolRegistry::new());
         let _mounted = mount_all(
             &ctx,
             &[
                 Arc::new(ToolRegistryPlugin::new(Arc::clone(&registry)))
                     as Arc<dyn KernelPlugin>,
-                Arc::new(McpPlugin::new(Arc::clone(&supervisor)))
-                    as Arc<dyn KernelPlugin>,
+                Arc::new(McpPlugin::new()) as Arc<dyn KernelPlugin>,
             ],
         )
         .expect("mount tools + mcp");
+        // The supervisor the plugin published is the one the runtime
+        // drives; the test supervises its in-memory server on it.
+        let supervisor = ctx
+            .require::<elysper::mcp::McpSupervisor>(elysper::mcp::KEY_MCP)
+            .expect("mcp service");
+        supervisor
+            .supervise(
+                "srv",
+                Arc::new(InMemoryTransportFactory::new(Arc::clone(&wire))) as _,
+            )
+            .await;
 
         let runtime = McpRuntime::start(
             ctx.clone(),

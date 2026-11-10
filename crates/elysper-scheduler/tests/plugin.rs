@@ -1,9 +1,12 @@
 //! The `scheduler` service as a native kernel plugin.
 //!
-//! The service holds one [`ScheduleStore`] and one [`Scheduler`]; these
-//! tests prove the kernel hands out exactly that pair (identity), that a
-//! due job is delivered by the service's own tick, and that the
-//! declaration parser refuses an interval it cannot honour.
+//! The plugin builds its own `ScheduleStore` and `Scheduler` from
+//! configuration inside `apply`; these tests mount it over a fresh
+//! context and prove the resolved service serves the configured store
+//! (a job written through it lists back), that a due job is delivered by
+//! the service's own tick, that unload withdraws the service and frees
+//! it, and that the declaration parser refuses an interval it cannot
+//! honour.
 
 use std::sync::Arc;
 
@@ -18,7 +21,7 @@ use elysper_kernel::{
 use elysper_scheduler::{
     Job,
     JobKind,
-    ScheduleStore,
+    SchedulerPluginConfig,
     SchedulerService,
     plugin::{KEY_SCHEDULER, SchedulerPlugin},
     task_file::{TASK_FILE, TaskDeclaration, TaskFileError},
@@ -35,44 +38,67 @@ fn now() -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
+fn config(schedules_dir: &std::path::Path) -> SchedulerPluginConfig {
+    SchedulerPluginConfig {
+        schedules_dir: schedules_dir.to_path_buf(),
+    }
+}
+
 fn mount_scheduler(
     ctx: &Context,
-    service: &Arc<SchedulerService>,
+    schedules_dir: &std::path::Path,
 ) -> elysper_kernel::MountHandle {
     mount_all(
         ctx,
-        &[Arc::new(SchedulerPlugin::new(Arc::clone(service)))
+        &[Arc::new(SchedulerPlugin::new(config(schedules_dir)))
             as Arc<dyn KernelPlugin>],
     )
     .expect("mount `scheduler`")
 }
 
 #[test]
-fn provides_the_service_and_unload_removes_it() {
+fn provides_a_working_service_and_unload_removes_it() {
     let ctx = Context::new();
     let dir = TempDir::new().expect("temp dir");
-    let store = Arc::new(ScheduleStore::new(dir.path()));
-    let service = Arc::new(SchedulerService::new(Arc::clone(&store)));
-
-    let mounted = mount_scheduler(&ctx, &service);
+    let mounted = mount_scheduler(&ctx, dir.path());
 
     let resolved = ctx
         .require::<SchedulerService>(KEY_SCHEDULER)
         .expect("`scheduler` resolves");
-    assert!(
-        Arc::ptr_eq(&resolved, &service),
-        "the service must be the pair the plugin was built with"
+    assert_eq!(
+        resolved.store().root(),
+        dir.path(),
+        "the service's store is rooted at the configured directory"
     );
-    assert!(
-        Arc::ptr_eq(resolved.store(), &store),
-        "the service exposes the store it was built over"
-    );
-    assert!(Arc::ptr_eq(resolved.store(), service.store()));
 
+    // The service is not a hollow shell: a job written through the
+    // resolved store lists back and is ticked by the same service.
+    resolved
+        .store()
+        .add(Job::new(
+            "nightly-audit",
+            JobKind::Once,
+            json!({"agent": "maintainer"}),
+            now(),
+        ))
+        .expect("add a job through the resolved service");
+    let listed = resolved.store().list();
+    assert_eq!(listed.len(), 1, "the job must reach the store");
+    assert_eq!(listed[0].name, "nightly-audit");
+
+    // Keep only a weak witness so unload can be checked by liveness,
+    // not just by visibility in the context.
+    let service = Arc::downgrade(&resolved);
+    drop(resolved);
     drop(mounted);
+
     assert!(
         ctx.require::<SchedulerService>(KEY_SCHEDULER).is_err(),
         "unload must withdraw `scheduler`"
+    );
+    assert!(
+        service.upgrade().is_none(),
+        "unload must drop the service, not merely hide it"
     );
 }
 
@@ -80,9 +106,7 @@ fn provides_the_service_and_unload_removes_it() {
 fn scheduler_tick_fires_due_job() {
     let ctx = Context::new();
     let dir = TempDir::new().expect("temp dir");
-    let store = Arc::new(ScheduleStore::new(dir.path()));
-    let service = Arc::new(SchedulerService::new(Arc::clone(&store)));
-    let mounted = mount_scheduler(&ctx, &service);
+    let mounted = mount_scheduler(&ctx, dir.path());
 
     let resolved = ctx
         .require::<SchedulerService>(KEY_SCHEDULER)
@@ -147,8 +171,7 @@ fn invalid_schedule_is_rejected() {
 #[test]
 fn manifest_matches_provided_key() {
     let dir = TempDir::new().expect("temp dir");
-    let store = Arc::new(ScheduleStore::new(dir.path()));
-    let plugin = SchedulerPlugin::new(Arc::new(SchedulerService::new(store)));
+    let plugin = SchedulerPlugin::new(config(dir.path()));
     let manifest = plugin.manifest();
 
     assert_eq!(manifest.id, "scheduler");
@@ -158,7 +181,7 @@ fn manifest_matches_provided_key() {
     assert_eq!(KEY_SCHEDULER, "scheduler");
     assert!(
         manifest.inject.is_empty(),
-        "the store and scheduler arrive with the plugin value"
+        "the store is built from config inside apply, so nothing is injected"
     );
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.abi.is_none());

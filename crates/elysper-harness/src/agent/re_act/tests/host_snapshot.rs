@@ -213,8 +213,20 @@ async fn the_gate_and_transformer_tables_ride_the_same_snapshot() {
         Arc::ptr_eq(&snapshot, &again),
         "the snapshot must be reused between dispatches"
     );
-    assert_eq!(snapshot.gates.len(), 1);
-    assert_eq!(snapshot.request_transformers.len(), 1);
+    assert_eq!(
+        host.waterfall(crate::seams::TOOL_PRE)
+            .map(|chain| chain.len())
+            .unwrap_or(0),
+        1
+    );
+    // The llm/request chain carries the gate's entry and the
+    // transformer's.
+    assert_eq!(
+        host.waterfall(crate::seams::LLM_REQUEST)
+            .map(|chain| chain.len())
+            .unwrap_or(0),
+        2
+    );
     assert_eq!(snapshot.result_transformers.len(), 1);
 
     // A registration in any table invalidates the published snapshot.
@@ -229,8 +241,18 @@ async fn the_gate_and_transformer_tables_ride_the_same_snapshot() {
 
     // The rebuilt snapshot holds the new registration too, not just a
     // different allocation.
-    assert_eq!(rebuilt.gates.len(), 2);
-    assert_eq!(rebuilt.request_transformers.len(), 1);
+    assert_eq!(
+        host.waterfall(crate::seams::TOOL_PRE)
+            .map(|chain| chain.len())
+            .unwrap_or(0),
+        2
+    );
+    assert_eq!(
+        host.waterfall(crate::seams::LLM_REQUEST)
+            .map(|chain| chain.len())
+            .unwrap_or(0),
+        3
+    );
     assert_eq!(rebuilt.result_transformers.len(), 1);
 
     let _second_request =
@@ -245,7 +267,12 @@ async fn the_gate_and_transformer_tables_ride_the_same_snapshot() {
         !Arc::ptr_eq(&rebuilt, &host.snapshot()),
         "a new transformer must invalidate the cached snapshot"
     );
-    assert_eq!(host.snapshot().request_transformers.len(), 2);
+    assert_eq!(
+        host.waterfall(crate::seams::LLM_REQUEST)
+            .map(|chain| chain.len())
+            .unwrap_or(0),
+        4
+    );
     assert_eq!(host.snapshot().result_transformers.len(), 2);
 }
 
