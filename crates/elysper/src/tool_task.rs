@@ -1,4 +1,4 @@
-//! [`elysper_tool_task`] — the `task` tool plugin: multi-agent
+//! [`elysper_tool_plugins::task`] — the `task` tool plugin: multi-agent
 //! delegation by running registered peers as sub-agents (gates,
 //! worktree isolation, `@agent:` routing, subagent admission, batched
 //! completion notification).
@@ -8,4 +8,4 @@
 //! (fallible — it returns `Err` if another installed delegator
 //! already advertises `task`).
 
-pub use elysper_tool_task::*;
+pub use elysper_tool_plugins::task::*;

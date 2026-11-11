@@ -627,7 +627,7 @@ fn assemble(
   不会覆盖核心工具。
 - **进程内动态加载（`.so` / WASM）不在本仓范围**：静态插件是编译期依赖，
   宿主（例如你自己的服务）在组装 agent 时安装它。需要不重编就能上线的第三方
-  插件，走 §7 的**进程**通道（`elysper-plugin-protocol` + `elysper-plugin-host`），
+  插件，走 §7 的**进程**通道（`elysper-plugin-runtime` 的 `protocol` + `host`），
   那不是加载 `.so`，而是起一个进程说 JSON。
 - 同一个 crate 也可以只做宿主侧的观察：`host.observe(...)` 拿到
   `BeforeTool` / `AfterTool` / `BeforeRequest` 等事件，看到的是只读视图；
@@ -864,7 +864,7 @@ plugins:
 5. **`gate` 是提权**。只有 `authority: full` **且**握手声明 `gate` 时才启用；
    声明了 `gate` 但配置没提权，插件看不到任何 gate 请求。
 
-方法集合（来自 `elysper-plugin-protocol` 的 `methods`，字符串不要手写）：
+方法集合（来自 `elysper-plugin-runtime::protocol::methods`，字符串不要手写）：
 
 | 方法 | 宿主发 | 插件回 |
 |---|---|---|
@@ -881,7 +881,7 @@ plugins:
 
 ```python
 #!/usr/bin/env python3
-"""records plugin: elysper-plugin-protocol over stdio."""
+"""records plugin: elysper-plugin-runtime protocol over stdio."""
 
 import json
 import sys
@@ -970,14 +970,14 @@ printf '%s\n%s\n%s\n' \
 ```
 
 再用真实宿主装一遍（一个临时 crate：依赖 `elysper-harness` +
-`elysper-plugin-host` + `elysper-plugin-protocol` + `elysper-tool` + `futures`，
+`elysper-plugin-runtime` + `elysper-tool` + `futures`，
 `futures::executor::block_on` 驱动，无需 tokio）：
 
 ```rust,ignore
 use futures::executor::block_on;
 use elysper_harness::Host;
-use elysper_plugin_host::{Authority, RemotePlugin, RemotePluginConfig, TransportKind};
-use elysper_plugin_protocol::PluginCapabilities;
+use elysper_plugin_runtime::host::{Authority, RemotePlugin, RemotePluginConfig, TransportKind};
+use elysper_plugin_runtime::protocol::PluginCapabilities;
 use elysper_tool::{Context, Risk};
 
 let config = RemotePluginConfig {

@@ -811,7 +811,11 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 - MCP 写一个**装不起来**的 profile ⇒ 报错，**profile 文件没变**，已挂载的树没变，
   界面仍显示变更前的目录。
 - MCP 写一个装得起来的 profile ⇒ 提交、刷新、下一 turn 用新装配结果。
-- MCP 创建一条能力行 ⇒ 排布里出现对应数据文件 + profile 里出现对应行，两者都在。
+- MCP 创建一条能力 ⇒ 排布里出现对应**数据文件**（`.agents/agents/<name>/` 或
+  `.agents/skills/<name>/`），且**承载它的聚合行**在 profile 里存在并启用（技能由 `skills`
+  行承载；**agent 没有独立的 profile 行**——它由目录发现，不是一行插件）。
+  ⇒ 验收：数据文件在盘 + 聚合行在 profile 里可见。（2026-11-10 修订：初稿写的是
+  "profile 里出现对应行"，那假设了 per-agent 行；实际的能力目录模型是"文件 + 聚合行"。）
 
 ### 刀 8 · UI 树与插槽契约（UI 装载器 + 浏览器 + 终端）
 
@@ -1034,3 +1038,15 @@ R-8/R-10 的前提已变（TUI 覆盖从三块扩到 12 域目录 + 对话优先
 3. 配置内部的 JSON `null` 键不可被 TOML 表达 → 往返即变更 → boot 物化行反复重挂；
    diff 改比“TOML 视图”（递归丢弃 null 值键）。
 4. 同值重复写仍广播 `profile/changed` → 订阅方无谓重读；no-op（diff 为空）不再广播。
+
+**验收期的缺口闭合**（设计审计 14 条，逐一处置）：
+- G3 能力创建的语义按上条修订对齐实现（数据文件 + 聚合行，而非 per-agent 行）。
+- G4 能力矩阵补上棘轮门禁（`scripts/check-host-capabilities.sh` + 基线 + `make ci`），
+  五种反向验证（无锚点 planned / 删列 / 缺口回升 / 证据不存在 / 编造方法）都会红。
+- G5 矩阵与 TUI 的 `KNOWN_METHODS` 补 `profile/*`（`:json` 通用门可达）。
+- G7 网关的指定端口被占时改选空闲端口（此前只会退避重试同一端口）。
+- G8 UI 装载器拒绝一行时写 `tracing::error!` 记录（此前只有错误上抛）。
+- G9/G10 终端的 kind 注册表与两宿主的 slot id 字面量：边界写进 README
+  （新 kind 需终端渲染器；slot id 漂移会落进"未放置"分组，不是静默丢失）。
+- G12 桌面壳的 `dist` 随前端重新同步（`make -C desktop frontend`）。
+- G13 root CI 的 web job 也跑 `npm run build`（此前只有 desktop job 构建）。

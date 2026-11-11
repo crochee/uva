@@ -135,7 +135,7 @@ async fn a_run_asks_the_provider_for_its_config_once() {
     let provider = Arc::new(ConfigCountingProvider::new());
     let registry = Arc::new(ToolRegistry::new());
     registry.register_entry(elysper_tool::ToolEntry::new(Arc::new(
-        elysper_tool_read::ReadTool::new(),
+        elysper_tool_plugins::read::ReadTool::new(),
     )));
     let events = run_and_collect(
         provider.clone(),
@@ -192,7 +192,7 @@ async fn a_manager_that_freezes_nothing_never_detaches_a_prefetch() {
     let provider = Arc::new(ConfigCountingProvider::new());
     let registry = Arc::new(ToolRegistry::new());
     registry.register_entry(elysper_tool::ToolEntry::new(Arc::new(
-        elysper_tool_read::ReadTool::new(),
+        elysper_tool_plugins::read::ReadTool::new(),
     )));
     let spawns = Arc::new(AtomicUsize::new(0));
     let agent = ReActAgent::new(provider, registry)

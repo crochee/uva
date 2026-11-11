@@ -144,7 +144,7 @@
   （`elysper-skill/src/skill.rs:121-127`）。
 - **谁拥有它**：`skills` 行（同技能）。
 - **缺行时的行为**：现状即无独立行；分区命令区显示空态并注明「命令随技能提供」。
-- **现状证据**：`crates/elysper-skill/src/skill.rs:121-127`；方法注册表（66 个）里没有
+- **现状证据**：`crates/elysper-skill/src/skill.rs:121-127`；方法注册表（71 个）里没有
   `commands` 前缀——本节刻意不引用任何命令方法名，这是矩阵要记录的事实，不是遗漏。
 
 ### 4.8 MCP（mcp）
@@ -256,7 +256,7 @@
   mcp
   ```
 
-  20 个方法名全部在注册表（66 个 `router.register`）中：`chat/message/send` /
+  20 个方法名全部在注册表（71 个 `router.register`）中：`chat/message/send` /
   `evals/run` / `models/list` / `plugins/list` / `schedules/tick` / `search/all` /
   `sessions/list` / `tasks/list` / `ui/schema` / `workflows/run` 等；精简部署里
   `eval` 缺行 → dump 无此行（`grep -c '"id": "eval"'` 为 0）。
@@ -289,12 +289,31 @@
 | 插件（`plugins`） | full | `list`（取项 `/resolved`）+ 行摊详情；只读目录 | 同上 |
 | 搜索（`search`） | full | `search/all`（`q` 必填）+ 行摊详情；侧栏 `s` 与 `:search <词>` 两个入口 | 同上 |
 | UI 扩展（`ui`） | full | `ui/schema`（取项 `/schemas`）+ 行摊详情；只读 | 同上 |
+| 配置（`profile`） | adapted | `profile/list` / `profile/get` / `profile/set` / `profile/create` / `profile/delete` 经 `:json` 通用门可达（写入走事务与四态回执）；**未**接目录面板（`profile/list` 的返回不是 `List<T>` 信封，需要取项适配） | `crates/elysper-tui/src/domains.rs`（`KNOWN_METHODS` 的 profile 段）、`crates/elysper-app-server/src/rpc/methods/profile.rs` |
 
 缺口说明：`create` / `patch` / `replace` / `register` 是多字段写，TUI 不提供表单，经
 `:json` 通用门可达（R-10 允许先只读）；若评审认为该降级，把对应行改 `adapted` 即可。本文
 §6 是刀 5 / 刀 6 的落地记录，profile 或方法面变化后随 §5 的再核对一起更新。
 
 刀 7 新增 `profile/list|get|set|create|delete` 方法面与自管 MCP 的 `profile`
-工具；TUI 尚未把 profile 接进目录面板或自带的 `KNOWN_METHODS`（`:json` 门目前
-只放行该表的副本），设置页的交互冒烟留给主线。因此本表暂不新增 `profile` 行，
-待 TUI 接入后按同一格式补「域 → 状态 → 证据」。
+工具。TUI 侧：`KNOWN_METHODS` 已收录这五个方法（`:json` 通用门可放行），但
+`profile/list` 的返回不是 `List<T>` 信封，未接目录面板——因此本表的 `profile`
+行是 `adapted`（可达但无专用视图）。设置页的写回交互由浏览器侧承担
+（`elysper-web/src/api/settings-profile.ts` 绑同一组方法）。
+
+## 7. 门禁（矩阵棘轮）
+
+`make check-host-capabilities`（脚本 `scripts/check-host-capabilities.sh`）把本文档变成
+可机械核验的棘轮：
+
+1. 每行必须有状态：`full` / `adapted` / `n/a` / `planned`（其它值即失败）；
+2. `planned` 行必须带锚点（说明里写清"什么会让它变成真"），`n/a` 行必须写理由；
+3. `full` / `adapted` 行引用的证据文件必须在磁盘上；
+4. 矩阵点名的方法必须在服务器注册表（`crates/elysper-app-server/src/rpc/methods/`）里存在；
+5. 缺口数（`planned` + `n/a`）不得超过 `scripts/host-capabilities/baseline`（当前基线 0）。
+
+反向验证（改坏任一格 ⇒ 门禁红）：把某格改成无锚点的 `planned`、删掉一列、把证据指向不存在的
+文件、在矩阵里编一个服务器没有的方法、让缺口数回升——五种情形都会让门禁失败。
+
+基线只能**单独一次提交**地抬高（与 `check-plugin-shape` 同一纪律）：矩阵退化是显式决定，
+不是漂移。

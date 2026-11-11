@@ -237,9 +237,14 @@ struct SuperviseShared {
     states_tx: mpsc::UnboundedSender<GatewayState>,
     /// The one receiver [`Gateway::states`] hands out.
     states_rx: Mutex<Option<mpsc::UnboundedReceiver<GatewayState>>>,
-    /// The live generation, so a synchronous `shutdown` can kill it.
+    /// The generation the supervisor owns, so a synchronous
+    /// `shutdown` can kill it.
     current: Mutex<Option<Arc<dyn GatewayProcess>>>,
     shutdown: AtomicBool,
+    /// Wakes the supervisor when the host stops, so a wait in the
+    /// restart backoff ends at once instead of after the full
+    /// window.
+    stopped: tokio::sync::Notify,
 }
 
 /// The supervisor's injectable seams and loop timings, bundled so
@@ -320,6 +325,7 @@ impl Gateway {
             states_rx: Mutex::new(Some(states_rx)),
             current: Mutex::new(None),
             shutdown: AtomicBool::new(false),
+            stopped: tokio::sync::Notify::new(),
         });
         let (outcome_tx, outcome_rx) = oneshot::channel();
         tokio::spawn(supervise(
@@ -362,6 +368,10 @@ impl Gateway {
     /// Stop supervising: kill the live generation and reap it. Idempotent.
     pub fn shutdown(&self) {
         self.shared.shutdown.store(true, Ordering::SeqCst);
+        // Wake the supervisor: a wait in the restart backoff must
+        // end now, not after the window — a generation started
+        // afterwards would be supervised by nobody.
+        self.shared.stopped.notify_one();
         if let Some(process) = self.shared.current.lock().as_ref() {
             process.kill();
         }
@@ -376,13 +386,25 @@ impl Drop for Gateway {
     }
 }
 
-/// Resolve `port == 0` by asking the OS for a free one, then
-/// releasing it so the gateway can bind. A brief race between the
-/// release and the child's bind is accepted (the same trade every
-/// "pick a port, then exec" host makes).
+/// Resolve the port the gateway is launched on: the caller's port
+/// when it is free, an OS-chosen one when it is `0` **or already
+/// taken**. The check releases the port again so the gateway can
+/// bind it; a brief race between the release and the child's bind is
+/// accepted (the same trade every "pick a port, then exec" host
+/// makes).
 fn pick_port(bind: &str, port: u16) -> io::Result<u16> {
     if port != 0 {
-        return Ok(port);
+        match std::net::TcpListener::bind((bind, port)) {
+            Ok(listener) => {
+                drop(listener);
+                return Ok(port);
+            }
+            // The port is taken: handing it to `serve` anyway would
+            // leave the gateway restarting forever on a port that
+            // never opens.
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {}
+            Err(error) => return Err(error),
+        }
     }
     let listener = std::net::TcpListener::bind((bind, 0))?;
     Ok(listener.local_addr()?.port())
@@ -439,20 +461,36 @@ fn production_probe() -> Probe {
     })
 }
 
+/// Why the readiness probe gave up early: nobody was waiting for the
+/// answer any more.
+const STOPPED_BEFORE_READY: &str =
+    "the gateway was stopped before it became ready";
+
 /// Probe until the gateway is ready or the budget runs out.
+///
+/// `stopped` tells the loop that nobody is waiting for the answer any
+/// more — the host dropped the handle, or abandoned the boot.
+/// Probing on would burn the whole readiness budget for nobody.
 async fn probe_until_ready(
     probe: &Probe,
     bind: &str,
     port: u16,
     timings: SuperviseTimings,
+    stopped: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + timings.ready_timeout;
     let mut last;
     loop {
+        if stopped() {
+            return Err(STOPPED_BEFORE_READY.to_owned());
+        }
         match probe(bind, port).await {
             Ok(200) => return Ok(()),
             Ok(code) => last = format!("HTTP status {code}"),
             Err(reason) => last = reason,
+        }
+        if stopped() {
+            return Err(STOPPED_BEFORE_READY.to_owned());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(format!(
@@ -461,6 +499,16 @@ async fn probe_until_ready(
         }
         tokio::time::sleep(timings.probe_interval).await;
     }
+}
+
+/// Whether the supervisor must stop: the host stopped, or the caller
+/// that awaited the first outcome went away.
+fn stop_requested(
+    shared: &SuperviseShared,
+    outcome: &Option<oneshot::Sender<Result<(), GatewayError>>>,
+) -> bool {
+    shared.shutdown.load(Ordering::SeqCst)
+        || outcome.as_ref().is_some_and(oneshot::Sender::is_canceled)
 }
 
 /// Emit one state to every listener.
@@ -499,6 +547,14 @@ async fn supervise(
     } = parts;
     let mut attempt = 0_u32;
     loop {
+        // A shutdown that landed between two generations must not
+        // start another one: the new child would be supervised by a
+        // task nobody owns, and nothing could ever kill it.
+        if shared.shutdown.load(Ordering::SeqCst) {
+            reap_current(&shared).await;
+            return;
+        }
+
         emit(&shared, GatewayState::Starting);
 
         let process: Arc<dyn GatewayProcess> = match launcher.launch(&options) {
@@ -520,13 +576,31 @@ async fn supervise(
         };
         *shared.current.lock() = Some(process.clone());
 
-        if let Err(reason) =
-            probe_until_ready(&probe, &options.bind, options.port, timings)
-                .await
-        {
+        // A shutdown that landed while the child was starting: the
+        // generation would be an orphan unless we kill it here.
+        if shared.shutdown.load(Ordering::SeqCst) {
+            reap_current(&shared).await;
+            return;
+        }
+
+        let probe_result = probe_until_ready(
+            &probe,
+            &options.bind,
+            options.port,
+            timings,
+            &|| stop_requested(&shared, &outcome),
+        )
+        .await;
+        if let Err(reason) = probe_result {
             process.kill();
             let _ = process.wait().await;
             *shared.current.lock() = None;
+            if stop_requested(&shared, &outcome) {
+                // Nobody is waiting for the answer any more: there is
+                // no failure to report, only a stop.
+                reply(&mut outcome, Err(GatewayError::Shutdown));
+                return;
+            }
             emit(
                 &shared,
                 GatewayState::Failed {
@@ -560,16 +634,34 @@ async fn supervise(
 
         // Hold the fort until the process ends.
         let _ = monitor(&process).await;
-        *shared.current.lock() = None;
 
         if shared.shutdown.load(Ordering::SeqCst) {
-            let _ = process.wait().await;
+            reap_current(&shared).await;
             return;
         }
 
         attempt += 1;
         emit(&shared, GatewayState::Restarting { attempt });
-        sleeper(Duration::from_secs(backoff_secs(attempt))).await;
+        // The backoff ends at once when the host stops: a
+        // generation started after that would be supervised by
+        // nobody.
+        let mut backoff = sleeper(Duration::from_secs(backoff_secs(attempt)));
+        let stopped = shared.stopped.notified();
+        tokio::pin!(stopped);
+        tokio::select! {
+            _ = &mut backoff => {}
+            _ = &mut stopped => {}
+        }
+    }
+}
+
+/// Kill and reap the generation the supervisor still owns, so no
+/// child outlives the task that supervises it.
+async fn reap_current(shared: &SuperviseShared) {
+    let owned = shared.current.lock().take();
+    if let Some(process) = owned {
+        process.kill();
+        let _ = process.wait().await;
     }
 }
 

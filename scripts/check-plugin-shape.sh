@@ -8,11 +8,10 @@
 #
 # Why this exists: `check-harness-shape` already pins the
 # harness crate's function length / nesting budget; plugin crates
-# (`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-web`
-# / `-task` / `-scheduler` / `-search` plus `elysper-mcp` /
-# `elysper-skill` / `elysper-attachment`) ship as a `lib.rs` plus
-# focused siblings, and the same long-file drift that motivated the
-# harness budget shows up there too. The gate is intentionally
+# (`elysper-tool-plugins` / `-policy-plugins` / `-plugin-runtime` plus
+# `elysper-mcp` / `-skill` / `-attachment`) ship one plugin per module
+# directory, and the same long-file drift that motivated the harness
+# budget shows up there too. The gate is intentionally
 # file-grained (not function-grained): plugins are small and the
 # natural remediation is splitting the file, not extracting helpers
 # inline.
@@ -30,14 +29,9 @@ cd "$(dirname "$0")/.."
 # Plugin-crate roots whose production source files participate in
 # the gate. Each root is the leaf crate directory under `crates/`.
 PLUGIN_CRATE_ROOTS=(
-  crates/elysper-tool-read
-  crates/elysper-tool-write
-  crates/elysper-tool-shell
-  crates/elysper-tool-todo
-  crates/elysper-tool-web
-  crates/elysper-tool-task
-  crates/elysper-tool-scheduler
-  crates/elysper-tool-search
+  crates/elysper-tool-plugins
+  crates/elysper-policy-plugins
+  crates/elysper-plugin-runtime
   crates/elysper-mcp
   crates/elysper-skill
   crates/elysper-attachment
@@ -57,16 +51,18 @@ if [[ -z "$baseline" ]]; then
   exit 1
 fi
 
-# Walk each plugin crate's `src/` directory: include the leaf `lib.rs`
-# and every sibling `.rs`, exclude `tests.rs` (inline tests; the
-# `check-test-layout` gate owns that), exclude `tests/` (sibling
-# integration-test dirs; layout gate covers those).
+# Walk each plugin crate's `src/` directory **recursively**: a plugin
+# family keeps one plugin per module directory (`src/<plugin>/*.rs`),
+# so a depth-1 walk would scan nothing and the gate would pass
+# vacuously. Exclude `tests.rs` (inline tests; the `check-test-layout`
+# gate owns that) and the sibling `tests/` integration-test dirs
+# (layout gate covers those).
 files=()
 for root in "${PLUGIN_CRATE_ROOTS[@]}"; do
   [[ -d "$root/src" ]] || continue
   while IFS= read -r -d '' f; do
     files+=("$f")
-  done < <(find "$root/src" -maxdepth 1 -name '*.rs' ! -name 'tests.rs' -print0)
+  done < <(find "$root/src" -name '*.rs' ! -name 'tests.rs' -print0)
 done
 
 if [[ ${#files[@]} -eq 0 ]]; then

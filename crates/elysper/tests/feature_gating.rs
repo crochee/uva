@@ -195,7 +195,7 @@ fn plugin_host_module_is_reachable_when_enabled() {
 }
 
 /// The wire vocabulary is usable alone: a plugin author takes
-/// `elysper-plugin-protocol` without the host's process transport.
+/// `elysper-plugin-runtime` without the host's process transport.
 #[cfg(feature = "plugin-protocol")]
 #[test]
 fn plugin_protocol_module_is_reachable_when_enabled() {
@@ -229,7 +229,7 @@ fn scheduler_module_is_reachable_when_enabled() {
 /// The `cron` feature is the whole cron path through the facade, not
 /// half of it: it reaches the parser (`elysper-scheduler/cron`, behind
 /// `elysper::scheduler::CronTrigger`) *and* the tool layer's forwarding
-/// feature (`elysper-tool-scheduler/cron`, which is what makes the
+/// feature (`elysper-tool-plugins/cron`, which is what makes the
 /// `schedule` tool accept `kind: "cron"` instead of refusing it).
 ///
 /// Reachability alone would not prove the second half — under

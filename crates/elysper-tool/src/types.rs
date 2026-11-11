@@ -12,8 +12,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// truncation config.
 ///
 /// What a call may *touch* is not here: a process-running tool
-/// owns its own execution policy (`elysper-tool-shell` holds its
-/// `ExecutionPolicy` + `SandboxBackend`), and a file-touching one
+/// owns its own execution policy (`elysper-tool-plugins`'s `shell`
+/// module holds its `ExecutionPolicy` + `SandboxBackend`), and a
+/// file-touching one
 /// enforces [`crate::workspace`] path confinement. The context is
 /// the same for every tool, so a per-tool boundary cannot live on
 /// it without one tool's setting silently changing another's.

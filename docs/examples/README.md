@@ -27,8 +27,8 @@ Two things are worth knowing before reading the code:
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
 | `assemble_with_builder` | `elysper-harness` | The same agent in one `ReActAgent` chain: tier steering, `.with_output_schema` auto-tool, LLM compaction, the session's log writer, `@agent` router | how small the happy path is |
-| `chain_of_thought` | `elysper-strategy-cot` | The `ChainOfThoughtStrategy` plugin: one tool-free pass with a step-format instruction, the chain parsed from the answer | `COT: OK` |
-| `best_of_n_demo` | `elysper-strategy-best-of-n` | The `BestOfNStrategy` plugin with `LlmJudgeScorer`: three candidates, one judge call per candidate, the highest-scoring candidate wins | `BON: OK`, plus the per-candidate progress events and the selection event |
+| `chain_of_thought` | `elysper-policy-plugins` (`cot`) | The `ChainOfThoughtStrategy` plugin: one tool-free pass with a step-format instruction, the chain parsed from the answer | `COT: OK` |
+| `best_of_n_demo` | `elysper-policy-plugins` (`best-of-n`) | The `BestOfNStrategy` plugin with `LlmJudgeScorer`: three candidates, one judge call per candidate, the highest-scoring candidate wins | `BON: OK`, plus the per-candidate progress events and the selection event |
 | `argument_validation` | `elysper-tool` | The R74 opt-in: same `EchoTool`, two runs (off / on), the off path counts 2 tool bodies (default unchanged-by-R74 contract), the on path counts 1 (the malformed call is rejected at the registry with `is_error: true` and the dotted-path violation in the body) | `ARGUMENT-VALIDATION: OK`, and the tool's call counter (2 vs 1) |
 | `external-consumer` | `docs/examples/` | A **standalone crate** (not a workspace member) depending on elysper by relative path — the real "use it as a library" test | `CONSUMER-PROOF: OK` |
 | `minimal-consumer` | `docs/examples/` | The **smallest** complete agent: one dependency (`elysper`, `default-features = false`) and the seven-feature MVP subset from [`MINIMAL.md`](../../MINIMAL.md) — a scripted provider that asks for a tool, one hand-written `Tool`, and assertions that it really ran. Its tree carries no HTTP client at all | `MVP-OK`, and `make check-mvp-deps` for the dependency promise |
@@ -39,23 +39,23 @@ Two things are worth knowing before reading the code:
 
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
-| `read_ranges` | `elysper-tool-read` | The `read` plugin brick: workspace file reader with 1-based `offset` / `limit` line ranges | `READ-OK`, and the line-numbered output |
-| `write_modes` | `elysper-tool-write` | The `write` plugin brick: overwrite vs append, confined to the workspace | `WRITE-OK`, and the file body after both calls |
-| `todo_list` | `elysper-tool-todo` | The `TodoWrite` plugin brick: the structured task list the model maintains | `TODO-OK`, and the rendered checklist |
-| `allowlist` | `elysper-tool-web` | The `web_fetch` plugin brick, offline: its schema plus `is_url_allowed` for an allowed vs blocked host | `WEB-OK` (no network access) |
+| `read_ranges` | `elysper-tool-plugins` (`read`) | The `read` plugin brick: workspace file reader with 1-based `offset` / `limit` line ranges | `READ-OK`, and the line-numbered output |
+| `write_modes` | `elysper-tool-plugins` (`write`) | The `write` plugin brick: overwrite vs append, confined to the workspace | `WRITE-OK`, and the file body after both calls |
+| `todo_list` | `elysper-tool-plugins` (`todo`) | The `TodoWrite` plugin brick: the structured task list the model maintains | `TODO-OK`, and the rendered checklist |
+| `allowlist` | `elysper-tool-plugins` (`web`) | The `web_fetch` plugin brick, offline: its schema plus `is_url_allowed` for an allowed vs blocked host | `WEB-OK` (no network access) |
 | `deferred_tools` | `elysper-tool` | `ToolExposure::Deferred`: a tool is advertised as name + description until the transcript shows it was called, then promoted to its full schema | the model-facing payload shrinking before the call and growing after; the tool still dispatches in both states |
 | `derive_tool` | `elysper-macros` | `#[derive(Tool)]`: a struct + inherent `execute` becomes a full `Tool` | the generated JSON Schema, and the model-facing `Invalid arguments` error |
-| `sandbox_policy` | `elysper-tool-shell` | `ExecutionPolicy` + `BwrapBackend` (the plugin's own OS execution policy) as consumed by `ShellTool` | the fail-closed refusal with no backend, and the real `[sandbox: file access denied …]` marker |
-| `schedule_jobs` | `elysper-tool-scheduler` | The `schedule` tool driven through `Tool::call` (`list` / `create` / `pause` / `resume` / `remove`) over the **same** `Arc<ScheduleStore>` the host's `Scheduler` ticks | `SCHEDULE-TOOL: OK`, the job the tool created being the one the host tick delivers, a paused job not firing, and `kind: "cron"` being refused on a default build because the scheduler crate cannot compute a recurrence (with `--features cron` the same call schedules the expression's own first fire) |
-| `search_tool_demo` | `elysper-tool-search` | The cross-domain `search` tool over one two-domain `elysper-search::Registry`: `register_search_tool` registers it `Deferred`, then one query fans out to both the skill and the memory engine | `SEARCH-TOOL: OK`, the advertised schema starting as the permissive placeholder and growing to the tool's own `query` / `limit` schema, and hits from both engines in one answer |
+| `sandbox_policy` | `elysper-tool-plugins` (`shell`) | `ExecutionPolicy` + `BwrapBackend` (the plugin's own OS execution policy) as consumed by `ShellTool` | the fail-closed refusal with no backend, and the real `[sandbox: file access denied …]` marker |
+| `schedule_jobs` | `elysper-tool-plugins` (`scheduler`) | The `schedule` tool driven through `Tool::call` (`list` / `create` / `pause` / `resume` / `remove`) over the **same** `Arc<ScheduleStore>` the host's `Scheduler` ticks | `SCHEDULE-TOOL: OK`, the job the tool created being the one the host tick delivers, a paused job not firing, and `kind: "cron"` being refused on a default build because the scheduler crate cannot compute a recurrence (with `--features cron` the same call schedules the expression's own first fire) |
+| `search_tool_demo` | `elysper-tool-plugins` (`search`) | The cross-domain `search` tool over one two-domain `elysper-search::Registry`: `register_search_tool` registers it `Deferred`, then one query fans out to both the skill and the memory engine | `SEARCH-TOOL: OK`, the advertised schema starting as the permissive placeholder and growing to the tool's own `query` / `limit` schema, and hits from both engines in one answer |
 | `tool_arg_repair` | `elysper-provider` | Wire hygiene: `repair_json` + `ToolArgsQuality` salvage malformed tool-call arguments and report how; `parse_provider_error_body` + `classify_provider_error_body` classify a failed response from its body | a raw control character and an invalid escape recovered as `Repaired`, a truncated tail reported as `RawFallback`, and 429 quota vs 429 throttling landing in different classes |
 
 ## 3. Agents in teams
 
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
-| `delegation_gate` | `elysper-tool-task` | `gate`: a verification command that must pass for a delegated child's work to count | the pass path, then `failed gate …` with the command's output |
-| `worktree_isolation` | `elysper-tool-task` | `worktree`: a temp git worktree on a reserved `elysper/agent-<ulid>` branch, kept when the child left changes | the branch and base SHA reported back |
+| `delegation_gate` | `elysper-tool-plugins` (`task`) | `gate`: a verification command that must pass for a delegated child's work to count | the pass path, then `failed gate …` with the command's output |
+| `worktree_isolation` | `elysper-tool-plugins` (`task`) | `worktree`: a temp git worktree on a reserved `elysper/agent-<ulid>` branch, kept when the child left changes | the branch and base SHA reported back |
 | `workflow_fanout` | `elysper-workflow` | A declarative `WorkflowSpec` (fan-out + gated call) executed through a fake `WorkflowHost`, then replayed from the JSONL journal | statuses per call; the second run spawning nothing |
 | `workflow_best_of` | `elysper-workflow` | `Step::BestOf`: run N candidate attempts, keep the first whose gate passes | the winner's text as the step output, the losers recorded as `Superseded` without failing the run, and the replay run spawning nothing |
 
@@ -83,6 +83,15 @@ Two things are worth knowing before reading the code:
 
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
+
+## 8. A third-party plugin
+
+| Example | Crate | Shows | Proof line |
+|---|---|---|---|
+| `plugin-author` | `docs/examples/plugin-author` (its own workspace, outside the framework's) | A **third-party** tool plugin: implement `Tool`, register it, call it — with the framework entry as its *only* framework dependency (`elysper`, `default-features = false`, features `tool` + `kernel`) | `PLUGIN-AUTHOR: OK` |
+
+The plugin catalog — every shipped plugin, its feature, its module and
+the dependencies it brings — is [`docs/plugins.md`](../plugins.md).
 
 ## Reading order suggestion
 

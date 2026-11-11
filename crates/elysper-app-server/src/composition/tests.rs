@@ -1,7 +1,7 @@
 //! Tests for the runtime plugin composition layer.
 //!
 //! The remote plugins here are `/bin/sh` running scripted protocol,
-//! like `elysper-plugin-host`'s own tests: the process boundary is
+//! like `elysper-plugin-runtime`'s own tests: the process boundary is
 //! real, the plugin is not.
 
 use std::{path::PathBuf, sync::Arc};

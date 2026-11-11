@@ -1,0 +1,83 @@
+[package]
+name = "elysper-policy-plugins"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+description = "The shipped policy plugins: semantic cache, resilience, budget, reflection and the reasoning strategies — one module and one feature per policy."
+homepage.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+# One feature per policy. A feature turns on exactly that policy's
+# module and the dependencies only that policy needs.
+cache = ["dep:elysper-search"]
+resilience = ["dep:elysper-tool"]
+budget = ["dep:elysper-tool"]
+reflection = ["dep:elysper-tool", "dep:elysper-harness", "dep:elysper-context", "dep:elysper-steering"]
+cot = ["dep:elysper-harness", "dep:elysper-session"]
+plan-execute = ["dep:elysper-tool", "dep:elysper-harness", "dep:elysper-context", "dep:elysper-steering"]
+best-of-n = ["dep:elysper-harness", "dep:elysper-session"]
+
+[dependencies]
+elysper-core.workspace = true
+elysper-provider = { workspace = true, default-features = false }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+rand.workspace = true
+# --- per-policy, optional ---
+elysper-tool = { workspace = true, optional = true }
+elysper-harness = { workspace = true, optional = true }
+elysper-context = { workspace = true, optional = true }
+elysper-steering = { workspace = true, optional = true }
+elysper-session = { workspace = true, optional = true }
+elysper-search = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+elysper-core = { workspace = true, features = ["tokio-util"] }
+tokio-util.workspace = true
+tracing-subscriber.workspace = true
+elysper-test-support.workspace = true
+elysper-tool.workspace = true
+elysper-context.workspace = true
+elysper-session.workspace = true
+chrono.workspace = true
+
+# An example needs its policy's feature: the family ships nothing
+# until a feature asks for it.
+[[example]]
+name = "semantic_cache_demo"
+required-features = ["cache"]
+[[example]]
+name = "resilience_demo"
+required-features = ["resilience"]
+[[example]]
+name = "budget_demo"
+required-features = ["budget"]
+[[example]]
+name = "reflection_demo"
+required-features = ["reflection"]
+[[example]]
+name = "chain_of_thought"
+required-features = ["cot"]
+[[example]]
+name = "plan_execute_demo"
+required-features = ["plan-execute"]
+[[example]]
+name = "best_of_n_demo"
+required-features = ["best-of-n"]

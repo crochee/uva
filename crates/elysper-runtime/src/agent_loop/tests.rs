@@ -84,7 +84,7 @@ impl Plugin for SubagentsPlugin {
     ) -> Result<Vec<elysper_kernel::EffectHandle>, elysper_kernel::PluginError>
     {
         let service = ctx.provide(
-            elysper_tool_task::KEY_SUBAGENTS,
+            elysper_tool_plugins::task::KEY_SUBAGENTS,
             Arc::clone(&self.delegator),
         )?;
         Ok(vec![service])
@@ -109,7 +109,7 @@ fn subagents_manifest() -> PluginManifest {
     manifest.runtime = elysper_kernel::RuntimeKind::Native;
     manifest
         .provides
-        .push(elysper_tool_task::KEY_SUBAGENTS.to_string());
+        .push(elysper_tool_plugins::task::KEY_SUBAGENTS.to_string());
     manifest
 }
 
@@ -269,7 +269,7 @@ fn the_subagents_service_becomes_a_delegator() {
     let provider: Arc<dyn ModelProvider> =
         Arc::new(elysper_test_support::FakeProvider::text("ok"));
     let delegator: Arc<dyn elysper_harness::DelegatingTool> =
-        Arc::new(elysper_tool_task::TaskDelegator::new(Arc::new(
+        Arc::new(elysper_tool_plugins::task::TaskDelegator::new(Arc::new(
             elysper_harness::AgentRegistry::new(),
         )));
     let (ctx, _mounted) =
@@ -292,7 +292,8 @@ fn the_subagents_service_becomes_a_delegator() {
 #[test]
 fn the_loop_injects_the_subagents_service() {
     assert!(
-        super::AGENT_LOOP_INJECTS.contains(&elysper_tool_task::KEY_SUBAGENTS),
+        super::AGENT_LOOP_INJECTS
+            .contains(&elysper_tool_plugins::task::KEY_SUBAGENTS),
         "the loop waits for the delegation backend: {:?}",
         super::AGENT_LOOP_INJECTS
     );

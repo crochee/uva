@@ -120,7 +120,7 @@ pub struct AgentInput {
     /// so a fan-out shares one manifest without cloning it.
     pub prompt_context: Option<Arc<PromptContext>>,
     /// Child-run depth (0 = a top-level session). The delegation
-    /// plugin (`elysper-tool-task`) stamps it on the inputs it
+    /// plugin (`elysper-tool-plugins`) stamps it on the inputs it
     /// hands to child agents and refuses to spawn past its depth
     /// cap.
     pub subagent_depth: usize,

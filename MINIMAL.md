@@ -12,9 +12,9 @@ nothing in `elysper` is forced on you.
 | Use the bundled Anthropic adapter | `elysper-provider` | `provider-anthropic` |
 | Use the bundled OpenAI adapter | `elysper-provider` | `provider-openai` |
 | Define tools | `elysper-tool` | `tool` |
-| Give the agent the offline file and process tools | `elysper-tool-read`, `-write`, `-shell`, `-todo` | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
-| Let the agent fetch URLs | `elysper-tool-web` | `tool-web` |
-| Delegate to peer agents | `elysper-tool-task` | `tool-task` |
+| Give the agent the offline file and process tools | `elysper-tool-plugins` (`read`, `write`, `shell`, `todo`) | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
+| Let the agent fetch URLs | `elysper-tool-plugins` (`web`) | `tool-web` |
+| Delegate to peer agents | `elysper-tool-plugins` (`task`) | `tool-task` |
 | Run a ReAct loop | `elysper-harness` | `harness` |
 | Have a context window policy | `elysper-context` | `context` |
 | Persist session events | `elysper-session` | `session` |
@@ -25,7 +25,7 @@ nothing in `elysper` is forced on you.
 | Drive MCP servers | `elysper-mcp` | `mcp` |
 | Let the agent browse and call MCP tools | `elysper-mcp` | `mcp` |
 | Run a scheduler (host-owned timer) | `elysper-scheduler` | `scheduler` |
-| Let the agent create / pause / cancel scheduled jobs | `elysper-tool-scheduler` | `tool-scheduler` |
+| Let the agent create / pause / cancel scheduled jobs | `elysper-tool-plugins` (`scheduler`) | `tool-scheduler` |
 | Define workflows | `elysper-workflow` | `workflow` |
 | Run eval suites | `elysper-eval` | `eval` |
 | Bundle skills | `elysper-skill` | `skill` |
@@ -47,10 +47,10 @@ elysper = { version = "0.1", default-features = false, features = [
 Note what that subset does **not** claim: `provider` is the
 `ModelProvider` trait and the wire types, not the Anthropic/OpenAI
 adapters, and `tool` is the **paradigm** — the registry plus the `Tool`
-trait — not a tool set. Every agent-facing tool implementation is its
-own plugin crate behind its own feature (`tool-read` / `tool-write` /
-`tool-shell` / `tool-todo` / `tool-task`, and `tool-web` for the one
-that talks to the network; `tool-scheduler` and `tool-search` are
+trait — not a tool set. Every agent-facing tool implementation is one
+module of the tool plugin family behind its own feature (`tool-read` /
+`tool-write` / `tool-shell` / `tool-todo` / `tool-task`, and `tool-web`
+for the one that talks to the network; `tool-scheduler` and `tool-search` are
 opt-in like `mcp` because their hosts must construct the
 `ScheduleStore` / `Registry` they adapt), so
 the seven-feature subset compiles **no
@@ -127,7 +127,7 @@ async fn assemble(provider: Arc<dyn ModelProvider>) {
     // 1) tools      — the paradigm ships no agent-facing set: the
     //                 `tool` feature is the registry + the `Tool`
     //                 trait. Register your own here, and add the
-    //                 plugin crates (`tool-read`, `tool-shell`, …)
+    //                 plugin features (`tool-read`, `tool-shell`, …)
     //                 as you want them.
     let registry = Arc::new(ToolRegistry::new());
 
@@ -202,7 +202,7 @@ re-enters that feature set.
 | LLM-driven compaction | `SummaryCompactor::new(provider, model).with_settings(settings)` + `.with_compactor(...)`: the session crate owns the one compaction engine, and a context manager only projects the request |
 | The defensive policy | `Host::default_policy(workspace)` instead of `Host::new()` — five guards, three hints, the adaptive tracker and the logging hook |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
-| Multi-agent delegation | `elysper-tool-task`: `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
+| Multi-agent delegation | `elysper-tool-plugins` (`task`): `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
 | Plugin kernel | add the `kernel` feature and mount a manifest group: `let ctx = elysper::kernel::Context::new(); let mounted = elysper::kernel::mount_all(&ctx, &[Arc::new(MyPlugin)])?;` — `mounted.dispose_plugin("my-id")` unloads one plugin and parks its consumers; UI extensions are `[ui]` profile rows the frontend renders from `ui/schema`, never remote code |
 | Remote MCP tools the host discovered | `elysper-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
 | Scheduling, model-side | add `tool-scheduler` and share one store: `let store = Arc::new(ScheduleStore::new(dir)); register_scheduler_tool(&registry, SchedulerTool::new(Arc::clone(&store)));` — the host still owns delivery (`Scheduler::new(store).tick(now)`), and a tool-side write (or a `ScheduleStore::load` that ingests another process's rows) reaches the next `tick` / `next_deadline` on its own: the pass sees the store's revision move and rebuilds its wheel. `Scheduler::resync(now)` stays available as the explicit rebuild, for a host that needs the wheel correct between passes |
@@ -283,7 +283,7 @@ use elysper::{
 };
 ```
 
-The plugin crates add their own modules once you enable the feature —
+The plugin family adds its own modules once you enable the feature —
 `elysper::tool_read::ReadTool`, `elysper::tool_web::WebFetchTool`,
 `elysper::tool_task::TaskDelegator`, and so on:
 if a name is not in the prelude, the module that owns it has it.

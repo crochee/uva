@@ -324,11 +324,11 @@ impl ProfileStore {
         root.insert("hmr".to_string(), toml::Value::Boolean(profile.hmr));
         root.insert(
             "core".to_string(),
-            toml::Value::Table(section(profile, &profile.core)?),
+            toml::Value::Table(section(&profile.core)?),
         );
         root.insert(
             "ui".to_string(),
-            toml::Value::Table(section(profile, &profile.ui)?),
+            toml::Value::Table(section(&profile.ui)?),
         );
         toml::to_string_pretty(&toml::Value::Table(root))
             .map_err(|error| format!("the profile does not serialize: {error}"))
@@ -359,26 +359,20 @@ impl ProfileStore {
     }
 }
 
-fn section(
-    profile: &Profile,
-    rows: &[Entry],
-) -> Result<toml::value::Table, String> {
+fn section(rows: &[Entry]) -> Result<toml::value::Table, String> {
     let mut section = toml::value::Table::new();
     section.insert(
         "entries".to_string(),
         toml::Value::Array(
             rows.iter()
-                .map(|entry| row_to_toml(profile, entry))
+                .map(row_to_toml)
                 .collect::<Result<Vec<_>, _>>()?,
         ),
     );
     Ok(section)
 }
 
-fn row_to_toml(
-    _profile: &Profile,
-    entry: &Entry,
-) -> Result<toml::Value, String> {
+fn row_to_toml(entry: &Entry) -> Result<toml::Value, String> {
     let mut row = toml::value::Table::new();
     row.insert("id".to_string(), toml::Value::String(entry.id.clone()));
     row.insert(

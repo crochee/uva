@@ -53,13 +53,15 @@ use std::{path::PathBuf, sync::Arc};
 use elysper_core::SharedClock;
 use elysper_mcp::ServerTool;
 use elysper_tool::{Context, Tool, ToolOutput};
-use elysper_tool_read::ReadTool;
-use elysper_tool_scheduler::SchedulerTool;
-use elysper_tool_search::SearchTool;
-use elysper_tool_shell::ShellTool;
-use elysper_tool_todo::TodoWriteTool;
-use elysper_tool_web::WebFetchTool;
-use elysper_tool_write::WriteTool;
+use elysper_tool_plugins::{
+    read::ReadTool,
+    scheduler::SchedulerTool,
+    search::SearchTool,
+    shell::ShellTool,
+    todo::TodoWriteTool,
+    web::WebFetchTool,
+    write::WriteTool,
+};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 

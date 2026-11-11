@@ -45,6 +45,11 @@ const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(250);
 /// The reconnect wait ceiling.
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(2);
 
+/// The budget one dial gets. The gateway is a local sidecar: a dial
+/// that hangs means the host is broken, not the gateway, and the
+/// client must not wedge on it.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// One notification handler: the notification's method name and its
 /// `params` member. Shared by [`GatewayClient::subscribe`] and
 /// [`GatewayClient::subscribe_all`].
@@ -232,15 +237,33 @@ fn build_replay(inner: &ClientInner) -> Vec<String> {
 /// Only `ws://` is supported — the gateway is a local sidecar.
 type Socket = WebSocketStream<TcpStream>;
 
-async fn dial(url: &url::Url) -> Result<Socket, String> {
+pub(crate) async fn dial(url: &url::Url) -> Result<Socket, String> {
+    dial_within(url, DIAL_TIMEOUT).await
+}
+
+/// `dial` under an explicit budget: a gateway that never answers
+/// must not wedge the client.
+pub(crate) async fn dial_within(
+    url: &url::Url,
+    budget: Duration,
+) -> Result<Socket, String> {
     let host = url.host_str().ok_or_else(|| "no host".to_owned())?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let stream = TcpStream::connect((host, port))
+    let stream = tokio::time::timeout(budget, TcpStream::connect((host, port)))
         .await
+        .map_err(|_| {
+            format!("the tcp dial to {host}:{port} timed out after {budget:?}")
+        })?
         .map_err(|error| format!("tcp dial failed: {error}"))?;
-    let (socket, _) = tokio_tungstenite::client_async(url.as_str(), stream)
-        .await
-        .map_err(|error| format!("handshake failed: {error}"))?;
+    let (socket, _) = tokio::time::timeout(
+        budget,
+        tokio_tungstenite::client_async(url.as_str(), stream),
+    )
+    .await
+    .map_err(|_| {
+        format!("the handshake with {host}:{port} timed out after {budget:?}")
+    })?
+    .map_err(|error| format!("handshake failed: {error}"))?;
     Ok(socket)
 }
 
@@ -301,6 +324,22 @@ async fn run(
     mut outbound: mpsc::UnboundedReceiver<Outbound>,
     first: Socket,
 ) {
+    let _ = connection_loop(url, inner.clone(), &mut outbound, first).await;
+    // Every exit path releases the waiters: a request that was
+    // queued while the socket was down would otherwise never be
+    // answered, and its caller (a host task) would hang forever.
+    inner.fail_pending("the client went away");
+}
+
+/// The reconnect loop: serve one socket at a time, redial with a
+/// 250ms → 2s backoff after a drop, replay the subscriptions, and
+/// stop once the client is closed or abandoned.
+async fn connection_loop(
+    url: url::Url,
+    inner: Arc<ClientInner>,
+    outbound: &mut mpsc::UnboundedReceiver<Outbound>,
+    first: Socket,
+) {
     let mut socket = Some(first);
     let mut backoff = RECONNECT_BACKOFF_MIN;
     loop {
@@ -322,7 +361,7 @@ async fn run(
             }
         };
         inner.connected.store(true, Ordering::SeqCst);
-        match pump(inner.clone(), current, &mut outbound).await {
+        match pump(inner.clone(), current, outbound).await {
             PumpEnd::SocketDead => {
                 inner.connected.store(false, Ordering::SeqCst);
                 inner.fail_pending("the connection was lost");

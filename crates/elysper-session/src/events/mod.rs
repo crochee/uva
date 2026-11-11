@@ -561,7 +561,7 @@ pub enum SessionEvent {
     /// other's state (dsh `sandbox/mode` parity). The effective
     /// policy is the last such event folded against the caller's
     /// grants and the deployment default — see
-    /// `elysper_tool_shell::sandbox::effective_policy`.
+    /// `elysper_tool_plugins::shell::sandbox::effective_policy`.
     #[serde(rename = "sandbox_mode")]
     SandboxMode {
         /// Sequence ordinal.

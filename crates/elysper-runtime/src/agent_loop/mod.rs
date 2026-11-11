@@ -36,7 +36,7 @@ use elysper_harness::plugin::{AgentLoopFactory, RunConfig};
 use elysper_kernel::{Context, PluginError};
 use elysper_provider::{ModelProvider, plugin::KEY_LLM_DEFAULT};
 use elysper_session::{CompactionSettings, Compactor, SummaryCompactor};
-use elysper_tool_task::KEY_SUBAGENTS;
+use elysper_tool_plugins::task::KEY_SUBAGENTS;
 
 /// The policy a fresh per-run compactor is built from when a run
 /// names an explicit provider.

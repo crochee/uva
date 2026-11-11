@@ -38,6 +38,9 @@ PARADIGM_CRATES=(
   crates/elysper-context
   crates/elysper-steering
   crates/elysper-session
+  crates/elysper-tool-plugins
+  crates/elysper-policy-plugins
+  crates/elysper-plugin-runtime
 )
 
 baseline_dir="scripts/paradigm-surface/baselines"

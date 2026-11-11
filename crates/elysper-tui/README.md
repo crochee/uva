@@ -14,7 +14,7 @@
 
 ## 三条宿主路径同源
 
-```
+```text
 crates/elysper-tui ─┐
 浏览器（elysper-web）─┼─▶ serve 的 /rpc WebSocket ─▶ core（无头）
 桌面壳（desktop）  ─┘     （网关监管 core、按 id 中继帧）
@@ -113,6 +113,12 @@ transcript 下方的块；两者都只在有组件时占位，空树时布局与
 照常画，未知 kind 显示 `? <kind>` 占位行；声明了但本构建不放置的插槽收进
 那个块的一行 `unplaced: …` 摘要。新增一个 UI 插件 = 一行 profile + 一份组件
 数据，终端代码零改动。
+
+**边界（别把"零改动"读成"永远零改动"）**：零改动成立的前提是组件用**已注册的
+kind**（`panel` / `list` / `key-value`）；新增一种 kind 需要在终端的 kind 注册表
+（`src/render/ui_slots.rs`）加一个渲染器。插槽 id（`chat.sidebar` 等）两宿主各写
+一份字面量——服务器改名时，终端不会静默丢组件：它落进 `unplaced: …` 摘要，
+浏览器落进"未放置"分组，两边都看得见。
 
 ## 分层与测试
 

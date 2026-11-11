@@ -19,6 +19,7 @@ use crate::{
     GatewayError,
     GatewayOptions,
     GatewayState,
+    client::{dial, dial_within},
     supervisor::{
         GatewayProcess,
         Launcher,
@@ -397,6 +398,32 @@ fn instant_sleeper() -> Sleeper {
     Arc::new(|_| Box::pin(async {}))
 }
 
+/// A sleeper the test can hold open: the supervisor parks in it
+/// until the test releases it, so a shutdown can land *inside* the
+/// restart backoff.
+fn pausable_sleeper()
+-> (Sleeper, Arc<AtomicBool>, tokio::sync::oneshot::Sender<()>) {
+    let parked = Arc::new(AtomicBool::new(false));
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let released = Arc::new(Mutex::new(Some(released)));
+    let sleeper: Sleeper = {
+        let parked = parked.clone();
+        let released = released.clone();
+        Arc::new(move |_duration| {
+            let parked = parked.clone();
+            let released = released.clone();
+            Box::pin(async move {
+                parked.store(true, Ordering::SeqCst);
+                let receiver = released.lock().take();
+                if let Some(released) = receiver {
+                    let _ = released.await;
+                }
+            })
+        })
+    };
+    (sleeper, parked, release)
+}
+
 /// Read the next state, failing fast instead of hanging forever.
 async fn next_state(
     states: &mut UnboundedReceiver<GatewayState>,
@@ -549,7 +576,9 @@ async fn dropping_start_before_its_outcome_reaps_the_generation() {
     });
     let launcher = RecordingLauncher::new(|_| FakeProcess::alive());
 
-    let start = Gateway::start_with(
+    // The boot runs on its own task: aborting it drops the `start`
+    // future — the host quitting during boot.
+    let boot = tokio::spawn(Gateway::start_with(
         options(),
         SuperviseParts {
             launcher: launcher.clone(),
@@ -557,12 +586,16 @@ async fn dropping_start_before_its_outcome_reaps_the_generation() {
             sleeper: instant_sleeper(),
             timings: TEST_TIMINGS,
         },
+    ));
+    // Let the boot reach its await point, then abandon it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        launcher.launch_count(),
+        1,
+        "the generation was launched before the host quit"
     );
-    let start = Box::pin(start);
-    // Let the start reach its await point, then abandon it.
-    tokio::task::yield_now().await;
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    drop(start);
+    boot.abort();
+    let _ = boot.await;
     gate.store(true, Ordering::SeqCst);
     let _ = release.send(());
 
@@ -577,6 +610,184 @@ async fn dropping_start_before_its_outcome_reaps_the_generation() {
     assert!(
         launcher.all_killed(),
         "an abandoned start reaps its generation instead of orphaning it"
+    );
+}
+
+#[tokio::test]
+async fn an_occupied_port_is_replaced_by_a_free_one() {
+    // The caller's port is taken: handing it to `serve` anyway would
+    // leave the gateway restarting forever on a port that never
+    // opens.
+    let occupied = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let launcher = RecordingLauncher::new(|_| FakeProcess::alive());
+    let (probe, _) = scripted_probe(vec![Ok(200)]);
+
+    let gateway = Gateway::start_with(
+        GatewayOptions {
+            port: occupied_port,
+            ..options()
+        },
+        SuperviseParts {
+            launcher: launcher.clone(),
+            probe,
+            sleeper: instant_sleeper(),
+            timings: TEST_TIMINGS,
+        },
+    )
+    .await
+    .expect("ready");
+
+    let ports = launcher.ports();
+    assert_eq!(ports.len(), 1, "serve was launched exactly once");
+    let served = ports[0];
+    assert_ne!(
+        served, occupied_port,
+        "serve must not be given a port that is already taken"
+    );
+    assert_ne!(served, 0, "port 0 never reaches serve");
+    assert_eq!(
+        gateway.base_url(),
+        format!("http://127.0.0.1:{served}"),
+        "base_url carries the port serve got"
+    );
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", served)).is_ok(),
+        "the port the supervisor picked must be bindable"
+    );
+
+    gateway.shutdown();
+}
+
+#[tokio::test]
+async fn an_abandoned_boot_stops_the_readiness_probe() {
+    // The probe never answers. Without a stop signal the supervisor
+    // would burn the whole readiness budget (30s in production) for a
+    // host that is already gone.
+    let launcher = RecordingLauncher::new(|_| FakeProcess::alive());
+    let probe: Probe = Arc::new(|_bind: &str, _port: u16| {
+        Box::pin(async { Err("connection refused".to_owned()) })
+    });
+
+    // The boot runs on its own task: aborting it is the host quitting
+    // during boot (a dropped `start` future drops the outcome
+    // receiver, and the supervisor must notice).
+    let boot = tokio::spawn(Gateway::start_with(
+        options(),
+        SuperviseParts {
+            launcher: launcher.clone(),
+            probe,
+            sleeper: instant_sleeper(),
+            timings: SuperviseTimings {
+                probe_interval: Duration::from_millis(5),
+                ready_timeout: Duration::from_secs(30),
+            },
+        },
+    ));
+    // Let the boot reach its await point, then abandon it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        launcher.launch_count(),
+        1,
+        "the generation was launched before the host quit"
+    );
+    boot.abort();
+    let _ = boot.await;
+
+    for _ in 0..500 {
+        if launcher.all_killed() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(4)).await;
+    }
+    assert!(
+        launcher.all_killed(),
+        "an abandoned boot must stop probing instead of burning the readiness budget"
+    );
+}
+
+#[tokio::test]
+async fn dropping_the_gateway_inside_the_restart_backoff_does_not_revive_an_orphan()
+ {
+    // Generation 0 dies on its own and the supervisor waits out the
+    // backoff. The host quits inside that window: the supervisor must
+    // stop, not start a generation nobody is left to kill.
+    let gen0_exit = Arc::new(AtomicBool::new(false));
+    let launcher = RecordingLauncher::new({
+        let gen0_exit = gen0_exit.clone();
+        move |index| {
+            let mut process = FakeProcess::alive();
+            if index == 0 {
+                process.exited = gen0_exit.clone();
+            }
+            process
+        }
+    });
+    let (probe, _) = scripted_probe(vec![Ok(200)]);
+    let (sleeper, parked, release) = pausable_sleeper();
+
+    let gateway = Gateway::start_with(
+        options(),
+        SuperviseParts {
+            launcher: launcher.clone(),
+            probe,
+            sleeper,
+            timings: TEST_TIMINGS,
+        },
+    )
+    .await
+    .expect("ready");
+
+    let mut states = gateway.states();
+    assert!(matches!(
+        next_state(&mut states).await,
+        GatewayState::Starting
+    ));
+    assert!(matches!(
+        next_state(&mut states).await,
+        GatewayState::Ready { .. }
+    ));
+
+    // The generation dies; the supervisor enters the restart backoff.
+    gen0_exit.store(true, Ordering::Relaxed);
+    assert_eq!(
+        next_state(&mut states).await,
+        GatewayState::Restarting { attempt: 1 }
+    );
+    for _ in 0..500 {
+        if parked.load(Ordering::SeqCst) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert!(
+        parked.load(Ordering::SeqCst),
+        "the supervisor parked in the restart backoff"
+    );
+
+    // The host quits while the supervisor waits.
+    drop(gateway);
+    // Release the sleeper: a supervisor that only checks the flag
+    // after waking must not start another generation either.
+    let _ = release.send(());
+
+    // The supervisor stops with the host: the state stream closes.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while states.next().await.is_some() {}
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the supervisor must stop when the host drops the handle"
+    );
+    assert_eq!(
+        launcher.launch_count(),
+        1,
+        "no generation was started after the drop"
+    );
+    assert!(
+        launcher.all_killed(),
+        "the generation the supervisor owned was killed"
     );
 }
 
@@ -670,6 +881,138 @@ async fn eventually(condition: impl Fn() -> bool) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("condition never became true");
+}
+
+/// A gateway that answers exactly one connection and then goes away:
+/// the client's socket dies and every redial is refused.
+async fn serve_once_then_stop() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        // The handshake completes, then the socket hangs up.
+        let socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        drop(socket);
+        // The listener goes with it: every redial is refused.
+        drop(listener);
+    });
+    format!("ws://127.0.0.1:{port}/rpc")
+}
+
+/// A listener whose accept queue is full: the kernel drops the SYN
+/// instead of refusing it, so the connect hangs — the blackhole a
+/// dial has to give up on. The listener and the queued connections
+/// come back with the port: both must stay alive for the queue to
+/// stay full.
+async fn saturated_listener()
+-> (u16, std::net::TcpListener, Vec<tokio::net::TcpStream>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut held = Vec::new();
+    for _ in 0..512 {
+        match tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => held.push(stream),
+            // The queue is full: the connect hangs instead of being
+            // refused.
+            _ => break,
+        }
+    }
+    assert!(
+        held.len() >= 64,
+        "the accept queue should be full by now: {}",
+        held.len()
+    );
+    (port, listener, held)
+}
+
+#[tokio::test]
+async fn the_dial_gives_up_when_the_gateway_never_accepts() {
+    let (port, _listener, _held) = saturated_listener().await;
+    let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/rpc")).unwrap();
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        dial_within(&url, Duration::from_millis(200)),
+    )
+    .await
+    .expect("the dial must give up instead of hanging")
+    .expect_err("the dial cannot succeed");
+    assert!(error.contains("timed out"), "{error}");
+}
+
+#[tokio::test]
+async fn the_production_dial_gives_up_when_the_gateway_never_accepts() {
+    // The path the client really takes: `dial` must come back with
+    // an error, not hang on a socket nobody accepts.
+    let (port, _listener, _held) = saturated_listener().await;
+    let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/rpc")).unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(30), dial(&url))
+        .await
+        .expect("the production dial must give up instead of hanging")
+        .expect_err("the dial cannot succeed");
+    assert!(error.contains("timed out"), "{error}");
+}
+
+#[tokio::test]
+async fn the_dial_gives_up_when_the_handshake_never_answers() {
+    // A listener that accepts the socket and then says nothing: the
+    // WebSocket handshake never completes.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let url = url::Url::parse(&format!("ws://127.0.0.1:{port}/rpc")).unwrap();
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        dial_within(&url, Duration::from_millis(200)),
+    )
+    .await
+    .expect("the dial must give up instead of hanging")
+    .expect_err("the handshake cannot succeed");
+    assert!(error.contains("timed out"), "{error}");
+}
+
+#[tokio::test]
+async fn a_request_parked_during_the_redial_window_fails_when_the_client_closes()
+ {
+    // The gateway answers once and goes away: the client's socket
+    // dies and every redial is refused.
+    let url = serve_once_then_stop().await;
+    let client = GatewayClient::connect(&url).await.expect("connect");
+    eventually(|| !client.connected()).await;
+
+    // A request queued while the client is redialing parks.
+    let request = tokio::spawn({
+        let client = client.clone();
+        async move { client.request("sessions/list", json!({ "limit": 1 })).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The host closes the client: the parked request must be
+    // released, not hang forever.
+    client.close();
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .expect("the parked request must be released, not hang")
+        .expect("the request task finished");
+    assert!(
+        outcome.is_err(),
+        "a request that can no longer be delivered must fail: {outcome:?}"
+    );
 }
 
 #[tokio::test]

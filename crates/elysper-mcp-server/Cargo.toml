@@ -37,13 +37,15 @@ elysper-mcp.workspace = true
 elysper-core.workspace = true
 elysper-provider.workspace = true
 elysper-tool.workspace = true
-elysper-tool-read.workspace = true
-elysper-tool-write.workspace = true
-elysper-tool-shell.workspace = true
-elysper-tool-todo.workspace = true
-elysper-tool-web.workspace = true
-elysper-tool-scheduler.workspace = true
-elysper-tool-search.workspace = true
+elysper-tool-plugins = { workspace = true, features = [
+  "read",
+  "write",
+  "shell",
+  "todo",
+  "web",
+  "scheduler",
+  "search",
+] }
 elysper-scheduler.workspace = true
 elysper-search.workspace = true
 

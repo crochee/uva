@@ -37,10 +37,10 @@ use elysper_harness::{AgentEvent, AgentInput, Host, ReActAgent};
 use elysper_provider::traits::ModelProvider;
 use elysper_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use elysper_tool::{ToolEntry, ToolRegistry};
-use elysper_tool_read::ReadTool;
-use elysper_tool_shell::ShellTool;
-use elysper_tool_todo::TodoWriteTool;
-use elysper_tool_write::WriteTool;
+use elysper_tool_plugins::read::ReadTool;
+use elysper_tool_plugins::shell::ShellTool;
+use elysper_tool_plugins::todo::TodoWriteTool;
+use elysper_tool_plugins::write::WriteTool;
 
 /// The tool surface, composed brick by brick: one line per plugin
 /// crate, nothing hidden in a default set.

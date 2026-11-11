@@ -43,7 +43,7 @@
 
 use core::time::Duration;
 
-/// Outcome a wrapped call observes. `elysper-resilience` provides
+/// Outcome a wrapped call observes. `elysper-policy-plugins` provides
 /// the classifier that maps a `ProviderError` (or a `ToolOutput`
 /// error flag) to one of these variants; the state machine is
 /// generic over the variant.

@@ -45,7 +45,7 @@ impl AgentConfig {
     /// Parse the per-agent sandbox wire name (R62). Unknown values
     /// return `None` so a log written by a newer build degrades
     /// gracefully — matching
-    /// `elysper_tool_shell::sandbox::ExecutionPolicy::from_wire`
+    /// `elysper_tool_plugins::shell::sandbox::ExecutionPolicy::from_wire`
     /// without the server depending on the shell tool crate.
     #[must_use]
     pub fn sandbox_policy_name(&self) -> Option<&'static str> {

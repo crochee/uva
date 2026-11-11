@@ -346,7 +346,19 @@ impl std::fmt::Debug for ComponentHandle {
 pub fn load_ui_tree(entries: &[Entry]) -> Result<UiTree, UiError> {
     let tree = UiTree::new();
     for entry in entries {
-        load_row(&tree, entry)?;
+        if let Err(error) = load_row(&tree, entry) {
+            // The rejection is the point: a row that names a slot
+            // nobody declared (or declares one twice) must not mount.
+            // Record it, so an operator can see *which* row was
+            // refused instead of only that the boot failed.
+            tracing::error!(
+                target: "elysper::ui",
+                row = %entry.id,
+                error = %error,
+                "a ui row was refused by the slot loader"
+            );
+            return Err(error);
+        }
     }
     Ok(tree)
 }

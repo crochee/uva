@@ -68,10 +68,12 @@ elysper-test-support.workspace = true
 tracing-subscriber.workspace = true
 # The assembly examples compose the plugin crates exactly as a
 # downstream consumer would.
-elysper-tool-read.workspace = true
-elysper-tool-write.workspace = true
-elysper-tool-shell.workspace = true
-elysper-tool-todo.workspace = true
+elysper-tool-plugins = { workspace = true, features = [
+  "read",
+  "write",
+  "shell",
+  "todo",
+] }
 
 # The hot-path benchmarks: one binary that prints a table (`make
 # bench`). `harness = false` keeps criterion (and its dependency tree)

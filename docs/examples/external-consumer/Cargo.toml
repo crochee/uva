@@ -25,10 +25,12 @@ elysper-tool = { path = "../../../crates/elysper-tool" }
 # The tool implementations are plugin crates: depend on the ones you
 # want, register them yourself. This consumer wants the four offline
 # file/process tools (the `-task` and `-web` plugins are left out).
-elysper-tool-read = { path = "../../../crates/elysper-tool-read" }
-elysper-tool-write = { path = "../../../crates/elysper-tool-write" }
-elysper-tool-shell = { path = "../../../crates/elysper-tool-shell" }
-elysper-tool-todo = { path = "../../../crates/elysper-tool-todo" }
+elysper-tool-plugins = { path = "../../../crates/elysper-tool-plugins", features = [
+  "read",
+  "write",
+  "shell",
+  "todo",
+] }
 elysper-steering = { path = "../../../crates/elysper-steering" }
 elysper-session = { path = "../../../crates/elysper-session" }
 elysper-core = { path = "../../../crates/elysper-core" }

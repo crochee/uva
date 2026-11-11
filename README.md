@@ -92,7 +92,7 @@ loop → session writer）在这一份代码里真实跑一遍，并断言工具
 | **生产级 SaaS / 内部平台** | 25 个 crate 独立 `cargo add`，按需拉起 provider / tool / telemetry，无未使用依赖 |
 | **本地 CLI / IDE 插件** | `CancelToken` 与 `Spawner` 让 stdout / LSP 长生命周期进程安全取消 |
 | **嵌入式 / 机器人** | 无 tokio 依赖的 lib 公共 API（`make check-public-api-runtime` 保证），可跑在 `std::thread + futures::executor` |
-| **多智能体工作流** | `elysper-tool-task`（多智能体委派）+ `elysper-workflow`（声明式 DAG），JSONL journal 可断点续跑 |
+| **多智能体工作流** | `elysper-tool-plugins/task`（多智能体委派）+ `elysper-workflow`（声明式 DAG），JSONL journal 可断点续跑 |
 | **审计 / 合规** | `elysper-steering`（Guard / Hook / Hint）+ `elysper-telemetry/otlp`（OTel trace），事件流可接企业 SIEM |
 | **商业化 / 私有 fork** | MIT 许可 + 双轨发布（cargo + raw binary）+ `cargo-deny` 锁供应链 + SLSA Build L1 来源证明（见 [RELEASE.md](RELEASE.md)） |
 
@@ -109,7 +109,7 @@ loop → session writer）在这一份代码里真实跑一遍，并断言工具
 
 ## 仓库分层
 
-The framework is organized as a Rust workspace with **44 packages**, all under `crates/`, every one of them a `elysper-*` crate except the `elysper` facade. Of those, the libraries are meant to be composed by consumers; `elysper-app-server` is the application crate, `elysper-tui` its terminal projection, and `elysper-mcp-server` the stdio binary — the places where `tokio` / `axum` may appear in a public signature. The front-end sits next to the workspace as `elysper-web/` with its own `package.json`.
+The framework is organized as a Rust workspace with **29 packages**, all under `crates/`, every one of them a `elysper-*` crate except the `elysper` facade. Of those, the libraries are meant to be composed by consumers; `elysper-app-server` is the application crate, `elysper-tui` its terminal projection, and `elysper-mcp-server` the stdio binary — the places where `tokio` / `axum` may appear in a public signature. The front-end sits next to the workspace as `elysper-web/` with its own `package.json`.
 
 ### Core Crates
 
@@ -119,7 +119,9 @@ The framework is organized as a Rust workspace with **44 packages**, all under `
 | [elysper-provider](crates/elysper-provider/) | LLM provider abstraction (OpenAI, Anthropic) |
 | [elysper-context](crates/elysper-context/) | Context-window management (truncating / summarizing / DAG strategies) + 3-layer `Memory` tier (conversation / working / long-term) over the session sink |
 | [elysper-tool](crates/elysper-tool/) | Tool paradigm: `Tool` trait, registry, exposure projection, `workspace` path confinement, and the two synthetic contracts (`__get_full_output`, `structured_output`) — **no agent-facing tool set** |
-| [elysper-tool-read](crates/elysper-tool-read/) · [-write](crates/elysper-tool-write/) · [-shell](crates/elysper-tool-shell/) · [-todo](crates/elysper-tool-todo/) · [-web](crates/elysper-tool-web/) · [-task](crates/elysper-tool-task/) · [-scheduler](crates/elysper-tool-scheduler/) · [-search](crates/elysper-tool-search/) | The tool plugins, one brick each (the shell owns its OS execution policy; `-task` is the multi-agent `task` tool; `-scheduler` is the `schedule` tool over `elysper-scheduler`; `-search` is the cross-domain `search` tool over a host-built `elysper-search` registry) |
+| [elysper-tool-plugins](crates/elysper-tool-plugins/) | The tool plugins, one module per tool behind one feature each: `read` / `write` / `shell` / `todo` / `web` / `task` / `scheduler` / `search` / `memo` (the shell owns its OS execution policy; `task` is the multi-agent `task` tool; `scheduler` is the `schedule` tool over `elysper-scheduler`; `search` is the cross-domain `search` tool over a host-built `elysper-search` registry) |
+| [elysper-policy-plugins](crates/elysper-policy-plugins/) | The policy plugins, one module per policy behind one feature each: `cache` / `resilience` / `budget` / `reflection` / `cot` / `plan-execute` / `best-of-n` |
+| [elysper-plugin-runtime](crates/elysper-plugin-runtime/) | The dynamic plugin channel: `protocol` (the serde-only wire contract) / `host` (a plugin process becomes registrations) / `wasm` (the component runtime) |
 | [elysper-session](crates/elysper-session/) | Session lifecycle and state management |
 | [elysper-harness](crates/elysper-harness/README.md) | The harness: core ReAct loop, `Agent` / `DelegatingTool` / strategy seams, `AgentRegistry`, type definitions |
 | [elysper-steering](crates/elysper-steering/) | Steering layer: guards / hooks / hints / tracker / output transformer + `HookMap` typed registry |
@@ -203,9 +205,9 @@ cargo run --example runtime_agnostic -p elysper-harness
 # a full turn (tool call included) on std::thread + futures::executor::block_on
 ```
 
-The boundary is documented rather than implied: the tool plugin crates
-(`elysper-tool-read` / `-write` / `-shell` use `tokio::fs` /
-`tokio::process`; `elysper-tool-web` uses `reqwest`), the provider HTTP
+The boundary is documented rather than implied: the tool plugin family
+(`elysper-tool-plugins` uses `tokio::fs` / `tokio::process`; its `web`
+feature uses `reqwest`), the provider HTTP
 adapters, and the JSONL session sink are tokio-bound *plugins* — a
 consumer on another runtime does not depend on them, or supplies their
 own `Tool` / `ModelProvider` / `SessionSink`, and the loop still runs
@@ -262,8 +264,8 @@ use elysper_core::{AtomicCancelToken, CancelToken, SystemClock};
 use elysper_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use elysper_steering::Steering;
 use elysper_tool::{ToolEntry, ToolRegistry};
-use elysper_tool_read::ReadTool;   // tool implementations are plugins:
-use elysper_tool_shell::ShellTool; // depend on the bricks you want
+use elysper_tool_plugins::read::ReadTool;    // tool implementations are plugins:
+use elysper_tool_plugins::shell::ShellTool;  // one module + one feature each
 
 let provider = Arc::new(MyProvider::new());               // 1. any ModelProvider
 let registry = ToolRegistry::new();                       // 2. tools: compose
@@ -316,17 +318,17 @@ Later rounds kept growing the same lego axes:
 | 8 | `Steering::for_tier` / `tier::auto` | `elysper-steering` | One-line tier-tuned guard/hint/tracker bundle (traitclaw parity) |
 | 9 | `AdaptiveRegistry` | `elysper-tool` | Tier-capped LLM-visible tool list over any `Arc<ToolRegistry>` |
 | 10 | `ToolOutputDefinition` + `present_call` / `present_result` | `elysper-tool` | Tool-owned canonical render contract for LLM + UI surfaces (dsh parity) |
-| 11 | `Router` + `LeaderRouter` + `mentions_to_task_specs` | `elysper-tool-task` | `@agent: prompt` text mentions → delegation `TaskSpec`s |
+| 11 | `Router` + `LeaderRouter` + `mentions_to_task_specs` | `elysper-tool-plugins` | `@agent: prompt` text mentions → delegation `TaskSpec`s |
 | 12 | `AttachmentStore` + `ImageAttachmentRef` | `elysper-attachment` | Content-addressed multimodal store (sha256, hash re-verify, FS + memory backends) |
 | 13 | `SnapshotBus` + `subscribe_snapshots` | `elysper-session` / `elysper-app-server` | Publish/subscribe channel for run lifecycle snapshots; surfaced by the `sessions/status` method |
 | 14 | `ReActAgent` + `with_*` chain | `elysper-harness` | One-expression assembly of a complete agent (`new(provider, registry)` + chained setters; the harness *is* the builder) |
 | 15 | `validate_against_schema` + `SchemaViolation` | `elysper-core` | JSON-Schema-subset validator with dotted-path, all-at-once violations |
 | 16 | `StructuredOutputTool` | `elysper-tool` | Schema-validated structured-output capture; `with_output_schema(json)` on the agent auto-injects it |
-| 23 | `GroupJoin` | `elysper-tool-task` | Batch background-agent completions into one notification, with a timeout so a straggler can't stall the batch (clock injected — runtime-neutral) |
+| 23 | `GroupJoin` | `elysper-tool-plugins` | Batch background-agent completions into one notification, with a timeout so a straggler can't stall the batch (clock injected — runtime-neutral) |
 | 24 | `ToolRestriction` + `RestrictedRegistry` | `elysper-tool` | Per-scope allow / deny tool visibility; ancestor scopes intersect (dsh parity) |
 | 25 | `ToolSchemaBuilder` + `ToolFeatures` | `elysper-tool` | Feature-gated JSON-Schema fields — a refused capability is never described to the model |
 | 26 | `credential::normalize_api_key` | `elysper-provider` | Pre-send credential classifier; a malformed key fails before it reaches the transport (dsh parity) |
-| 27 | `MentionClone` + `LeaderRouter::mention_clone_mode` | `elysper-tool-task` | Route a `@agent:` mention through an invisible throwaway clone, not the leader's own tool call (pi-subagents parity) |
+| 27 | `MentionClone` + `LeaderRouter::mention_clone_mode` | `elysper-tool-plugins` | Route a `@agent:` mention through an invisible throwaway clone, not the leader's own tool call (pi-subagents parity) |
 | 28 | `Scheduler` + `Job` + `ScheduleStore` | `elysper-scheduler` | Cron / interval / once dispatch with the timer owned by the caller and atomic JSON persistence |
 | 29 | `OperationRequest` + gated operation dispatch | `elysper-app-server` | One discriminated-union request (`prompt | skill | prompt_template | compaction | navigation`) behind `[operations] enabled`, served by the `chat/operation` method |
 | 30 | `CompactionLifecycle` emitter + `compaction_outcomes` | `elysper-context`, `elysper-session` | Pair `compaction_start`/`end` in the durable log; an orphan is `Interrupted`, not an ambiguous gap |
@@ -339,15 +341,15 @@ Later rounds kept growing the same lego axes:
 | 37 | `EvalSuite` / `TestCase` / `Metric` (sync) / `AsyncMetric` / `EvalRunner` / `KeywordMetric` / `LlmJudgeMetric` / `SchemaValidationMetric` / `EvalReport` (JSON + CSV) | `elysper-eval` (new) | Quality measurement: case passes iff ALL metric scores ≥ threshold; LLM judge with local `JudgeProvider` seam and clamped score parse; schema-validation reuses `elysper_core::schema::validate_against_schema`; RFC4180 CSV escaping |
 | 38 | `ReplayProvider` (`from_script` / `from_events_jsonl` + `assert_consumed`) | `elysper-test-support` | Deterministic `ModelProvider` for golden-transcript regression tests over the full loop (compaction, steering, delegation, repair); dsh `assertConsumed` parity (cancellation aborts undrained cursor) |
 | 39 | `RunInbox` trait + `MpscInbox` + `RunInboxHandle` + `SteeringInjected` / `SteeringSource::{Steering, FollowUp}` + length-stop guard | `elysper-harness` | Interactive seams: messages typed mid-run drain between tool rounds; follow-ups revive a stopping run; length-stop tool batches fail with model-facing error `ToolResult`s instead of executing truncated JSON (pi parity) |
-| 40 | `prompt::RuntimeContext` (chrono clock injected) + `task::gate` (`GateSpec` + injectable `CommandRunner`) + `task::worktree` (`WorktreeSpec` + `elysper/agent-<ulid>` branch) + `task_tool_definition()` schema fields | `elysper-harness`, `elysper-tool-task` | Cache-stable system prompt — volatile env facts become a user-role snapshot appended only when the rendered body changed (dsh `renderContextSnapshot`); verification gate on `task` runs exactly-once post-child (failed gates refuse the result); git-worktree isolation for delegated children (the `worktree_isolation` feature name `elysper-tool/schema_builder` R29 advertised is now real) |
+| 40 | `prompt::RuntimeContext` (chrono clock injected) + `task::gate` (`GateSpec` + injectable `CommandRunner`) + `task::worktree` (`WorktreeSpec` + `elysper/agent-<ulid>` branch) + `task_tool_definition()` schema fields | `elysper-harness`, `elysper-tool-plugins` | Cache-stable system prompt — volatile env facts become a user-role snapshot appended only when the rendered body changed (dsh `renderContextSnapshot`); verification gate on `task` runs exactly-once post-child (failed gates refuse the result); git-worktree isolation for delegated children (the `worktree_isolation` feature name `elysper-tool/schema_builder` R29 advertised is now real) |
 | 41 | `FileMemory` + `FileMemoryConfig` + `MemoryScope::{Local, Project, User}` + `FileMemoryEntry` + `MemoryKind` | `elysper-context` | File-backed scoped long-term memory (pi-subagents parity): `MEMORY.md` index + frontmatter entry files, deterministic keyword recall (3×/2×/1× name/description/body, newest-id tie-break), ULID identity, read-only mode, agent-name whitelist + symlink/traversal refusal |
-| 42 | `ExecutionPolicy` + `SandboxBackend` + `BwrapBackend` + `NoopBackend` + `resolve_confined_command` + `effective_policy` + `SANDBOX_UNAVAILABLE` | `elysper-tool-shell` | OS-level execution policy (dsh sandbox parity), owned by the plugin that runs processes: confinement is **argv construction** (the backend returns the command to spawn instead), `ReadOnly`/`WorkspaceWrite`/`DangerFullAccess`, bubblewrap profile with `--ro-bind /` + `--die-with-parent`, availability probed once and **fail-closed** (a confined policy with no backend refuses instead of running unconfined), `grant > session mode > deployment default` fold |
-| 43 | `SubagentPool` + `Slot` + `Admission`/`AdmissionTicket`/`QueuedToken` + `InvocationRecord` + `InvocationStatus` | `elysper-tool-task` | Two-lane subagent admission state machine (pi-subagents `agent-manager` parity): bounded background lane with FIFO queue, unbounded foreground, nested children uncharged (the deadlock guard), 100 tombstones addressable by id, requested-vs-effective model/tier substitution visible after the fact. No threads, no timers — the caller admits, spawns, releases |
+| 42 | `ExecutionPolicy` + `SandboxBackend` + `BwrapBackend` + `NoopBackend` + `resolve_confined_command` + `effective_policy` + `SANDBOX_UNAVAILABLE` | `elysper-tool-plugins` (`shell`) | OS-level execution policy (dsh sandbox parity), owned by the plugin that runs processes: confinement is **argv construction** (the backend returns the command to spawn instead), `ReadOnly`/`WorkspaceWrite`/`DangerFullAccess`, bubblewrap profile with `--ro-bind /` + `--die-with-parent`, availability probed once and **fail-closed** (a confined policy with no backend refuses instead of running unconfined), `grant > session mode > deployment default` fold |
+| 43 | `SubagentPool` + `Slot` + `Admission`/`AdmissionTicket`/`QueuedToken` + `InvocationRecord` + `InvocationStatus` | `elysper-tool-plugins` | Two-lane subagent admission state machine (pi-subagents `agent-manager` parity): bounded background lane with FIFO queue, unbounded foreground, nested children uncharged (the deadlock guard), 100 tombstones addressable by id, requested-vs-effective model/tier substitution visible after the fact. No threads, no timers — the caller admits, spawns, releases |
 | 44 | `WorkflowSpec` / `Step::{Agent, FanOut, Pipeline}` / `WorkflowRuntime` / `WorkflowHost` / `WorkflowCaps` / `WorkflowControl` / `WorkflowJournal` | `elysper-workflow` (new) | Declarative workflow runtime (pi-subagents §workflow, JS VM replaced by serde data): one injected `WorkflowHost` effect seam (`spawn_agent` / `run_gate`) keeps caps + concurrency + abort enforceable and tests host-free; JSONL journal keyed by sha256 of each call's identity, torn-tail tolerant, replays the longest matching prefix and re-runs the tail; typed pause/resume/skip/retry/abort control |
 | 45 | `GroupedRegistry` + `GroupError` | `elysper-tool` | Named tool groups with independent activation (traitclaw `GroupedRegistry`): `visible_tool_names()` offers only active groups (plus tools no group claims) while dispatch is untouched, so a tool in a deactivated group **stays executable** — the visibility ≠ executability split skills, workflow steps and subagents rely on. Declarations are validated (unknown tool, duplicate, tool claimed twice) and one tool belongs to one group |
 | 46 | `FullOutputStore` + `InMemoryFullOutputStore` + `__get_full_output` tool + `TransformerChain` / `JsonExtractor` / `BudgetAwareTruncator` | `elysper-core`, `elysper-tool`, `elysper-steering` | Output too large to commit is transformed then *stashed* rather than dropped (traitclaw transformers): the store is bounded by entries **and** bytes with true LRU (a `get` refreshes recency, handles are never reused), the transformer chain extracts JSON before budgeting, and the published marker names a handle the model retrieves through `__get_full_output` |
-| 47 | Layered `elysper-harness`: private submodules + curated re-exports; `agent::{strategy, run}` | `elysper-harness`, `elysper-tool-task` | R122's harness cleanup. Every submodule of `elysper-harness` is **private** and re-exports only the names it is for, so internal structure is no longer public API and adding an item to an internal module cannot silently widen the contract. The three reasoning strategies moved under `agent::strategy` beside the seam they implement (with `CandidateScorer` its own file and one shared single-shot request builder), and run control — `RunInbox`/`MpscInbox` under `agent::run`; the `AgentHandle`/`DetachedAgent` deferred-run pair that sat beside them has since been **deleted** (no in-tree consumer — `Agent::run`'s event stream is the single run entry point). The out-of-band **team** layer (`BoundAgent` / `VerificationChain` / `RoundRobinGroupChat`) was **deleted**: a `prompt -> text` team chat has no caller in a harness whose delegation is the `task` tool, verify-then-retry is a `CandidateScorer` (or a `elysper-workflow` gate), and a stop condition is the loop's own |
-| 48 | `ConditionalRouter` + `RoutePatternError` | `elysper-tool-task` | Ordered regex routing rules, first match wins, with a default fallback (traitclaw `ConditionalRouter`) — implemented against the existing `Router` trait, so rules and `@agent:` mentions are two strategies behind one seam. A bad pattern is a typed error, never a panic |
+| 47 | Layered `elysper-harness`: private submodules + curated re-exports; `agent::{strategy, run}` | `elysper-harness`, `elysper-tool-plugins` | R122's harness cleanup. Every submodule of `elysper-harness` is **private** and re-exports only the names it is for, so internal structure is no longer public API and adding an item to an internal module cannot silently widen the contract. The three reasoning strategies moved under `agent::strategy` beside the seam they implement (with `CandidateScorer` its own file and one shared single-shot request builder), and run control — `RunInbox`/`MpscInbox` under `agent::run`; the `AgentHandle`/`DetachedAgent` deferred-run pair that sat beside them has since been **deleted** (no in-tree consumer — `Agent::run`'s event stream is the single run entry point). The out-of-band **team** layer (`BoundAgent` / `VerificationChain` / `RoundRobinGroupChat`) was **deleted**: a `prompt -> text` team chat has no caller in a harness whose delegation is the `task` tool, verify-then-retry is a `CandidateScorer` (or a `elysper-workflow` gate), and a stop condition is the loop's own |
+| 48 | `ConditionalRouter` + `RoutePatternError` | `elysper-tool-plugins` | Ordered regex routing rules, first match wins, with a default fallback (traitclaw `ConditionalRouter`) — implemented against the existing `Router` trait, so rules and `@agent:` mentions are two strategies behind one seam. A bad pattern is a typed error, never a panic |
 | 49 | `SqliteMemory` + `SqliteMemoryError` (feature `sqlite`) | `elysper-context` | Single-file durable memory (traitclaw-memory-sqlite): FTS5/BM25 long-term recall (queries are sanitised into quoted terms so `NEAR(` and `*` are text, not syntax), a durable working-memory table, a session registry, read-only opens, and typed errors that keep `SQLite`'s own message. The conversation tier still delegates to the session sink — one source of truth |
 | 50 | `ToolEntry::with_exposure` + `ToolDescriptor::exposure` + `project_tool_definitions` + `called_tool_names` + `ToolRegistry::descriptors` | `elysper-tool`, `elysper-harness`, `elysper-app-server` | The tool surface the model is offered, in one place: `Direct` sends the full schema, `Deferred` sends name + description with a permissive schema until the transcript shows the tool was called (then it is promoted), `Hidden`/`is_hidden` sends nothing. Promotion is derived from the transcript, so it is replay-stable and needs no mutable registry state; the same projection serves the agent loop and the operator listing, and the visible-name filter is how `AdaptiveRegistry`'s tier cap and `GroupedRegistry`'s groups plug in |
 | 51 | `json_repair::{repair_json, parse_tool_input_reported, parse_tool_input_logged, ToolArgsQuality}` + `error_body::{ProviderErrorBody, parse_provider_error_body}` + `RetryClass::{ContextOverflow, Auth}` + `classify_provider_error_body` | `elysper-provider` | Wire hygiene: malformed tool-call arguments are salvaged by repair instead of silently degrading, and *how* they were parsed is reported (strict / repaired / raw fallback) so a production log shows it. Provider error bodies are parsed into a typed signal, so quota exhaustion, context overflow, capacity overload and auth failures classify distinctly — including when they share an HTTP status (429 quota vs 429 throttling) |
@@ -357,11 +359,11 @@ Later rounds kept growing the same lego axes:
 | 55 | `WorkflowHost::select_candidate` + `SelectionRequest` / `SelectionCandidate` / `CandidateOutcome` / `GateVerdict` + `JournalEntry.winner` | `elysper-workflow` | The host may judge candidates (a rubric, an LLM, the longest answer) instead of taking the first passing gate; the default implementation keeps R33's rule, the choice is **recorded** so a replay never re-asks the host, and naming a candidate that did not succeed is a typed error rather than a plausible-looking wrong winner |
 | 56 | `CompactionCheckpoint` + `SurfaceLedger` + `fold_log_surface` / `try_fold_log_surface` | `elysper-session`, `elysper-context`, `elysper-harness`, `elysper-app-server` | Durable compaction checkpoints, end to end: provenance is resolved through the log (the manager's in-memory indices cannot address the surface), the lifecycle pair is handed to the session's writer as soon as it fires and reaches the log at the writer's next flush, and a record whose span cannot be proven is dropped with a warning instead of writing a checkpoint with wrong provenance. The production resume projection folds the log, so a resumed session rebuilds the compacted surface instead of replaying (and re-paying for) the pre-compaction history |
 
-| 57 | `Spawner` + `SharedSpawner` + `ReActAgent::with_spawner` | `elysper-core`, `elysper-harness` | The one operation that used to hard-code tokio — detached work — behind a trait with no runtime in its signature. The loop still detaches one task per run (a caller that stops polling must not cancel the run), but *where* that task goes is the consumer's choice: `cargo run --example runtime_agnostic -p elysper-harness` runs a full turn on `std::thread` + `futures::executor::block_on`. Tool dispatch is spawn-free entirely (`run_stream` drives every call from the caller's poll); the tool plugin crates, the provider HTTP adapters and the JSONL sink remain tokio-bound plugins, and the crate docs say so |
-| 58 | Per-crate features: tool plugins (`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-web` / `-task` / `-scheduler` / `-search`, one tool each) + `elysper-telemetry` (`metrics`, `otlp`), `elysper-provider` (`anthropic`, `openai`), facade features (`provider-anthropic`, `provider-openai`, `tool-*`) + `make check-mvp-deps` | workspace-wide | Transport and tools are opt-in and *separable*: the seven-feature MVP subset compiles the `Tool` paradigm and **no agent-facing tool** (no HTTP client at all — `reqwest` / `hyper` / `rustls` / `h2` / `tower` absent), each tool plugin is a crate you either depend on or don't, the OTel exporter arrives only with `otlp`, and the gate asserts both the MVP subset and the seven offline tool crates stay clean |
-| 59 | `ReasoningStrategy` + `AgentRuntime` + `EventSink` + `ReActAgent::with_strategy` | `elysper-harness` | The reasoning loop as a swappable part: a strategy receives every assembled piece (provider, tools, steering, context manager, clock, cancel token, executor) and publishes events, so `ReActStrategy` and `ChainOfThoughtStrategy` run against one runtime — `cargo run --example chain_of_thought -p elysper-strategy-cot` exercises the chain-of-thought strategy against the same runtime. One method, streaming-first; errors travel as `SessionEnded { reason }` |
+| 57 | `Spawner` + `SharedSpawner` + `ReActAgent::with_spawner` | `elysper-core`, `elysper-harness` | The one operation that used to hard-code tokio — detached work — behind a trait with no runtime in its signature. The loop still detaches one task per run (a caller that stops polling must not cancel the run), but *where* that task goes is the consumer's choice: `cargo run --example runtime_agnostic -p elysper-harness` runs a full turn on `std::thread` + `futures::executor::block_on`. Tool dispatch is spawn-free entirely (`run_stream` drives every call from the caller's poll); the tool plugin family, the provider HTTP adapters and the JSONL sink remain tokio-bound plugins, and the crate docs say so |
+| 58 | Per-crate features: the tool family (`elysper-tool-plugins`, one feature per tool) + `elysper-telemetry` (`metrics`, `otlp`), `elysper-provider` (`anthropic`, `openai`), facade features (`provider-anthropic`, `provider-openai`, `tool-*`) + `make check-mvp-deps` | workspace-wide | Transport and tools are opt-in and *separable*: the seven-feature MVP subset compiles the `Tool` paradigm and **no agent-facing tool** (no HTTP client at all — `reqwest` / `hyper` / `rustls` / `h2` / `tower` absent), each tool is a feature you either turn on or don't, the OTel exporter arrives only with `otlp`, and the gate asserts both the MVP subset and the tool family's offline features stay clean |
+| 59 | `ReasoningStrategy` + `AgentRuntime` + `EventSink` + `ReActAgent::with_strategy` | `elysper-harness` | The reasoning loop as a swappable part: a strategy receives every assembled piece (provider, tools, steering, context manager, clock, cancel token, executor) and publishes events, so `ReActStrategy` and `ChainOfThoughtStrategy` run against one runtime — `cargo run --example chain_of_thought -p elysper-policy-plugins --features cot` exercises the chain-of-thought strategy against the same runtime. One method, streaming-first; errors travel as `SessionEnded { reason }` |
 | 60 | `McpControlTool` + `register_mcp_control_tool` (`MCP_TOOL_NAME`) | `elysper-mcp` | The `mcp` tool: the **dynamic** counterpart of the per-tool `McpTool` registration. Three actions (`servers` / `tools` / `call`) over a shared `McpSupervisor`, so a model can read the live catalog — including each remote tool's argument schema — and call a remote tool by its server-side name without the host publishing every remote schema up front. Unknown server vs disconnected server get different, corrective messages; a remote tool's `isError` and its image/audio blocks travel through the same projection as the pre-registered path (`cargo run --example mcp_control_tool -p elysper-mcp`) |
-| 61 | `SchedulerTool` + `register_scheduler_tool` (`SCHEDULE_TOOL_NAME`) | `elysper-tool-scheduler` (new) | The `schedule` tool: `list` / `create` / `pause` / `resume` / `remove` over a shared `ScheduleStore`, addressed by job id **or** name. It plans, the host delivers — `create` never fires its own payload, so there is one delivery path (`Scheduler::tick`). `cron` is refused by the schema unless the `cron` feature is enabled — with it, `kind: "cron"` plus a 5-field POSIX `cron_expr` is accepted and the first fire is the expression's own next occurrence; without it the scheduler crate cannot compute a recurrence, so an accepted job is always one the crate can honour (`cargo run --example schedule_jobs -p elysper-tool-scheduler`) |
+| 61 | `SchedulerTool` + `register_scheduler_tool` (`SCHEDULE_TOOL_NAME`) | `elysper-tool-plugins` (new) | The `schedule` tool: `list` / `create` / `pause` / `resume` / `remove` over a shared `ScheduleStore`, addressed by job id **or** name. It plans, the host delivers — `create` never fires its own payload, so there is one delivery path (`Scheduler::tick`). `cron` is refused by the schema unless the `cron` feature is enabled — with it, `kind: "cron"` plus a 5-field POSIX `cron_expr` is accepted and the first fire is the expression's own next occurrence; without it the scheduler crate cannot compute a recurrence, so an accepted job is always one the crate can honour (`cargo run --example schedule_jobs -p elysper-tool-plugins --features scheduler`) |
 
 
 ```bash
@@ -373,25 +375,25 @@ cargo run --example lib_grade -p elysper-harness
 
 # Tools
 cargo run --example deferred_tools -p elysper-tool
-cargo run --example read_ranges -p elysper-tool-read
-cargo run --example write_modes -p elysper-tool-write
-cargo run --example todo_list -p elysper-tool-todo
-cargo run --example allowlist -p elysper-tool-web
-cargo run --example sandbox_policy -p elysper-tool-shell
-cargo run --example schedule_jobs -p elysper-tool-scheduler
-cargo run --example search_tool_demo -p elysper-tool-search
+cargo run --example read_ranges -p elysper-tool-plugins --features read
+cargo run --example write_modes -p elysper-tool-plugins --features write
+cargo run --example todo_list -p elysper-tool-plugins --features todo
+cargo run --example allowlist -p elysper-tool-plugins --features web
+cargo run --example sandbox_policy -p elysper-tool-plugins --features shell
+cargo run --example schedule_jobs -p elysper-tool-plugins --features scheduler
+cargo run --example search_tool_demo -p elysper-tool-plugins --features search
 cargo run --example derive_tool -p elysper-macros
 
 # Teams and workflows
-cargo run --example delegation_gate -p elysper-tool-task
-cargo run --example worktree_isolation -p elysper-tool-task
+cargo run --example delegation_gate -p elysper-tool-plugins --features task
+cargo run --example worktree_isolation -p elysper-tool-plugins --features task
 cargo run --example workflow_fanout -p elysper-workflow
 cargo run --example workflow_best_of -p elysper-workflow
 
 # Runtime choice and reasoning loop
 cargo run --example runtime_agnostic -p elysper-harness
-cargo run --example chain_of_thought -p elysper-strategy-cot
-cargo run --example best_of_n_demo -p elysper-strategy-best-of-n
+cargo run --example chain_of_thought -p elysper-policy-plugins --features cot
+cargo run --example best_of_n_demo -p elysper-policy-plugins --features best-of-n
 
 # Memory and remote tools
 cargo run --example sqlite_memory -p elysper-context
@@ -567,10 +569,13 @@ Run `make help` for the full list of targets.
 │   ├── elysper-provider/       # ModelProvider + wire types; adapters as features
 │   ├── elysper-context/        # window strategies, memory tiers, compaction
 │   ├── elysper-tool/           # the tool paradigm: trait, registry, path policy
-│   ├── elysper-tool-read/      # one tool per plugin crate: read, write, shell (with its
-│   │                           #   OS execution policy), todo, web, task (multi-agent),
-│   │                           #   scheduler (the `schedule` tool), search (cross-domain
-│   │                           #   over a host-built elysper-search registry)
+│   ├── elysper-tool-plugins/   # the tool plugins, one module per tool: read, write,
+│   │                           #   shell (with its OS execution policy), todo, web,
+│   │                           #   task (multi-agent), scheduler (the `schedule` tool),
+│   │                           #   search (cross-domain), memo
+│   ├── elysper-policy-plugins/ # the policy plugins: cache, resilience, budget,
+│   │                           #   reflection, cot, plan-execute, best-of-n
+│   ├── elysper-plugin-runtime/ # the dynamic plugin channel: protocol, host, wasm
 │   ├── elysper-skill/          # procedural skills bound to tools
 │   ├── elysper-agents/         # agent definitions as files (agent.md + config.json)
 │   ├── elysper-session/        # session lifecycle, sinks, typed events

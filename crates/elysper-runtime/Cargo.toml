@@ -16,14 +16,14 @@ categories.workspace = true
 default = []
 
 [dependencies]
-elysper-budget.workspace = true
+
 elysper-context.workspace = true
 elysper-core.workspace = true
 elysper-harness.workspace = true
 elysper-kernel.workspace = true
-elysper-resilience.workspace = true
+
 elysper-search.workspace = true
-elysper-semantic-cache.workspace = true
+
 elysper-session.workspace = true
 elysper-tool.workspace = true
 # The delegation backend's service key. The `agent-loop` row consumes
@@ -31,7 +31,8 @@ elysper-tool.workspace = true
 # loop needs the key its owner crate defines — the key never moves
 # into this crate (see the design's "service keys live with their
 # owner" rule).
-elysper-tool-task.workspace = true
+elysper-tool-plugins = { workspace = true, features = ["task"] }
+elysper-policy-plugins = { workspace = true, features = ["budget", "resilience", "cache"] }
 elysper-provider = { workspace = true, features = ["anthropic", "openai"] }
 serde.workspace = true
 tracing.workspace = true

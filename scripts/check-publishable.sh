@@ -45,19 +45,15 @@ cd "$(dirname "$0")/.."
 # packaged here — the gate is about "installable", and a crate that
 # cannot be packaged cannot be installed either.
 ORDER=(
-  elysper-core elysper-kernel elysper-agents elysper-telemetry elysper-provider
-  elysper-attachment
-  elysper-tool elysper-budget elysper-session elysper-context elysper-eval
-  elysper-steering elysper-harness elysper-harness-tokio elysper-search
-  elysper-macros elysper-mcp elysper-plugin-protocol
-  elysper-plugin-host elysper-reflection elysper-resilience
-  elysper-scheduler elysper-semantic-cache elysper-skill elysper-runtime
-  elysper-strategy-best-of-n elysper-strategy-cot elysper-strategy-plan-execute
-  elysper-test-support elysper-tool-memo elysper-tool-read
-  elysper-tool-scheduler elysper-tool-search elysper-tool-shell
-  elysper-tool-task elysper-tool-todo elysper-tool-web elysper-tool-write
-  elysper-wasm-runtime
-  elysper-workflow elysper elysper-app-server elysper-gateway elysper-tui elysper-mcp-server
+  elysper-core elysper-kernel elysper-macros elysper-agents
+  elysper-eval elysper-harness-tokio elysper-scheduler
+  elysper-telemetry elysper-workflow elysper-provider
+  elysper-attachment elysper-search elysper-session elysper-tool
+  elysper-context elysper-mcp elysper-skill elysper-test-support
+  elysper-steering elysper-harness elysper-policy-plugins
+  elysper-tool-plugins elysper-mcp-server elysper-plugin-runtime
+  elysper-runtime elysper elysper-app-server elysper-gateway
+  elysper-tui
 )
 
 # The gate must cover every workspace member. A member missing from

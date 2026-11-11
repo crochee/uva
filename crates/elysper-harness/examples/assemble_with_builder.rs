@@ -31,10 +31,12 @@ use elysper_harness::{Host, ReActAgent, agent::Agent as _};
 use elysper_provider::traits::ModelProvider;
 use elysper_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use elysper_tool::{ToolEntry, ToolRegistry};
-use elysper_tool_read::ReadTool;
-use elysper_tool_shell::ShellTool;
-use elysper_tool_todo::TodoWriteTool;
-use elysper_tool_write::WriteTool;
+use elysper_tool_plugins::{
+    read::ReadTool,
+    shell::ShellTool,
+    todo::TodoWriteTool,
+    write::WriteTool,
+};
 
 /// The default surface, composed explicitly: one line per plugin
 /// crate, exactly the bricks this example wants.

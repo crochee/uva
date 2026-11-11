@@ -192,6 +192,13 @@ jobs:
       - name: types, lint, formatting
         run: make check-web
 
+      # The build is a gate too: a bundler error (or a chunk graph that
+      # no longer resolves) must fail here, not in whoever packages the
+      # desktop shell. The desktop job builds the same `dist`.
+      - name: production build
+        working-directory: elysper-web
+        run: npm run build
+
   bench:
     name: performance invariants
     runs-on: ubuntu-latest

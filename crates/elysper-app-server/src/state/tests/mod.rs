@@ -37,6 +37,8 @@ mod for_test;
 mod load_helpers;
 mod load_strategy;
 mod profile_apply;
+mod profile_lifecycle;
+mod profile_security;
 mod reload;
 mod resolve_agent_name;
 mod resolve_server;

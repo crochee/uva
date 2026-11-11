@@ -1,4 +1,4 @@
-//! The unified [`Agent`] runtime contract and the pieces assembled around it: the loop, the registry catalog, and the event types child runs wrap their traces in. Sub-agent delegation lives in `elysper-tool-task`.
+//! The unified [`Agent`] runtime contract and the pieces assembled around it: the loop, the registry catalog, and the event types child runs wrap their traces in. Sub-agent delegation lives in `elysper-tool-plugins`.
 use std::{pin::Pin, sync::Arc};
 
 use async_trait::async_trait;

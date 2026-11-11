@@ -31,10 +31,11 @@
 //!
 //! **2. The tools** — a [`ToolRegistry`], holding [`Tool`]
 //! implementations. The framework ships the **paradigm**, not an
-//! agent-facing set: each builtin is its own plugin crate behind its
-//! own feature (`tool-read` / `tool-write` / `tool-shell` /
-//! `tool-todo` / `tool-web` / `tool-task` / `tool-scheduler` /
-//! `tool-search`), so the surface is composed brick by brick —
+//! agent-facing set: the shipped tools live in one plugin family
+//! (`elysper-tool-plugins`), one module per tool behind its own
+//! feature (`tool-read` / `tool-write` / `tool-shell` / `tool-todo` /
+//! `tool-web` / `tool-task` / `tool-scheduler` / `tool-search` /
+//! `tool-memo`), so the surface is composed brick by brick —
 //! register the plugin tools you want, or implement
 //! [`Tool`] (derive it: `elysper::macros::Tool`) for the rest. (The two
 //! synthetic contracts the harness injects itself — `__get_full_output`
@@ -183,12 +184,12 @@
 //! | `provider-openai` | [`provider`] | `elysper-provider/openai` | yes |
 //! | `context` | [`context`] | `elysper-context` | yes |
 //! | `tool` | [`tool`] | `elysper-tool` | yes |
-//! | `tool-read` | [`tool_read`] | `elysper-tool-read` | yes |
-//! | `tool-write` | [`tool_write`] | `elysper-tool-write` | yes |
-//! | `tool-shell` | [`tool_shell`] | `elysper-tool-shell` | yes |
-//! | `tool-todo` | [`tool_todo`] | `elysper-tool-todo` | yes |
-//! | `tool-web` | [`tool_web`] | `elysper-tool-web` | yes |
-//! | `tool-task` | [`tool_task`] | `elysper-tool-task` | yes |
+//! | `tool-read` | [`tool_read`] | `elysper-tool-plugins` | yes |
+//! | `tool-write` | [`tool_write`] | `elysper-tool-plugins` | yes |
+//! | `tool-shell` | [`tool_shell`] | `elysper-tool-plugins` | yes |
+//! | `tool-todo` | [`tool_todo`] | `elysper-tool-plugins` | yes |
+//! | `tool-web` | [`tool_web`] | `elysper-tool-plugins` | yes |
+//! | `tool-task` | [`tool_task`] | `elysper-tool-plugins` | yes |
 //! | `session` | [`session`] | `elysper-session` | yes |
 //! | `steering` | [`steering`] | `elysper-steering` | yes |
 //! | `harness` | [`harness`] | `elysper-harness` | yes |
@@ -197,29 +198,29 @@
 //! | `skill` | `elysper::skill` | `elysper-skill` | no |
 //! | `attachment` | `elysper::attachment` | `elysper-attachment` | no |
 //! | `mcp` | `elysper::mcp` | `elysper-mcp` | no |
-//! | `tool-scheduler` | `elysper::tool_scheduler` | `elysper-tool-scheduler` | no |
-//! | `tool-search` | `elysper::tool_search` | `elysper-tool-search` | no |
+//! | `tool-scheduler` | `elysper::tool_scheduler` | `elysper-tool-plugins` | no |
+//! | `tool-search` | `elysper::tool_search` | `elysper-tool-plugins` | no |
 //! | `scheduler` | `elysper::scheduler` | `elysper-scheduler` | no |
 //! | `search` | `elysper::search` | `elysper-search` | no |
-//! | `cron` | `elysper::scheduler` / `elysper::tool_scheduler` | `elysper-scheduler/cron` + `elysper-tool-scheduler/cron` | no |
+//! | `cron` | `elysper::scheduler` / `elysper::tool_scheduler` | `elysper-scheduler/cron` + `elysper-tool-plugins/cron` | no |
 //! | `eval` | `elysper::eval` | `elysper-eval` | no |
 //! | `workflow` | `elysper::workflow` | `elysper-workflow` | no |
 //! | `telemetry` | `elysper::telemetry` | `elysper-telemetry` | no |
-//! | `semantic-cache` | [`semantic_cache`] | `elysper-semantic-cache` | no |
-//! | `tool-memo` | [`tool_memo`] | `elysper-tool-memo` | no |
-//! | `resilience` | [`resilience`] | `elysper-resilience` | no |
-//! | `strategy-plan-execute` | [`strategy_plan_execute`] | `elysper-strategy-plan-execute` | no |
-//! | `reflection` | [`reflection`] | `elysper-reflection` | no |
-//! | `budget` | `elysper::budget` | `elysper-budget` | no |
+//! | `semantic-cache` | [`semantic_cache`] | `elysper-policy-plugins` | no |
+//! | `tool-memo` | [`tool_memo`] | `elysper-tool-plugins` | no |
+//! | `resilience` | [`resilience`] | `elysper-policy-plugins` | no |
+//! | `strategy-plan-execute` | [`strategy_plan_execute`] | `elysper-policy-plugins` | no |
+//! | `reflection` | [`reflection`] | `elysper-policy-plugins` | no |
+//! | `budget` | `elysper::budget` | `elysper-policy-plugins` | no |
 //! | `hpc-pool` | `elysper::hpc_pool` | `elysper-provider/hpc-pool` | no |
 //! | `hpc-simd` | `elysper::hpc_simd` | `elysper-search/simd` | no |
 //! | `sqlite` | `elysper::context::memory` | `elysper-context/sqlite` | no |
 //! | `test-support` | `elysper::test_support` | `elysper-test-support` | no |
-//! | `plugin-host` | `elysper::plugin_host` | `elysper-plugin-host` | no |
-//! | `plugin-protocol` | `elysper::plugin_protocol` | `elysper-plugin-protocol` | no |
+//! | `plugin-host` | `elysper::plugin_host` | `elysper-plugin-runtime` | no |
+//! | `plugin-protocol` | `elysper::plugin_protocol` | `elysper-plugin-runtime` | no |
 //! | `kernel` | `elysper::kernel` | `elysper-kernel` | no |
 //! | `hnsw` | `elysper::hnsw` | `elysper-search/hnsw` | no |
-//! | `wasm` | `elysper::wasm` | `elysper-wasm-runtime` | no |
+//! | `wasm` | `elysper::wasm` | `elysper-plugin-runtime` | no |
 //! | `runtime` | `elysper::runtime` | `elysper-runtime` | no |
 //!
 //! Enabling a feature enables the modules its types refer to, so a
@@ -472,6 +473,14 @@ use elysper::harness_tokio::TokioSleeper;
 // `async-trait` is the facade's only non-elysper dependency. It is a
 // proc macro already in every library crate's graph.
 pub use async_trait::async_trait;
+/// The exact `serde_json` the framework's wire types use.
+///
+/// A plugin author implements [`tool::Tool`], whose signature speaks
+/// `serde_json::Value` — naming that type from a *different*
+/// `serde_json` version would not satisfy the trait. The facade hands
+/// over the version it was built against, so a plugin author needs one
+/// dependency entry instead of two (and cannot pin the wrong one).
+pub use serde_json;
 
 /// The tutorial, **compiled**.
 ///

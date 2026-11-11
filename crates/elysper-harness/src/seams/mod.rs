@@ -51,7 +51,7 @@
 //! A registration's lifetime is its [`Registration`] handle: dropping
 //! the last handle withdraws the row from every seam wrapped around
 //! the host, which is the same lifetime the kernel's `process-plugins`
-//! entry (in `elysper-plugin-host`) hands its effect.
+//! entry (in `elysper-plugin-runtime`) hands its effect.
 
 use std::{
     panic::AssertUnwindSafe,

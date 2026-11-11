@@ -154,7 +154,7 @@ impl AppState {
                 edit.id()
             ));
         }
-        let reconciled = match self.apply_resolved(next).await {
+        let reconciled = match self.apply_resolved_locked(next).await {
             Ok(reconciled) => reconciled,
             Err(error) => {
                 return ChangeOutcome::failed(format!(
@@ -223,6 +223,15 @@ impl AppState {
                 "an agent definition needs a name and a description",
             );
         }
+        // The name becomes a directory under `.agents/agents/`: a name
+        // with a path separator (or an absolute path) would write
+        // outside the workspace. The skills path already refuses it.
+        if !valid_definition_name(&descriptor.name) {
+            return ChangeOutcome::failed(format!(
+                "`{}` is not a valid agent name",
+                descriptor.name
+            ));
+        }
         if crate::routes::agents::is_protected(&descriptor.name) {
             return ChangeOutcome::failed(format!(
                 "agent `{}` is protected",
@@ -243,6 +252,14 @@ impl AppState {
     }
 
     async fn delete_agent_file(&self, id: &str) -> ChangeOutcome {
+        // The id becomes a directory under `.agents/agents/`, and the
+        // directory is removed recursively: a traversal would delete
+        // whatever it points at.
+        if !valid_definition_name(id) {
+            return ChangeOutcome::failed(format!(
+                "`{id}` is not a valid agent name"
+            ));
+        }
         if crate::routes::agents::is_protected(id) {
             return ChangeOutcome::failed(format!("agent `{id}` is protected"));
         }

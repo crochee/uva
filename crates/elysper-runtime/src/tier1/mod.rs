@@ -4,30 +4,27 @@
 
 use std::sync::Arc;
 
-use elysper_budget::{
-    Budget,
-    BudgetProvider,
-    CostBudget,
-    LatencyBudget,
-    PricingTable,
-    StaticPricingTable,
-    TokenBudget,
-};
 use elysper_core::{Clock, SharedClock, sleeper::Sleeper};
+use elysper_policy_plugins::{
+    budget::{
+        Budget,
+        BudgetProvider,
+        CostBudget,
+        LatencyBudget,
+        PricingTable,
+        StaticPricingTable,
+        TokenBudget,
+    },
+    cache::{
+        InMemorySemanticCache,
+        SemanticCacheConfig,
+        SemanticCacheProvider,
+        SemanticCacheStore,
+    },
+    resilience::{BreakerConfig, Jitter, ResiliencePolicy, ResilientProvider},
+};
 use elysper_provider::traits::ModelProvider;
-use elysper_resilience::{
-    BreakerConfig,
-    Jitter,
-    ResiliencePolicy,
-    ResilientProvider,
-};
 use elysper_search::{CjkTokenizer, Embedder, HashingEmbedder};
-use elysper_semantic_cache::{
-    InMemorySemanticCache,
-    SemanticCacheConfig,
-    SemanticCacheProvider,
-    SemanticCacheStore,
-};
 
 use crate::model_adapter::ModelAdapterConfig;
 

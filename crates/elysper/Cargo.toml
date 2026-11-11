@@ -36,14 +36,7 @@ elysper-kernel = { workspace = true, optional = true }
 elysper-provider = { workspace = true, optional = true }
 elysper-context = { workspace = true, optional = true }
 elysper-tool = { workspace = true, optional = true }
-elysper-tool-read = { workspace = true, optional = true }
-elysper-tool-write = { workspace = true, optional = true }
-elysper-tool-shell = { workspace = true, optional = true }
-elysper-tool-todo = { workspace = true, optional = true }
-elysper-tool-web = { workspace = true, optional = true }
-elysper-tool-task = { workspace = true, optional = true }
-elysper-tool-scheduler = { workspace = true, optional = true }
-elysper-tool-search = { workspace = true, optional = true }
+elysper-tool-plugins = { workspace = true, optional = true }
 elysper-session = { workspace = true, optional = true }
 elysper-steering = { workspace = true, optional = true }
 elysper-harness = { workspace = true, optional = true }
@@ -68,14 +61,8 @@ elysper-eval = { workspace = true, optional = true }
 elysper-workflow = { workspace = true, optional = true }
 elysper-telemetry = { workspace = true, optional = true }
 elysper-test-support = { workspace = true, optional = true }
-elysper-semantic-cache = { workspace = true, optional = true }
-elysper-tool-memo = { workspace = true, optional = true }
-elysper-resilience = { workspace = true, optional = true }
-elysper-strategy-plan-execute = { workspace = true, optional = true }
-elysper-strategy-cot = { workspace = true, optional = true }
-elysper-strategy-best-of-n = { workspace = true, optional = true }
-elysper-reflection = { workspace = true, optional = true }
-elysper-budget = { workspace = true, optional = true }
+elysper-policy-plugins = { workspace = true, optional = true }
+elysper-plugin-runtime = { workspace = true, optional = true }
 elysper-runtime = { workspace = true, optional = true }
 # : opt-in plug-ins in the new round (Tier 1 perf + concurrency).
 # Default-NO for every one so the seven-feature MVP subset stays at zero
@@ -83,17 +70,18 @@ elysper-runtime = { workspace = true, optional = true }
 # W2: the dynamic plugin channel's wire crate. Opt-in and serde-only;
 # it does not depend on the harness, so a plugin author can take it
 # alone. `elysper-plugin-host` maps its vocabulary onto internal types.
-elysper-plugin-protocol = { workspace = true, optional = true }
 # W2: the host half of the same channel. It registers `Host` entries
 # and speaks `Tool`, so its feature pulls those modules — unlike the
 # wire crate, this one is not usable alone.
-elysper-plugin-host = { workspace = true, optional = true }
 # The opt-in Wasm component runtime. Default-NO: it carries `wasmtime`
 # (a JIT plus Cranelift), the one dependency the default build must
 # never resolve. `make check-wasm-deps` is the assertion.
-elysper-wasm-runtime = { workspace = true, optional = true }
 
 async-trait.workspace = true
+# The facade re-exports `serde_json`: `Tool::parameters` speaks
+# `serde_json::Value`, and a plugin author must name the very version
+# the framework was built against.
+serde_json.workspace = true
 
 [dev-dependencies]
 # Examples and doc tests need *an* executor for `main`/`#[tokio::main]`;
@@ -102,9 +90,6 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time
 # Draining an `Agent` event stream is `StreamExt::next`—the same
 # combinator a consumer already has through their own `futures` dep.
 futures.workspace = true
-# `Tool::parameters` is a `serde_json::Value`; the example's custom
-# tool builds one, exactly as a consumer's would.
-serde_json.workspace = true
 
 # The example is the tutorial done end to end, so it needs the
 # assembly set (the default features). Under a narrower selection cargo
@@ -179,18 +164,18 @@ context = ["dep:elysper-context", "core", "provider", "session"]
 tool = ["dep:elysper-tool", "core", "provider", "session"]
 # One tool implementation per feature, exactly as a consumer would
 # depend on them. All offline except `tool-web`.
-tool-read = ["tool", "dep:elysper-tool-read"]
-tool-write = ["tool", "dep:elysper-tool-write"]
-tool-shell = ["tool", "dep:elysper-tool-shell"]
-tool-todo = ["tool", "dep:elysper-tool-todo"]
+tool-read = ["tool", "dep:elysper-tool-plugins", "elysper-tool-plugins/read"]
+tool-write = ["tool", "dep:elysper-tool-plugins", "elysper-tool-plugins/write"]
+tool-shell = ["tool", "dep:elysper-tool-plugins", "elysper-tool-plugins/shell"]
+tool-todo = ["tool", "dep:elysper-tool-plugins", "elysper-tool-plugins/todo"]
 # The one tool that talks to the network—the only one that pulls
 # an HTTP client and its transport stack.
-tool-web = ["tool", "dep:elysper-tool-web"]
+tool-web = ["tool", "dep:elysper-tool-plugins", "elysper-tool-plugins/web"]
 # The multi-agent `task` tool: a synthetic tool that runs a
 # registered peer as a child agent. Offline, but it pulls the agent
 # crate (children run in-process, through the interceptor seam).
 tool-task = [
-  "dep:elysper-tool-task",
+  "dep:elysper-tool-plugins", "elysper-tool-plugins/task",
   "harness",
   "tool",
 ]
@@ -221,7 +206,7 @@ mcp = ["dep:elysper-mcp", "core", "tool"]
 # Opt-in rather than default, like `mcp`: both need a host-constructed
 # runtime object (a supervisor, a store), not just a registration.
 tool-scheduler = [
-  "dep:elysper-tool-scheduler",
+  "dep:elysper-tool-plugins", "elysper-tool-plugins/scheduler",
   "tool",
   "scheduler",
 ]
@@ -230,7 +215,7 @@ tool-scheduler = [
 # construct the Registry it searches, and it is that Registry—not
 # this feature—that decides which domains exist.
 tool-search = [
-  "dep:elysper-tool-search",
+  "dep:elysper-tool-plugins", "elysper-tool-plugins/search",
   "tool",
   "search",
 ]
@@ -266,7 +251,7 @@ cron = [
   "scheduler",
   "elysper-scheduler/cron",
   "tool-scheduler",
-  "elysper-tool-scheduler/cron",
+  "elysper-tool-plugins/cron",
 ]
 eval = ["dep:elysper-eval", "core"]
 workflow = ["dep:elysper-workflow", "core"]
@@ -292,11 +277,23 @@ hnsw = ["search", "elysper-search/hnsw"]
 # joins the offline tier—`make check-mvp-deps` proves no
 # HTTP/OTel/DB stack is dragged in. None is in the default set;
 # deployments opt in per `[agents.<name>]` config.
-semantic-cache = ["dep:elysper-semantic-cache", "core", "provider"]
-tool-memo = ["dep:elysper-tool-memo", "core", "tool"]
-resilience = ["dep:elysper-resilience", "core", "provider", "tool"]
+semantic-cache = [
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/cache",
+  "core",
+  "provider",
+]
+tool-memo = ["dep:elysper-tool-plugins", "elysper-tool-plugins/memo", "core", "tool"]
+resilience = [
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/resilience",
+  "core",
+  "provider",
+  "tool",
+]
 strategy-plan-execute = [
-  "dep:elysper-strategy-plan-execute",
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/plan-execute",
   "harness",
   "core",
   "provider",
@@ -307,27 +304,36 @@ strategy-plan-execute = [
 # strategy-plan-execute): the harness itself ships only the
 # canonical ReAct loop; deployments that want CoT opt in.
 strategy-cot = [
-  "dep:elysper-strategy-cot",
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/cot",
   "harness",
   "core",
   "provider",
 ]
 # The best-of-N strategy plugin. Default-NO, same reasoning.
 strategy-best-of-n = [
-  "dep:elysper-strategy-best-of-n",
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/best-of-n",
   "harness",
   "core",
   "provider",
 ]
 reflection = [
-  "dep:elysper-reflection",
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/reflection",
   "core",
   "provider",
   "tool",
   "steering",
   "context",
 ]
-budget = ["dep:elysper-budget", "core", "provider", "tool"]
+budget = [
+  "dep:elysper-policy-plugins",
+  "elysper-policy-plugins/budget",
+  "core",
+  "provider",
+  "tool",
+]
 # : four facade plug-ins that each gate a single
 # performance/concurrency upgrade. Behaviour-neutral by default
 # (NOT in the default set); enabling a feature installs the
@@ -343,7 +349,10 @@ hpc-simd = ["search", "elysper-search/simd"]
 # W2: the dynamic plugin channel. A single-crate axis, not a bundle:
 # the wire vocabulary is useful on its own (a plugin author reads it
 # without the harness), so it pulls no sibling feature.
-plugin-protocol = ["dep:elysper-plugin-protocol"]
+plugin-protocol = [
+  "dep:elysper-plugin-runtime",
+  "elysper-plugin-runtime/protocol",
+]
 
 # W2: the host half. The crate's public types name `Host` and
 # `PluginHandle` (harness), `Tool` and `Risk` (tool), the wire's
@@ -351,7 +360,8 @@ plugin-protocol = ["dep:elysper-plugin-protocol"]
 # `Sleeper` seams the builders take (core) — so the feature pulls each
 # of those modules, the same way `budget` and `reflection` do.
 plugin-host = [
-  "dep:elysper-plugin-host",
+  "dep:elysper-plugin-runtime",
+  "elysper-plugin-runtime/host",
   "plugin-protocol",
   "harness",
   "tool",
@@ -370,7 +380,8 @@ kernel = ["dep:elysper-kernel"]
 # shell's `SandboxBackend`, so the feature pulls those three modules.
 # Default-NO, and the only feature that reaches `wasmtime`.
 wasm = [
-  "dep:elysper-wasm-runtime",
+  "dep:elysper-plugin-runtime",
+  "elysper-plugin-runtime/wasm",
   "kernel",
   "tool",
   "tool-shell",

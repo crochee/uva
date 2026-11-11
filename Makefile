@@ -65,10 +65,18 @@ test: test-rust ## Run all tests (Rust; the frontend has no test runner —
 
 test-rust: test-crates ## Run every member's tests in turn (never --workspace, per AGENTS.md §3.3)
 
+# The plugin families ship nothing until a feature asks for it, so
+# their own suites run with every feature on. (A `case` pattern takes
+# `|`-separated alternatives, hence the pipe-joined list.)
+FAMILY_CRATES := elysper-tool-plugins|elysper-policy-plugins|elysper-plugin-runtime
+
 test-unit: ## Run every member's library unit tests in turn
 	@set -e; for c in $(CRATES); do \
 	  echo "== $$c"; \
-	  cargo test -p $$c -q --lib; \
+	  case $$c in \
+	    $(FAMILY_CRATES)) cargo test -p $$c -q --lib --all-features ;; \
+	    *) cargo test -p $$c -q --lib ;; \
+	  esac; \
 	done
 
 # ---- Code quality ----
@@ -101,6 +109,7 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-harness-shape.sh \
 	  scripts/check-public-api-runtime.sh \
 	  scripts/check-plugin-shape.sh \
+  scripts/check-host-capabilities.sh \
 	  scripts/check-pub-surface-strict.sh \
 	  scripts/check-harness-docs.sh \
 	  scripts/check-single-writer.sh \
@@ -178,15 +187,16 @@ check-stdout: ## Assert the core's binaries never write to stdout directly
 # `tower-http` are caught by `hyper` / `rustls` / `tower`.
 MVP_FEATURES := core,provider,context,tool,session,steering,harness
 MVP_FORBIDDEN := opentelemetry|tonic|axum|rusqlite|sqlx|reqwest|hyper|rustls|h2|tower|webpki
-# The offline tool plugins must stay offline on their own, independent
-# of the facade: `elysper-tool-web` is the only tool crate allowed an
-# HTTP client.
-OFFLINE_TOOL_CRATES := elysper-tool-read elysper-tool-write elysper-tool-shell elysper-tool-todo elysper-tool-task elysper-tool-scheduler elysper-tool-search elysper-tool-memo
-# R-OPT-HPC round (Tier 1 performance + concurrency, Tier 2 reasoning
-# + quality): six new opt-in plugin crates, all in the offline tier
-# (no HTTP/OTel/DB by default — proved by the `mvp-forbidden` check
+# The shipped tool plugins live in one family crate, so the isolation
+# property is per *feature*, not per crate: the offline set pulls no
+# HTTP stack, and only `web` does.
+FAMILY_TOOL_CRATES := elysper-tool-plugins
+FAMILY_TOOL_OFFLINE_FEATURES := read,write,shell,todo,task,scheduler,search,memo
+# The policy plugins (R-OPT-HPC round: Tier 1 performance + concurrency,
+# Tier 2 reasoning + quality) live in one family crate too, all in the
+# offline tier (no HTTP/OTel/DB — proved by the `mvp-forbidden` check
 # below).
-ROPT_PLUGIN_CRATES := elysper-semantic-cache elysper-tool-memo elysper-resilience elysper-strategy-plan-execute elysper-reflection elysper-budget
+FAMILY_POLICY_CRATES := elysper-policy-plugins
 # The two crates whose interesting configuration the plain loops never
 # check each get their own section: `elysper-search` under
 # `--features provider`, `elysper-tool-scheduler` under `--features
@@ -207,26 +217,33 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  exit 1; \
 	fi
 	@echo "OK: $(MVP_FEATURES) pulls no ($(MVP_FORBIDDEN))"
-	@for c in $(OFFLINE_TOOL_CRATES); do \
-	  if cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	@for c in $(FAMILY_TOOL_CRATES); do \
+	  if cargo tree -p $$c --features $(FAMILY_TOOL_OFFLINE_FEATURES) -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: $$c (the offline tool plugin) pulled a forbidden dependency:"; \
-	    cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: $$c (the offline tool plugins) pulled a forbidden dependency:"; \
+	    cargo tree -p $$c --features $(FAMILY_TOOL_OFFLINE_FEATURES) -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: $(OFFLINE_TOOL_CRATES) pull no ($(MVP_FORBIDDEN))"
-	@for c in $(ROPT_PLUGIN_CRATES); do \
-	  if cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	@echo "OK: $(FAMILY_TOOL_CRATES) ($(FAMILY_TOOL_OFFLINE_FEATURES)) pull no ($(MVP_FORBIDDEN))"
+	@# The reverse assertion: the web feature really is the switch that
+	@# opens the HTTP stack. Without it the gate above would pass on a
+	@# crate that never had one.
+	@cargo tree -p elysper-tool-plugins --features web -e normal --prefix none 2>/dev/null \
+	  | cut -d' ' -f1 | sort -u | grep -Eq '^reqwest$$' \
+	  && echo "OK: the tool family's web feature is the only one that opens reqwest" \
+	  || { echo "FAIL: the tool family's web feature did not open reqwest"; exit 1; }
+	@for c in $(FAMILY_POLICY_CRATES); do \
+	  if cargo tree -p $$c --all-features -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: $$c (the R-OPT-HPC plugin) pulled a forbidden dependency:"; \
-	    cargo tree -p $$c -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: $$c (the policy plugins) pulled a forbidden dependency:"; \
+	    cargo tree -p $$c --all-features -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: $(ROPT_PLUGIN_CRATES) pull no ($(MVP_FORBIDDEN))"
+	@echo "OK: $(FAMILY_POLICY_CRATES) (all features) pull no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features simd"; do \
 	  if cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
@@ -247,16 +264,16 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  fi; \
 	done
 	@echo "OK: elysper-search (default + --features provider + --features hnsw) pulls no ($(MVP_FORBIDDEN))"
-	@for f in "" "--features cron"; do \
-	  if cargo tree -p elysper-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
+	@for f in "--features scheduler" "--features scheduler,cron"; do \
+	  if cargo tree -p elysper-tool-plugins $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: elysper-tool-scheduler $$f pulled a forbidden dependency:"; \
-	    cargo tree -p elysper-tool-scheduler $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: elysper-tool-plugins $$f pulled a forbidden dependency:"; \
+	    cargo tree -p elysper-tool-plugins $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: elysper-tool-scheduler (default + --features cron) pulls no ($(MVP_FORBIDDEN))"
+	@echo "OK: elysper-tool-plugins (scheduler + scheduler,cron) pulls no ($(MVP_FORBIDDEN))"
 	@for f in ""; do \
 	  if cargo tree -p elysper-harness $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
@@ -269,11 +286,11 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	@echo "OK: elysper-harness (default) pulls no ($(MVP_FORBIDDEN))"
 	@cargo check -q -p elysper-harness --no-default-features 2>/dev/null \
 	  && echo "OK: elysper-harness --no-default-features compiles"
-	@for p in elysper-strategy-cot elysper-strategy-best-of-n; do \
-	  cargo check -q -p $$p 2>/dev/null \
+	@for p in elysper-policy-plugins; do \
+	  cargo check -q -p $$p --all-features 2>/dev/null \
 	    || { echo "FAIL: $$p does not build standalone"; exit 1; }; \
 	done
-	@echo "OK: each strategy plugin crate builds standalone"
+	@echo "OK: the policy plugin family builds standalone"
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p elysper-scheduler \
 	    --features cron 2>/dev/null \
 	  && echo "OK: elysper-scheduler --features cron rustdoc is warning-free"
@@ -288,7 +305,7 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 # tokio entry instead of declaring features on it.
 RUNTIME_FREE := elysper-core elysper-scheduler elysper-macros elysper-eval \
 	elysper-workflow elysper-search elysper-session elysper-harness \
-	elysper-context elysper-steering elysper-plugin-protocol elysper-tool-task \
+	elysper-context elysper-steering elysper-plugin-runtime \
 	elysper-kernel
 
 .PHONY: check-no-runtime
@@ -395,12 +412,15 @@ CRATES := $(notdir $(wildcard crates/*))
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-wasm-deps check-stdout check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + clock + single-writer + publishability + license/ban invariants + every member's test suite
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-wasm-deps check-stdout check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-host-capabilities check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + clock + single-writer + publishability + license/ban invariants + every member's test suite
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
 	  echo "== $$c"; \
-	  cargo test -p $$c -q; \
+	  case $$c in \
+	    $(FAMILY_CRATES)) cargo test -p $$c -q --all-features ;; \
+	    *) cargo test -p $$c -q ;; \
+	  esac; \
 	done
 
 test-sqlite: ## Run the optional SQLite memory tier's tests
@@ -550,7 +570,7 @@ bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
 # when the call path changes; `-- --check` enforces the ratios the same
 # way the default gate does.
 bench-wasm: ## Run the Wasm call benchmarks (opt-in; compiles wasmtime)
-	cargo bench -p elysper-wasm-runtime --bench wasm_calls
+	cargo bench -p elysper-plugin-runtime --bench wasm_calls
 
 # Note: `otel_collector_mock` is a long-running server that only
 # exits after a companion client POSTs to it; there is no client
@@ -576,10 +596,29 @@ examples: ## Run every example plus all three consumer proofs (each prints a pro
 	    [ "$$name" = "provider_pool_bench" ] && extra="--features hpc-pool" || true; \
 	    [ "$$name" = "simd_bench" ] && extra="--features simd" || true; \
 	    [ "$$name" = "otel_collector_mock" ] && continue || true; \
+	    [ "$$name" = "read_ranges" ] && extra="--features read" || true; \
+	    [ "$$name" = "write_modes" ] && extra="--features write" || true; \
+	    [ "$$name" = "todo_list" ] && extra="--features todo" || true; \
+	    [ "$$name" = "sandbox_policy" ] && extra="--features shell" || true; \
+	    [ "$$name" = "allowlist" ] && extra="--features web" || true; \
+	    [ "$$name" = "delegation_gate" ] && extra="--features task" || true; \
+	    [ "$$name" = "worktree_isolation" ] && extra="--features task" || true; \
+	    [ "$$name" = "schedule_jobs" ] && extra="--features scheduler" || true; \
+	    [ "$$name" = "search_tool_demo" ] && extra="--features search" || true; \
+	    [ "$$name" = "tool_memo_demo" ] && extra="--features memo" || true; \
+	    [ "$$name" = "semantic_cache_demo" ] && extra="--features cache" || true; \
+	    [ "$$name" = "resilience_demo" ] && extra="--features resilience" || true; \
+	    [ "$$name" = "budget_demo" ] && extra="--features budget" || true; \
+	    [ "$$name" = "reflection_demo" ] && extra="--features reflection" || true; \
+	    [ "$$name" = "chain_of_thought" ] && extra="--features cot" || true; \
+	    [ "$$name" = "plan_execute_demo" ] && extra="--features plan-execute" || true; \
+	    [ "$$name" = "best_of_n_demo" ] && extra="--features best-of-n" || true; \
 	    echo "== $$pkg/$$name"; \
 	    cargo run -q -p $$pkg --example $$name $$extra > /dev/null; \
 	  done; \
 	done
+	@echo "== docs/examples/plugin-author (a third-party tool plugin)"
+	@cd docs/examples/plugin-author && cargo run -q
 	@echo "== docs/examples/external-consumer"
 	@cd docs/examples/external-consumer && cargo run -q
 	@echo "== docs/examples/minimal-consumer"
@@ -728,16 +767,24 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 .PHONY: plugin-shape-audit check-plugin-shape
 
 plugin-shape-audit: ## List plugin-crate production files and their line counts (largest first)
-	@for root in crates/elysper-tool-read crates/elysper-tool-write crates/elysper-tool-shell \
-	             crates/elysper-tool-todo crates/elysper-tool-web crates/elysper-tool-task \
-	             crates/elysper-tool-scheduler crates/elysper-tool-search crates/elysper-mcp \
+	@for root in crates/elysper-tool-plugins crates/elysper-policy-plugins \
+	             crates/elysper-plugin-runtime crates/elysper-mcp \
 	             crates/elysper-skill crates/elysper-attachment; do \
 	  [[ -d "$$root/src" ]] || continue; \
-	  find "$$root/src" -maxdepth 1 -name '*.rs' ! -name 'tests.rs' -exec wc -l {} +; \
+	  find "$$root/src" -name '*.rs' ! -name 'tests.rs' -exec wc -l {} +; \
 	done | sort -rn | head -20
 
 check-plugin-shape: ## Fail when a plugin-crate production file grows past the baseline
 	@bash scripts/check-plugin-shape.sh
+
+# ---- Capability matrix (the host matrix only improves) ----
+# The matrix in `docs/host-capabilities.md` is the reverse view of the
+# resolved profile: every row carries a status, a `planned` row anchors
+# itself, a landed row cites evidence that is on disk, every method it
+# names is registered by the server, and the gap count never rises
+# above `scripts/host-capabilities/baseline`.
+check-host-capabilities: ## Fail when the capability matrix regresses
+	@bash scripts/check-host-capabilities.sh
 
 # ---- Inline test-module layout (R105–R109) ----
 # No production file may grow an inline `#[cfg(test)] mod` block to

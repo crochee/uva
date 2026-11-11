@@ -664,6 +664,13 @@ pub const KNOWN_METHODS: &[&str] = &[
     "attachments/create",
     "attachments/get",
     "attachments/delete",
+    // profile (the settings surface's write path; the terminal reaches
+    // it through the `:json` gate, which whitelists this copy)
+    "profile/list",
+    "profile/get",
+    "profile/set",
+    "profile/create",
+    "profile/delete",
 ];
 
 impl DomainSpec {

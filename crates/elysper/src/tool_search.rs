@@ -1,4 +1,4 @@
-//! [`elysper_tool_search`] — the `search` tool: cross-domain discovery
+//! [`elysper_tool_plugins::search`] — the `search` tool: cross-domain discovery
 //! over a host-built [`Registry`](crate::search::Registry).
 //!
 //! The [`search`](crate::search) feature ships the *building block* —
@@ -38,7 +38,7 @@
 //! siblings.
 //!
 //! ```bash
-//! cargo run --example search_tool_demo -p elysper-tool-search
+//! cargo run --example search_tool_demo -p elysper-tool-plugins --features search
 //! ```
 
-pub use elysper_tool_search::*;
+pub use elysper_tool_plugins::search::*;

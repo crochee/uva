@@ -72,10 +72,10 @@ Be explicit about the other side of the promise:
 - **Crate-root `pub mod` names.** `elysper_core::agent` (the module
   itself) is not on the curated list — only the names the crate root
   re-exports from it. A module path can move without a major bump.
-- **The crates this page does not list.** The three crates added
-  alongside the frozen seven — `elysper-plugin-host`,
-  `elysper-plugin-protocol` and `elysper-harness-tokio` — are not
-  frozen: their surfaces may still move before `0.2`. So is the
+- **The crates this page does not list.** The plugin channel family
+  (`elysper-plugin-runtime`) and `elysper-harness-tokio` sit
+  alongside the frozen seven without being frozen: their surfaces may
+  still move before `0.2`. So is the
   facade (`elysper`), which only propagates the surfaces below.
 - **The server's HTTP API.** `/api/v1` URLs version themselves; this
   page covers only the library crates listed above.

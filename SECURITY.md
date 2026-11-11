@@ -42,9 +42,9 @@ Elysper 是一个**运行时无关的 Rust AI Agent 框架**，核心通过
 
 - 公开 API 中**可观察**的内存安全 / 数据完整性缺陷（崩溃、use-after-free
   、越权写入、任意代码执行路径）；
-- `elysper-tool-shell` 的 `ShellCommands.json` 等配置文件解析路径的
-  panic / 无界资源消耗（`elysper-tool-shell::sandbox` 是 OS 执行策略
-  的单一收口，`AGENTS.md` §3.7）；
+- `elysper-tool-plugins` 的 `shell` 模块（`ShellCommands.json` 等
+  配置文件）解析路径的 panic / 无界资源消耗（该模块的 `sandbox` 是
+  OS 执行策略的单一收口，`AGENTS.md` §3.7）；
 - 公开 crate 暴露的 HTTP / IPC 表面（如 `elysper-server` 的 axum 路由、
   `elysper-mcp` 的 MCP transport）的拒绝服务 / 注入；
 - 凭据 / 密钥在源代码、release artifact、文档、CI 日志里的泄漏。

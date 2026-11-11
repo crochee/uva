@@ -15,9 +15,9 @@
 //!
 //! This is the path half of "what a call is allowed to touch".
 //! The process half — OS-level execution policy, `ExecutionPolicy`
-//! and `SandboxBackend` — lives in `elysper-tool-shell`, the plugin
-//! that actually spawns processes, so this crate carries no process
-//! policy at all.
+//! and `SandboxBackend` — lives in `elysper-tool-plugins`'s `shell`
+//! module, the plugin that actually spawns processes, so this crate
+//! carries no process policy at all.
 
 use std::path::{Path, PathBuf};
 

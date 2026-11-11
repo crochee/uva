@@ -12,6 +12,31 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Changed (crate topology: plugin families)
+
+- **按插件维度聚合成族 crate（45 → 29 个 crate）**：同构的插件实现不再一人一个 crate，
+  而是"**一个族 = 一个插件维度**，族内**一个插件 = 一个模块 + 一个 feature**"：
+  - `elysper-tool-plugins` —— 九个工具插件（`read` / `write` / `shell` / `todo` /
+    `web` / `task` / `scheduler` / `search` / `memo`）；
+  - `elysper-policy-plugins` —— 七个策略插件（`cache` / `resilience` / `budget` /
+    `reflection` / `cot` / `plan-execute` / `best-of-n`）；
+  - `elysper-plugin-runtime` —— 插件通道的三个断面（`protocol` / `host` / `wasm`）。
+- **插件专属依赖逐插件 optional**：一个工具的依赖由它自己的 feature 打开
+  （`web` → `reqwest`、`task` → `elysper-harness`、`scheduler` → `elysper-scheduler`、
+  `search` → `elysper-search`、`memo` → `blake3`），族 crate 的默认构建什么也不带；
+  `make check-mvp-deps` 改为按 **feature 组合** 断言，并反向断言 `web` 确实是打开
+  `reqwest` 的那个开关。
+- **消费方零改动**：facade 的 feature 名（48 个）与模块路径（`elysper::tool_read::…`）
+  一字未改，`Cargo.toml` 与源码都不需要动；三个独立 consumer proof 与
+  `make examples` 全部照旧通过。
+- **范式 crate 不动**：`elysper-tool` / `-provider` / `-core` / `-kernel` / `-harness`
+  等公开面与冻结基线一字未改；`elysper-harness-tokio` 保持独立（harness 不得带 feature）。
+- **门禁按新拓扑改写**：`check-plugin-shape` 递归扫描族 crate 的模块目录（否则会静默
+  失效）；`check-publishable` 的打包序 45 → 29 项；三个族 crate 各有 `pub use` 预算基线。
+- **插件目录**：[`docs/plugins.md`](docs/plugins.md) 给出"我要 X → 装哪个 feature →
+  实现哪个 trait"的路线，配套可运行的第三方插件样例
+  （`docs/examples/plugin-author`，只依赖 `elysper` 一个入口）。
+
 ### Added (SPA information architecture, knife 9)
 
 - **SPA 信息架构重排（对话优先）**：主界面收成会话 / 对话 + 设置分区，旧目录页全部删除；

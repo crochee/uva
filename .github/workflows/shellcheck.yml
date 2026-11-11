@@ -48,6 +48,7 @@ jobs:
           # change (no glob — keeps the scope deterministic).
           scandir: |
             ./scripts/check-frozen-api.sh
+            ./scripts/check-host-capabilities.sh
             ./scripts/check-harness-docs.sh
             ./scripts/check-harness-shape.sh
             ./scripts/check-kernel-deps.sh

@@ -1,0 +1,21 @@
+[package]
+name = "plugin-author"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: this crate is what a *third party* would write, so
+# it must not be a member of the framework's workspace.
+[workspace]
+
+[dependencies]
+# The framework entry: one dependency, the traits and the registries.
+# `tool` is the tool seam (the `Tool` trait + `ToolRegistry`), `kernel`
+# is the plugin lifecycle contract (`Plugin` / `EffectHandle`).
+elysper = { path = "../../../crates/elysper", default-features = false, features = [
+  "tool",
+  "kernel",
+] }
+# An executor to run the one async call. Runtime-agnostic on purpose:
+# a plugin author is not forced onto tokio.
+futures = "0.3"

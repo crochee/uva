@@ -1013,7 +1013,6 @@ dependencies = [
  "async-trait",
  "elysper-agents",
  "elysper-attachment",
- "elysper-budget",
  "elysper-context",
  "elysper-core",
  "elysper-eval",
@@ -1022,34 +1021,19 @@ dependencies = [
  "elysper-kernel",
  "elysper-macros",
  "elysper-mcp",
- "elysper-plugin-host",
- "elysper-plugin-protocol",
+ "elysper-plugin-runtime",
+ "elysper-policy-plugins",
  "elysper-provider",
- "elysper-reflection",
- "elysper-resilience",
  "elysper-runtime",
  "elysper-scheduler",
  "elysper-search",
- "elysper-semantic-cache",
  "elysper-session",
  "elysper-skill",
  "elysper-steering",
- "elysper-strategy-best-of-n",
- "elysper-strategy-cot",
- "elysper-strategy-plan-execute",
  "elysper-telemetry",
  "elysper-test-support",
  "elysper-tool",
- "elysper-tool-memo",
- "elysper-tool-read",
- "elysper-tool-scheduler",
- "elysper-tool-search",
- "elysper-tool-shell",
- "elysper-tool-task",
- "elysper-tool-todo",
- "elysper-tool-web",
- "elysper-tool-write",
- "elysper-wasm-runtime",
+ "elysper-tool-plugins",
  "elysper-workflow",
  "futures",
  "serde_json",
@@ -1119,25 +1103,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "elysper-budget"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-core",
- "elysper-provider",
- "elysper-tool",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1231,10 +1196,7 @@ dependencies = [
  "elysper-telemetry",
  "elysper-test-support",
  "elysper-tool",
- "elysper-tool-read",
- "elysper-tool-shell",
- "elysper-tool-todo",
- "elysper-tool-write",
+ "elysper-tool-plugins",
  "futures",
  "hex",
  "parking_lot",
@@ -1323,13 +1285,7 @@ dependencies = [
  "elysper-scheduler",
  "elysper-search",
  "elysper-tool",
- "elysper-tool-read",
- "elysper-tool-scheduler",
- "elysper-tool-search",
- "elysper-tool-shell",
- "elysper-tool-todo",
- "elysper-tool-web",
- "elysper-tool-write",
+ "elysper-tool-plugins",
  "futures",
  "serde_json",
  "tempfile",
@@ -1339,7 +1295,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "elysper-plugin-host"
+name = "elysper-plugin-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1347,26 +1303,50 @@ dependencies = [
  "elysper-core",
  "elysper-harness",
  "elysper-kernel",
- "elysper-plugin-protocol",
  "elysper-provider",
  "elysper-session",
  "elysper-steering",
  "elysper-tool",
+ "elysper-tool-plugins",
  "futures",
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
+ "wasmtime",
 ]
 
 [[package]]
-name = "elysper-plugin-protocol"
+name = "elysper-policy-plugins"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
+ "elysper-context",
+ "elysper-core",
+ "elysper-harness",
+ "elysper-provider",
+ "elysper-search",
+ "elysper-session",
+ "elysper-steering",
+ "elysper-test-support",
+ "elysper-tool",
+ "futures",
+ "hex",
+ "parking_lot",
+ "rand 0.8.8",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1399,65 +1379,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "elysper-reflection"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-context",
- "elysper-core",
- "elysper-harness",
- "elysper-provider",
- "elysper-steering",
- "elysper-tool",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "elysper-resilience"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-core",
- "elysper-provider",
- "elysper-tool",
- "futures",
- "parking_lot",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "elysper-runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "elysper-budget",
  "elysper-context",
  "elysper-core",
  "elysper-harness",
  "elysper-harness-tokio",
  "elysper-kernel",
+ "elysper-policy-plugins",
  "elysper-provider",
- "elysper-resilience",
  "elysper-search",
- "elysper-semantic-cache",
  "elysper-session",
  "elysper-test-support",
  "elysper-tool",
- "elysper-tool-task",
+ "elysper-tool-plugins",
  "futures",
  "serde",
  "tokio",
@@ -1497,27 +1434,6 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "elysper-semantic-cache"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-core",
- "elysper-provider",
- "elysper-search",
- "elysper-test-support",
- "hex",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -1584,68 +1500,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "elysper-strategy-best-of-n"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-context",
- "elysper-core",
- "elysper-harness",
- "elysper-provider",
- "elysper-session",
- "elysper-test-support",
- "elysper-tool",
- "futures",
- "parking_lot",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "elysper-strategy-cot"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-context",
- "elysper-core",
- "elysper-harness",
- "elysper-provider",
- "elysper-session",
- "elysper-test-support",
- "elysper-tool",
- "futures",
- "parking_lot",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "elysper-strategy-plan-execute"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-context",
- "elysper-core",
- "elysper-harness",
- "elysper-provider",
- "elysper-session",
- "elysper-steering",
- "elysper-tool",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "elysper-telemetry"
 version = "0.1.0"
 dependencies = [
@@ -1704,100 +1558,27 @@ dependencies = [
 ]
 
 [[package]]
-name = "elysper-tool-memo"
+name = "elysper-tool-plugins"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
  "chrono",
  "elysper-core",
- "elysper-tool",
- "futures",
- "parking_lot",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "elysper-tool-read"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-kernel",
- "elysper-tool",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "elysper-tool-scheduler"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-core",
- "elysper-kernel",
- "elysper-scheduler",
- "elysper-tool",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "elysper-tool-search"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-core",
- "elysper-search",
- "elysper-tool",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "elysper-tool-shell"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "elysper-kernel",
- "elysper-provider",
- "elysper-tool",
- "libc",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "elysper-tool-task"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-core",
  "elysper-harness",
  "elysper-kernel",
  "elysper-provider",
+ "elysper-scheduler",
+ "elysper-search",
  "elysper-test-support",
  "elysper-tool",
  "futures",
+ "libc",
  "opentelemetry",
+ "parking_lot",
+ "reqwest",
+ "schemars",
+ "schemars_derive",
  "serde",
  "serde_json",
  "tempfile",
@@ -1807,52 +1588,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ulid",
-]
-
-[[package]]
-name = "elysper-tool-todo"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-kernel",
- "elysper-provider",
- "elysper-tool",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "elysper-tool-web"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-core",
- "elysper-kernel",
- "elysper-tool",
- "reqwest",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "tokio",
  "url",
-]
-
-[[package]]
-name = "elysper-tool-write"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-kernel",
- "elysper-tool",
- "schemars",
- "schemars_derive",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -1872,24 +1608,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
-]
-
-[[package]]
-name = "elysper-wasm-runtime"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "elysper-kernel",
- "elysper-provider",
- "elysper-tool",
- "elysper-tool-shell",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "tokio",
- "tracing",
- "wasmtime",
 ]
 
 [[package]]

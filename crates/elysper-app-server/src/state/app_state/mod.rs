@@ -477,6 +477,10 @@ impl AppState {
         &self,
         resolved: crate::profile::Profile,
     ) -> Result<crate::profile::ProfileDiff, String> {
+        // The watcher and the write transaction share one writer: two
+        // concurrent reconciles would unload and mount the same rows
+        // twice (a double mount, and an unload in the wrong order).
+        let _guard = self.profile_write.lock().await;
         Ok(self.reconcile(resolved, false).await?.diff)
     }
 
@@ -492,6 +496,17 @@ impl AppState {
     ///
     /// The same build / UI errors as [`Self::reload_profile`].
     pub async fn apply_resolved(
+        &self,
+        resolved: crate::profile::Profile,
+    ) -> Result<Reconciled, String> {
+        let _guard = self.profile_write.lock().await;
+        self.reconcile(resolved, true).await
+    }
+
+    /// The reconcile a write transaction applies: the caller already
+    /// holds the single-writer lock, so this one must not take it
+    /// again (the lock is not reentrant).
+    async fn apply_resolved_locked(
         &self,
         resolved: crate::profile::Profile,
     ) -> Result<Reconciled, String> {

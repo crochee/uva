@@ -846,3 +846,34 @@ async fn a_bad_ui_segment_is_rejected_and_the_old_tree_stays() {
     assert_eq!(components.len(), 1, "the old tree is still mounted");
     assert_eq!(components[0].props["title"], json!("before"));
 }
+
+#[tokio::test]
+async fn a_reload_waits_for_the_write_transaction() {
+    // The watcher and the write transaction share one writer: a
+    // reload that ran beside a transaction would unload and mount
+    // the same rows twice (double mount, wrong unload order).
+    let (state, _dir) = state().await;
+    let next = state.current_profile();
+
+    // Hold the writer the way a write transaction does.
+    let guard = state.profile_write.lock().await;
+    let mut reload = Box::pin(state.reload_profile(next));
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            &mut reload
+        )
+        .await
+        .is_err(),
+        "the reload must wait for the write transaction"
+    );
+    drop(guard);
+
+    let diff = tokio::time::timeout(std::time::Duration::from_secs(5), reload)
+        .await
+        .expect("the reload must finish once the writer is gone")
+        .expect("the reload applies");
+    assert!(diff.added.is_empty(), "nothing was added: {diff:?}");
+    assert!(diff.removed.is_empty(), "nothing was removed: {diff:?}");
+    assert!(diff.remounted.is_empty(), "nothing was remounted: {diff:?}");
+}

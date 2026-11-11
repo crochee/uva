@@ -12,7 +12,7 @@
 //!
 //! Sub-agent delegation itself is **not** here: the `task` tool, its
 //! gates, worktree isolation and routing live in
-//! `elysper::tool_task` (`elysper-tool-task`).
+//! `elysper::tool_task` (`elysper-tool-plugins`).
 //!
 //! Every interception point is one registry: [`Host`] holds the
 //! hooks, gates, guards, hints, trackers, transformers and prompt

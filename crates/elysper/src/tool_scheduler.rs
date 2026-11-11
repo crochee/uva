@@ -1,4 +1,4 @@
-//! [`elysper_tool_scheduler`] — the `schedule` tool: create and manage
+//! [`elysper_tool_plugins::scheduler`] — the `schedule` tool: create and manage
 //! scheduled jobs from the model side.
 //!
 //! The [`scheduler`](crate::scheduler) feature ships the *building
@@ -49,7 +49,7 @@
 //! ```
 //!
 //! ```bash
-//! cargo run --example schedule_jobs -p elysper-tool-scheduler
+//! cargo run --example schedule_jobs -p elysper-tool-plugins --features scheduler
 //! ```
 
-pub use elysper_tool_scheduler::*;
+pub use elysper_tool_plugins::scheduler::*;

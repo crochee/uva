@@ -81,12 +81,12 @@
 //!
 //! - [`Tool`] / [`ToolEntry`] — the trait and its registration wrapper
 //!   (provenance, exposure, privacy flag, execution mode).
-//! - The **agent-facing tool implementations are separate plugin
-//!   crates** — `elysper-tool-read` / `-write` / `-shell` / `-todo` /
-//!   `-web` (and `-task` / `-scheduler` for the two that adapt a crate
-//!   behind them) each carry exactly one tool and depend only on this
-//!   crate plus, for those two, the crate they adapt. Compose a
-//!   registry by registering the bricks you want;
+//! - The **agent-facing tool implementations live in one plugin
+//!   family** — `elysper-tool-plugins` carries one module (and one
+//!   feature) per tool: `read` / `write` / `shell` / `todo` / `web` /
+//!   `task` / `scheduler` / `search` / `memo`. A tool's own
+//!   dependencies are optional and travel with its feature. Compose a
+//!   registry by registering the plugins you want;
 //!   this crate ships no default set. What it does carry beyond the
 //!   paradigm is two *synthetic contracts* the harness itself needs
 //!   ([`full_output`]'s retrieval tool and [`structured_output`]'s
@@ -103,7 +103,7 @@
 //! - [`workspace`] — path confinement for file-touching tools. A
 //!   boundary that needs more than a path — process confinement, an
 //!   approval gate, cross-call serialisation — belongs to the plugin
-//!   that enforces it: `elysper-tool-shell` carries the OS execution
+//!   that enforces it: `elysper-tool-plugins` carries the OS execution
 //!   policy, and a tool that mutates files declares
 //!   [`ExecutionMode::Sequential`] so the loop never races it with a
 //!   sibling call.
@@ -112,10 +112,9 @@
 //!
 //! - **No runtime choice.** Dispatch runs on the caller's poll —
 //!   no detached task, no spawner, no channel — so `run_stream`
-//!   works on any executor. The plugin tool crates
-//!   (`elysper-tool-read` / `-write` / `-shell` / `-todo` / `-web`
-//!   / `-task`) use `tokio::fs` / `tokio::process`, and a consumer
-//!   on another runtime registers their own tools.
+//!   works on any executor. The tool plugin family
+//!   (`elysper-tool-plugins`) uses `tokio::fs` / `tokio::process`,
+//!   and a consumer on another runtime registers their own tools.
 //!
 //! - **No retries.** A tool failure is a result the model reads
 //!   ([`ToolOutput`]), not a transport error to retry.

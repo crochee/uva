@@ -3,7 +3,7 @@
 //! recent sessions server-side and returning one flat list of
 //! `TaskDelegation` records.
 //!
-//! The `task` tool is model-facing (`elysper-tool-task`); since
+//! The `task` tool is model-facing (`elysper-tool-plugins`); since
 //! delegated children run in their **own sessions** (see
 //! `crate::session::subagent_router`), the delegation's record
 //! lives in the child's own log: it opens with a
