@@ -1,7 +1,8 @@
 # Dependabot auto-merge — patch / minor only.
 #
-# `dependabot.yml` opens PRs weekly. Major bumps are kept out (already
-# filtered by `ignore.update-types: ["version-update:semver-major"]`).
+# `dependabot.yml` opens PRs every two months (1st of odd months, 09:00
+# UTC). Major bumps are kept out (already filtered by
+# `ignore.update-types: ["version-update:semver-major"]`).
 # This workflow auto-merges the remaining PRs **after**:
 #   1) `make ci` is green;
 #   2) the PR is labeled `dependencies` AND the semver type is patch or

@@ -1,7 +1,7 @@
-# Elysper full-stack Makefile
+# Uva full-stack Makefile
 #
 # Unified entry point for development, build, test, and deployment
-# of the elysper-app-server (Rust) and elysper-web (React/Vite) pair.
+# of the uva-app-server (Rust) and uva-web (React/Vite) pair.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -9,8 +9,8 @@ SHELL := /bin/bash
 # ---- Configuration ----
 SERVER_PORT       ?= 8080
 WEB_PORT          ?= 5173
-SERVER_CRATE      := elysper-app-server
-WEB_DIR           := elysper-web
+SERVER_CRATE      := uva-app-server
+WEB_DIR           := uva-web
 DOCKER_COMPOSE    := docker compose
 COMPOSE_FILE_DEV  := docker-compose.yml
 COMPOSE_FILE_PROD := docker-compose.prod.yml
@@ -27,7 +27,7 @@ help: ## Show this help
 .PHONY: dev dev-server dev-web dev-stop
 
 dev: ## Start backend (:8080) and frontend (:5173) in parallel
-	@echo "Starting elysper-app-server on :$(SERVER_PORT) and elysper-web on :$(WEB_PORT)"
+	@echo "Starting uva-app-server on :$(SERVER_PORT) and uva-web on :$(WEB_PORT)"
 	@$(MAKE) -j2 dev-server dev-web
 
 dev-server: ## Start the App Server only (:8080; spawns the headless core)
@@ -68,7 +68,7 @@ test-rust: test-crates ## Run every member's tests in turn (never --workspace, p
 # The plugin families ship nothing until a feature asks for it, so
 # their own suites run with every feature on. (A `case` pattern takes
 # `|`-separated alternatives, hence the pipe-joined list.)
-FAMILY_CRATES := elysper-tool-plugins|elysper-policy-plugins|elysper-plugin-runtime
+FAMILY_CRATES := uva-tool-plugins|uva-policy-plugins
 
 test-unit: ## Run every member's library unit tests in turn
 	@set -e; for c in $(CRATES); do \
@@ -117,6 +117,7 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-publishable.sh \
 	  scripts/check-public-docs.sh \
 	  scripts/check-kernel-deps.sh \
+	  scripts/verify-harness-e2e.sh \
 	  scripts/check-stdout.sh
 
 check-web: ## Frontend gates: types, lint, formatting (no browser needed)
@@ -135,49 +136,58 @@ check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 check-kernel-deps: ## Assert the kernel's dependency graph contains no agent/UI crate
 	@bash scripts/check-kernel-deps.sh
 
-# ---- Wasm dependency gate ----
-# The Wasm component runtime is opt-in and carries `wasmtime` (a JIT
-# plus Cranelift). The default facade build must resolve no wasmtime
-# package at all; `--features wasm` must resolve one. The pattern is a
-# package-name prefix match, so `wasmtime`, `wasmtime-environ`, … are
-# all caught. The count is `wc -l` on the filtered list, so zero matches
-# are a zero count rather than grep's exit status 1.
-WASMTIME_PATTERN := ^wasmtime(-|$$)
-
-.PHONY: check-wasm-deps
-
-check-wasm-deps: ## Assert the default build has no wasmtime and `--features wasm` does
-	@count=$$(cargo tree -p elysper --no-default-features -e normal --prefix none 2>/dev/null \
-	  | cut -d' ' -f1 | sort -u | grep -E '$(WASMTIME_PATTERN)' | wc -l); \
-	if [ "$$count" -ne 0 ]; then \
-	  echo "FAIL: the default elysper build resolves $$count wasmtime package(s):"; \
-	  cargo tree -p elysper --no-default-features -e normal --prefix none 2>/dev/null \
-	    | cut -d' ' -f1 | sort -u | grep -E '$(WASMTIME_PATTERN)'; \
-	  exit 1; \
-	fi
-	@echo "OK: the default elysper build resolves no wasmtime package"
-	@enabled=$$(cargo tree -p elysper --no-default-features --features wasm -e normal --prefix none 2>/dev/null \
-	  | cut -d' ' -f1 | sort -u | grep -E '$(WASMTIME_PATTERN)' | wc -l); \
-	if [ "$$enabled" -eq 0 ]; then \
-	  echo "FAIL: '--features wasm' resolved no wasmtime package"; \
-	  exit 1; \
-	fi
-	@echo "OK: '--features wasm' resolves wasmtime"
-
 # ---- stdout discipline gate ----
 # The headless core's stdout is the JSON-RPC transport. A `println!`
 # in the binary reaches the peer as a non-frame and corrupts the
 # stream; logs go to stderr. The protocol writer in
-# `crates/elysper-app-server/src/rpc/stdio.rs` is the only stdout
+# `crates/uva-app-server/src/rpc/stdio.rs` is the only stdout
 # caller and is outside the scanned binaries.
 .PHONY: check-stdout
 
 check-stdout: ## Assert the core's binaries never write to stdout directly
 	@bash scripts/check-stdout.sh
 
+# ---- CLI surface gate ----
+# Every binary's command line is clap's, and the protocol modes keep
+# stdout for frames only. Two rules:
+#
+#   1. No hand-rolled argv parsing in library code. The binaries own
+#      argv; a library takes the parsed arguments. This is what stops
+#      a second `parse_argv` from growing next to the clap
+#      definitions (the one that did — `uva-mcp-server`'s — was
+#      removed when that crate moved to clap).
+#   2. The protocol modes never print help through clap's stdout
+#      printer: `core` and the stdio MCP server render `--help` and
+#      `--version` on stderr, so a peer never reads them as frames.
+#
+# The runtime half of the same contract lives in the `cli_surface`
+# integration tests of the three binary crates.
+.PHONY: check-cli-surface
+
+check-cli-surface: ## Assert the CLIs are clap's and the protocol modes keep stdout for frames
+	@hits=$$(find crates/*/src -name '*.rs' ! -name 'main.rs' ! -name 'tests.rs' ! -path '*/bin/*' -print0 \
+	  | xargs -0 -r grep -nE '\benv::args(_os)?\b' 2>/dev/null \
+	  | grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)' || true); \
+	if [ -n "$$hits" ]; then \
+	  echo "FAIL: library code must not read argv by hand — the CLI is clap's:"; \
+	  printf '%s\n' "$$hits" | sed 's/^/  /'; \
+	  echo "Move the parsing into the crate's clap module and pass the parsed"; \
+	  echo "arguments in (crates/*/src/cli.rs)."; \
+	  exit 1; \
+	fi
+	@hits=$$(grep -rnE '\bprint_(long_)?help\b' crates/uva-app-server/src crates/uva-mcp-server/src 2>/dev/null \
+	  | grep -vE ':[0-9]+:[[:space:]]*(//|/\*|\*)' || true); \
+	if [ -n "$$hits" ]; then \
+	  echo "FAIL: the protocol modes must render help on stderr, never stdout:"; \
+	  printf '%s\n' "$$hits" | sed 's/^/  /'; \
+	  echo "Render the help yourself and write it to stderr."; \
+	  exit 1; \
+	fi
+	@echo "OK: every CLI is clap's, and the protocol modes keep stdout for frames"
+
 # ---- MVP dependency gate ----
 # The smallest agent (MINIMAL.md) must not drag the deployment stack
-# along: the seven-feature subset of the `elysper` facade has to build
+# along: the seven-feature subset of the `uva` facade has to build
 # with no HTTP client, no exporter, no HTTP framework, no database, and
 # no OTLP transport. This target fails if any of them reappear.
 #
@@ -190,16 +200,16 @@ MVP_FORBIDDEN := opentelemetry|tonic|axum|rusqlite|sqlx|reqwest|hyper|rustls|h2|
 # The shipped tool plugins live in one family crate, so the isolation
 # property is per *feature*, not per crate: the offline set pulls no
 # HTTP stack, and only `web` does.
-FAMILY_TOOL_CRATES := elysper-tool-plugins
+FAMILY_TOOL_CRATES := uva-tool-plugins
 FAMILY_TOOL_OFFLINE_FEATURES := read,write,shell,todo,task,scheduler,search,memo
 # The policy plugins (R-OPT-HPC round: Tier 1 performance + concurrency,
 # Tier 2 reasoning + quality) live in one family crate too, all in the
 # offline tier (no HTTP/OTel/DB — proved by the `mvp-forbidden` check
 # below).
-FAMILY_POLICY_CRATES := elysper-policy-plugins
+FAMILY_POLICY_CRATES := uva-policy-plugins
 # The two crates whose interesting configuration the plain loops never
-# check each get their own section: `elysper-search` under
-# `--features provider`, `elysper-tool-scheduler` under `--features
+# check each get their own section: `uva-search` under
+# `--features provider`, `uva-tool-scheduler` under `--features
 # cron`. `doc-check` builds only the default features, so the cron
 # section also runs a rustdoc pass — otherwise the cron-gated surface
 # is documented nowhere in `make ci`.
@@ -207,12 +217,12 @@ FAMILY_POLICY_CRATES := elysper-policy-plugins
 .PHONY: check-mvp-deps
 
 check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty prelude compiles
-	@cargo check -q -p elysper --no-default-features 2>/dev/null \
-	  && echo "OK: elysper --no-default-features compiles (the prelude is empty, not broken)"
-	@if cargo tree -p elysper --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
+	@cargo check -q -p uva --no-default-features 2>/dev/null \
+	  && echo "OK: uva --no-default-features compiles (the prelude is empty, not broken)"
+	@if cargo tree -p uva --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
 	  | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
 	  echo "FAIL: the MVP feature subset pulled a forbidden dependency:"; \
-	  cargo tree -p elysper --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
+	  cargo tree -p uva --no-default-features --features $(MVP_FEATURES) -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	  exit 1; \
 	fi
@@ -230,7 +240,7 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	@# The reverse assertion: the web feature really is the switch that
 	@# opens the HTTP stack. Without it the gate above would pass on a
 	@# crate that never had one.
-	@cargo tree -p elysper-tool-plugins --features web -e normal --prefix none 2>/dev/null \
+	@cargo tree -p uva-tool-plugins --features web -e normal --prefix none 2>/dev/null \
 	  | cut -d' ' -f1 | sort -u | grep -Eq '^reqwest$$' \
 	  && echo "OK: the tool family's web feature is the only one that opens reqwest" \
 	  || { echo "FAIL: the tool family's web feature did not open reqwest"; exit 1; }
@@ -245,78 +255,77 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	done
 	@echo "OK: $(FAMILY_POLICY_CRATES) (all features) pull no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features simd"; do \
-	  if cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p uva-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: elysper-search $$f pulled a forbidden dependency:"; \
-	    cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: uva-search $$f pulled a forbidden dependency:"; \
+	    cargo tree -p uva-search $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: elysper-search (default + --features simd) stays offline"
+	@echo "OK: uva-search (default + --features simd) stays offline"
 	@for f in "" "--features provider" "--features hnsw"; do \
-	  if cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p uva-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: elysper-search $$f pulled a forbidden dependency:"; \
-	    cargo tree -p elysper-search $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: uva-search $$f pulled a forbidden dependency:"; \
+	    cargo tree -p uva-search $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: elysper-search (default + --features provider + --features hnsw) pulls no ($(MVP_FORBIDDEN))"
+	@echo "OK: uva-search (default + --features provider + --features hnsw) pulls no ($(MVP_FORBIDDEN))"
 	@for f in "--features scheduler" "--features scheduler,cron"; do \
-	  if cargo tree -p elysper-tool-plugins $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p uva-tool-plugins $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: elysper-tool-plugins $$f pulled a forbidden dependency:"; \
-	    cargo tree -p elysper-tool-plugins $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: uva-tool-plugins $$f pulled a forbidden dependency:"; \
+	    cargo tree -p uva-tool-plugins $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: elysper-tool-plugins (scheduler + scheduler,cron) pulls no ($(MVP_FORBIDDEN))"
+	@echo "OK: uva-tool-plugins (scheduler + scheduler,cron) pulls no ($(MVP_FORBIDDEN))"
 	@for f in ""; do \
-	  if cargo tree -p elysper-harness $$f -e normal --prefix none 2>/dev/null \
+	  if cargo tree -p uva-harness $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
-	    echo "FAIL: elysper-harness $$f pulled a forbidden dependency:"; \
-	    cargo tree -p elysper-harness $$f -e normal --prefix none 2>/dev/null \
+	    echo "FAIL: uva-harness $$f pulled a forbidden dependency:"; \
+	    cargo tree -p uva-harness $$f -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: elysper-harness (default) pulls no ($(MVP_FORBIDDEN))"
-	@cargo check -q -p elysper-harness --no-default-features 2>/dev/null \
-	  && echo "OK: elysper-harness --no-default-features compiles"
-	@for p in elysper-policy-plugins; do \
+	@echo "OK: uva-harness (default) pulls no ($(MVP_FORBIDDEN))"
+	@cargo check -q -p uva-harness --no-default-features 2>/dev/null \
+	  && echo "OK: uva-harness --no-default-features compiles"
+	@for p in uva-policy-plugins; do \
 	  cargo check -q -p $$p --all-features 2>/dev/null \
 	    || { echo "FAIL: $$p does not build standalone"; exit 1; }; \
 	done
 	@echo "OK: the policy plugin family builds standalone"
-	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p elysper-scheduler \
+	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p uva-scheduler \
 	    --features cron 2>/dev/null \
-	  && echo "OK: elysper-scheduler --features cron rustdoc is warning-free"
+	  && echo "OK: uva-scheduler --features cron rustdoc is warning-free"
 
 # ---- Runtime-free gate ----
 # These pieces promise their consumer no async runtime: their own code
 # is `futures` + std and the runtime lives in the caller (the scheduler
-# takes `tick(now)`, the workflow takes an injected host, the eval
-# runner and the macro-generated code never spawn). A `tokio` crate
+# takes `tick(now)`, the eval runner never spawns). A `tokio` crate
 # reappearing in one of their *lib* trees means the promise broke —
 # most likely because someone went back to inheriting the workspace's
 # tokio entry instead of declaring features on it.
-RUNTIME_FREE := elysper-core elysper-scheduler elysper-macros elysper-eval \
-	elysper-workflow elysper-search elysper-session elysper-harness \
-	elysper-context elysper-steering elysper-plugin-runtime \
-	elysper-kernel
+RUNTIME_FREE := uva-core uva-scheduler uva-eval \
+	uva-search uva-session uva-harness \
+	uva-context uva-steering \
+	uva-kernel
 
 .PHONY: check-no-runtime
 
-# `elysper-tool` keeps its OWN [dependencies] runtime-free (dispatch
+# `uva-tool` keeps its OWN [dependencies] runtime-free (dispatch
 # runs on the caller's poll; tokio lives in [dev-dependencies] only).
 # It cannot join RUNTIME_FREE: the wire types it consumes come from
-# `elysper-provider`, whose default features enable the two HTTP
+# `uva-provider`, whose default features enable the two HTTP
 # adapters (and with them tokio), so the crate gets the same depth-1
 # "declares no runtime" assertion `check-harness-features` applies to
-# `elysper-harness`.
+# `uva-harness`.
 check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	@for c in $(RUNTIME_FREE); do \
 	  n=$$(cargo tree -p $$c -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
@@ -324,26 +333,26 @@ check-no-runtime: ## Assert the runtime-free crates pull no tokio in a lib build
 	    echo "FAIL: $$c (lib) pulls tokio ($$n crates)"; exit 1; \
 	  fi; \
 	done
-	@n=$$(cargo tree -p elysper-telemetry --no-default-features -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
+	@n=$$(cargo tree -p uva-telemetry --no-default-features -e normal --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -c '^tokio' || true); \
 	  if [ "$$n" != "0" ]; then \
-	    echo "FAIL: elysper-telemetry --no-default-features pulls tokio ($$n crates)"; exit 1; \
+	    echo "FAIL: uva-telemetry --no-default-features pulls tokio ($$n crates)"; exit 1; \
 	  fi
-	@n=$$(cargo tree -p elysper-tool -e normal --depth 1 --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -cE '^(tokio|tokio-stream|tokio-util|async-std|smol|futures-executor)' || true); \
+	@n=$$(cargo tree -p uva-tool -e normal --depth 1 --prefix none 2>/dev/null | cut -d' ' -f1 | sort -u | grep -cE '^(tokio|tokio-stream|tokio-util|async-std|smol|futures-executor)' || true); \
 	  if [ "$$n" != "0" ]; then \
-	    echo "FAIL: elysper-tool declares a runtime dependency ($$n crates)"; exit 1; \
+	    echo "FAIL: uva-tool declares a runtime dependency ($$n crates)"; exit 1; \
 	  fi
-	@echo "OK: $(RUNTIME_FREE), elysper-telemetry --no-default-features, and elysper-tool's own deps are tokio-free"
+	@echo "OK: $(RUNTIME_FREE), uva-telemetry --no-default-features, and uva-tool's own deps are tokio-free"
 
 
 .PHONY: check-harness-features
 
-check-harness-features: ## Assert elysper-harness declares zero features and no direct runtime dependency
-	@if grep -q '^\[features\]' crates/elysper-harness/Cargo.toml; then \
-	  echo "FAIL: elysper-harness must not declare a [features] table"; exit 1; fi
-	@if cargo tree -p elysper-harness -e normal --depth 1 --prefix none 2>/dev/null \
+check-harness-features: ## Assert uva-harness declares zero features and no direct runtime dependency
+	@if grep -q '^\[features\]' crates/uva-harness/Cargo.toml; then \
+	  echo "FAIL: uva-harness must not declare a [features] table"; exit 1; fi
+	@if cargo tree -p uva-harness -e normal --depth 1 --prefix none 2>/dev/null \
 	  | cut -d' ' -f1 | sort -u | grep -Eq '^(tokio|tokio-util|async-std|smol|futures-executor)'; then \
-	  echo "FAIL: elysper-harness declares a runtime dependency"; exit 1; fi
-	@echo "OK: elysper-harness has no features and no direct runtime dependency"
+	  echo "FAIL: uva-harness declares a runtime dependency"; exit 1; fi
+	@echo "OK: uva-harness has no features and no direct runtime dependency"
 
 # ---- Claim-language gate ----
 # Forbidden phrasings that contradict facts the code enforces (the
@@ -369,7 +378,7 @@ CLAIM_CRATE_DOCS := $(wildcard crates/*/README.md)
 # Doc comments / inline comments in the facade and the paradigm crate
 # are scanned; tests are exempt (they pin a contract that the runtime
 # enforces, and the wording there is necessarily literal).
-CLAIM_RUST_DOCS := crates/elysper/src/lib.rs crates/elysper/src/tool.rs crates/elysper-tool/src/lib.rs
+CLAIM_RUST_DOCS := crates/uva/src/lib.rs crates/uva/src/tool.rs crates/uva-tool/src/lib.rs
 
 .PHONY: check-claim-language
 
@@ -397,22 +406,35 @@ check-claim-language: ## Fail on absolute "paradigm only / default set" claims i
 	  exit 1; \
 	fi; \
 	echo "OK: no absolute claim-language in current-state docs"
+# The end-to-end proof that the assembled harness really works: it
+# needs a live model endpoint and a provider key, so it is a
+# development-time tool rather than a CI gate (CI has no key).
+verify-harness-e2e: ## Prove the mounted harness answers with a real tool call (needs a provider key)
+	@bash scripts/verify-harness-e2e.sh
+
 # ---- CI entry points ----
 # `.github/workflows/rust-quality.yml` calls these instead of spelling
 # the commands out in YAML, so a contributor can reproduce any CI step
 # by running one `make` target locally. `cargo test --workspace` is
 # deliberately absent: AGENTS.md §3.3 requires per-module batches.
 
-# Every workspace member, derived from the tree so a new crate needs no
-# Makefile edit.
-CRATES := $(notdir $(wildcard crates/*))
+# Every workspace member, derived from Cargo's own manifest so a new
+# crate needs no Makefile edit.
+#
+# The list comes from `cargo metadata`, not from `wildcard crates/*`:
+# git does not track empty directories, so a removed crate's directory
+# can survive on disk and make this loop test a package that does not
+# exist ("package ID specification `X` did not match any packages").
+# Cargo's manifest is the single source of truth for membership.
+CRATES := $(shell cargo metadata --no-deps --format-version 1 2>/dev/null \
+  | python3 -c 'import json,sys; print(" ".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"])))')
 
-.PHONY: fmt-check ci test-crates test-sqlite bench bench-wasm examples
+.PHONY: fmt-check ci test-crates test-sqlite bench examples verify-harness-e2e
 
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-wasm-deps check-stdout check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-host-capabilities check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + clock + single-writer + publishability + license/ban invariants + every member's test suite
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-host-capabilities check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + every member's test suite
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -424,7 +446,7 @@ test-crates: ## Run every member's test suite in turn (never --workspace)
 	done
 
 test-sqlite: ## Run the optional SQLite memory tier's tests
-	cargo test -p elysper-context -q --features sqlite
+	cargo test -p uva-context -q --features sqlite
 
 check-public-api-runtime: ## Fail if a library crate's public API names a runtime type
 	@bash scripts/check-public-api-runtime.sh
@@ -442,8 +464,8 @@ doc-check: ## Fail on any rustdoc warning (a broken intra-doc link points at not
 .PHONY: test-guides
 
 test-guides: ## Compile MINIMAL.md's fences under both feature sets
-	cargo test -p elysper --doc
-	cargo test -p elysper --doc --no-default-features \
+	cargo test -p uva --doc
+	cargo test -p uva --doc --no-default-features \
 	    --features core,provider,context,tool,session,steering,harness
 
 # ---- Public-surface gate ----
@@ -451,27 +473,27 @@ test-guides: ## Compile MINIMAL.md's fences under both feature sets
 # naming every re-export explicitly. A `pub use <module>::*;` makes
 # any future `pub` item inside that module part of the crate's
 # contract without anyone choosing it. The facade is the one
-# exception — `crates/elysper/src/*.rs` propagate their crate's
+# exception — `crates/uva/src/*.rs` propagate their crate's
 # curated surface wholesale, which is safe precisely because the
 # crates below are curated.
 .PHONY: pub-surface-audit check-pub-surface
 
 pub-surface-audit: ## List glob re-exports outside the facade
 	@grep -rnE '^[[:space:]]*pub use [a-z_]+::\*;' crates/*/src --include='*.rs' 2>/dev/null \
-	  | grep -v '^crates/elysper/src/' || echo "  none"
+	  | grep -v '^crates/uva/src/' || echo "  none"
 
-check-pub-surface: ## Fail on a glob re-export inside a elysper-* crate
+check-pub-surface: ## Fail on a glob re-export inside a uva-* crate
 	@hits=$$(grep -rnE '^[[:space:]]*pub use [a-z_]+::\*;' crates/*/src --include='*.rs' 2>/dev/null \
-	  | grep -v '^crates/elysper/src/' || true); \
+	  | grep -v '^crates/uva/src/' || true); \
 	if [ -n "$$hits" ]; then \
 	  echo "FAIL: glob re-export in a library crate's src (AGENTS.md §3.7):"; \
 	  echo "$$hits"; \
 	  echo "List the names explicitly; the crate's lib.rs is the single place that"; \
-	  echo "decides what is public. The facade (crates/elysper/src/) is exempt — it"; \
+	  echo "decides what is public. The facade (crates/uva/src/) is exempt — it"; \
 	  echo "propagates each crate's already-curated surface. Run 'make pub-surface-audit'."; \
 	  exit 1; \
 	fi; \
-	echo "OK: no glob re-export inside a elysper-* crate (facade exempt)"
+	echo "OK: no glob re-export inside a uva-* crate (facade exempt)"
 
 # ---- Strict paradigm-crate surface (R-G --strict-paradigm) ----
 # The glob `pub use <module>::*;` check above catches the worst
@@ -479,7 +501,7 @@ check-pub-surface: ## Fail on a glob re-export inside a elysper-* crate
 # without anyone choosing it), but a crate can still drift toward
 # the same problem by *counting* — 50 explicit re-exports are not
 # meaningfully safer than one glob. AGENTS.md §3.7 says each
-# `elysper-*` crate's lib.rs is the *single* place that decides
+# `uva-*` crate's lib.rs is the *single* place that decides
 # what is public, so a tighter ratchet is appropriate: each
 # non-facade lib crate gets a per-crate line-count budget, encoded
 # in `scripts/paradigm-surface/baselines/<crate>=<N>`, and any
@@ -487,23 +509,16 @@ check-pub-surface: ## Fail on a glob re-export inside a elysper-* crate
 # commit as a baseline bump — mirrors the `check-plugin-shape`
 # precedent.
 #
-# Facade (`crates/elysper/`) is exempt by the same reasoning as the
-# glob gate: `pub use elysper_xxx::*;` is the documented propagation
+# Facade (`crates/uva/`) is exempt by the same reasoning as the
+# glob gate: `pub use uva_xxx::*;` is the documented propagation
 # pattern, and the surface budget lives on the underlying crates.
-# `elysper-app-server` and `elysper-mcp-server` are app / binary
+# `uva-app-server` and `uva-mcp-server` are app / binary
 # crates; their lib.rs is a thin wiring entry, not a curated
 # surface, so they're exempt too.
 .PHONY: check-pub-surface-strict paradigm-surface-audit
 
 paradigm-surface-audit: ## Print current per-crate pub-use counts (largest first)
-	@for c in crates/elysper-tool crates/elysper-harness crates/elysper-provider \
-	         crates/elysper-core crates/elysper-context crates/elysper-steering \
-	         crates/elysper-session; do \
-	  f="$$c/src/lib.rs"; \
-	  [ -f "$$f" ] || continue; \
-	  n=$$(grep -cE '^[[:space:]]*pub use ' "$$f" 2>/dev/null || echo 0); \
-	  printf "%2d  %s\n" "$$n" "$$f"; \
-	done | sort -rn
+	@bash scripts/check-pub-surface-strict.sh --print
 
 check-pub-surface-strict: ## Fail when a paradigm crate's pub-use count grows past its per-crate baseline
 	@bash scripts/check-pub-surface-strict.sh
@@ -545,7 +560,7 @@ check-publishable: ## Fail when a publishable crate cannot be packaged
 .PHONY: check-deny
 check-deny: ## Run cargo deny (license / bans / sources)
 	# Advisories 是 `cargo-audit` 的工作 — 那是 `.github/workflows/security-audit.yml`
-	# 与周一 cron 的责任; 在 `make ci` 上跑 cargo deny advisories 会让 transitive
+	# 与每 2 个月 cron 的责任; 在 `make ci` 上跑 cargo deny advisories 会让 transitive
 	# 公告 (h2 / rustls 等的旧版) 一次性 fail, 但升级 lock 不在本 R 范围内.
 	# 收紧 `advisories = "deny"` 应在专门的 dep-upgrade PR 里打开.
 	@command -v cargo-deny >/dev/null 2>&1 || { \
@@ -555,22 +570,14 @@ check-deny: ## Run cargo deny (license / bans / sources)
 	cargo deny check licenses bans sources
 
 bench: ## Run the hot-path benchmarks (harness + kernel + app-server)
-	cargo bench -p elysper-harness --bench hot_paths
-	cargo bench -p elysper-kernel --bench hot_paths
-	cargo bench -p elysper-app-server --bench framing
+	cargo bench -p uva-harness --bench hot_paths
+	cargo bench -p uva-kernel --bench hot_paths
+	cargo bench -p uva-app-server --bench framing
 
 bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
-	cargo bench -p elysper-harness --bench hot_paths -- --check
-	cargo bench -p elysper-kernel --bench hot_paths -- --check
-	cargo bench -p elysper-app-server --bench framing -- --check
-
-# Opt-in: the Wasm runtime links wasmtime (a JIT plus Cranelift), so its
-# bench is not part of `bench-check`; the default bench job never runs it
-# (clippy --all-targets may still check-compile it in the lint job). Run it
-# when the call path changes; `-- --check` enforces the ratios the same
-# way the default gate does.
-bench-wasm: ## Run the Wasm call benchmarks (opt-in; compiles wasmtime)
-	cargo bench -p elysper-plugin-runtime --bench wasm_calls
+	cargo bench -p uva-harness --bench hot_paths -- --check
+	cargo bench -p uva-kernel --bench hot_paths -- --check
+	cargo bench -p uva-app-server --bench framing -- --check
 
 # Note: `otel_collector_mock` is a long-running server that only
 # exits after a companion client POSTs to it; there is no client
@@ -583,7 +590,7 @@ bench-wasm: ## Run the Wasm call benchmarks (opt-in; compiles wasmtime)
 # `cargo tree` there must contain zero `tokio`. A non-zero count means
 # the harness closure grew a runtime crate — fix the library, never add
 # tokio to the fixture to silence it.
-examples: ## Run every example plus all three consumer proofs (each prints a proof line)
+examples: ## Run every example plus all four consumer proofs (each prints a proof line)
 	@set -e; for d in $(wildcard crates/*/examples); do \
 	  ls $$d/*.rs >/dev/null 2>&1 || continue; \
 	  pkg=$$(echo $$d | cut -d/ -f2); \
@@ -629,7 +636,7 @@ examples: ## Run every example plus all three consumer proofs (each prints a pro
 	  && echo "tokio in tree: $$n" \
 	  && [ "$$n" = "0" ] || { \
 	    echo "FAIL: the harness closure pulls tokio into a consumer that"; \
-	    echo "      depends only on elysper-harness (AGENTS.md: libraries are"; \
+	    echo "      depends only on uva-harness (AGENTS.md: libraries are"; \
 	    echo "      runtime-neutral). Remove it from the library."; \
 	    exit 1; }
 	@echo "== docs/examples/harness-only-consumer"
@@ -637,9 +644,9 @@ examples: ## Run every example plus all three consumer proofs (each prints a pro
 
 # ---- Wall-clock discipline gate ----
 # AGENTS.md §3.8: library code reads the wall clock through
-# `elysper_core::Clock`, never `chrono::Utc::now()`. Only *code* counts
+# `uva_core::Clock`, never `chrono::Utc::now()`. Only *code* counts
 # here — a line whose first characters are `//` is a comment (the docs
-# legitimately mention the call they forbid) — and `elysper-app-server`
+# legitimately mention the call they forbid) — and `uva-app-server`
 # is the **app** crate (AGENTS.md §3.1: libs use thiserror, apps use
 # anyhow) so its 4 production reads are exempt. After excluding
 # comments, `#[cfg(test)]` blocks, and the app crate, the count is 0;
@@ -651,14 +658,14 @@ CLOCK_BASELINE := 0
 
 clock-audit: ## List every chrono::Utc::now() call left in library code
 	# Same scope as `check-clock`: lib crates only (app crate
-	# elysper-app-server is exempt); inside libs we still exclude
+	# uva-app-server is exempt); inside libs we still exclude
 	# `#[cfg(test)]` blocks. Run this to see which lines contributed
 	# to the count.
 	@for f in $$(find crates -name '*.rs' -path '*/src/*' \
 	              ! -name 'clock.rs' \
 	              ! -name 'tests.rs' \
 	              ! -path '*/tests/*' \
-	              ! -path '*/elysper-app-server/src/*'); do \
+	              ! -path '*/uva-app-server/src/*'); do \
 	  awk -v F="$$f" '\
 	    /^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
 	    /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
@@ -668,7 +675,7 @@ clock-audit: ## List every chrono::Utc::now() call left in library code
 	done
 
 check-clock: ## Fail when chrono::Utc::now() calls in library code grow
-	# Scope: lib crates only — `elysper-app-server` is the **app** crate
+	# Scope: lib crates only — `uva-app-server` is the **app** crate
 	# (AGENTS.md §3.1: libs use thiserror, apps use anyhow), and apps
 	# legitimately read wall-clock time directly. Inside libs we still
 	# exclude `#[cfg(test)]` blocks (test code uses real time, not the
@@ -677,7 +684,7 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	                   ! -name 'clock.rs' \
 	                   ! -name 'tests.rs' \
 	                   ! -path '*/tests/*' \
-	                   ! -path '*/elysper-app-server/src/*'); do \
+	                   ! -path '*/uva-app-server/src/*'); do \
 	  awk '/^[[:space:]]*#\[cfg[.(]test[.)]]/{in_test=1; next} \
 	       /^}[[:space:]]*$$/ && in_test{in_test=0; next} \
 	       /Utc::now/{ stripped=$$0; sub(/^[ \t]+/, "", stripped); \
@@ -685,23 +692,23 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 	       END{print c+0}' "$$f"; \
 	done | awk '{s+=$$1} END{print s+0}'); \
 	if [ "$$n" -gt $(CLOCK_BASELINE) ]; then \
-	  echo "FAIL: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-app-server is exempt, cfg(test) is exempt)"; \
-	  echo "Wall-clock reads in library code must go through elysper_core::Clock — run 'make clock-audit'."; \
+	  echo "FAIL: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate uva-app-server is exempt, cfg(test) is exempt)"; \
+	  echo "Wall-clock reads in library code must go through uva_core::Clock — run 'make clock-audit'."; \
 	  exit 1; \
 	fi; \
-	echo "OK: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate elysper-app-server is exempt, cfg(test) is exempt)"
+	echo "OK: $$n chrono::Utc::now() call(s) in lib production code (baseline $(CLOCK_BASELINE); app crate uva-app-server is exempt, cfg(test) is exempt)"
 
 # ---- Harness shape (R122) ----
 # `clippy.toml` sets `cognitive-complexity-threshold = 20`, but
 # `clippy::cognitive_complexity` is allow-by-default and its own docs
 # now say it no longer measures what its name suggests: it counts
 # decisions only (no nesting, no loops, no `?`), so at R122 the whole
-# `elysper-harness` loop maxed out at 8/20 and the threshold was inert.
+# `uva-harness` loop maxed out at 8/20 and the threshold was inert.
 # The properties this harness actually maintains are **flat nesting and
 # short functions**, and neither was measured. These two lints are what
 # clippy recommends in its place.
 #
-# Scoped to `elysper-harness`'s **production** code on purpose: a
+# Scoped to `uva-harness`'s **production** code on purpose: a
 # workspace-wide run of `too_many_lines` at this threshold reports 24
 # sites (14 of them production), and this round touched none of them,
 # so enforcing the budget everywhere would be an unrequested refactor.
@@ -715,7 +722,7 @@ check-clock: ## Fail when chrono::Utc::now() calls in library code grow
 # makes `excessive_nesting` able to fire at all (default 0 = disabled).
 .PHONY: check-harness-shape
 
-check-harness-shape: ## Fail when a elysper-harness production fn grows past the length / nesting budget
+check-harness-shape: ## Fail when a uva-harness production fn grows past the length / nesting budget
 	@bash scripts/check-harness-shape.sh
 
 # ---- Harness comment budget ----
@@ -723,7 +730,7 @@ check-harness-shape: ## Fail when a elysper-harness production fn grows past the
 # the signature or narrate the next three lines; the ones recording
 # a non-obvious constraint are the payload and stay. The gate fails
 # on growth so a later round cannot quietly put the tax back.
-check-harness-docs: ## Fail when elysper-harness private-item doc comments grow past the budget
+check-harness-docs: ## Fail when uva-harness private-item doc comments grow past the budget
 	@bash scripts/check-harness-docs.sh
 
 # ---- Public docs ratchet ----
@@ -749,9 +756,9 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 	@bash scripts/check-single-writer.sh
 
 # ---- Plugin shape (R-G) ----
-# Plugin tool crates (`elysper-tool-read` / `-write` / `-shell` /
+# Plugin tool crates (`uva-tool-read` / `-write` / `-shell` /
 # `-todo` / `-web` / `-task` / `-scheduler` / `-search` plus
-# `elysper-mcp` / `-skill` / `-attachment`) ship one tool (or one
+# `uva-mcp` / `-skill` / `-attachment`) ship one tool (or one
 # tool-like facade) per crate and stay flat — `lib.rs` plus focused
 # siblings. Long-file drift hurts the same way it did in the harness,
 # so the gate is a sibling of `check-harness-shape` but scoped at the
@@ -767,9 +774,9 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 .PHONY: plugin-shape-audit check-plugin-shape
 
 plugin-shape-audit: ## List plugin-crate production files and their line counts (largest first)
-	@for root in crates/elysper-tool-plugins crates/elysper-policy-plugins \
-	             crates/elysper-plugin-runtime crates/elysper-mcp \
-	             crates/elysper-skill crates/elysper-attachment; do \
+	@for root in crates/uva-tool-plugins crates/uva-policy-plugins \
+	             crates/uva-mcp \
+	             crates/uva-skill crates/uva-attachment; do \
 	  [[ -d "$$root/src" ]] || continue; \
 	  find "$$root/src" -name '*.rs' ! -name 'tests.rs' -exec wc -l {} +; \
 	done | sort -rn | head -20
@@ -833,19 +840,19 @@ IMAGE_TARGETS := server web mcp
 
 image-build: image-build-server image-build-web image-build-mcp ## Build all three container images (server + web + mcp)
 
-image-build-server: ## Build elysper-app-server image (Dockerfile.server, multi-stage cargo-chef)
+image-build-server: ## Build uva-app-server image (Dockerfile.server, multi-stage cargo-chef)
 	bash scripts/images.sh build server
 
-image-build-web: ## Build elysper-web image (Dockerfile.web, Vite + nginx with envsubst)
+image-build-web: ## Build uva-web image (Dockerfile.web, Vite + nginx with envsubst)
 	bash scripts/images.sh build web
 
-image-build-mcp: ## Build elysper-mcp-server image (Dockerfile.mcp, stdio binary)
+image-build-mcp: ## Build uva-mcp-server image (Dockerfile.mcp, stdio binary)
 	bash scripts/images.sh build mcp
 
-server-artifact: ## Export Linux musl binary to ./dist/elysper-app-server (matches ci.yml cross-linux-musl)
+server-artifact: ## Export Linux musl binary to ./dist/uva-app-server (matches ci.yml cross-linux-musl)
 	bash scripts/images.sh artifact server
 
-windows-artifact: ## Export Windows PE to ./dist/elysper-app-server.exe (matches ci.yml cross-windows)
+windows-artifact: ## Export Windows PE to ./dist/uva-app-server.exe (matches ci.yml cross-windows)
 	bash scripts/images.sh artifact windows
 
 image-push: ## Push all three images to the configured registry (REGISTRY / TAG)

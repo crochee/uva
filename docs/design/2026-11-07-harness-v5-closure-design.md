@@ -22,7 +22,7 @@
 本轮开始时的基线（批 0 完成后复核）：
 
 - `git status --short` 为空（工作树干净）；
-- `cargo tree -p elysper-harness -e normal | grep -c tokio` = **0**（harness 依赖闭包无运行时）。
+- `cargo tree -p uva-harness -e normal | grep -c tokio` = **0**（harness 依赖闭包无运行时）。
 
 ---
 
@@ -35,25 +35,25 @@
 
 | # | 差距 | 证据（file:line） | 本轮处置 | 验收方式 |
 |:--|:---|:---|:---|:---|
-| **G1** | 每轮把整条 transcript 深拷一遍——`messages.extend(session.messages.iter().cloned())` 把整条历史逐条克隆进请求列表 | `crates/elysper-harness/src/agent/re_act/loop/prepare.rs:139` | **落地**（批 2 Step 2.1） | 新增契约测试：`prepare` 之后的 `messages` 与"`kept_range` 裁剪 + `prepare_arc`"逐条相等；`cargo test -p elysper-context --lib` 绿 |
-| **G2** | 压缩时无条件整表克隆——`let mut next = (*session.messages).clone()` | `crates/elysper-harness/src/agent/re_act/loop/compaction/mod.rs:153` | **落地**（批 2 Step 2.2） | `cargo test -p elysper-harness --lib`（含 `compaction.rs`）绿；压缩后 transcript 与压缩前语义一致 |
-| **G3** | 工具批每轮 4 个 Vec 分配（`Batch.outputs` / `runnable` / `safe_indices` / `unsafe_indices`）+ `join_all` 无并发上限、无背压 | `crates/elysper-harness/src/agent/re_act/loop/tools/mod.rs:48-54,186-188,261,279` | **落地**（批 2 Step 2.3） | 顺序不变式测试：一轮 3 个 tool_use 时写入日志的 `tool_result` 行顺序 == assistant 行里 tool_use 的顺序；`parallel_safe.rs` / `parallel_unsafe.rs` / `parallel_cancel.rs` 绿 |
-| **G4** | 每轮一次 `format!("LLM pass {iteration}")` | `crates/elysper-harness/src/agent/re_act/loop/mod.rs:473` | **落地**（批 2 Step 2.5，**按占比判定**：< 5% 则不改代码，只记录占比） | R1–R3 场景里该行的实测占比写回台账 §1.1 末 |
-| **G5** | 每个非只读工具调用一次 SHA-256+hex，且 `to_string` 后再 `as_bytes()` 二次拷贝 | `crates/elysper-harness/src/agent/re_act/loop/guard.rs:396-401` | **落地**（批 2 Step 2.4，**按占比判定**：< 5% 则不改代码，只记录占比） | R2 场景里该行的实测占比写回台账 §1.1 末；哈希输出逐字节不变（`sha256:` 前缀 + 同样的 hex） |
-| **G6** | 超窗路径 ~305 µs 至今没有归因——V4 §5.6 原文："下一轮先加一行能隔离它们的 bench 再谈降本" | `docs/design/2026-10-26-harness-v4-design.md` §5.6 | **落地**（批 1 Step 1.2 R4） | R4 bench 行存在；`cargo bench -p elysper-harness --bench hot_paths -- --check` 退出 0；拷贝 / 三次 token 估计 / `Vec::remove` 搬移三段的实测占比写回台账 §1.1 末 |
-| **G7** | 基准名不副实：15 行里只有 1 行驱动真 harness，projection 两行测的是 bench 文件里的副本 | `crates/elysper-harness/benches/hot_paths.rs:918-954` | **落地**（批 1） | `grep -c "fn projection_memo_hit_v2\|fn close_iteration_v2_cost" crates/elysper-harness/benches/hot_paths.rs` = 0；表格里出现 R1–R4 四行 |
+| **G1** | 每轮把整条 transcript 深拷一遍——`messages.extend(session.messages.iter().cloned())` 把整条历史逐条克隆进请求列表 | `crates/uva-harness/src/agent/re_act/loop/prepare.rs:139` | **落地**（批 2 Step 2.1） | 新增契约测试：`prepare` 之后的 `messages` 与"`kept_range` 裁剪 + `prepare_arc`"逐条相等；`cargo test -p uva-context --lib` 绿 |
+| **G2** | 压缩时无条件整表克隆——`let mut next = (*session.messages).clone()` | `crates/uva-harness/src/agent/re_act/loop/compaction/mod.rs:153` | **落地**（批 2 Step 2.2） | `cargo test -p uva-harness --lib`（含 `compaction.rs`）绿；压缩后 transcript 与压缩前语义一致 |
+| **G3** | 工具批每轮 4 个 Vec 分配（`Batch.outputs` / `runnable` / `safe_indices` / `unsafe_indices`）+ `join_all` 无并发上限、无背压 | `crates/uva-harness/src/agent/re_act/loop/tools/mod.rs:48-54,186-188,261,279` | **落地**（批 2 Step 2.3） | 顺序不变式测试：一轮 3 个 tool_use 时写入日志的 `tool_result` 行顺序 == assistant 行里 tool_use 的顺序；`parallel_safe.rs` / `parallel_unsafe.rs` / `parallel_cancel.rs` 绿 |
+| **G4** | 每轮一次 `format!("LLM pass {iteration}")` | `crates/uva-harness/src/agent/re_act/loop/mod.rs:473` | **落地**（批 2 Step 2.5，**按占比判定**：< 5% 则不改代码，只记录占比） | R1–R3 场景里该行的实测占比写回台账 §1.1 末 |
+| **G5** | 每个非只读工具调用一次 SHA-256+hex，且 `to_string` 后再 `as_bytes()` 二次拷贝 | `crates/uva-harness/src/agent/re_act/loop/guard.rs:396-401` | **落地**（批 2 Step 2.4，**按占比判定**：< 5% 则不改代码，只记录占比） | R2 场景里该行的实测占比写回台账 §1.1 末；哈希输出逐字节不变（`sha256:` 前缀 + 同样的 hex） |
+| **G6** | 超窗路径 ~305 µs 至今没有归因——V4 §5.6 原文："下一轮先加一行能隔离它们的 bench 再谈降本" | `docs/design/2026-10-26-harness-v4-design.md` §5.6 | **落地**（批 1 Step 1.2 R4） | R4 bench 行存在；`cargo bench -p uva-harness --bench hot_paths -- --check` 退出 0；拷贝 / 三次 token 估计 / `Vec::remove` 搬移三段的实测占比写回台账 §1.1 末 |
+| **G7** | 基准名不副实：15 行里只有 1 行驱动真 harness，projection 两行测的是 bench 文件里的副本 | `crates/uva-harness/benches/hot_paths.rs:918-954` | **落地**（批 1） | `grep -c "fn projection_memo_hit_v2\|fn close_iteration_v2_cost" crates/uva-harness/benches/hot_paths.rs` = 0；表格里出现 R1–R4 四行 |
 
 ### 1.2 server 侧（批 3）
 
 | # | 差距 | 证据（file:line） | 本轮处置 | 验收方式 |
 |:--|:---|:---|:---|:---|
-| **G8** | follow 每连接每 100 ms 反向扫尾日志（最多 512 行） | `crates/elysper-server/src/routes/follow.rs:101,636-637,721,780` | **落地**（批 3 Step 3.1） | follow 测试：一条连接在写入 3 条新行后，durable 读取次数 ≤ 2，客户端收到 3 个 `row` 帧 |
-| **G9** | 每轮把整个会话日志重读重折叠 | `crates/elysper-server/src/session/controller/run_task.rs:270-274` | **落地**（批 3 Step 3.2） | controller 测试：同一会话连续两轮，第二轮不再读全量（计数 sink 的 `read()` 计数在第二轮为 0），两轮的模型历史相同 |
-| **G10** | `GET /api/v1/tasks` 扫 50 会话 × 256 行且不翻页 | `crates/elysper-server/src/routes/tasks.rs:50,53-66,119,136` | **落地**（批 3 Step 3.5；批 5 复核发现 id/游标缺陷并修复，见 §9） | 种 3 条 delegation 后 `GET /api/v1/tasks?limit=2` 返回 2 条且 `next_cursor` 非空 |
-| **G11** | `/api/v1/tools` 缓存命中仍深拷贝整份定义（而 handler 只用 name/description，schema 当场丢弃） | `crates/elysper-server/src/routes/tool.rs:82-90,120-140` | **落地**（批 3 Step 3.3） | `GET /api/v1/tools` 连续两次请求，第二次 registry 版本不变时两次响应体逐字节相同 |
-| **G12** | 每轮结束连着 flush 两次（两次 fsync），两个 warn 块逐字相同 | `crates/elysper-server/src/session/controller/run_task.rs:537,545` | **落地**（批 3 Step 3.4） | `cargo test -p elysper-server --lib` 里"durable 行只写一次"的既有断言仍绿；删除第二个 flush 块后不出现新的 fsync 计数 |
-| **G13** | `chat_router()` 是死代码（注释指向不存在的 `server-bin` crate） | `crates/elysper-server/src/routes/mod.rs:43-51` + `crates/elysper-server/src/server/router.rs:433-436` | **落地**（批 3 Step 3.6） | `grep -rn "chat_router" crates/elysper-server/src` = 0 命中；`make lint-rust` 绿（无未用 import） |
-| **G14** | 鉴权白名单里有一条没有路由的豁免——`/.well-known/agent-card.json` 在 server 里未注册 | `crates/elysper-server/src/middleware/auth/path.rs:3` | **落地**（批 3 Step 3.7） | `grep -rn "agent-card" crates/elysper-server/src` 只命中 `middleware/auth/`（白名单本身与其测试）；三处断言同步更新 |
+| **G8** | follow 每连接每 100 ms 反向扫尾日志（最多 512 行） | `crates/uva-app-server/src/routes/follow.rs:101,636-637,721,780` | **落地**（批 3 Step 3.1） | follow 测试：一条连接在写入 3 条新行后，durable 读取次数 ≤ 2，客户端收到 3 个 `row` 帧 |
+| **G9** | 每轮把整个会话日志重读重折叠 | `crates/uva-app-server/src/session/controller/run_task.rs:270-274` | **落地**（批 3 Step 3.2） | controller 测试：同一会话连续两轮，第二轮不再读全量（计数 sink 的 `read()` 计数在第二轮为 0），两轮的模型历史相同 |
+| **G10** | `GET /api/v1/tasks` 扫 50 会话 × 256 行且不翻页 | `crates/uva-app-server/src/routes/tasks.rs:50,53-66,119,136` | **落地**（批 3 Step 3.5；批 5 复核发现 id/游标缺陷并修复，见 §9） | 种 3 条 delegation 后 `GET /api/v1/tasks?limit=2` 返回 2 条且 `next_cursor` 非空 |
+| **G11** | `/api/v1/tools` 缓存命中仍深拷贝整份定义（而 handler 只用 name/description，schema 当场丢弃） | `crates/uva-app-server/src/routes/tool.rs:82-90,120-140` | **落地**（批 3 Step 3.3） | `GET /api/v1/tools` 连续两次请求，第二次 registry 版本不变时两次响应体逐字节相同 |
+| **G12** | 每轮结束连着 flush 两次（两次 fsync），两个 warn 块逐字相同 | `crates/uva-app-server/src/session/controller/run_task.rs:537,545` | **落地**（批 3 Step 3.4） | `cargo test -p uva-app-server --lib` 里"durable 行只写一次"的既有断言仍绿；删除第二个 flush 块后不出现新的 fsync 计数 |
+| **G13** | `chat_router()` 是死代码（注释指向不存在的 `server-bin` crate） | `crates/uva-app-server/src/routes/mod.rs:43-51` + `crates/uva-app-server/src/server/router.rs:433-436` | **落地**（批 3 Step 3.6） | `grep -rn "chat_router" crates/uva-app-server/src` = 0 命中；`make lint-rust` 绿（无未用 import） |
+| **G14** | 鉴权白名单里有一条没有路由的豁免——`/.well-known/agent-card.json` 在 server 里未注册 | `crates/uva-app-server/src/middleware/auth/path.rs:3` | **落地**（批 3 Step 3.7） | `grep -rn "agent-card" crates/uva-app-server/src` 只命中 `middleware/auth/`（白名单本身与其测试）；三处断言同步更新 |
 
 ### 1.3 契约侧（批 4）
 
@@ -69,22 +69,22 @@
 
 ### D1 — 泛型化：保留 dyn，不做
 
-- **决定**：`elysper-harness` 的公开面继续用 `dyn Trait`（`Arc<dyn ModelProvider>` / `Arc<dyn ToolRegistry>` 等），本轮不改。
+- **决定**：`uva-harness` 的公开面继续用 `dyn Trait`（`Arc<dyn ModelProvider>` / `Arc<dyn ToolRegistry>` 等），本轮不改。
 - **代价**：多一层动态派发；换来"宿主可运行时替换实现"与 V4 §5.5 逐站点复核的一致性。
 - **出处**：V4 §5.5（已逐站点复核，结论＝dyn 全部保留）；V4 验收记录。
 - **重开条件**：需要另立设计文档并推翻已验收结论，不在本轮内。
 
 ### D2 — 依赖面收缩：保留 7 个兄弟 crate 依赖
 
-- **决定**：harness 继续依赖 `elysper-core` / `-provider` / `-tool` / `-session` / `-context` / `-steering` / `-mcp`，不做进一步收缩。
+- **决定**：harness 继续依赖 `uva-core` / `-provider` / `-tool` / `-session` / `-context` / `-steering` / `-mcp`，不做进一步收缩。
 - **代价**：harness 不是"零依赖"库；换来 trait 语义单一真源（`Message` / `ToolDefinition` / `Tool` / `SessionSink` 只有一个定义处）。
-- **出处**：V4 §5.x 依赖面裁决；本轮 `cargo tree -p elysper-harness -e normal | grep -c tokio` = 0 的**运行时**零依赖承诺仍然成立。
+- **出处**：V4 §5.x 依赖面裁决；本轮 `cargo tree -p uva-harness -e normal | grep -c tokio` = 0 的**运行时**零依赖承诺仍然成立。
 
 ### D3 — 无状态口径：本轮只要求"会话真源可跨节点"
 
 - **决定**：会话 / workflows / evals / schedules 的真源是共享 workspace 文件系统，多节点计算无状态这条**已达成**；节点本地状态本轮不动。
 - **代价**：11 项节点本地状态（工具注册表 / agent 注册表 / 插件进程 / MCP 子进程 / usage 计数 / Prometheus / 会话搜索索引 / provider 连接池 / 模型 pin 等）**不跨节点**。
-- **出处**：`crates/elysper-server/src/state/app_state/mod.rs:62-310`；`crates/elysper-server/README.md` 的「多节点部署」节。
+- **出处**：`crates/uva-app-server/src/state/app_state/mod.rs:62-310`；`crates/uva-app-server/README.md` 的「多节点部署」节。
 
 ### D4 — 性能口径：先测再改，占比 ≥ 5% 才动代码
 
@@ -122,7 +122,7 @@
 | provider 连接池 | 每节点一份 |
 | 模型 pin | 不跨节点 |
 
-证据：`crates/elysper-server/src/state/app_state/mod.rs:62-310`。
+证据：`crates/uva-app-server/src/state/app_state/mod.rs:62-310`。
 **本轮处置：进台账，不做。** 让"运行期注册的工具 / agent / 插件集群内可见"或"usage / metrics 部署级聚合"成立，需要扩展 cluster frame 协议 + Redis 计数语义，是独立一轮。
 
 ### 3.2 泛型化
@@ -139,7 +139,7 @@ V4 §5.10 未做的那部分（facade 的 feature 表是否还能再窄）。**�
 
 ### 3.5 `GET /api/v1/sessions` 的逐会话读放大——**本轮只测量不修**
 
-- 现状：每会话 1 次 `read_head` + 1 次 `read_tail(512)`（`crates/elysper-server/src/routes/sessions/mod.rs:630-637`），读放大随会话数线性增长，且分页发生在读之后。
+- 现状：每会话 1 次 `read_head` + 1 次 `read_tail(512)`（`crates/uva-app-server/src/routes/sessions/mod.rs:630-637`），读放大随会话数线性增长，且分页发生在读之后。
 - **本轮处置**：只加一条 `tracing::debug!`（session_id + 读耗时）并把该事实写进台账；不修。
 - **理由**：修法需要新的缓存层与失效键，属于"状态面"，与本轮"不动节点本地状态"（§3.1）一致。
 - **验收方式**：日志里能看到每会话的读耗时；台账记录"读放大随会话数线性增长、分页在读之后"这一事实。
@@ -154,7 +154,7 @@ V4 §5.10 未做的那部分（facade 的 feature 表是否还能再窄）。**�
 
 | 批 | 内容 | 验收行 |
 |:--|:---|:---|
-| 0 | 差距台账 | ✅ 本文件存在，G1–G15 每条有证据行号与验收方式；基线复核（`make ci` 绿、`cargo tree -p elysper-harness -e normal \| grep -c tokio` = 0）通过 |
+| 0 | 差距台账 | ✅ 本文件存在，G1–G15 每条有证据行号与验收方式；基线复核（`make ci` 绿、`cargo tree -p uva-harness -e normal \| grep -c tokio` = 0）通过 |
 | 1 | 基准驱动真身 | ✅ R1–R4 四行在表里；两行重实现已删（`grep -c "fn projection_memo_hit_v2\|fn close_iteration_v2_cost"` = 0）；`--check` 退出 0 |
 | 2 | harness 热路径 | ✅ G1/G2/G3 落地，G4/G5 按 <5% 判定不改（占比见 §6）；实测见 §5 |
 | 3 | server 读放大与死代码 | ✅ G8–G14 的验收方式逐条绿（含 5 条新测试） |
@@ -222,7 +222,7 @@ V4 §5.10 未做的那部分（facade 的 feature 表是否还能再窄）。**�
 
 | 端点 | 定性 | 理由 |
 |:---|:---|:---|
-| `POST /api/v1/chat/sessions` | **接**（→ both） | `elysper-web/src/api/chat-stream.ts:148` 的 `createChatSession` 就在调它；模块文档写明 "creation is the only way a chat starts"。原抑制理由是假的，已删 |
+| `POST /api/v1/chat/sessions` | **接**（→ both） | `uva-web/src/api/chat-stream.ts:148` 的 `createChatSession` 就在调它；模块文档写明 "creation is the only way a chat starts"。原抑制理由是假的，已删 |
 | `GET /api/v1/sessions/{key}/events` | 不接 | web 用 `/follow`（一个 reader per log）；这是外部轮询客户端的 SSE 面 |
 | `GET /api/v1/chat/usage` | 不接 | web 读 per-session usage；这是部署级聚合，给运维 |
 | `GET /api/v1/sessions/search` | 不接 | web 用 `/api/v1/search`（统一索引）；这是会话域变体 |
@@ -262,7 +262,7 @@ V4 §5.10 未做的那部分（facade 的 feature 表是否还能再窄）。**�
 
 web 侧同步：TasksPage 改走 `useCursorList` + Load more（跟随 `next_cursor`，不再截断在默认 limit=20）；ToolsPage 的 "Recent task delegations" 面板改为 `?limit=5` 取最新 5 条（服务端默认序即最新在前）。
 
-**验收**：`cargo test -p elysper-server --lib routes::tasks` 5/5；`--test management_routes_test` 16/16（含 `%3A` 编码 id 的 wire 往返、父不匹配 404、穿越形状 422 三条 HTTP 级测试）；对运行中 server 实测——list 最新在前、`limit=1` 翻页第二页返回较旧一条且 `next_cursor=null`、`%3A` 详情 200、穿越 id 422、错父 404；`contract-closure && npm run check` 退出 0（`frontend_only=0`）。
+**验收**：`cargo test -p uva-app-server --lib routes::tasks` 5/5；`--test management_routes_test` 16/16（含 `%3A` 编码 id 的 wire 往返、父不匹配 404、穿越形状 422 三条 HTTP 级测试）；对运行中 server 实测——list 最新在前、`limit=1` 翻页第二页返回较旧一条且 `next_cursor=null`、`%3A` 详情 200、穿越 id 422、错父 404；`contract-closure && npm run check` 退出 0（`frontend_only=0`）。
 
 ---
 
@@ -271,7 +271,7 @@ web 侧同步：TasksPage 改走 `useCursorList` + Load more（跟随 `next_curs
 | 项 | 证据 | 说明 |
 |:---|:---|:---|
 | **G6 的 O(n²) 搬移在 `prepare` 里仍在** | §5.3 | 投影让 **harness 的热路径**跳过了它，但 `ContextManager::prepare`（`prepare_arc` 的兜底、以及所有不实现投影的 manager）走的还是"先收集全部 drop 再一次重建"。`apply_plan` 已把重建降为 O(n)，**但 `drop_plan` 内部的 `tail.remove(i)` 仍是 O(n²)**（只是元素从 ~100 字节的 `Message` 变成 16 字节的 slot）。R4 从 347 µs 降到 115 µs 说明常数项已小很多；若还要再降，把 plan 的模拟换成写指针扫描即可（O(n)），属机械改动 |
-| **`NoopContextManager::prepare` 重复调用两次 `estimate_tokens`** | `crates/elysper-context/src/context_manager/mod.rs:360-365` | 两次逐字相同；~20 µs/次。不在 G1–G15 里，未动 |
-| **`GET /api/v1/sessions` 的逐会话读放大** | `crates/elysper-server/src/routes/sessions/mod.rs`（本次加了 debug 探针） | 每会话 1 次 `read_head` + 1 次 `read_tail(512)`，**分页在读之后**：读成本随会话数线性增长，`limit` 不约束它。修法需要新的缓存层与失效键，属"状态面"，与 §3.1 一致本轮不动 |
-| **会话跨轮的增量折叠** | §G9 | G9 落的是"日志没变 → 不读"；生产里每轮都会 append，所以命中率主要来自同轮内的重复读与接管重建。真正的修法是**增量折叠**（`read_since` 取增量 + 把 `SurfaceFold`/投影状态留在缓存里），难点在折叠是有状态的：compaction 的 `Replace` 是**位置**区间（要能作用到缓存面上），投影持有 pending tool calls 与 deferred user。属 `elysper-session` 的折叠 API 扩展，独立一轮 |
-| **`GET /api/v1/tasks` 对 depth≥2 的委派不可见** | `crates/elysper-server/src/session/subagent_router.rs`（`ParentSink::Deeper` 不写父日志） | 孙辈委派只记录在孙辈自己的日志里（`subagent_enter` 头行），而扫描遍历的是注册会话的日志尾窗——孙辈会话不注册就永远扫不到。修法要么扫盘枚举会话（sessions 路由已有该机制），要么路由器把镜像写到直接父而非仅根父。属发现面扩展，独立一轮 |
+| **`NoopContextManager::prepare` 重复调用两次 `estimate_tokens`** | `crates/uva-context/src/context_manager/mod.rs:360-365` | 两次逐字相同；~20 µs/次。不在 G1–G15 里，未动 |
+| **`GET /api/v1/sessions` 的逐会话读放大** | `crates/uva-app-server/src/routes/sessions/mod.rs`（本次加了 debug 探针） | 每会话 1 次 `read_head` + 1 次 `read_tail(512)`，**分页在读之后**：读成本随会话数线性增长，`limit` 不约束它。修法需要新的缓存层与失效键，属"状态面"，与 §3.1 一致本轮不动 |
+| **会话跨轮的增量折叠** | §G9 | G9 落的是"日志没变 → 不读"；生产里每轮都会 append，所以命中率主要来自同轮内的重复读与接管重建。真正的修法是**增量折叠**（`read_since` 取增量 + 把 `SurfaceFold`/投影状态留在缓存里），难点在折叠是有状态的：compaction 的 `Replace` 是**位置**区间（要能作用到缓存面上），投影持有 pending tool calls 与 deferred user。属 `uva-session` 的折叠 API 扩展，独立一轮 |
+| **`GET /api/v1/tasks` 对 depth≥2 的委派不可见** | `crates/uva-app-server/src/session/subagent_router.rs`（`ParentSink::Deeper` 不写父日志） | 孙辈委派只记录在孙辈自己的日志里（`subagent_enter` 头行），而扫描遍历的是注册会话的日志尾窗——孙辈会话不注册就永远扫不到。修法要么扫盘枚举会话（sessions 路由已有该机制），要么路由器把镜像写到直接父而非仅根父。属发现面扩展，独立一轮 |

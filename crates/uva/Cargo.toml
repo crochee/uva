@@ -1,0 +1,359 @@
+[package]
+name = "uva"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Facade for the uva agent framework: one dependency, one prelude"
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+# The facade holds **no logic**—every module is a `pub use` of one
+# underlying crate (`uva::harness` = `uva-harness`, …) and the
+# `prelude` is a curated subset. Dependency direction is one-way:
+# `uva` → `uva-*`, never back.
+#
+# Each piece is an *optional* dependency behind a same-named feature,
+# so a consumer compiles exactly the lego they asked for. The default
+# set is the "assemble a basic agent" set; everything else (skills,
+# attachments, MCP, the scheduler, eval, workflows, telemetry,
+# SQLite memory, the app crate, test support) is opt-in.
+#
+# `async-trait` is the one non-uva dependency: the async traits the
+# facade re-exports (`ModelProvider`, `Tool`, `Agent`, …) can only be
+# implemented with that attribute macro, and a facade that makes you
+# add a second dependency to implement its own traits has failed at
+# its one job. It is re-exported as `uva::async_trait`.
+[dependencies]
+uva-core = { workspace = true, optional = true }
+# The plugin kernel: manifests and `mount_all`. Opt-in until the harness
+# moves onto it; the kernel carries `cordis-rs` and no runtime.
+uva-kernel = { workspace = true, optional = true }
+uva-provider = { workspace = true, optional = true }
+uva-context = { workspace = true, optional = true }
+uva-tool = { workspace = true, optional = true }
+uva-tool-plugins = { workspace = true, optional = true }
+uva-session = { workspace = true, optional = true }
+uva-steering = { workspace = true, optional = true }
+uva-harness = { workspace = true, optional = true }
+# The tokio implementations of the runtime-neutral seams
+# (`TokioSpawner` / `TokioSleeper` / `TokioBlocking`), behind the
+# opt-in `harness-tokio` feature. The feature adds no runtime to a
+# consumer that opts in — it pulls `uva-core-tokio`, which
+# depends on `tokio` with the `rt` + `time` features only. (The
+# facade's *default* features are a different story: the two HTTP
+# provider adapters carry tokio; see the `harness-tokio` feature note
+# below.)
+uva-core-tokio = { workspace = true, optional = true }
+
+uva-skill = { workspace = true, optional = true }
+uva-attachment = { workspace = true, optional = true }
+uva-mcp = { workspace = true, optional = true }
+uva-search = { workspace = true, optional = true }
+uva-scheduler = { workspace = true, optional = true }
+uva-eval = { workspace = true, optional = true }
+uva-telemetry = { workspace = true, optional = true }
+uva-test-support = { workspace = true, optional = true }
+uva-policy-plugins = { workspace = true, optional = true }
+uva-runtime = { workspace = true, optional = true }
+# : opt-in plug-ins in the new round (Tier 1 perf + concurrency).
+# Default-NO for every one so the seven-feature MVP subset stays at zero
+# HTTP/OTel/DB dependencies (`make check-mvp-deps` is the assertion).
+
+async-trait.workspace = true
+# The facade re-exports `serde_json`: `Tool::parameters` speaks
+# `serde_json::Value`, and a plugin author must name the very version
+# the framework was built against.
+serde_json.workspace = true
+
+[dev-dependencies]
+# Examples and doc tests need *an* executor for `main`/`#[tokio::main]`;
+# the framework's own seams never name a runtime.
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
+# Draining an `Agent` event stream is `StreamExt::next`—the same
+# combinator a consumer already has through their own `futures` dep.
+futures.workspace = true
+
+# The example is the tutorial done end to end, so it needs the
+# assembly set (the default features). Under a narrower selection cargo
+# skips it instead of failing the build.
+[[example]]
+name = "assemble_from_zero"
+required-features = [
+  "core",
+  "provider",
+  "context",
+  "tool",
+  "tool-read",
+  "tool-write",
+  "tool-shell",
+  "tool-todo",
+  "session",
+  "steering",
+  "harness",
+]
+
+[[test]]
+name = "tokio_adapters"
+required-features = ["harness-tokio"]
+
+[features]
+# Assemble a basic agent: provider + tools + steering + context
+# manager + session sink + cancel token + the agent loop.
+#
+# The default set is "everything a normal agent wants": the providers
+# and every shipped tool plugin (the multi-agent `task` among them).
+# Each piece is its own feature precisely
+# so a consumer can drop it—`default-features = false` plus the
+# seven names in MINIMAL.md compiles no HTTP client and **zero** tool
+# implementations.
+default = [
+  "core",
+  "provider",
+  "provider-anthropic",
+  "provider-openai",
+  "context",
+  "tool",
+  "tool-read",
+  "tool-write",
+  "tool-shell",
+  "tool-todo",
+  "tool-web",
+  "tool-task",
+  "session",
+  "steering",
+  "harness",
+]
+
+# --- the default set -------------------------------------------------
+#
+# Each feature pulls exactly the crate behind its module and the
+# crates that module's types refer to, so enabling one module never
+# leaves a type from a sibling module unnameable.
+core = ["dep:uva-core"]
+# The `ModelProvider` trait, the wire types, the token estimator, the
+# typed profiles. No HTTP client: see the two adapter features.
+provider = ["dep:uva-provider", "core"]
+# The shipped adapters, each carrying `reqwest` and its transport
+# stack. `AnthropicProvider` / `OpenAICompatibleProvider`.
+provider-anthropic = ["provider", "uva-provider/anthropic"]
+provider-openai = ["provider", "uva-provider/openai"]
+context = ["dep:uva-context", "core", "provider", "session"]
+# The registry, the `Tool` trait, the exposure projection, the
+# `workspace` path confinement. No tool implementations—those are
+# the plugin features below.
+tool = ["dep:uva-tool", "core", "provider", "session"]
+# One tool implementation per feature, exactly as a consumer would
+# depend on them. All offline except `tool-web`.
+tool-read = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/read"]
+tool-write = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/write"]
+tool-shell = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/shell"]
+tool-todo = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/todo"]
+# The one tool that talks to the network—the only one that pulls
+# an HTTP client and its transport stack.
+tool-web = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/web"]
+# The multi-agent `task` tool: a synthetic tool that runs a
+# registered peer as a child agent. Offline, but it pulls the agent
+# crate (children run in-process, through the interceptor seam).
+tool-task = [
+  "dep:uva-tool-plugins", "uva-tool-plugins/task",
+  "harness",
+  "tool",
+]
+session = ["dep:uva-session", "core", "provider"]
+steering = ["dep:uva-steering", "core", "context", "provider"]
+harness = [
+  "dep:uva-harness",
+  "core",
+  "provider",
+  "context",
+  "session",
+  "steering",
+  "tool",
+]
+# --- opt-in pieces ---------------------------------------------------
+skill = ["dep:uva-skill", "core", "tool"]
+# The file-backed agent definitions (`agents/<name>/agent.md`).
+agents = ["core"]
+attachment = ["dep:uva-attachment", "core", "provider"]
+mcp = ["dep:uva-mcp", "core", "tool"]
+# The `schedule` tool—the model-facing adapter over
+# `uva-scheduler`. It pulls the `scheduler` feature because the
+# tool is constructed from a `ScheduleStore` and delivers through a
+# `Scheduler`: without that feature the module would be unnameable.
+# Opt-in rather than default, like `mcp`: both need a host-constructed
+# runtime object (a supervisor, a store), not just a registration.
+tool-scheduler = [
+  "dep:uva-tool-plugins", "uva-tool-plugins/scheduler",
+  "tool",
+  "scheduler",
+]
+# The cross-domain `search` tool over a host-built `uva-search`
+# `Registry`. Opt-in like `mcp` / `tool-scheduler`: the host must first
+# construct the Registry it searches, and it is that Registry—not
+# this feature—that decides which domains exist.
+tool-search = [
+  "dep:uva-tool-plugins", "uva-tool-plugins/search",
+  "tool",
+  "search",
+]
+scheduler = ["dep:uva-scheduler", "core"]
+search = ["dep:uva-search", "core"]
+# The config-driven assembly layer: fat plugin factories for the
+# built-in native plugins (model-adapter with the tier-1 wrapping
+# chain, agent-loop, …). Opt-in and never in the default set: it
+# carries the provider adapters and the tier-1 plugin crates, which
+# the seven-feature MVP subset deliberately stays free of.
+runtime = [
+  "dep:uva-runtime",
+  "kernel",
+  "provider",
+  "harness",
+  "tool",
+  "session",
+  "context",
+  "semantic-cache",
+  "resilience",
+  "budget",
+]
+# The whole cron path, both halves at once: the parser behind
+# `uva::scheduler::CronTrigger` (`uva-scheduler/cron`) *and*
+# the `schedule` tool's acceptance of `kind: "cron"`
+# (`uva-tool-scheduler/cron`). A parser-only feature would be a
+# half-cutover: `create` is refused by the tool layer unless *its*
+# forwarding feature is on, so the round's user-visible win—the
+# model can create cron jobs—would stay unreachable from the facade.
+# Opt-in, and out of the default set, like the two features it builds
+# on.
+cron = [
+  "scheduler",
+  "uva-scheduler/cron",
+  "tool-scheduler",
+  "uva-tool-plugins/cron",
+]
+eval = ["dep:uva-eval", "core"]
+telemetry = [
+  "dep:uva-telemetry",
+  "core",
+  "uva-telemetry/metrics",
+  "uva-telemetry/otlp",
+]
+# Forwards to `uva-context/sqlite` (bundled SQLite + FTS5 memory).
+sqlite = ["context", "uva-context/sqlite"]
+# Deterministic fakes (`ReplayProvider`, …) for other crates' test
+# suites; never enable this from a production binary.
+test-support = ["dep:uva-test-support", "core", "provider", "tool"]
+# The HNSW vector-index backend (`uva-search/hnsw`). Opt-in and
+# not in the default set, so the MVP subset (`make check-mvp-deps`)
+# keeps proving zero HTTP/OTel/DB deps for the seven-feature minimum.
+hnsw = ["search", "uva-search/hnsw"]
+
+# AI Agent Plugin Optimization Roadmap: six
+# opt-in surfaces (Tier 1 performance + concurrency, Tier 2
+# reasoning + quality). Each is its own small dependency that
+# joins the offline tier—`make check-mvp-deps` proves no
+# HTTP/OTel/DB stack is dragged in. None is in the default set;
+# deployments opt in per `[agents.<name>]` config.
+semantic-cache = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/cache",
+  "core",
+  "provider",
+]
+tool-memo = ["dep:uva-tool-plugins", "uva-tool-plugins/memo", "core", "tool"]
+resilience = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/resilience",
+  "core",
+  "provider",
+  "tool",
+]
+strategy-plan-execute = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/plan-execute",
+  "harness",
+  "core",
+  "provider",
+  "tool",
+  "steering",
+]
+# The chain-of-thought strategy plugin. Default-NO (like
+# strategy-plan-execute): the harness itself ships only the
+# canonical ReAct loop; deployments that want CoT opt in.
+strategy-cot = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/cot",
+  "harness",
+  "core",
+  "provider",
+]
+# The best-of-N strategy plugin. Default-NO, same reasoning.
+strategy-best-of-n = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/best-of-n",
+  "harness",
+  "core",
+  "provider",
+]
+reflection = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/reflection",
+  "core",
+  "provider",
+  "tool",
+  "steering",
+  "context",
+]
+budget = [
+  "dep:uva-policy-plugins",
+  "uva-policy-plugins/budget",
+  "core",
+  "provider",
+  "tool",
+]
+# : four facade plug-ins that each gate a single
+# performance/concurrency upgrade. Behaviour-neutral by default
+# (NOT in the default set); enabling a feature installs the
+# matching opt-in module under `uva::hpc_*` and forwards the
+# crate-level feature of the same name. See
+# `docs/research/r-opt-hpc-round.md` for the per-feature
+# contract. All four stay runtime-neutral (no tokio::* /
+# async_std::* / smol::* in the public API; `make
+# check-public-api-runtime` is the gate).
+hpc-pool = ["provider", "uva-provider/hpc-pool"]
+hpc-simd = ["search", "uva-search/simd"]
+
+# The plugin kernel (`Plugin`, `PluginManifest`, `mount_all`). The
+# kernel names no harness, tool, or runtime type, so it pulls no
+# sibling feature. Opt-in because nothing in the default assembly
+# consumes it yet.
+kernel = ["dep:uva-kernel"]
+
+# The one runtime the facade speaks: `uva-core-tokio`'s three
+# adapters, so a consumer on tokio reaches them through the single
+# dependency (`uva::harness_tokio::TokioSleeper`, …) instead of
+# adding the sibling crate by hand. Opt-in like the adapters are.
+#
+# The feature adds **no** runtime to a consumer that opts in: it
+# pulls `uva-core-tokio`, whose only runtime dependency is
+# `tokio` with the `rt` + `time` features. Measured with
+#   cargo tree -p uva --no-default-features --features harness-tokio -e normal
+# that is exactly one tokio package (`tokio`).
+#
+# The facade's DEFAULT features are a different story, and the
+# difference must not be papered over: they include
+# `provider-anthropic` and `provider-openai`, whose HTTP adapters
+# carry `reqwest` → `hyper-rustls` → `hyper` → `h2` → `tokio`.
+# Measured with
+#   cargo tree -p uva -e normal
+# the default tree holds four tokio packages (`tokio`,
+# `tokio-macros`, `tokio-rustls`, `tokio-util`). A consumer that
+# wants a runtime-free tree must say `default-features = false` — the
+# seven-feature MVP subset (`core,provider,context,tool,session,
+# steering,harness`) measures zero, which `make check-mvp-deps` keeps
+# proving.
+harness-tokio = ["dep:uva-core-tokio", "core"]

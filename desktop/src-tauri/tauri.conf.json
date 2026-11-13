@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Elysper",
+  "productName": "Uva",
   "version": "0.1.0",
-  "identifier": "dev.elysper.desktop",
+  "identifier": "dev.uva.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"

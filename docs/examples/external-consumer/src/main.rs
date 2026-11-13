@@ -1,6 +1,6 @@
-//! # Consume elysper from outside the workspace (R18 proof)
+//! # Consume uva from outside the workspace (R18 proof)
 //!
-//! This crate is deliberately NOT a member of the elysper
+//! This crate is deliberately NOT a member of the uva
 //! workspace: it depends on the crates by relative path, exactly
 //! as an external library consumer would. If it compiles and
 //! runs, the "assemble a complete agent as a lib from zero"
@@ -16,31 +16,31 @@
 //!
 //! | Piece | Crate | Call |
 //! |---|---|---|
-//! | Provider (stub, no network) | `elysper-provider` | `ModelProviderStub::text_only` |
-//! | Tier-aware steering | `elysper-steering` | `tier::auto(provider.tier(), ws)` |
-//! | Session log writer | `elysper-session` | `LogWriter::new(sink, clock)` |
-//! | Agent assembly | `elysper-harness` | `ReActAgent::new(..)` chain → the agent is its own builder |
-//! | Structured output | `elysper-harness`/`elysper-tool` | `.with_output_schema(json!{..})` |
-//! | LLM compaction | `elysper-context` | `SummarizingContextManager::new(..).with_settings(..)` via `.with_context_manager(..)` |
-//! | Multimodal store | `elysper-attachment` | `AttachmentStore::{save,read}_image` |
-//! | Runtime-neutral cancel | `elysper-core` | `AtomicCancelToken` (std only) |
-//! | Skill registry | `elysper-skill` | `SkillRegistry::new()` |
+//! | Provider (stub, no network) | `uva-provider` | `ModelProviderStub::text_only` |
+//! | Tier-aware steering | `uva-steering` | `tier::auto(provider.tier(), ws)` |
+//! | Session log writer | `uva-session` | `LogWriter::new(sink, clock)` |
+//! | Agent assembly | `uva-harness` | `ReActAgent::new(..)` chain → the agent is its own builder |
+//! | Structured output | `uva-harness`/`uva-tool` | `.with_output_schema(json!{..})` |
+//! | LLM compaction | `uva-context` | `SummarizingContextManager::new(..).with_settings(..)` via `.with_context_manager(..)` |
+//! | Multimodal store | `uva-attachment` | `AttachmentStore::{save,read}_image` |
+//! | Runtime-neutral cancel | `uva-core` | `AtomicCancelToken` (std only) |
+//! | Skill registry | `uva-skill` | `SkillRegistry::new()` |
 //!
-//! No `tokio` type appears in any of the elysper API calls above —
+//! No `tokio` type appears in any of the uva API calls above —
 //! the runtime is the consumer's choice.
 
 use std::sync::Arc;
 
 use futures::StreamExt;
-use elysper_harness::agent::Agent as _;
-use elysper_harness::{AgentEvent, AgentInput, Host, ReActAgent};
-use elysper_provider::traits::ModelProvider;
-use elysper_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
-use elysper_tool::{ToolEntry, ToolRegistry};
-use elysper_tool_plugins::read::ReadTool;
-use elysper_tool_plugins::shell::ShellTool;
-use elysper_tool_plugins::todo::TodoWriteTool;
-use elysper_tool_plugins::write::WriteTool;
+use uva_harness::agent::Agent as _;
+use uva_harness::{AgentEvent, AgentInput, Host, ReActAgent};
+use uva_provider::traits::ModelProvider;
+use uva_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
+use uva_tool::{ToolEntry, ToolRegistry};
+use uva_tool_plugins::read::ReadTool;
+use uva_tool_plugins::shell::ShellTool;
+use uva_tool_plugins::todo::TodoWriteTool;
+use uva_tool_plugins::write::WriteTool;
 
 /// The tool surface, composed brick by brick: one line per plugin
 /// crate, nothing hidden in a default set.
@@ -59,7 +59,7 @@ async fn main() {
 
     // Piece 1 — provider (stub, no network).
     let provider: Arc<dyn ModelProvider> = Arc::new(
-        elysper_provider::traits_stub::ModelProviderStub::text_only(
+        uva_provider::traits_stub::ModelProviderStub::text_only(
             "consumer proof ok",
         ),
     );
@@ -71,7 +71,7 @@ async fn main() {
     let sink = Arc::new(InMemorySessionSink::new("consumer-proof"));
     let writer = Arc::new(LogWriter::new(
         sink.clone(),
-        Arc::new(elysper_core::SystemClock),
+        Arc::new(uva_core::SystemClock),
     ));
 
     // Pieces 4..n — one-expression assembly.
@@ -86,7 +86,7 @@ async fn main() {
             "required": ["answer"]
         }))
         .with_context_manager(Arc::new(
-            elysper_context::TruncatingContextManager,
+            uva_context::TruncatingContextManager,
         ))
         .with_log_writer(writer);
 
@@ -97,7 +97,7 @@ async fn main() {
     );
 
     // Piece n+1 — attachment store (multimodal), used directly.
-    let store = elysper_attachment::AttachmentStore::default();
+    let store = uva_attachment::AttachmentStore::default();
     let png: Vec<u8> = vec![
         0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00,
         0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
@@ -116,8 +116,8 @@ async fn main() {
     );
 
     // Piece n+2 — runtime-neutral cancellation (std-only token).
-    let cancel: Arc<dyn elysper_core::CancelToken> =
-        Arc::new(elysper_core::AtomicCancelToken::new());
+    let cancel: Arc<dyn uva_core::CancelToken> =
+        Arc::new(uva_core::AtomicCancelToken::new());
 
     // Drive a turn with NO tokio type in the public API surface.
     let mut stream = agent
@@ -130,7 +130,7 @@ async fn main() {
     let mut text = String::new();
     while let Some(event) = stream.next().await {
         events += 1;
-        if let AgentEvent::Model(elysper_provider::ContentPart::Text(t)) = &event
+        if let AgentEvent::Model(uva_provider::ContentPart::Text(t)) = &event
         {
             text.push_str(&t.text);
         }
@@ -142,7 +142,7 @@ async fn main() {
     println!("structural rows: {}", rows.len());
 
     // Skill registry (the lego for procedural knowledge).
-    let reg = elysper_skill::SkillRegistry::new();
+    let reg = uva_skill::SkillRegistry::new();
     println!("skill registry providers: {}", reg.provider_names().len());
 
     assert_eq!(agent.descriptor().name, "consumer-proof");

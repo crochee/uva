@@ -1,0 +1,52 @@
+[package]
+name = "uva-session"
+description = "Durable session log for uva: SessionSink trait, JSONL / in-memory sinks, replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+# For `Clock`: session timestamps (`OperationSnapshot::taken_at`) go
+# through the injectable clock rather than `chrono::Utc::now`.
+uva-core.workspace = true
+uva-provider.workspace = true
+# The `sessions` service is a native kernel plugin, so this crate
+# implements the kernel's `Plugin` contract. The kernel is runtime-free
+# (`cordis-rs` has an empty dependency table), so the crate stays
+# runtime-free.
+uva-kernel.workspace = true
+
+# The one runtime-neutral async toolkit: the file lock, the
+# `select!` that races a summary against its deadline, and the
+# oneshot the blocking seam carries results over. No runtime.
+futures.workspace = true
+[dev-dependencies]
+tempfile.workspace = true
+# Tests only: `#[tokio::test]` drives the async paths and the
+# concurrency tests need a worker pool. The crate's own code names no
+# runtime — that is what `cargo tree -p uva-session -e normal`
+# verifies.
+tokio = { workspace = true, features = [
+  "macros",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+# Tests only: the keyless-park-row test captures the deprecation
+# warn `parked_prompts` emits.
+tracing-subscriber.workspace = true

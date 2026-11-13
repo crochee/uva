@@ -1,16 +1,16 @@
 [package]
-name = "elysper-external-consumer"
+name = "uva-external-consumer"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
-# Keeps this crate OUT of the elysper workspace (it lives inside
+# Keeps this crate OUT of the uva workspace (it lives inside
 # the repo tree for durability, but builds as an independent
 # consumer — the literal "use this repo as a lib" posture).
 [workspace]
 
 # R18 external-consumer proof: this crate lives OUTSIDE the
-# elysper workspace and depends on the crates by relative path.
+# uva workspace and depends on the crates by relative path.
 # It is the literal "use this repo as a lib from zero" tutorial
 # — copy this directory anywhere and change the paths.
 #
@@ -18,24 +18,24 @@ publish = false
 # <repo>/docs/examples/external-consumer/. Adjust them (or switch
 # to version deps) when copying out of the repo.
 [dependencies]
-elysper-harness = { path = "../../../crates/elysper-harness" }
-elysper-provider = { path = "../../../crates/elysper-provider" }
-elysper-context = { path = "../../../crates/elysper-context" }
-elysper-tool = { path = "../../../crates/elysper-tool" }
+uva-harness = { path = "../../../crates/uva-harness" }
+uva-provider = { path = "../../../crates/uva-provider" }
+uva-context = { path = "../../../crates/uva-context" }
+uva-tool = { path = "../../../crates/uva-tool" }
 # The tool implementations are plugin crates: depend on the ones you
 # want, register them yourself. This consumer wants the four offline
 # file/process tools (the `-task` and `-web` plugins are left out).
-elysper-tool-plugins = { path = "../../../crates/elysper-tool-plugins", features = [
+uva-tool-plugins = { path = "../../../crates/uva-tool-plugins", features = [
   "read",
   "write",
   "shell",
   "todo",
 ] }
-elysper-steering = { path = "../../../crates/elysper-steering" }
-elysper-session = { path = "../../../crates/elysper-session" }
-elysper-core = { path = "../../../crates/elysper-core" }
-elysper-attachment = { path = "../../../crates/elysper-attachment" }
-elysper-skill = { path = "../../../crates/elysper-skill" }
+uva-steering = { path = "../../../crates/uva-steering" }
+uva-session = { path = "../../../crates/uva-session" }
+uva-core = { path = "../../../crates/uva-core" }
+uva-attachment = { path = "../../../crates/uva-attachment" }
+uva-skill = { path = "../../../crates/uva-skill" }
 serde_json = "1"
 futures = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

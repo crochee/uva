@@ -1,4 +1,4 @@
-# Contributing to Elysper
+# Contributing to Uva
 
 感谢参与！本仓按 CNCF 社区的通行做法维护 —— 门槛低、流程可预期、一切
 以 CI 为准。先读 [`README.md`](README.md) 了解项目是什么，再回来走
@@ -9,11 +9,11 @@
 
 需要：Rust 工具链（版本由 `rust-toolchain.toml` 钉死，rustup 自动装）；
 可选：docker（仅交叉编译与契约测试时）、Node.js 20+（仅前端
-`elysper-web/`）。不需要任何外部 API key —— 测试 / 模组 / 示例全部用
+`uva-web/`）。不需要任何外部 API key —— 测试 / 模组 / 示例全部用
 `replay.json` 类夹具或本地 stub。
 
 ```sh
-git clone <repo> && cd elysper
+git clone <repo> && cd uva
 make ci               # 改动后的全部护栏, 提交前必绿
 make examples         # 全 example 与两个独立 consumer crate 的 proof line
 ```
@@ -33,7 +33,7 @@ make examples         # example + 两个独立 consumer crate
 make ci               # 上面四者的并集 + 其它不变量
 ```
 
-改 `crates/<x>/src/` 后：`make ci`。改 `elysper-web/src/**` 后：
+改 `crates/<x>/src/` 后：`make ci`。改 `uva-web/src/**` 后：
 `make check-web`（`tsc --noEmit` + `eslint` + `prettier --check`），
 然后用 Playwright MCP 验证真实渲染（`AGENTS.md` §4.2）。
 
@@ -43,17 +43,17 @@ make ci               # 上面四者的并集 + 其它不变量
 |---|---|
 | 我应该用哪个 crate | [`MINIMAL.md`](MINIMAL.md)（4 步 MVP guide） |
 | 我能换掉哪个 seam | [`SEAMS.md`](SEAMS.md)（7 大组件的可替换点） |
-| 一个新工具该怎么写 | [`crates/elysper-tool/`](crates/elysper-tool/) + 任一离线 tool crate（如 `elysper-tool-read`） |
-| 多智能体委派 | [`crates/elysper-tool-task/`](crates/elysper-tool-task/)（`ToolInterceptor` seam 的第一个实现） |
-| 调度 / cron / interval | [`crates/elysper-tool-scheduler/`](crates/elysper-tool-scheduler/) |
-| 跨域搜索 | [`crates/elysper-search/`](crates/elysper-search/) + [`crates/elysper-tool-search/`](crates/elysper-tool-search/) |
-| HTTP / WebSocket 表面 | [`crates/elysper-server/`](crates/elysper-server/) |
+| 一个新工具该怎么写 | [`crates/uva-tool/`](crates/uva-tool/) + 任一离线 tool 模块（如 `read`） |
+| 多智能体委派 | [`crates/uva-tool-plugins/`](crates/uva-tool-plugins/) 的 `task` 模块（`ToolInterceptor` seam 的第一个实现） |
+| 调度 / cron / interval | [`crates/uva-tool-plugins/`](crates/uva-tool-plugins/) 的 `scheduler` 模块 |
+| 跨域搜索 | [`crates/uva-search/`](crates/uva-search/) + [`crates/uva-tool-plugins/`](crates/uva-tool-plugins/) 的 `search` 模块 |
+| HTTP / WebSocket 表面 | [`crates/uva-app-server/`](crates/uva-app-server/) |
 
 ### 强制约定
 
-- **依赖方向单向**：`elysper` → `elysper-*` → `elysper-core`，
-  永远不回指；用 `cargo tree -p elysper-core` 验证无环。
-- **可选的才是 opt-in**：默认 `elysper = "0.1"` 不会拉起 scheduler /
+- **依赖方向单向**：`uva` → `uva-*` → `uva-core`，
+  永远不回指；用 `cargo tree -p uva-core` 验证无环。
+- **可选的才是 opt-in**：默认 `uva = "0.1"` 不会拉起 scheduler /
   workflow / search / skill / mcp / eval / attachment 七者之一；
   `make check-mvp-deps` 断言这一点。
 - **不加依赖除非必要**；新增依赖走 `Cargo.toml` 的
@@ -61,10 +61,10 @@ make ci               # 上面四者的并集 + 其它不变量
   引用（见 `AGENTS.md` §3.1）。MSRV `1.95` 是硬上限。
 - **公开面最小化**：只在 crate 外被实际使用的项才 `pub`；其余 helper
   必须 `pub(crate)` 或 `pub(super)`（`AGENTS.md` §3.7）。
-- **运行时无关**：除 `elysper-server`（可选 feature）外，任何 crate
+- **运行时无关**：除 `uva-app-server`（可选 feature）外，任何 crate
   都不应在公共 API 暴露 `tokio::*` / `async-std::*` / `smol::*`；
   `make check-public-api-runtime` 是这条线的门禁。
-- **形状预算**：`elysper-harness` 生产代码不得有函数超过 100 行或 4 层
+- **形状预算**：`uva-harness` 生产代码不得有函数超过 100 行或 4 层
   嵌套，由 `make check-harness-shape` 断言（见
   [`scripts/harness-shape/clippy.toml`](scripts/harness-shape/clippy.toml)）。
 
@@ -82,7 +82,11 @@ git commit -s    # 生成 Signed-off-by: 你 <邮箱>
 提交即表示同意以 MIT 许可贡献，且签署确认该贡献由你撰写 / 有权提交
 （Developer Certificate of Origin，与 CNCF 项目一致）。
 
-PR 标题形如 `feat(elysper-tool-read): add `binary` MIME classifier`；
+PR 标题形如 `feat(uva-tool-read): add `binary` MIME classifier`；
+GitHub 自动按 C 有权提交
+（Developer Certificate of Origin，与 CNCF 项目一致）。
+
+PR 标题形如 `feat(uva-tool-read): add `binary` MIME classifier`；
 GitHub 自动按 Conventional Commit 解析来生成 changelog 与版本号
 （见 [RELEASE.md](RELEASE.md)）。
 
@@ -93,7 +97,7 @@ GitHub 自动按 Conventional Commit 解析来生成 changelog 与版本号
    job 的状态贴即可。
 2. **契约一致**：改了 facade / 公共 API 的 PR 必须更新
    `crates/*/src` 内受影响模块的 `pub use` 列表（`make check-pub-surface`
-   棘轮）；改了 `crates/elysper-server` 路由或 `elysper-web` 调用的 PR
+   棘轮）；改了 `crates/uva-app-server` 路由或 `uva-web` 调用的 PR
    必须保证 `contract-closure` 闭环（`.github/workflows/contract-closure.yml`）。
 3. **不变量**：任何形变（lin / 形状 / 时钟 / 依赖 MVP）都在 CI 里有
    如果，直接红灯。
@@ -125,6 +129,6 @@ make doctor         # Makefile 自带的诊断目标（见 make doctor）
 ## 反馈
 
 - 改 PR / 修文档：直接提 PR；
-- 用例 / 设计讨论：[GitHub Discussions](https://github.com/crochee/elysper/discussions)；
+- 用例 / 设计讨论：[GitHub Discussions](https://github.com/crochee/uva/discussions)；
 - 安全问题：[SECURITY.md](SECURITY.md)；
 - 其它：[SUPPORT.md](.github/SUPPORT.md)。

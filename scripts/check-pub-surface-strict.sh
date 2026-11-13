@@ -7,14 +7,14 @@
 # surface grows until it's indistinguishable from a glob.
 #
 # Why this exists: AGENTS.md §3.7 says the lib.rs of each
-# `elysper-*` crate is the single place that decides what is public.
+# `uva-*` crate is the single place that decides what is public.
 # A count-only ratchet pins that decision so a future "let's also
 # export this" doesn't sneak past review — the same way
 # `check-plugin-shape` ratchets plugin-crate file length.
 #
-# Scope: same as `check-pub-surface` minus the facade — `crates/elysper/`
-# is exempt (it propagates curated surfaces wholesale), `elysper-app-server`
-# and `elysper-mcp-server` are app / binary crates and their lib.rs is
+# Scope: same as `check-pub-surface` minus the facade — `crates/uva/`
+# is exempt (it propagates curated surfaces wholesale), `uva-app-server`
+# and `uva-mcp-server` are app / binary crates and their lib.rs is
 # a wiring entry, not a curated surface.
 #
 # Per-crate baselines live in `scripts/paradigm-surface/baselines/<crate>`.
@@ -31,17 +31,28 @@ cd "$(dirname "$0")/.."
 # Crates whose lib.rs participates in the ratchet. Kept explicit so
 # a new crate's lib.rs doesn't silently get budgeted at 0.
 PARADIGM_CRATES=(
-  crates/elysper-tool
-  crates/elysper-harness
-  crates/elysper-provider
-  crates/elysper-core
-  crates/elysper-context
-  crates/elysper-steering
-  crates/elysper-session
-  crates/elysper-tool-plugins
-  crates/elysper-policy-plugins
-  crates/elysper-plugin-runtime
+  crates/uva-tool
+  crates/uva-harness
+  crates/uva-provider
+  crates/uva-core
+  crates/uva-context
+  crates/uva-steering
+  crates/uva-session
+  crates/uva-tool-plugins
+  crates/uva-policy-plugins
 )
+
+# `--print` re-emits the current counts in baseline format, so the
+# Makefile's audit target and this gate can never drift apart.
+if [[ "${1:-}" == "--print" ]]; then
+  for crate in "${PARADIGM_CRATES[@]}"; do
+    lib_rs="$crate/src/lib.rs"
+    [[ -f "$lib_rs" ]] || continue
+    n=$(grep -cE '^[[:space:]]*pub use ' "$lib_rs" 2>/dev/null || echo 0)
+    printf '%2d  %s\n' "$n" "$lib_rs"
+  done | sort -rn
+  exit 0
+fi
 
 baseline_dir="scripts/paradigm-surface/baselines"
 if [[ ! -d "$baseline_dir" ]]; then

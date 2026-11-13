@@ -5,11 +5,11 @@ acceptance run. Every number and every quoted line was produced by a
 command on this branch in this worktree; nothing here is copied from
 the design or the plan.
 
-* Worktree: `/home/crochee/workspace/elysper/.worktrees/harness-v4`
+* Worktree: `/home/crochee/workspace/uva/.worktrees/harness-v4`
 * Branch: `feature/harness-v4`, HEAD `e0892c50` at the start of the run
-* Server binary: `target/debug/elysper-server` (`cargo build -p
-  elysper-server`)
-* Acceptance workspace: `/tmp/elysper-accept-t18` (server configs, the
+* Server binary: `target/debug/uva-app-server` (`cargo build -p
+  uva-app-server`)
+* Acceptance workspace: `/tmp/uva-accept-t18` (server configs, the
   Python plugin, and the session logs live there and are **not**
   committed)
 * Model provider: a real OpenAI-compatible endpoint
@@ -17,9 +17,9 @@ the design or the plan.
   from `DEEPSEEK_API_KEY`. The harness, the server, the tools, the log
   and the HTTP surface under test are this repo's; only the model is
   external.
-* Web: assets built with `npm run build` in `elysper-web/`.
+* Web: assets built with `npm run build` in `uva-web/`.
 
-`$DIR` below means `/tmp/elysper-accept-t18`; `$API` means
+`$DIR` below means `/tmp/uva-accept-t18`; `$API` means
 `http://127.0.0.1:8099/api/v1`; a session log is
 `$DIR/ws/sessions/dev/<session-id>/events.jsonl`.
 
@@ -50,8 +50,8 @@ section named in the last column.
 | 6 | The spawn gate dies with its controller | `spawn_gates` holds no entry for a controller that is gone | commit `22d30024`; `sessions::the_spawn_gate_map_does_not_outlive_the_controllers_it_belongs_to` | CLOSED | §5 |
 | 7 | Docs state the real dependency and public surface | consumer-facing counts match `cargo tree` and the curated re-exports | commits `dd0f9dd3`, `c2c46f7b`, `46265448`, `42b67d17`, `797d30b6`; `docs_truth` 9/9 green | CLOSED | §5 |
 | 8 | One turn-boundary rule; keyless park rows retired | `follow` asks the harness's `suspended_segment`, and a `parked_prompt` without `park_id` is warned and skipped, not guessed by position | commit `42889677`; `the_window_folds_the_harnesss_suspended_segment`; `a_keyless_park_row_is_warned_once_and_skipped` | CLOSED | §5 |
-| 9 | `elysper-resilience` / `elysper-tool-memo` green | the two crates compile and their suites pass | commit `0e0978f5`; `make test-crates` exit 0 (§7) | CLOSED | §4 item 3 |
-| 10 | `elysper-budget` / `elysper-semantic-cache` doctests green | both crates' doctests compile against the real signatures | commit `6b6b80d3` + `8d895820`; `make test-crates` exit 0 (§7) | CLOSED | §4 item 3 |
+| 9 | `uva-resilience` / `uva-tool-memo` green | the two crates compile and their suites pass | commit `0e0978f5`; `make test-crates` exit 0 (§7) | CLOSED | §4 item 3 |
+| 10 | `uva-budget` / `uva-semantic-cache` doctests green | both crates' doctests compile against the real signatures | commit `6b6b80d3` + `8d895820`; `make test-crates` exit 0 (§7) | CLOSED | §4 item 3 |
 | 11 | Curated public API frozen | a name appearing or disappearing without the baseline changing fails the gate (`scripts/check-frozen-api.sh` compares the live curated surface against `scripts/frozen-api/baseline`; moving `docs/api-frozen.md` in the same commit is the review convention the script's header states, not something the gate itself enforces) | commit `aec2999d`; `make check-frozen-api` exit 0; 435 frozen names | CLOSED | — |
 | 12 | Handover docs exist | `docs/api-frozen.md`, `docs/api-surface.md`, `docs/log-format.md`, `docs/contributing/first-steps.md` all present and current | the four files on this branch; added by `aec2999d` (`docs/api-frozen.md`) and `bb5203b5` (the other three) | CLOSED | — |
 | 13 | Acceptance rerun, record closed | five gates exit 0 and scenarios A–I rerun on the v2 format | §7 (this round) | CLOSED (this document) | — |
@@ -65,11 +65,11 @@ here; see the plan's self-check.
 ## 1. The three dependency counts
 
 ```
-$ cargo tree -p elysper-harness -e normal | grep -c tokio
+$ cargo tree -p uva-harness -e normal | grep -c tokio
 0
-$ cargo tree -p elysper-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"
+$ cargo tree -p uva-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"
 0
-$ cargo tree -p elysper-plugin-protocol -e normal | grep -c tokio
+$ cargo tree -p uva-plugin-protocol -e normal | grep -c tokio
 0
 ```
 
@@ -88,11 +88,11 @@ status.
 
 | target | exit | what it said |
 |---|---|---|
-| `make ci` (first run) | 2 | Stopped in `doc-check`: `error: unresolved link to \`GATE\`` at `crates/elysper-plugin-protocol/src/wire.rs:34` |
-| `make ci` (second run) | 2 | `doc-check` then reported two further branch-added links: `Tool::risk` at `crates/elysper-server/src/composition.rs:194` and `ControllerInner::awaiting_approval` at `crates/elysper-server/src/session/controller/mod.rs:441` |
+| `make ci` (first run) | 2 | Stopped in `doc-check`: `error: unresolved link to \`GATE\`` at `crates/uva-plugin-protocol/src/wire.rs:34` |
+| `make ci` (second run) | 2 | `doc-check` then reported two further branch-added links: `Tool::risk` at `crates/uva-app-server/src/composition.rs:194` and `ControllerInner::awaiting_approval` at `crates/uva-app-server/src/session/controller/mod.rs:441` |
 | `make ci` (final run) | 0 | `fmt-check`, `lint-rust`, `doc-check`, `test-guides` (default and the seven-feature subset), all 15 check targets, and `cargo deny` (`bans ok, licenses ok, sources ok`) |
 | `make check-web` | 0 | `tsc --noEmit`, `eslint`, `prettier --check` all clean (`All matched files use Prettier code style!`) |
-| `make test-crates` | 2 | Stopped at `elysper-budget`: its crate-level doctest does not compile (see §4) |
+| `make test-crates` | 2 | Stopped at `uva-budget`: its crate-level doctest does not compile (see §4) |
 | `make examples` | 0 | 55 example/consumer targets; the harness-only consumer printed `tokio in tree: 0` and `HARNESS-ONLY: OK` |
 | `make bench-check` | 0 | `all performance invariants hold` (7 invariants OK; e.g. `descriptors_cached vs descriptors 1713.9x (min 100.0x)`) |
 
@@ -134,47 +134,47 @@ stopped at the third crate. The remaining crates were run one at a
 time with the same command:
 
 ```
-elysper                          EXIT=0   (from make test-crates)
-elysper-attachment               EXIT=0   (from make test-crates)
-elysper-budget                   EXIT=101 (from make test-crates; doctest)
-elysper-context                  EXIT=0
-elysper-core                     EXIT=0
-elysper-eval                     EXIT=0
-elysper-harness                  EXIT=0
-elysper-harness-tokio            EXIT=0
-elysper-hpc-batch                EXIT=0
-elysper-macros                   EXIT=0
-elysper-mcp                      EXIT=0
-elysper-mcp-server               EXIT=0
-elysper-plugin-host              EXIT=0
-elysper-plugin-protocol          EXIT=0
-elysper-provider                 EXIT=0
-elysper-reflection               EXIT=0
-elysper-resilience               EXIT=101 (compile error in the lib test)
-elysper-safety                   EXIT=0
-elysper-scheduler                EXIT=0
-elysper-search                   EXIT=0
-elysper-semantic-cache           EXIT=101 (crate-level doctest)
-elysper-session                  EXIT=0
-elysper-skill                    EXIT=0
-elysper-steering                 EXIT=0
-elysper-strategy-best-of-n       EXIT=0
-elysper-strategy-cot             EXIT=0
-elysper-strategy-plan-execute    EXIT=0
-elysper-telemetry                EXIT=0
-elysper-test-support             EXIT=0
-elysper-tool                     EXIT=0
-elysper-tool-memo                EXIT=101 (compile error in the lib test)
-elysper-tool-read                EXIT=0
-elysper-tool-scheduler           EXIT=0
-elysper-tool-search              EXIT=0
-elysper-tool-shell               EXIT=0
-elysper-tool-task                EXIT=0
-elysper-tool-todo                EXIT=0
-elysper-tool-web                 EXIT=0
-elysper-tool-write               EXIT=0
-elysper-workflow                 EXIT=0
-elysper-server                   EXIT=0
+uva                          EXIT=0   (from make test-crates)
+uva-attachment               EXIT=0   (from make test-crates)
+uva-budget                   EXIT=101 (from make test-crates; doctest)
+uva-context                  EXIT=0
+uva-core                     EXIT=0
+uva-eval                     EXIT=0
+uva-harness                  EXIT=0
+uva-harness-tokio            EXIT=0
+uva-hpc-batch                EXIT=0
+uva-macros                   EXIT=0
+uva-mcp                      EXIT=0
+uva-mcp-server               EXIT=0
+uva-plugin-host              EXIT=0
+uva-plugin-protocol          EXIT=0
+uva-provider                 EXIT=0
+uva-reflection               EXIT=0
+uva-resilience               EXIT=101 (compile error in the lib test)
+uva-safety                   EXIT=0
+uva-scheduler                EXIT=0
+uva-search                   EXIT=0
+uva-semantic-cache           EXIT=101 (crate-level doctest)
+uva-session                  EXIT=0
+uva-skill                    EXIT=0
+uva-steering                 EXIT=0
+uva-strategy-best-of-n       EXIT=0
+uva-strategy-cot             EXIT=0
+uva-strategy-plan-execute    EXIT=0
+uva-telemetry                EXIT=0
+uva-test-support             EXIT=0
+uva-tool                     EXIT=0
+uva-tool-memo                EXIT=101 (compile error in the lib test)
+uva-tool-read                EXIT=0
+uva-tool-scheduler           EXIT=0
+uva-tool-search              EXIT=0
+uva-tool-shell               EXIT=0
+uva-tool-task                EXIT=0
+uva-tool-todo                EXIT=0
+uva-tool-web                 EXIT=0
+uva-tool-write               EXIT=0
+uva-workflow                 EXIT=0
+uva-app-server                   EXIT=0
 ```
 
 The three failures are reproduced and explained in §4. None of the
@@ -219,16 +219,16 @@ carried the `tool_use` blocks in place:
 {"seq":6,"parts":{"text":12,"tool_use":2}}                                                     # the assistant message it left behind
 ```
 
-That is the same shape the tutorial's own `elysper-session`
+That is the same shape the tutorial's own `uva-session`
 `tool_pairing` module exists to prevent: a replace that straddles an
 `assistant/tool_use` ↔ `tool/result` boundary produces an orphan call.
-The automatic path lives in `elysper-context`'s summariser, which
+The automatic path lives in `uva-context`'s summariser, which
 splices only the tool-result run ("The assistant turn that contained
 the original `tool_use` blocks stays untouched", `manager.rs:346`);
-the manual/harness path in `elysper-session` applies
+the manual/harness path in `uva-session` applies
 `balanced_cut_at_or_before` instead. The two rules disagree.
 
-This is **not** caused by this branch: `crates/elysper-context` is
+This is **not** caused by this branch: `crates/uva-context` is
 unchanged except for the removal of one unused constructor, and the
 splice comment is present on `master`.
 
@@ -237,7 +237,7 @@ other setting identical), the scenario passes:
 
 ```
 {"type":"turn","data":{"kind":"end","turn":0,"reason":"completed"}}
-tool_result #1: "   1 elysper tutorial\n"
+tool_result #1: "   1 uva tutorial\n"
 tool_result #2: "stdout:\ntotal 4\ndrwxr-xr-x 5 … notes.txt …\n\n[exit code: 0]"
 baseline: {"rows":16,"cursor":16,"live":"object","context":{"used":9801,"window":128000},"pending":0,"rsh":71,"header_state":"idle"}
 ```
@@ -275,7 +275,7 @@ The queued message is an ordinary `UserInput` row at `seq` 16, after
 the first turn's `end` at 15, and the `sleep` it did not interrupt
 returned normally. **PASS.**
 
-> **Update — 2026-10-28 (Elysper v5, task 8 "durable parks").** The
+> **Update — 2026-10-28 (Uva v5, task 8 "durable parks").** The
 > evidence above is the frozen pre-task-8 observation and stays as it
 > was recorded. The *row shape* it observed has since moved: a queued
 > message is now parked durably before it is queued, so the same
@@ -328,7 +328,7 @@ this run only proves the API side.
 
 ```bash
 curl -s -X POST $API/chat/sessions/$SID/messages -H 'content-type: application/json' \
-  -d '{"text":"Use the shell tool to run exactly: echo elysper-approval-probe > /tmp/elysper-approval.txt ; then report the command'\''s output and exit status."}'
+  -d '{"text":"Use the shell tool to run exactly: echo uva-approval-probe > /tmp/uva-approval.txt ; then report the command'\''s output and exit status."}'
 ```
 
 Rows, in order:
@@ -359,8 +359,8 @@ resume HTTP 202
 {"type":"approval_decided","seq":13,"id":"approval-call_00_OI2…","call_id":"call_00_OI2…","status":"approved","by":"resume"}
 {"type":"tool_dispatch","seq":14,"call_id":"call_00_OI2…","tool":"shell","arguments_hash":"sha256:acc956…"}
 dispatches for that call: 1
-$ cat /tmp/elysper-approval.txt
-elysper-approval-probe
+$ cat /tmp/uva-approval.txt
+uva-approval-probe
 ```
 
 The turn then completes with an answer that correctly explains the
@@ -373,8 +373,8 @@ resume HTTP 202
 {"type":"approval_decided","seq":13,"call_id":"call_00_PfxYc9uQJZBNLVbhLgee4180","status":"denied","by":"resume"}
 tool_dispatch rows: 0
 {"type":"tool_result","seq":14,…,"is_error":true}
-$ ls /tmp/elysper-deny.txt
-ls: cannot access '/tmp/elysper-deny.txt': No such file or directory
+$ ls /tmp/uva-deny.txt
+ls: cannot access '/tmp/uva-deny.txt': No such file or directory
 ```
 
 The answer acknowledges the denial ("Since a denial just came through
@@ -385,7 +385,7 @@ from the operator …"), and no side effect happened. **PASS.**
 ```bash
 # sleep 20 in flight; snapshot the log; kill -9; restart the same command
 cp "$LOG" /tmp/before-crash.jsonl          # 9 lines
-pkill -9 -f 'elysper-server.*--directory'
+pkill -9 -f 'uva-app-server.*--directory'
 curl -s "$API/sessions/$SID/follow" --max-time 4 -N   # cold open → repair
 ```
 
@@ -415,7 +415,7 @@ approval is pending, restart, open the session:
 resume HTTP 202
 {"type":"approval_decided","seq":13,"call_id":"call_00_dcnQ0eJNvz4OenAll4by6656","status":"approved","by":"resume"}
 {"type":"tool_dispatch","seq":14,"call_id":"call_00_dcnQ0eJNvz4OenAll4by6656","tool":"shell"}
-$ cat /tmp/elysper-restart-approval.txt
+$ cat /tmp/uva-restart-approval.txt
 restart-approval
 ```
 
@@ -552,7 +552,7 @@ The export is byte-faithful NDJSON:
 
 ```
 $ head -1 export-G.jsonl
-{"_meta":{"kind":"elysper_session_meta","schema_version":1,"id":"d7adff13-…"}}
+{"_meta":{"kind":"uva_session_meta","schema_version":1,"id":"d7adff13-…"}}
 $ wc -l export-G.jsonl     → 16   (log: 16)
 $ cmp export-G.jsonl "$LOG"                        → identical
 $ jq -r '.seq' | awk 'NR>1 && $1!=p+1 {print "gap"}' → (no gap)
@@ -562,9 +562,9 @@ $ jq -r '.seq' | awk 'NR>1 && $1!=p+1 {print "gap"}' → (no gap)
 
 ### H. A remote plugin from a non-Rust process
 
-A 60-line Python 3 plugin (`/tmp/elysper-accept-t18/records_plugin.py`,
-stdlib only, not committed) answers `elysper/initialize`,
-`elysper/tools/list` and `elysper/tools/call` over stdio. It was first
+A 60-line Python 3 plugin (`/tmp/uva-accept-t18/records_plugin.py`,
+stdlib only, not committed) answers `uva/initialize`,
+`uva/tools/list` and `uva/tools/call` over stdio. It was first
 checked frame by frame without the host:
 
 ```
@@ -580,7 +580,7 @@ It is then configured in the deployment:
 plugins:
   - name: records
     kind: remote
-    command: ["python3", "/tmp/elysper-accept-t18/records_plugin.py"]
+    command: ["python3", "/tmp/uva-accept-t18/records_plugin.py"]
     transport: stdio
     capabilities: [tools]
     authority: reduced
@@ -617,7 +617,7 @@ The result text is the Python process's object, serialised by the host.
 curl -s -X POST $API/chat/sessions/$SID/messages -d '{"text":"Use the shell tool to run exactly: sleep 25; echo hold. Then report the output."}'
 curl -s -X POST $API/chat/sessions/$SID/messages -d '{"text":"Reply with exactly the token parked-marker-18 and nothing else.","agent_name":"code"}'
 # wait for the durable park, then crash and restart
-pkill -9 -f 'elysper-server.*--directory'
+pkill -9 -f 'uva-app-server.*--directory'
 ```
 
 The park is durable before the crash:
@@ -655,7 +655,7 @@ it cannot be spent twice. **PASS.**
 This repo verifies the UI in a browser, not with component specs, and
 the browser check is not part of this record. What was checked here:
 
-* `npm run build` in `elysper-web/` exits 0 (`✓ built in 685ms`).
+* `npm run build` in `uva-web/` exits 0 (`✓ built in 685ms`).
 * The built bundle carries the surfaces the scenarios exercise:
   `dist/assets/index-DRinsAsH.js` contains `历史已压缩`, `批准一次`,
   `拒绝`, `已注入 step`, `下一回合`, `/follow`, `/resume`, `/compact`;
@@ -693,10 +693,10 @@ regression of this branch (§A). It was fixed after this run; §6 records
 the fix and the re-run.
 
 **2. `doc-check` was red on this branch, in three branch-added places.**
-`crates/elysper-plugin-protocol/src/wire.rs:34` linked `[`GATE`]`
-without the disambiguating target; `crates/elysper-server/src/composition.rs:194`
+`crates/uva-plugin-protocol/src/wire.rs:34` linked `[`GATE`]`
+without the disambiguating target; `crates/uva-app-server/src/composition.rs:194`
 linked `[`Tool::risk`]` where `Tool` is not in scope;
-`crates/elysper-server/src/session/controller/mod.rs:441` linked a
+`crates/uva-app-server/src/session/controller/mod.rs:441` linked a
 `pub(super)` method through a private module. The first stopped the
 first `make ci`; the other two only appeared once it got past that
 crate. All three were edited to resolve (two code spans, one explicit
@@ -706,18 +706,18 @@ edits `make ci` exited 2.
 **3. `make test-crates` is red, in four crates this branch does not
 touch.**
 
-* `elysper-budget` — its crate-level doctest still calls
+* `uva-budget` — its crate-level doctest still calls
   `LatencyBudget::new(one_arg)` and passes `Arc<Arc<StaticPricingTable>>`
   where `Arc<dyn PricingTable>` is wanted; both signatures already have
   that shape on `master`.
-* `elysper-resilience` — the lib test does not compile:
+* `uva-resilience` — the lib test does not compile:
   `error[E0433]: cannot find \`time\` in \`tokio\`` at
   `src/provider.rs:393`, while the crate declares `tokio` with
   `features = ["macros", "rt", "rt-multi-thread"]`.
-* `elysper-tool-memo` — the same compile error, at
+* `uva-tool-memo` — the same compile error, at
   `src/tests.rs:304`, with the same feature list on its `tokio`.
-* `elysper-semantic-cache` — its crate-level doctest imports
-  `elysper_provider::AnthropicProvider` under a feature set that has it
+* `uva-semantic-cache` — its crate-level doctest imports
+  `uva_provider::AnthropicProvider` under a feature set that has it
   off and calls `SemanticCacheProvider::new` with four of five
   arguments (`Arc<dyn Clock>` is missing).
 
@@ -725,8 +725,8 @@ For all four the branch's diff to the crate and to the workspace
 `tokio` entry is empty, so these are red on `master` as well. They are
 reported, not repaired, because they are outside this branch's change.
 `make ci` cannot see any of them: it does not run doctests, and
-`test-crates` is not part of it. `elysper-server` itself is green
-(`cargo test -p elysper-server -q` → `EXIT=0`).
+`test-crates` is not part of it. `uva-app-server` itself is green
+(`cargo test -p uva-app-server -q` → `EXIT=0`).
 
 ## 5. What remained at the time of the original run
 
@@ -734,9 +734,9 @@ reported, not repaired, because they are outside this branch's change.
 per-item closure with evidence. This list is kept as it stood.)
 
 * **M7 — the duplicated turn-boundary rule. Resolved by §6.** The
-  automatic pass (`elysper-context::summarizing`) used to splice tool
+  automatic pass (`uva-context::summarizing`) used to splice tool
   results without their call while the manual/harness pass
-  (`elysper-session::compaction` + `tool_pairing`) balanced the cut;
+  (`uva-session::compaction` + `tool_pairing`) balanced the cut;
   scenario A was that disagreement, observed end to end. The automatic
   pass now calls `tool_pairing::balanced_prefix` (the prefix half of
   `balanced_message_cut`) and widens its range to the tool-call group,
@@ -782,10 +782,10 @@ per-item closure with evidence. This list is kept as it stood.)
 
 ## 6. Follow-up (2026-10-26): the automatic compaction boundary is fixed
 
-The summarising manager in `elysper-context` no longer splices the
+The summarising manager in `uva-context` no longer splices the
 tool-result run alone. Each run is widened into its tool-call group
 before the splice: the start moves back to the nearest cut whose prefix
-holds no unanswered `tool_use` — `elysper_session::tool_pairing::
+holds no unanswered `tool_use` — `uva_session::tool_pairing::
 balanced_prefix`, the prefix half of the same `balanced_message_cut`
 the manual path applies — and the end moves forward until the range
 answers every call inside it. The assistant turn the widening swallows
@@ -794,7 +794,7 @@ is archived (text and thinking) as a `ToolCallRecord` with
 `start`/`end`/`source_indices` cover the extended span.
 
 Re-run of scenario A, exactly as §3.A, in a fresh workspace
-(`/tmp/elysper-accept-t19b`, `context_window: 3000`, `reserve_tokens:
+(`/tmp/uva-accept-t19b`, `context_window: 3000`, `reserve_tokens:
 800`, `compaction.enabled: true`, provider `openai` at
 `https://api.deepseek.com/v1` with model `deepseek-flash`), same two
 curl commands, on the rebuilt binary that carries the fix:
@@ -826,13 +826,13 @@ durable ledger key, the checkpoint resolves, and the durable
 ## 7. Remainders acceptance rerun (2026-10-27)
 
 HEAD before this round's commits: `bb5203b5`. This section's
-workspace is `/tmp/elysper-accept-t20` — §3's `$DIR` (the original
-run) was `/tmp/elysper-accept-t18`; the two are distinct and each
+workspace is `/tmp/uva-accept-t20` — §3's `$DIR` (the original
+run) was `/tmp/uva-accept-t18`; the two are distinct and each
 section's paths are its own. Two deployments: `ws` at
 `context_window: 128000` for B–I, `ws-a` at `context_window: 3000`
 for A and F; the Python plugin was recreated from the record — the
 original is not committed — and its frame-by-frame smoke test answered
-`elysper/initialize`, `elysper/tools/list`, `elysper/tools/call`.
+`uva/initialize`, `uva/tools/list`, `uva/tools/call`.
 Same provider and model as the original run. A mid-run `/tmp` wipe
 after scenario H destroyed that deployment's logs: the B–H lines
 below survive as quotes captured at run time, while A, F and I were
@@ -846,7 +846,7 @@ command on this branch in this worktree.
 |---|---|---|
 | `make test-crates` | 0 | every member crate green, the four §4 item 3 crates included |
 | `make ci` (run 1) | 2 | `doc-check`: `fs.rs:33`/`:130` linked private items (`AppendFailure`, `Self::append_owned`) — committed code, caught by the gate |
-| `make ci` (run 2) | 2 | `doc-check`: `harness_tokio.rs:3-6` linked unresolved `elysper::core::…` paths |
+| `make ci` (run 2) | 2 | `doc-check`: `harness_tokio.rs:3-6` linked unresolved `uva::core::…` paths |
 | `make ci` (final) | 0 | after the two doc-link fixes (plain code spans / correct `crate::core::…` paths); `test-crates` is now one of its prerequisites (Makefile `ci:` target) |
 | `make check-web` | 0 | tsc / eslint / prettier clean |
 | `make examples` | 0 | 55 targets + the three consumer proofs; `tokio in tree: 0`, `HARNESS-ONLY: OK` |
@@ -874,7 +874,7 @@ steer lands as `user_message` with `source:"steer"` inside the turn
 and the answer carries `steer-marker`; cancel during `sleep 30`
 answers `204`, the turn ends `cancelled`, both steer rows durable.
 
-> **Update — 2026-10-28 (Elysper v5, task 8 "durable parks").** The
+> **Update — 2026-10-28 (Uva v5, task 8 "durable parks").** The
 > scenario is unchanged; the *row shape* it observed has moved. A
 > queued message now writes three rows — `parked_prompt`, then the
 > `park_consumed` row that spends the park, then the turn's own
@@ -887,10 +887,10 @@ C (approval): high-risk shell call suspends (`approval_asked`,
 `risk:"high"`, turn `suspended`, baseline `awaiting_approval`);
 `resume` with `status:"resolved"` → `202`, `approval_decided …
 status:"approved"`, exactly one `tool_dispatch`,
-`/tmp/elysper-approval.txt` written, turn `completed`; **the same
+`/tmp/uva-approval.txt` written, turn `completed`; **the same
 resume body replayed → `200`, still one dispatch.** Deny
 (`status:"rejected"`) → `202`, zero dispatches, `is_error:true` tool
-result, `/tmp/elysper-deny.txt` absent. (`status:"approved"` is not a
+result, `/tmp/uva-deny.txt` absent. (`status:"approved"` is not a
 wire variant — the 422 lists `resolved|cancelled|rejected`.)
 
 D (crash and restart): `kill -9` mid-`sleep 20`; cold `follow` after

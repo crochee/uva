@@ -1,11 +1,11 @@
 [package]
-name = "elysper-harness-only-consumer"
+name = "uva-harness-only-consumer"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 # Same posture as `../minimal-consumer`: the empty `[workspace]` table
-# keeps this crate OUT of the elysper workspace, so it compiles as an
+# keeps this crate OUT of the uva workspace, so it compiles as an
 # independent consumer would and its dependency tree is its own.
 [workspace]
 
@@ -19,10 +19,10 @@ publish = false
 # A harness-only consumer writes four crates, because the harness
 # re-exports none of the traits it hands back:
 #
-#   elysper-harness  — the loop, the seams, the event stream
-#   elysper-core     — CancelToken / Spawner / Clock
-#   elysper-provider — the ModelProvider trait and the message types
-#   elysper-tool     — the Tool trait and ToolRegistry
+#   uva-harness  — the loop, the seams, the event stream
+#   uva-core     — CancelToken / Spawner / Clock
+#   uva-provider — the ModelProvider trait and the message types
+#   uva-tool     — the Tool trait and ToolRegistry
 #
 # `async-trait` expands the attribute those traits are declared with;
 # it is a proc-macro crate, not a runtime. `futures` drives the event
@@ -31,17 +31,17 @@ publish = false
 # count the harness README and the tutorial quote.
 #
 # The provider line carries `default-features = false`, and that flag
-# is the whole reason this tree is runtime-free: `elysper-provider`'s
+# is the whole reason this tree is runtime-free: `uva-provider`'s
 # default feature set (`default = ["anthropic", "openai"]`) turns on
 # the two shipped HTTP adapters, each of which carries `reqwest`,
 # `tokio` and `tokio-util`. A consumer who writes the plain
-# `elysper-provider = "0.1"` gets all three. (`elysper-tool` has no
+# `uva-provider = "0.1"` gets all three. (`uva-tool` has no
 # feature set at all, so the flag on it below is a no-op.)
 [dependencies]
-elysper-harness = { path = "../../../crates/elysper-harness" }
-elysper-core = { path = "../../../crates/elysper-core" }
-elysper-provider = { path = "../../../crates/elysper-provider", default-features = false }
-elysper-tool = { path = "../../../crates/elysper-tool", default-features = false }
+uva-harness = { path = "../../../crates/uva-harness" }
+uva-core = { path = "../../../crates/uva-core" }
+uva-provider = { path = "../../../crates/uva-provider", default-features = false }
+uva-tool = { path = "../../../crates/uva-tool", default-features = false }
 async-trait = "0.1"
 futures = "0.3"
 serde_json = "1"

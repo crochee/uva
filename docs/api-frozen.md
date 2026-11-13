@@ -35,17 +35,17 @@ The frozen surface is that set of names, per crate:
 
 | Crate | Frozen names |
 |---|---|
-| `elysper-core` | 41 |
-| `elysper-context` | 43 |
-| `elysper-harness` | 64 |
-| `elysper-provider` | 92 |
-| `elysper-session` | 121 |
-| `elysper-steering` | 43 |
-| `elysper-tool` | 48 |
+| `uva-core` | 41 |
+| `uva-context` | 43 |
+| `uva-harness` | 64 |
+| `uva-provider` | 92 |
+| `uva-session` | 121 |
+| `uva-steering` | 43 |
+| `uva-tool` | 48 |
 
 The full lists are in [The frozen names](#the-frozen-names) below. Every
 entry is spelled exactly as you would write it after the crate name:
-`use elysper_harness::{ReActAgent, Agent}`.
+`use uva_harness::{ReActAgent, Agent}`.
 
 A handful of these names exist only behind a Cargo feature or platform
 flag (`OpenAICompatibleProvider` needs `openai`, the `AnthropicStream*`
@@ -58,25 +58,24 @@ behind it still obeys its feature flag.
 Be explicit about the other side of the promise:
 
 - **Deep paths.** Anything reachable only by a longer path — for
-  example `elysper_harness::agent::host` internals, or any `pub` item
+  example `uva_harness::agent::host` internals, or any `pub` item
   inside a module that lib.rs did not re-export — is **not** covered.
   Those names can move or disappear in any release without a major
   announcement. If you depend on one, tell us, and we will consider
   curating it.
 - **Items defined in lib.rs outside the `pub use` lists.** A few lib.rs
   files define public items directly (e.g. the `Result` type alias in
-  `elysper-core`). Those are not part of the curated lists and are not
+  `uva-core`). Those are not part of the curated lists and are not
   covered by this promise. (Where a name *is* re-exported — as
-  `elysper-tool` re-exports `Result` from its `types` module — it is
+  `uva-tool` re-exports `Result` from its `types` module — it is
   frozen like any other.)
-- **Crate-root `pub mod` names.** `elysper_core::agent` (the module
+- **Crate-root `pub mod` names.** `uva_core::agent` (the module
   itself) is not on the curated list — only the names the crate root
   re-exports from it. A module path can move without a major bump.
-- **The crates this page does not list.** The plugin channel family
-  (`elysper-plugin-runtime`) and `elysper-harness-tokio` sit
-  alongside the frozen seven without being frozen: their surfaces may
+- **The crates this page does not list.** `uva-core-tokio` sits
+  alongside the frozen seven without being frozen: its surfaces may
   still move before `0.2`. So is the
-  facade (`elysper`), which only propagates the surfaces below.
+  facade (`uva`), which only propagates the surfaces below.
 - **The server's HTTP API.** `/api/v1` URLs version themselves; this
   page covers only the library crates listed above.
 - **Signatures.** The promise is about the *set of names*: each listed
@@ -105,8 +104,8 @@ inside `0.1.x`.
 and fails on both kinds of drift:
 
 ```text
-NEW:     elysper-harness::ShinyNewThing      # a name the baseline never promised
-REMOVED: elysper-harness::ReActAgent         # a promised name that disappeared
+NEW:     uva-harness::ShinyNewThing      # a name the baseline never promised
+REMOVED: uva-harness::ReActAgent         # a promised name that disappeared
 ```
 
 A new public name failing the gate is the intended behaviour: it forces
@@ -150,7 +149,7 @@ this once, ship it" leaves a visible mark.
 
 Sorted per crate; the backticked spelling is the exact import name.
 
-### elysper-core — 41 names
+### uva-core — 41 names
 
 Runtime seams without a runtime: clock, cancellation, ids, sleep, plus
 small shared registries and text helpers.
@@ -165,7 +164,7 @@ small shared registries and text helpers.
 `parse_judge_score`, `redact_partial`, `redact_partial_with`, `truncate_chars`
 `validate_against_schema`
 
-### elysper-context — 43 names
+### uva-context — 43 names
 
 The context window: managers, memory, DAG summaries, compaction
 settings.
@@ -182,7 +181,7 @@ settings.
 `events_to_messages`, `repair_session`, `should_compact`, `touched_target`
 `typed_messages_from_sink`
 
-### elysper-harness — 64 names
+### uva-harness — 64 names
 
 The agent loop: strategies, approval/resume, checkpoints, host hooks,
 events, and the loop's own contract.
@@ -202,7 +201,7 @@ events, and the loop's own contract.
 `open_requests`, `prepare_messages_for_shot`, `single_shot_request`, `single_shot_request_shared`
 `suspended_segment`, `workspace_hash`
 
-### elysper-provider — 92 names
+### uva-provider — 92 names
 
 Model providers and everything around a completion: request/response
 types, credentials, retry classification, cache policy, JSON repair.
@@ -230,7 +229,7 @@ types, credentials, retry classification, cache policy, JSON repair.
 `parse_tool_input_logged`, `parse_tool_input_reported`, `parse_tool_input_with_completion`
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
-### elysper-session — 121 names
+### uva-session — 121 names
 
 The durable ledger: JSONL sink and version header, events, history fold,
 surface ledger, compaction, search, token metering, typed builders.
@@ -265,7 +264,7 @@ surface ledger, compaction, search, token metering, typed builders.
 `turn_end`, `turn_end_suspended`, `turn_start`, `turn_suspended`, `usage`
 `user_message`, `validate_replace_with_balance`
 
-### elysper-steering — 43 names
+### uva-steering — 43 names
 
 The policy layer: guards, gates, hints, hooks, and output transformers.
 
@@ -279,7 +278,7 @@ The policy layer: guards, gates, hints, hooks, and output transformers.
 `TruncationHint`, `WorkspaceBoundaryGuard`, `auto`, `event_name`, `for_tier`
 `logging_hook_map`, `run_guards`, `tool_fingerprint`
 
-### elysper-tool — 48 names
+### uva-tool — 48 names
 
 The tool paradigm: registry, traits, annotations, restriction, surface
 projection.

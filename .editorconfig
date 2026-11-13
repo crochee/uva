@@ -1,7 +1,7 @@
-# EditorConfig — Elysper
+# EditorConfig — Uva
 # https://editorconfig.org
 #
-# Elysper 已用 rustfmt.toml (Rust) / .prettierrc (TS/JSON) / shellcheck /
+# Uva 已用 rustfmt.toml (Rust) / .prettierrc (TS/JSON) / shellcheck /
 # markdownlint 的等价规则锁格式化; 本文件只覆盖**那些**规则没触达的
 # 文件 (Makefile / shell / TOML / Markdown 的尾换行 / 末行), 让
 # 任意 IDE / editor 打开仓库时有一致的默认.

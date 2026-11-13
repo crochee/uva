@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# elysper image build entry — Docker only, no cluster interaction.
+# uva image build entry — Docker only, no cluster interaction.
 #
 #   scripts/images.sh build             # build server + web + mcp
 #   scripts/images.sh build server      # build only the server
@@ -44,14 +44,14 @@ usage() {
 
 build_server() {
     need docker
-    echo "== build elysper-app-server:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build uva-app-server:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
-        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
-        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "UVA_GIT_SHA=${GIT_SHA}" \
+        --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
-        --build-arg "ELYSPER_VERSION=${TAG}" \
+        --build-arg "UVA_VERSION=${TAG}" \
         -f "${REPO_ROOT}/Dockerfile.server" \
-        -t "${REGISTRY}/elysper-app-server:${TAG}" \
+        -t "${REGISTRY}/uva-app-server:${TAG}" \
         "${REPO_ROOT}"
 }
 
@@ -63,10 +63,10 @@ build_server_artifact() {
     need docker
     ARTIFACT_DIR=${ARTIFACT_DIR:-./dist}
     mkdir -p "${ARTIFACT_DIR}"
-    echo "== artifact elysper-app-server (musl, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-app-server =="
+    echo "== artifact uva-app-server (musl, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/uva-app-server =="
     docker buildx build --target artifact \
-        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
-        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "UVA_GIT_SHA=${GIT_SHA}" \
+        --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
         --output "type=local,dest=${ARTIFACT_DIR}" \
         -f "${REPO_ROOT}/Dockerfile.server" \
@@ -74,15 +74,15 @@ build_server_artifact() {
 }
 
 # 走 Dockerfile.server.windows 的 `--target artifact` 阶段出 Windows PE;
-# 与 ci.yml 的 cross-windows 走同一条路径. 输出 elysper-app-server.exe.
+# 与 ci.yml 的 cross-windows 走同一条路径. 输出 uva-app-server.exe.
 build_server_windows() {
     need docker
     ARTIFACT_DIR=${ARTIFACT_DIR:-./dist}
     mkdir -p "${ARTIFACT_DIR}"
-    echo "== artifact elysper-app-server (windows gnu, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/elysper-app-server.exe =="
+    echo "== artifact uva-app-server (windows gnu, sha=${GIT_SHA:0:7}) -> ${ARTIFACT_DIR}/uva-app-server.exe =="
     docker buildx build --target artifact \
-        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
-        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "UVA_GIT_SHA=${GIT_SHA}" \
+        --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
         --output "type=local,dest=${ARTIFACT_DIR}" \
         -f "${REPO_ROOT}/Dockerfile.server.windows" \
         "${REPO_ROOT}"
@@ -90,36 +90,36 @@ build_server_windows() {
 
 build_web() {
     need docker
-    echo "== build elysper-web:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build uva-web:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
-        --build-arg "ELYSPER_VERSION=${TAG}" \
-        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
-        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "UVA_VERSION=${TAG}" \
+        --build-arg "UVA_GIT_SHA=${GIT_SHA}" \
+        --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "NODE_VERSION=${NODE_VERSION}" \
         -f "${REPO_ROOT}/Dockerfile.web" \
-        -t "${REGISTRY}/elysper-web:${TAG}" \
+        -t "${REGISTRY}/uva-web:${TAG}" \
         "${REPO_ROOT}"
 }
 
 build_mcp() {
     need docker
-    echo "== build elysper-mcp-server:${TAG} (sha=${GIT_SHA:0:7}) =="
+    echo "== build uva-mcp-server:${TAG} (sha=${GIT_SHA:0:7}) =="
     docker build \
-        --build-arg "ELYSPER_GIT_SHA=${GIT_SHA}" \
-        --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
+        --build-arg "UVA_GIT_SHA=${GIT_SHA}" \
+        --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
         --build-arg "RUST_VERSION=${RUST_VERSION}" \
-        --build-arg "ELYSPER_VERSION=${TAG}" \
+        --build-arg "UVA_VERSION=${TAG}" \
         -f "${REPO_ROOT}/Dockerfile.mcp" \
-        -t "${REGISTRY}/elysper-mcp-server:${TAG}" \
+        -t "${REGISTRY}/uva-mcp-server:${TAG}" \
         "${REPO_ROOT}"
 }
 
 maybe_push() {
     if [ "${PUSH:-0}" = "1" ]; then
         echo "== push =="
-        docker push "${REGISTRY}/elysper-app-server:${TAG}"
-        docker push "${REGISTRY}/elysper-web:${TAG}"
-        docker push "${REGISTRY}/elysper-mcp-server:${TAG}"
+        docker push "${REGISTRY}/uva-app-server:${TAG}"
+        docker push "${REGISTRY}/uva-web:${TAG}"
+        docker push "${REGISTRY}/uva-mcp-server:${TAG}"
     fi
 }
 

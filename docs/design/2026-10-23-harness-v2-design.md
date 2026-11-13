@@ -5,13 +5,13 @@
 [`2026-10-25-writer-unification-plan.md`](2026-10-25-writer-unification-plan.md)
 实施：写者唯一化、序号以行里的 `seq` 为准、一轮一行。插件与循环从 fold 推导的那几段
 尚未开始。
-取代：无（这是 `elysper-harness` 的下一次形态，不是补丁）
+取代：无（这是 `uva-harness` 的下一次形态，不是补丁）
 
 ---
 
 ## 1. 意图与为什么
 
-`crates/elysper-harness` 要成为社区级 AI agent 基座库：第三方 crate 装进来就能加 tool 和
+`crates/uva-harness` 要成为社区级 AI agent 基座库：第三方 crate 装进来就能加 tool 和
 plugin，不改 harness 一行；外围应用组装它就得到一个完整 agent。今天它做不到后者——
 插件挂载是编译期的，循环的真源在内存里，两者互不相干。
 
@@ -28,16 +28,16 @@ plugin，不改 harness 一行；外围应用组装它就得到一个完整 agen
 
 ### 现状（已核实）
 
-- `elysper-session` 已经持有 dsh 那套机制：22 种 `SessionEvent` 变体、
+- `uva-session` 已经持有 dsh 那套机制：22 种 `SessionEvent` 变体、
   `SurfaceOp::Replace { source_event_seqs }` provenance 校验、`fold_surface`（`log_surface.rs`,
   957 行）、`repair.rs`（820 行，`interrupted_turn_closers`）、`token_meter.rs`（977 行）。
   `events.rs` 文件头注明 *"Adopted from `deepseek-harness`'s `core/session/src/{types, surface,
   repair}.ts`"*。**本设计不重造这些。**
-  `fold_surface` 已有生产调用方（`elysper-context/src/memory/typed.rs:99` 的
+  `fold_surface` 已有生产调用方（`uva-context/src/memory/typed.rs:99` 的
   `try_fold_log_surface`），压缩路径不是死的。
-- 断的是接线：`elysper-harness` 的 `EventSink` 只发结构事件（step / turn / usage），
+- 断的是接线：`uva-harness` 的 `EventSink` 只发结构事件（step / turn / usage），
   用户消息、assistant 消息、工具结果一行不进日志；写这些的是 server
-  （`elysper-server/src/session/controller/run_task.rs`）。
+  （`uva-app-server/src/session/controller/run_task.rs`）。
 - `AgentCaps` 四平面（Model / Tool / Control / Env）共 22 个 `with_*` builder，全部
   `mut self -> Self`，构造后不可变。
 - `SyntheticTool`（`agent/re_act/synthetic.rs:23`）是唯一的「跨切面 tool」接缝：
@@ -47,17 +47,17 @@ plugin，不改 harness 一行；外围应用组装它就得到一个完整 agen
   未接入。
 - `Steering` 的 `BeforeProviderCall` / `AfterProviderCall` 只观测，**决定被丢弃**。
 - `TypedEventSink::record` 用 `try_send` 并丢弃返回值
-  （`elysper-session/src/typed_event_sink.rs:157`）。队列满时丢行，于是
+  （`uva-session/src/typed_event_sink.rs:157`）。队列满时丢行，于是
   `run_task.rs:535` 现盖的 seq 出现空洞，`fold_surface` 的 provenance 校验此后拒绝
   引用空洞之后的行——compact 静默失效，无报错。
-- `elysper-harness` 的公开 API 有 14 个 `pub` 项在 `crates/elysper-harness/src/` 之外
+- `uva-harness` 的公开 API 有 14 个 `pub` 项在 `crates/uva-harness/src/` 之外
   零引用（`with_run_inbox` / `MpscInbox` 一族占 1,009 行测试、`with_clock`、
   `with_tool_registry`、`with_model_hint`、`AgentRegistry::is_empty`、
-  `Checkpointer::list_keys` 等）。注：`with_clock` 在 `elysper-tool-scheduler` 等处有同名
+  `Checkpointer::list_keys` 等）。注：`with_clock` 在 `uva-tool-scheduler` 等处有同名
   命中，但那是 `SchedulerTool::with_clock` 这一**另一个类型**的方法；`with_tool_registry`
-  的唯一外部命中是 `elysper-tool/src/restriction.rs:166` 的一句文档提及。两者对
+  的唯一外部命中是 `uva-tool/src/restriction.rs:166` 的一句文档提及。两者对
   `ReActAgent` 而言仍是死代码。
-- `sink.rs:95` 的文档注释称 *"elysper-harness holds `Arc<dyn SessionSink>`"*，
+- `sink.rs:95` 的文档注释称 *"uva-harness holds `Arc<dyn SessionSink>`"*，
   而字段是 `typed_sink: Option<TypedEventSink>`。代码与注释不一致。
 
 ### 竞品基线
@@ -91,8 +91,8 @@ arXiv 2608.23953（2026-08）对比 deepagents / pi / dsh，结论之一是
 ### 非目标
 
 1. **不做运行时动态加载。** 不引入 `libloading` / Rhai / Lua / WASM。理由见 §8。
-2. 不做 GUI、不做多租户计费、不做向量检索（那属于 `elysper-search`）。
-3. 不替换 `elysper-provider` 的 HTTP adapter 层。
+2. 不做 GUI、不做多租户计费、不做向量检索（那属于 `uva-search`）。
+3. 不替换 `uva-provider` 的 HTTP adapter 层。
 4. 不为兼容旧签名保留 shim——按仓库既有规矩做干净切换。
 
 ### 反目标（做到了也算失败）
@@ -108,9 +108,9 @@ arXiv 2608.23953（2026-08）对比 deepagents / pi / dsh，结论之一是
 
 继承 `AGENTS.md` §3.6 / §3.7 / §3.8 的既有门禁，不新增例外：
 
-- 依赖单向 `elysper` → `elysper-*` → `elysper-core`。
+- 依赖单向 `uva` → `uva-*` → `uva-core`。
 - 库 crate 只用 `thiserror`；app crate 只用 `anyhow`。
-- 墙钟走 `elysper_core::Clock`，ID 走 `elysper_core::IdGen`；生产代码禁 `chrono::Utc::now()`。
+- 墙钟走 `uva_core::Clock`，ID 走 `uva_core::IdGen`；生产代码禁 `chrono::Utc::now()`。
 - `max_width = 80`，禁通配符导入，函数 ≤100 行、嵌套 ≤4 层（harness 专项）。
 - `scripts/harness-docs/baseline` 棘轮只许降不许升。
 - `make check-public-api-runtime`、`make check-clock`、`make check-no-runtime`、
@@ -200,7 +200,7 @@ derive() → sample() → dispatch() → commit() → [flush] → 下一轮
 ### 4.3 seq 的归属：编号上移（已决定）
 
 **问题**：今天 `SessionSink::append` 由 sink 在落盘时分配 seq 并返回给调用方
-（`elysper-session/src/sink.rs:109-114`）。server 的 `RunLog::append` 拿这个 seq 喂给
+（`uva-session/src/sink.rs:109-114`）。server 的 `RunLog::append` 拿这个 seq 喂给
 `SurfaceLedger`；`persist_and_broadcast` 还把它当 SSE 游标返回给
 `routes/chat.rs::resume_stream_to_sse`。
 
@@ -244,13 +244,13 @@ provenance 立即失效。切换顺序为：先加 `LogWriter` 与新 sink 实�
 ### 4.5 模块划分
 
 > **已被 [`2026-10-24-writer-unification-design.md`](2026-10-24-writer-unification-design.md) §5.1 推翻。**
-> 写者（`LogWriter`）下沉到 `elysper-session`：折叠器本来就在那里，而 provenance 要求写者取的号与
-> 折叠器算的号是同一个数；写者留在 harness 会让 `elysper-session` 里的 `CompactionCheckpoint`
+> 写者（`LogWriter`）下沉到 `uva-session`：折叠器本来就在那里，而 provenance 要求写者取的号与
+> 折叠器算的号是同一个数；写者留在 harness 会让 `uva-session` 里的 `CompactionCheckpoint`
 > 够不着它，只能另开一条会丢行的通道。下文的 `log/` 只保留「durable / ephemeral 分类」的职责，
 > 写者本身归 session crate。
 
 ```text
-crates/elysper-harness/src/
+crates/uva-harness/src/
 ├── log/                    # 循环的日志视图（harness 私有，不是新 crate）
 │   ├── mod.rs              # ~~LogWriter：stamp / append / flush / repair~~ → 下沉到 session
 │   ├── surface.rs          # fold 出来的只读模型视图
@@ -308,7 +308,7 @@ T4 是关键：权限靠约定维持会被绕过，靠类型维持不会。缺�
 T3 插件自我提权——否则分级退化成「有或没有」。
 
 **T2 拿到的 `Request` 不是 `CompletionRequest`（重要）。**
-`elysper_provider::CompletionRequest.messages` 是 `Arc<Vec<Message>>`，且 `messages[0]`
+`uva_provider::CompletionRequest.messages` 是 `Arc<Vec<Message>>`，且 `messages[0]`
 就是 system prompt。若把这个类型交给 T2，插件改一下 `messages[0]` 就绕过了 T3/T4——
 分级形同虚设，而只断言「`set_system_prompt` 不存在」的测试抓不到这种绕过。
 
@@ -371,7 +371,7 @@ pub trait DelegatingTool: Send + Sync {
 
 与现有 `SyntheticTool` 相比**补齐了权力差距**：拿到 `context`、可声明 `mode()`（并行/串行）、
 可声明 `annotations()`、并接入 `ToolExposure` 与 `ToolRestriction`。
-`elysper-tool-task` 的 `TaskDelegator` 迁到此处；`server/agent_assembly.rs`、
+`uva-tool-task` 的 `TaskDelegator` 迁到此处；`server/agent_assembly.rs`、
 `run_stream.rs`、`tests/delegation.rs` 随之改。
 
 派发从「线性扫全部实例找 `claims()`」改为按名查表，沿用 `ToolProjectionCache` 已有的
@@ -385,8 +385,8 @@ version-keyed 缓存模式。
 ## 6. 挂起与恢复
 
 harness 目前**没有中途挂起原语**：`Checkpointer` 只能整轮快照，`Steering` 的 hook 只有
-同步 `Block` / `Terminate`（`elysper-steering/src/hook_map.rs:115`）。这是 dsh / pi /
-Claude SDK 都有、elysper 独缺的能力。
+同步 `Block` / `Terminate`（`uva-steering/src/hook_map.rs:115`）。这是 dsh / pi /
+Claude SDK 都有、uva 独缺的能力。
 
 新增：
 
@@ -435,7 +435,7 @@ Rust 侧的等价物是 `libloading` 加载 `.so`，代价是：ABI 不稳定（
 伤害——一个能加载任意 `.so` 的 agent 基座，本身就是攻击面。
 
 **留的口子**：本 harness 不含此能力，但 `Plugin` trait 的形状（按名注册 + 显式 install）
-不排斥未来由独立 crate 提供 WASM 宿主。若将来需要，`elysper-harness` 不必改。
+不排斥未来由独立 crate 提供 WASM 宿主。若将来需要，`uva-harness` 不必改。
 
 ---
 
@@ -455,8 +455,8 @@ Rust 侧的等价物是 `libloading` 加载 `.so`，代价是：ABI 不稳定（
 
 | 目标 | 命令 |
 |---|---|
-| 编译 | `cargo build -p elysper-harness` |
-| 单测 | `cargo test -p elysper-harness --lib` |
+| 编译 | `cargo build -p uva-harness` |
+| 单测 | `cargo test -p uva-harness --lib` |
 | 公开 API 无运行时类型 | `make check-public-api-runtime` |
 | 无 tokio 依赖 | `make check-no-runtime` |
 | harness 无 features 表 | `make check-harness-shape`、`make check-harness-features` |
@@ -494,7 +494,7 @@ Rust 侧的等价物是 `libloading` 加载 `.so`，代价是：ABI 不稳定（
 | 4 | 加 `plugin/` 模块（T1–T3 + `DelegatingTool`），不改现有循环 | 无（旁挂） |
 | 5 | 循环改从 `fold` 出的 surface 推导；删 `RunState` 的可变字段 | 是（仅 harness 内） |
 | 6 | `TaskDelegator` 迁到 `DelegatingTool`，改 `server/agent_assembly.rs` / `run_stream.rs` | 是 |
-| 7 | 加 `Suspension` / `ResumeToken`；`Agent::run` 返回类型变更，**连带全部 `elysper-strategy-*` crate** | 是（跨 crate） |
+| 7 | 加 `Suspension` / `ResumeToken`；`Agent::run` 返回类型变更，**连带全部 `uva-strategy-*` crate** | 是（跨 crate） |
 
 第 3 步与第 7 步是仅有的两处原子切换：前者两侧同时写会产生重复行、破坏 provenance；
 后者 `Agent::run` 的签名变更会击穿所有 strategy crate 与 server 的调用点。
@@ -524,7 +524,7 @@ Rust 侧的等价物是 `libloading` 加载 `.so`，代价是：ABI 不稳定（
 | 决定 | 理由 |
 |---|---|
 | `Durability` 枚举四档，默认 `StepBoundary` | 语义沿用 LangGraph `durability` / PG `synchronous_commit` / Redis `appendfsync`，但默认档选在最省的位置 |
-| ~~`log/` 是 harness 私有模块而非新 crate~~ **（2026-10-24 推翻）** | 原理由：「什么行是 durable」须与循环实现同 crate，否则重蹈 server 兜底的覆辙。推翻后：写者下沉到 `elysper-session`（折叠器在那里，两端必须同 crate 才能保证 provenance 的号一致）——见 [`2026-10-24-writer-unification-design.md`](2026-10-24-writer-unification-design.md) §5.1 |
+| ~~`log/` 是 harness 私有模块而非新 crate~~ **（2026-10-24 推翻）** | 原理由：「什么行是 durable」须与循环实现同 crate，否则重蹈 server 兜底的覆辙。推翻后：写者下沉到 `uva-session`（折叠器在那里，两端必须同 crate 才能保证 provenance 的号一致）——见 [`2026-10-24-writer-unification-design.md`](2026-10-24-writer-unification-design.md) §5.1 |
 | 设计文档放 `docs/design/` 而非 `docs/superpowers/specs/` | 后者在本仓库 `.gitignore:42`，AGENTS.md 明定为 agent 草稿区 |
 | `SyntheticTool` **改造**为 `DelegatingTool` 而非删除 | 实现者审查发现：把执行能力塞进 T2「改写」档是错的。本能题成「执行循环内子 agent」的插件无处落地。改造保留其 `emit`/`cancel`/`depth`，补齐 `context`/`mode()`/`annotations()` |
 | T2 拿只读 `RequestParams` 视图而非 `CompletionRequest` | 后者的 `messages[0]` 就是 system prompt，交给插件等于绕过 T3/T4 |
@@ -543,4 +543,4 @@ Rust 侧的等价物是 `libloading` 加载 `.so`，代价是：ABI 不稳定（
 | 3 | `SyntheticTool` 的**执行**能力在 T1–T4 中无对应 | §5.3 新增 `DelegatingTool` 独立能力 |
 | 4 | `flush` 是否在热路径上 | §4.2 写明：仅 step 边界一次，在等待之列 |
 | 5 | 注释预算零余量（baseline 56 / 实测 56） | §4.6 列为硬约束；删除项须先行 |
-| — | 其称「`fold_surface` 零生产调用方」 | **该结论有误**：`elysper-context/src/memory/typed.rs:99` 在用。已在 §1 更正 |
+| — | 其称「`fold_surface` 零生产调用方」 | **该结论有误**：`uva-context/src/memory/typed.rs:99` 在用。已在 §1 更正 |

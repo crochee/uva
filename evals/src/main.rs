@@ -1,4 +1,4 @@
-//! An eval suite for one real Elysper task: turning a diff into a pull-request
+//! An eval suite for one real Uva task: turning a diff into a pull-request
 //! description. The task is small enough to verify mechanically: the output
 //! must carry three sections, repeat the facts the diff actually contains, and
 //! must not invent a number or fall back to generic filler.
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
-use elysper_eval::{
+use uva_eval::{
     EvalAgent, EvalError, EvalReport, EvalRunner, EvalSuite, KeywordMetric, Metric,
     SyncMetricAdapter, TestCase,
 };
@@ -123,10 +123,10 @@ impl PrAgent {
                 "Stops the harness from panicking when the first user message has no text.",
                 "`first_user_text` returns an empty string instead of calling `expect` on empty input.",
             )
-        } else if input.contains("ELYSPER_LOG_LEVEL") {
+        } else if input.contains("UVA_LOG_LEVEL") {
             (
                 "Renames the log-level environment variable and keeps the old name as a fallback.",
-                "`ELYSPER_LOG_LEVEL` is read first; `ELYSPER_LOG` still works.",
+                "`UVA_LOG_LEVEL` is read first; `UVA_LOG` still works.",
             )
         } else {
             (

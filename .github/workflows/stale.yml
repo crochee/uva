@@ -1,7 +1,7 @@
-# stale.yml — Elysper
+# stale.yml — Uva
 #
 # Invokes `.github/stale.yml` (the GitHub-native stale config, format
-# `version: "2"`) on a daily 02:00 UTC schedule. The config sets the
+# `version: "2"`) on a weekly 02:00 UTC schedule. The config sets the
 # CNCF / Kubernetes / Rust-Bridge cadence — bug/question 60/7, enhancement
 # 90/14, default 45/7 — exempt `keep-open` / `pinned` / `security` /
 # `roadmap` / `needs-design` / `blocking-release` / `discussion` labels.
@@ -18,10 +18,10 @@ name: stale
 
 on:
   schedule:
-    # Daily 02:00 UTC — earlier than `security-audit` (03:00 Mon),
-    # `markdown-lint` (04:00), `shellcheck` (05:00) so an issue closed
-    # overnight does not race a re-opened PR in the same window.
-    - cron: "0 2 * * *"
+    # Weekly, Monday 02:00 UTC — earlier than `markdown-lint` (Tue 04:00)
+    # and `shellcheck` (Wed 05:00) so an issue closed in a given week
+    # does not race a re-opened PR in the same window.
+    - cron: "0 2 * * 1"
   workflow_dispatch:
 
 permissions:

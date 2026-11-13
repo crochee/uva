@@ -1,6 +1,6 @@
 # Governance
 
-This document describes **how decisions are made** in Elysper today
+This document describes **how decisions are made** in Uva today
 and **how they will be made** once the project outgrows a single
 maintainer. It is the single source of truth for governance; it
 should be read together with [MAINTAINERS.md](MAINTAINERS.md) and
@@ -15,7 +15,7 @@ those don't.
 
 ## 1. Today: BDFL with explicit review surface
 
-Elysper today is a **BDFL** project (Benevolent Dictator For
+Uva today is a **BDFL** project (Benevolent Dictator For
 Life). The BDFL is [@crochee](https://github.com/crochee), the same
 person listed in [MAINTAINERS.md](MAINTAINERS.md) and
 [`.github/CODEOWNERS`](.github/CODEOWNERS).
@@ -31,7 +31,7 @@ person listed in [MAINTAINERS.md](MAINTAINERS.md) and
 
 The BDFL role is **publicly reviewable**: every PR diff and every
 release is on GitHub. Disagreement is resolved in the open, on the
-PR or in [Discussions](https://github.com/crochee/elysper/discussions).
+PR or in [Discussions](https://github.com/crochee/uva/discussions).
 
 ### Why BDFL, not a council, today
 
@@ -47,7 +47,7 @@ of the following are true for two consecutive minor releases:
 
 1. ≥ 3 active maintainers (≥ 5 distinct commits / reviews / issue
    responses per release).
-2. ≥ 2 distinct organizations are running Elysper in production
+2. ≥ 2 distinct organizations are running Uva in production
    (one of them is the BDFL's own; the other is independent).
 3. ≥ 1,000 GitHub stars **and** ≥ 50 active monthly contributors
    (PRs, reviews, issues, discussions).
@@ -86,20 +86,20 @@ fired).
 
 | Asset | Owner |
 |---|---|
-| Repository | the elysper organization (or @crochee until an org exists) |
-| Domain (`elysper.dev`, etc.) | the BDFL; transferred to the council once §2 fires |
+| Repository | the uva organization (or @crochee until an org exists) |
+| Domain (`uva.dev`, etc.) | the BDFL; transferred to the council once §2 fires |
 | crates.io namespace | the same as above |
 | Container registry | the same as above |
 | Trademark / logo | the same as above |
 
 A commercial deployment that ships a fork under its own name **must**
-not reuse the Elysper name or logo for marketing the fork. The
+not reuse the Uva name or logo for marketing the fork. The
 project grants no trademark license under MIT.
 
 ## 5. Conflict-of-interest
 
 The BDFL may have day-job affiliations with companies that consume
-Elysper. The BDFL recuses from PRs that affect only that company
+Uva. The BDFL recuses from PRs that affect only that company
 when the change is not generally beneficial. Recusal is noted in the
 PR thread.
 

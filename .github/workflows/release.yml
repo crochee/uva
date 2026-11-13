@@ -1,14 +1,14 @@
 # release.yml — tag 推送自动出跨平台容器镜像 (linux/amd64 + linux/arm64).
 #
-# 产物: docker.io/crochee/elysper-app-server 与 docker.io/crochee/elysper-web,
+# 产物: docker.io/crochee/uva-app-server 与 docker.io/crochee/uva-web,
 # 每个镜像打 tag 两件套: `<tag>` 直用 + `<tag>-<short-sha>` 追溯.
 # (workflow 仅由 tag push 触发; `<branch>-<short-sha>` 给 branch
 # pre-release 预留接口, 当前 ON 里没启用.) 草稿 release 不再创建
 # — 镜像直接 push 到 Docker Hub, release notes 留给 GitHub UI 的
 # auto-generated notes (tag 创建时自动生成) 或 maintainer 手填.
 #
-# 镜像身份通过 OCI labels 自证: ELYSPER_GIT_SHA / ELYSPER_VERSION /
-# ELYSPER_BUILD_TIME 由 Dockerfile.server / Dockerfile.web 在 build
+# 镜像身份通过 OCI labels 自证: UVA_GIT_SHA / UVA_VERSION /
+# UVA_BUILD_TIME 由 Dockerfile.server / Dockerfile.web 在 build
 # 阶段烤进 `org.opencontainers.image.{revision,version,created}`,
 # 因此 `docker buildx imagetools inspect` 是 release-time 验证的最
 # 便宜入口 — 不需要跑容器.
@@ -42,8 +42,8 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   # 容器镜像 — linux/amd64 + linux/arm64 双架构 (buildx + QEMU); server
   # 走 Dockerfile.server, web 走 Dockerfile.web. 两个 Dockerfile 都已
-  # 经在 OCI labels 里把 ELYSPER_GIT_SHA / ELYSPER_VERSION /
-  # ELYSPER_BUILD_TIME 烤进 org.opencontainers.image.{revision,version,created},
+  # 经在 OCI labels 里把 UVA_GIT_SHA / UVA_VERSION /
+  # UVA_BUILD_TIME 烤进 org.opencontainers.image.{revision,version,created},
   # 所以 inspect labels 是 release-time identity 验证的最便宜入口.
   #
   # tag 两件套 (本 workflow 仅在 tag push 触发):
@@ -132,11 +132,11 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       # server 镜像 — linux/amd64 + linux/arm64. build-arg 与
-      # Dockerfile.server 的 ELYSPER_GIT_SHA / ELYSPER_BUILD_TIME /
-      # ELYSPER_TARGET 完全对齐, builder 阶段会原样写入
+      # Dockerfile.server 的 UVA_GIT_SHA / UVA_BUILD_TIME /
+      # UVA_TARGET 完全对齐, builder 阶段会原样写入
       # cargo:rustc-env=, 最终进 binary 的 `--version` 行 — 与
       # `--version` 自证路径同源.
-      - name: Build and push elysper-app-server (multi-arch)
+      - name: Build and push uva-app-server (multi-arch)
         env:
           SHA: ${{ steps.identity.outputs.sha }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
@@ -158,29 +158,29 @@ jobs:
             exit 1
           fi
           tags=(
-            "docker.io/crochee/elysper-app-server:${TAG}"
-            "docker.io/crochee/elysper-app-server:${TAG}-${SHORT_SHA}"
+            "docker.io/crochee/uva-app-server:${TAG}"
+            "docker.io/crochee/uva-app-server:${TAG}-${SHORT_SHA}"
           )
           tag_args=()
           for t in "${tags[@]}"; do tag_args+=(--tag "$t"); done
 
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --build-arg "ELYSPER_GIT_SHA=${SHA}" \
-            --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
-            --build-arg "ELYSPER_VERSION=${VERSION}" \
-            --build-arg "ELYSPER_TARGET=x86_64-unknown-linux-musl" \
+            --build-arg "UVA_GIT_SHA=${SHA}" \
+            --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
+            --build-arg "UVA_VERSION=${VERSION}" \
+            --build-arg "UVA_TARGET=x86_64-unknown-linux-musl" \
             --file Dockerfile.server \
             --target runtime \
             --push \
             "${tag_args[@]}" \
             .
 
-      # web 镜像 — 同套 tag 方案. Dockerfile.web 的 ELYSPER_VERSION /
-      # ELYSPER_GIT_SHA / ELYSPER_BUILD_TIME 也已经写进 OCI labels.
-      # web 不需要 ELYSPER_TARGET — nginx image 跟 arch 无关, 只跟
+      # web 镜像 — 同套 tag 方案. Dockerfile.web 的 UVA_VERSION /
+      # UVA_GIT_SHA / UVA_BUILD_TIME 也已经写进 OCI labels.
+      # web 不需要 UVA_TARGET — nginx image 跟 arch 无关, 只跟
       # nginx binary 本身所在架构走 (buildx --platform 自动选).
-      - name: Build and push elysper-web (multi-arch)
+      - name: Build and push uva-web (multi-arch)
         env:
           SHA: ${{ steps.identity.outputs.sha }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
@@ -199,17 +199,17 @@ jobs:
             exit 1
           fi
           tags=(
-            "docker.io/crochee/elysper-web:${TAG}"
-            "docker.io/crochee/elysper-web:${TAG}-${SHORT_SHA}"
+            "docker.io/crochee/uva-web:${TAG}"
+            "docker.io/crochee/uva-web:${TAG}-${SHORT_SHA}"
           )
           tag_args=()
           for t in "${tags[@]}"; do tag_args+=(--tag "$t"); done
 
           docker buildx build \
             --platform linux/amd64,linux/arm64 \
-            --build-arg "ELYSPER_GIT_SHA=${SHA}" \
-            --build-arg "ELYSPER_BUILD_TIME=${BUILD_TIME}" \
-            --build-arg "ELYSPER_VERSION=${VERSION}" \
+            --build-arg "UVA_GIT_SHA=${SHA}" \
+            --build-arg "UVA_BUILD_TIME=${BUILD_TIME}" \
+            --build-arg "UVA_VERSION=${VERSION}" \
             --file Dockerfile.web \
             --target runtime \
             --push \
@@ -339,8 +339,8 @@ jobs:
 
           failed=0
           for image in \
-              "docker.io/crochee/elysper-app-server:${TAG}" \
-              "docker.io/crochee/elysper-web:${TAG}"; do
+              "docker.io/crochee/uva-app-server:${TAG}" \
+              "docker.io/crochee/uva-web:${TAG}"; do
             if ! verify_image "${image}"; then
               failed=1
             fi

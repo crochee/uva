@@ -51,24 +51,24 @@ fn an_unknown_flag_is_rejected() {
 #[test]
 fn the_app_server_resolution_order_is_flag_then_exe_dir_then_path() {
     let flag = PathBuf::from("/opt/server");
-    let exe_dir = Some(PathBuf::from("/usr/lib/elysper"));
+    let exe_dir = Some(PathBuf::from("/usr/lib/uva"));
     let candidates = app_server_candidates(Some(&flag), exe_dir.as_deref());
     assert_eq!(candidates[0], flag);
     assert_eq!(
         candidates[1],
-        PathBuf::from("/usr/lib/elysper/elysper-app-server")
+        PathBuf::from("/usr/lib/uva/uva-app-server")
     );
-    assert_eq!(candidates[2], PathBuf::from("elysper-app-server"));
+    assert_eq!(candidates[2], PathBuf::from("uva-app-server"));
 }
 
 #[test]
 fn the_web_dir_resolution_order_is_flag_then_resource_then_dev_checkout() {
     let flag = PathBuf::from("/tmp/dist");
-    let resource = PathBuf::from("/usr/lib/elysper/resources/dist");
+    let resource = PathBuf::from("/usr/lib/uva/resources/dist");
     let candidates = web_dir_candidates(Some(&flag), Some(&resource));
     assert_eq!(candidates[0], flag);
     assert_eq!(candidates[1], resource);
-    assert!(candidates[2].ends_with("elysper-web/dist"));
+    assert!(candidates[2].ends_with("uva-web/dist"));
 }
 
 #[test]

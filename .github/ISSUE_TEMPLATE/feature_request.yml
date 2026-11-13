@@ -57,7 +57,7 @@ body:
       label: 影响面
       description: |
         受影响 crate（facade feature flag 变化？新 crate？破坏性 API？）；
-        是否触碰 `crates/elysper-core` 的 trait；是否需要新依赖。
+        是否触碰 `crates/uva-core` 的 trait；是否需要新依赖。
     validations:
       required: false
 

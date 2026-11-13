@@ -1,5 +1,5 @@
 [package]
-name = "elysper-pr-evals"
+name = "uva-pr-evals"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,5 +8,5 @@ edition = "2024"
 [dependencies]
 async-trait = "0.1"
 serde_json = "1"
-elysper-eval = { path = "../crates/elysper-eval" }
+uva-eval = { path = "../crates/uva-eval" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

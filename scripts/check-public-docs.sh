@@ -38,13 +38,13 @@ cd "$(dirname "$0")/.."
 # exactly the contract this gate keeps documented. Kept explicit so
 # a new crate never joins silently.
 CRATES=(
-  elysper-core
-  elysper-tool
-  elysper-provider
-  elysper-session
-  elysper-context
-  elysper-steering
-  elysper-harness
+  uva-core
+  uva-tool
+  uva-provider
+  uva-session
+  uva-context
+  uva-steering
+  uva-harness
 )
 
 BASELINE_FILE="scripts/public-docs/baseline"

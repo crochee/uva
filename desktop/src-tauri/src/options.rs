@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// The usage text `--help` and parse errors print.
 const USAGE: &str = "\
-usage: elysper-desktop [--directory DIR] [--profile PATH]\
+usage: uva-desktop [--directory DIR] [--profile PATH]\
  [--bundle PATH] [--patch PATH]
                     [--app-server PATH] [--web-dir PATH]\
  [--dev-url URL]
@@ -19,15 +19,15 @@ usage: elysper-desktop [--directory DIR] [--profile PATH]\
   --profile PATH     plugin profile TOML (passed to serve)
   --bundle PATH      bundle seed TOML (lowest layer)
   --patch PATH       patch TOML layered over the profile
-  --app-server PATH  the elysper-app-server binary\
- (env: ELYSPER_APP_SERVER)
+  --app-server PATH  the uva-app-server binary\
+ (env: UVA_APP_SERVER)
   --web-dir PATH     the web front-end dist\
  (default: resource dir, then the dev checkout)
   --dev-url URL      the URL a debug window opens\
  (default: http://localhost:5173)";
 
 /// Everything the shell needs to launch: the pass-through surface of
-/// `elysper-app-server serve` plus the shell's own resource and
+/// `uva-app-server serve` plus the shell's own resource and
 /// window knobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -40,7 +40,7 @@ pub struct Options {
     pub bundle: Option<PathBuf>,
     /// The patch TOML layered over the profile, if any.
     pub patch: Option<PathBuf>,
-    /// `--app-server` or the env `ELYSPER_APP_SERVER`.
+    /// `--app-server` or the env `UVA_APP_SERVER`.
     pub app_server: Option<PathBuf>,
     /// `--web-dir`: an explicit override for the dist location.
     pub web_dir: Option<PathBuf>,
@@ -53,9 +53,9 @@ pub struct Options {
 /// process environment.
 #[derive(Debug, Clone, Default)]
 pub struct Env {
-    /// `ELYSPER_APP_SERVER` — same variable, same meaning as the TUI.
+    /// `UVA_APP_SERVER` — same variable, same meaning as the TUI.
     pub app_server: Option<String>,
-    /// `ELYSPER_BACKEND_PORT` — the port the Vite proxy targets.
+    /// `UVA_BACKEND_PORT` — the port the Vite proxy targets.
     pub backend_port: Option<String>,
 }
 
@@ -106,7 +106,7 @@ impl Options {
     }
 }
 
-/// Where to look for `elysper-app-server` (design D10): the
+/// Where to look for `uva-app-server` (design D10): the
 /// flag/env override first, then next to the shell's own binary (in
 /// a packaged bundle that is exactly where the bundler drops the
 /// sidecar, minus the target-triple suffix), then bare `PATH`.
@@ -119,9 +119,9 @@ pub fn app_server_candidates(
         candidates.push(flag.to_path_buf());
     }
     if let Some(dir) = exe_dir {
-        candidates.push(dir.join("elysper-app-server"));
+        candidates.push(dir.join("uva-app-server"));
     }
-    candidates.push(PathBuf::from("elysper-app-server"));
+    candidates.push(PathBuf::from("uva-app-server"));
     candidates
 }
 
@@ -140,8 +140,8 @@ pub fn web_dir_candidates(
     if let Some(resource) = resource_dist {
         candidates.push(resource.to_path_buf());
     }
-    candidates.push(PathBuf::from("../elysper-web/dist"));
-    candidates.push(PathBuf::from("../../elysper-web/dist"));
+    candidates.push(PathBuf::from("../uva-web/dist"));
+    candidates.push(PathBuf::from("../../uva-web/dist"));
     candidates
 }
 
@@ -159,7 +159,7 @@ pub fn first_existing(
 /// #2): release builds hand `0` to the supervisor (it picks a free
 /// port, and the window reads `base_url()`); debug builds bind the
 /// fixed port the Vite dev-server proxy targets —
-/// `ELYSPER_BACKEND_PORT`, default `8080` (`elysper-web/vite.config.ts`).
+/// `UVA_BACKEND_PORT`, default `8080` (`uva-web/vite.config.ts`).
 pub fn gateway_port(
     is_release: bool,
     backend_port: Option<&str>,
@@ -170,7 +170,7 @@ pub fn gateway_port(
     match backend_port {
         None => Ok(8080),
         Some(raw) => raw.parse::<u16>().map_err(|_| {
-            format!("ELYSPER_BACKEND_PORT is not a port number: {raw}")
+            format!("UVA_BACKEND_PORT is not a port number: {raw}")
         }),
     }
 }

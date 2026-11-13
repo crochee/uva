@@ -130,7 +130,7 @@
 
   <div class="question">
     <p><b>这份 demo 要回答的问题：</b>"三个宿主等价"这套定义与门禁规则，站得住吗？</p>
-    <p>表有 <b>13 个核心能力域</b>（会话、对话、Agent、技能、工具、任务、计划、工作流、评测、模型、插件目录、搜索、UI 扩展），
+    <p>表有 <b>11 个核心能力域</b>（会话、对话、Agent、技能、工具、任务、计划、评测、模型、搜索、UI 扩展），
        每行三列（三个宿主）。每格是四种状态之一：<b>完整</b>（能力齐、呈现等价）、
        <b>适配</b>（能力齐、但按介质换了呈现，比如终端里的表格）、<b>待做</b>（能力还不齐）、
        <b>不适用</b>（这个介质压根用不上，必须写明理由）。</p>
@@ -196,10 +196,8 @@ const Model = (() => {
     { key: 'tools',     label: '工具' },
     { key: 'tasks',     label: '任务' },
     { key: 'schedules', label: '计划' },
-    { key: 'workflows', label: '工作流' },
     { key: 'evals',     label: '评测' },
     { key: 'models',    label: '模型' },
-    { key: 'plugins',   label: '插件目录' },
     { key: 'search',    label: '搜索' },
     { key: 'ui',        label: 'UI 扩展' },
   ];
@@ -210,25 +208,24 @@ const Model = (() => {
     'anthropic/messages','approval/respond','attachments/create','attachments/delete','attachments/get',
     'chat/cancel','chat/feedback','chat/message/send','chat/operation','chat/regenerate',
     'chat/session/create','chat/usage','evals/create','evals/delete','evals/get','evals/list','evals/run',
-    'health/livez','health/ping','health/readyz','health/version','models/list','plugins/list',
+    'health/livez','health/ping','health/readyz','health/version','models/list',
     'schedules/create','schedules/delete','schedules/get','schedules/list','schedules/patch','schedules/tick',
     'search/all','session/unfollow','sessions/compact','sessions/delete','sessions/events','sessions/export',
     'sessions/follow','sessions/fork','sessions/get','sessions/list','sessions/resume','sessions/search',
     'sessions/status','sessions/usage','skills/create','skills/delete','skills/get','skills/list','skills/reload',
     'tasks/get','tasks/list','tools/get','tools/list','tools/register','tools/unregister','ui/schema',
-    'workflows/create','workflows/delete','workflows/get','workflows/list','workflows/replace','workflows/run',
   ];
 
   /* 磁盘上真实存在的文件（原型内的一份快照；真实门禁会读文件系统） */
   const DISK_SEED = [
-    'elysper-web/src/pages/SessionsPage.tsx','elysper-web/src/pages/ChatPage.tsx',
-    'elysper-web/src/pages/AgentsPage.tsx','elysper-web/src/pages/SkillsPage.tsx',
-    'elysper-web/src/pages/ToolsPage.tsx','elysper-web/src/pages/TasksPage.tsx',
-    'elysper-web/src/pages/SchedulesPage.tsx','elysper-web/src/pages/WorkflowsPage.tsx',
-    'elysper-web/src/pages/EvalsPage.tsx','elysper-web/src/api/client.ts',
-    'elysper-web/src/components/plugins/DeploymentPlugins.tsx',
-    'elysper-web/src/components/ui-schema/UiSchemaPanel.tsx',
-    'crates/elysper-tui/src/transport.rs','crates/elysper-tui/src/app.rs','crates/elysper-tui/src/render.rs',
+    'uva-web/src/pages/SessionsPage.tsx','uva-web/src/pages/ChatPage.tsx',
+    'uva-web/src/pages/AgentsPage.tsx','uva-web/src/pages/SkillsPage.tsx',
+    'uva-web/src/pages/ToolsPage.tsx','uva-web/src/pages/TasksPage.tsx',
+    'uva-web/src/pages/SchedulesPage.tsx',
+    'uva-web/src/pages/EvalsPage.tsx','uva-web/src/api/client.ts',
+    'uva-web/src/components/plugins/DeploymentPlugins.tsx',
+    'uva-web/src/components/ui-schema/UiSchemaPanel.tsx',
+    'crates/uva-tui/src/transport.rs','crates/uva-tui/src/app.rs','crates/uva-tui/src/render.rs',
     'docs/design/2026-11-09-desktop-frontend-tree-design.md',
   ];
 
@@ -247,28 +244,24 @@ const Model = (() => {
     tools:     ['tools/list','tools/register','tools/get','tools/unregister'],
     tasks:     ['tasks/list','tasks/get'],
     schedules: ['schedules/list','schedules/create','schedules/get','schedules/patch','schedules/delete','schedules/tick'],
-    workflows: ['workflows/list','workflows/create','workflows/get','workflows/replace','workflows/delete','workflows/run'],
     evals:     ['evals/list','evals/create','evals/get','evals/delete','evals/run'],
     models:    ['models/list'],
-    plugins:   ['plugins/list'],
     search:    ['search/all'],
     ui:        ['ui/schema'],
   };
 
   const WEB_EVIDENCE = {
-    sessions: 'elysper-web/src/pages/SessionsPage.tsx',
-    chat: 'elysper-web/src/pages/ChatPage.tsx',
-    agents: 'elysper-web/src/pages/AgentsPage.tsx',
-    skills: 'elysper-web/src/pages/SkillsPage.tsx',
-    tools: 'elysper-web/src/pages/ToolsPage.tsx',
-    tasks: 'elysper-web/src/pages/TasksPage.tsx',
-    schedules: 'elysper-web/src/pages/SchedulesPage.tsx',
-    workflows: 'elysper-web/src/pages/WorkflowsPage.tsx',
-    evals: 'elysper-web/src/pages/EvalsPage.tsx',
-    models: 'elysper-web/src/api/client.ts',
-    plugins: 'elysper-web/src/components/plugins/DeploymentPlugins.tsx',
-    search: 'elysper-web/src/api/client.ts',
-    ui: 'elysper-web/src/components/ui-schema/UiSchemaPanel.tsx',
+    sessions: 'uva-web/src/pages/SessionsPage.tsx',
+    chat: 'uva-web/src/pages/ChatPage.tsx',
+    agents: 'uva-web/src/pages/AgentsPage.tsx',
+    skills: 'uva-web/src/pages/SkillsPage.tsx',
+    tools: 'uva-web/src/pages/ToolsPage.tsx',
+    tasks: 'uva-web/src/pages/TasksPage.tsx',
+    schedules: 'uva-web/src/pages/SchedulesPage.tsx',
+    evals: 'uva-web/src/pages/EvalsPage.tsx',
+    models: 'uva-web/src/api/client.ts',
+    search: 'uva-web/src/api/client.ts',
+    ui: 'uva-web/src/components/ui-schema/UiSchemaPanel.tsx',
   };
 
   const DESIGN = 'docs/design/2026-11-09-desktop-frontend-tree-design.md';
@@ -277,7 +270,7 @@ const Model = (() => {
     const matrix = {};
     for (const d of DOMAINS) {
       matrix[d.key] = {};
-      // 浏览器：今天就覆盖全部 13 个域
+      // 浏览器：今天就覆盖全部 12 个域
       matrix[d.key].web = {
         status: 'full', evidence: WEB_EVIDENCE[d.key], anchor: '', reason: '',
         methods: DOMAIN_METHODS[d.key].slice(),
@@ -289,9 +282,9 @@ const Model = (() => {
       };
       // 终端：只有会话与对话两块，其余待做
       const tuiPartial = d.key === 'sessions'
-        ? { methods: ['sessions/follow','sessions/events','session/unfollow'], evidence: 'crates/elysper-tui/src/transport.rs' }
+        ? { methods: ['sessions/follow','sessions/events','session/unfollow'], evidence: 'crates/uva-tui/src/transport.rs' }
         : d.key === 'chat'
-          ? { methods: ['chat/session/create','chat/message/send','chat/cancel','approval/respond'], evidence: 'crates/elysper-tui/src/app.rs' }
+          ? { methods: ['chat/session/create','chat/message/send','chat/cancel','approval/respond'], evidence: 'crates/uva-tui/src/app.rs' }
           : { methods: [], evidence: '' };
       matrix[d.key].tui = {
         status: 'planned',
@@ -308,7 +301,7 @@ const Model = (() => {
       waves: {
         desktop: {
           name: '桌面壳落地（刀 3）',
-          detail: '桌面复用同一份前端 ⇒ 13 个域一次补齐。',
+          detail: '桌面复用同一份前端 ⇒ 12 个域一次补齐。',
           apply: (s) => {
             for (const d of DOMAINS) {
               const cell = s.matrix[d.key].desktop;
@@ -327,28 +320,28 @@ const Model = (() => {
             for (const key of ['sessions','chat']) {
               const cell = s.matrix[key].tui;
               cell.status = 'adapted';
-              cell.evidence = 'crates/elysper-tui/src/views/list.rs';
+              cell.evidence = 'crates/uva-tui/src/views/list.rs';
               cell.methods = DOMAIN_METHODS[key].slice();
               cell.anchor = '';
             }
-            s.disk.add('crates/elysper-tui/src/views/list.rs');
-            s.disk.add('crates/elysper-tui/src/views/detail.rs');
-            s.disk.add('crates/elysper-tui/src/domains.rs');
+            s.disk.add('crates/uva-tui/src/views/list.rs');
+            s.disk.add('crates/uva-tui/src/views/detail.rs');
+            s.disk.add('crates/uva-tui/src/domains.rs');
           },
         },
         tuiCatalog: {
           name: '终端补目录九域（刀 6）',
           detail: '每域一张列配置表（数据），不加界面 ⇒ 目录域能力齐。',
           apply: (s) => {
-            const rest = ['agents','skills','tools','tasks','schedules','workflows','evals','models','plugins','search','ui'];
+            const rest = ['agents','skills','tools','tasks','schedules','evals','models','search','ui'];
             for (const key of rest) {
               const cell = s.matrix[key].tui;
               cell.status = 'adapted';
-              cell.evidence = 'crates/elysper-tui/src/domains.rs';
+              cell.evidence = 'crates/uva-tui/src/domains.rs';
               cell.methods = DOMAIN_METHODS[key].slice();
               cell.anchor = '';
             }
-            s.disk.add('crates/elysper-tui/src/domains.rs');
+            s.disk.add('crates/uva-tui/src/domains.rs');
           },
         },
       },
@@ -499,7 +492,7 @@ const STATUS_CLASS = { full: 'full', adapted: 'adapted', 'n-a': 'na', planned: '
 const SCENARIOS = [
   {
     name: '① 今天的状态',
-    desc: '起点：浏览器覆盖 13 个域；桌面壳还没落地；终端只有会话与对话两块，其余待做。缺口数与基线相等 ⇒ 没有违规。',
+    desc: '起点：浏览器覆盖 12 个域；桌面壳还没落地；终端只有会话与对话两块，其余待做。缺口数与基线相等 ⇒ 没有违规。',
     steps: [
       { label: '看矩阵：终端列几乎全是"待做"', act: { type: 'noop' } },
       { label: '看缺口数（应该等于基线，没有违规）', act: { type: 'noop' } },
@@ -511,7 +504,7 @@ const SCENARIOS = [
     name: '② 推进波次',
     desc: '每落一个波次，缺口下降，然后基线跟着下调（棘轮只降不升）。三个波次之后缺口归零。',
     steps: [
-      { label: '应用波次：桌面壳落地（13 个域一次补齐）', act: { type: 'wave', wave: 'desktop' } },
+      { label: '应用波次：桌面壳落地（12 个域一次补齐）', act: { type: 'wave', wave: 'desktop' } },
       { label: '把基线下调到新的缺口数', act: { type: 'rebaseline' } },
       { label: '应用波次：终端补会话与对话', act: { type: 'wave', wave: 'tuiChat' } },
       { label: '把基线下调到新的缺口数', act: { type: 'rebaseline' } },

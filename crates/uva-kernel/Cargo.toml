@@ -1,0 +1,43 @@
+[package]
+name = "uva-kernel"
+description = "The Uva plugin kernel: plugin manifests, reversible mounting, and lifecycle-owned effects"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+# The kernel is the only crate that names `cordis`. Everything else --
+# the harness, the built-in plugins, the app server -- talks to the
+# kernel's `Plugin` / `mount_all` contract, so the pre-1.0 framework
+# stays behind one boundary.
+#
+# `cordis-rs 0.6.2` has an empty dependency table, which is what keeps
+# `uva-kernel` (and every crate that later depends on it) runtime
+# neutral: `cargo tree -p uva-kernel -e normal` must never show a
+# `tokio` package. Tests are plain `#[test]` fns -- cordis drives
+# lifecycle transitions eagerly -- so no dev-dependency on a runtime is
+# needed either.
+[dependencies]
+cordis = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# The waterfall rows drive async chain passes; `block_on` is a bench-only
+# executor and the kernel's own dependency graph stays runtime-free.
+[dev-dependencies]
+futures.workspace = true
+
+# The hot-path benchmarks: one binary that prints a table (`make bench`)
+# and enforces ratios with `--check` (`make bench-check`). `harness =
+# false` keeps criterion (and its dependency tree) out of the workspace.
+[[bench]]
+name = "hot_paths"
+harness = false

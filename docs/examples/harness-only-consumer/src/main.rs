@@ -1,6 +1,6 @@
 //! # A harness consumer with no runtime in its dependency tree
 //!
-//! The claim under test is narrow and mechanical: `elysper-harness`
+//! The claim under test is narrow and mechanical: `uva-harness`
 //! (and everything it pulls in) is usable from a program whose
 //! dependency tree contains **zero** `tokio`. Not "the framework does
 //! not require you to call `#[tokio::main]`" — that weaker claim holds
@@ -34,13 +34,13 @@
 //! - `main` is a plain `fn main()`; every await happens inside a
 //!   `block_on`;
 //! - the provider is scripted, so no HTTP adapter (and its tokio SSE
-//!   pump) is in the tree — `elysper-provider` is taken with
+//!   pump) is in the tree — `uva-provider` is taken with
 //!   `default-features = false`;
 //! - the only tool is this file's own [`EchoTool`]; the builtin
 //!   `read` / `write` / `shell` plugins are tokio-bound and are not
 //!   registered.
 //!
-//! `elysper-core`, `elysper-provider` and `elysper-tool` are direct
+//! `uva-core`, `uva-provider` and `uva-tool` are direct
 //! dependencies because their traits are what a consumer implements
 //! and the harness re-exports neither. They are the same libraries the
 //! harness itself uses; the tree they produce carries no runtime.
@@ -54,14 +54,14 @@ use std::{
 };
 
 use futures::StreamExt;
-use elysper_core::{
+use uva_core::{
     AtomicCancelToken,
     CancelToken,
     Error,
     spawn::{BoxFuture, Spawner},
 };
-use elysper_harness::{Agent, AgentEvent, AgentInput, ReActAgent};
-use elysper_provider::{
+use uva_harness::{Agent, AgentEvent, AgentInput, ReActAgent};
+use uva_provider::{
     CompletionRequest,
     CompletionResponse,
     Content,
@@ -71,11 +71,11 @@ use elysper_provider::{
     ProviderConfig,
     ToolUse,
 };
-use elysper_tool::{Tool, ToolOutput, ToolRegistry, registry::ToolEntry};
+use uva_tool::{Tool, ToolOutput, ToolRegistry, registry::ToolEntry};
 
 /// Where detached work goes. This is the only piece a non-tokio
 /// consumer has to supply, and it is the same ten lines as
-/// `elysper-harness/examples/runtime_agnostic.rs`.
+/// `uva-harness/examples/runtime_agnostic.rs`.
 struct ThreadSpawner;
 
 impl Spawner for ThreadSpawner {
@@ -166,7 +166,7 @@ impl Tool for EchoTool {
     async fn call(
         &self,
         input: serde_json::Value,
-        _context: &elysper_tool::Context,
+        _context: &uva_tool::Context,
     ) -> ToolOutput {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let text = input
@@ -178,7 +178,7 @@ impl Tool for EchoTool {
 }
 
 fn main() {
-    println!("=== elysper-harness: a consumer with no tokio ===\n");
+    println!("=== uva-harness: a consumer with no tokio ===\n");
 
     let model_calls = Arc::new(AtomicUsize::new(0));
     let tool_calls = Arc::new(AtomicUsize::new(0));
@@ -234,7 +234,7 @@ fn main() {
 
     println!("spawner          : std::thread + futures::executor::block_on");
     println!(
-        "model crate      : elysper-harness (no runtime crate in the tree)"
+        "model crate      : uva-harness (no runtime crate in the tree)"
     );
     println!("events observed  : {}", events.len());
     println!("model calls      : {}", model_calls.load(Ordering::SeqCst));

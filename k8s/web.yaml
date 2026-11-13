@@ -1,8 +1,8 @@
-# k8s deployment manifest — elysper-web
+# k8s deployment manifest — uva-web
 #
 # The React/Vite frontend serves the static SPA bundle via nginx.
 # The nginx config (`nginx/default.conf.template`) reverse-proxies
-# `/api/*` to the elysper-server Service so the SPA and the API
+# `/api/*` to the uva-server Service so the SPA and the API
 # share one origin in production (avoids CORS, keeps cookies
 # first-party).
 #
@@ -21,11 +21,11 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: elysper-web
+  name: uva-web
   labels:
-    app.kubernetes.io/name: elysper-web
+    app.kubernetes.io/name: uva-web
     app.kubernetes.io/component: frontend
-    app.kubernetes.io/part-of: elysper
+    app.kubernetes.io/part-of: uva
 spec:
   replicas: 1
   revisionHistoryLimit: 3
@@ -36,13 +36,13 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: elysper-web
+      app.kubernetes.io/name: uva-web
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: elysper-web
+        app.kubernetes.io/name: uva-web
         app.kubernetes.io/component: frontend
-        app.kubernetes.io/part-of: elysper
+        app.kubernetes.io/part-of: uva
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -54,7 +54,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: web
-          image: docker.io/crochee/elysper-web:0.1.0
+          image: docker.io/crochee/uva-web:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -81,9 +81,9 @@ spec:
             # here is plain nginx so this is informational. The web
             # image's nginx.conf can read these to drive proxy_pass
             # upstream selection in dev vs prod.
-            - name: ELYSPER_HOST
+            - name: UVA_HOST
               value: "0.0.0.0"
-            - name: ELYSPER_PORT
+            - name: UVA_PORT
               value: "80"
           resources:
             requests:
@@ -102,13 +102,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: elysper-web
+  name: uva-web
   labels:
-    app.kubernetes.io/name: elysper-web
+    app.kubernetes.io/name: uva-web
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: elysper-web
+    app.kubernetes.io/name: uva-web
   ports:
     - name: http
       port: 80
@@ -118,9 +118,9 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: elysper-web
+  name: uva-web
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: elysper-web
+      app.kubernetes.io/name: uva-web

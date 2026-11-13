@@ -8,7 +8,7 @@
 # reports a protocol error. Logs and diagnostics belong on stderr.
 #
 # The one writer allowed to touch stdout is the protocol writer in
-# `crates/elysper-app-server/src/rpc/stdio.rs`; this gate scans the
+# `crates/uva-app-server/src/rpc/stdio.rs`; this gate scans the
 # binaries (`src/bin/` and `src/main.rs`) and nothing else, so that
 # writer is not in scope.
 #
@@ -28,7 +28,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-CRATE="crates/elysper-app-server"
+CRATE="crates/uva-app-server"
 targets=()
 if [[ -d "$CRATE/src/bin" ]]; then
   targets+=("$CRATE/src/bin")
@@ -56,7 +56,7 @@ if hits=$(grep -rnE "$pattern" "${targets[@]}" 2>/dev/null \
   printf '%s\n' "$hits" | sed 's/^/  /'
   echo "Logs and diagnostics go to stderr; stdout carries only Content-Length"
   echo "frames. Route a frame through the protocol writer in"
-  echo "crates/elysper-app-server/src/rpc/stdio.rs instead."
+  echo "crates/uva-app-server/src/rpc/stdio.rs instead."
   exit 1
 fi
 

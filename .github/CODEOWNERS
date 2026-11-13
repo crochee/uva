@@ -1,4 +1,4 @@
-# CODEOWNERS — Elysper
+# CODEOWNERS — Uva
 #
 # 与 MAINTAINERS.md 同步。GitHub 在 PR 上自动 @ 用户 / 团队请求 review。
 # 行格式: <pattern> <owner>; 末匹配兜底 (`*`)。
@@ -8,20 +8,20 @@
 *                                    @crochee
 
 # 核心 trait + proc-macro —— 接口变更需快速 review。
-/crates/elysper-core/                @crochee
-/crates/elysper-macros/              @crochee
+/crates/uva-core/                @crochee
+/crates/uva-macros/              @crochee
 
 # Provider wire type 影响下游兼容，破坏性变更成本贵。
-/crates/elysper-provider/            @crochee
+/crates/uva-provider/            @crochee
 
 # Harness / Tool 范式 —— 循环 / 注册表 / 暴露投影；改一处走全仓 review。
-/crates/elysper-harness/             @crochee
-/crates/elysper-tool/                @crochee
-/crates/elysper-tool-*/              @crochee
+/crates/uva-harness/             @crochee
+/crates/uva-tool/                @crochee
+/crates/uva-tool-*/              @crochee
 
 # HTTP / SSE / config.yaml —— 公开面 / 安全敏感。
-/crates/elysper-app-server/         @crochee
-/elysper-web/                        @crochee
+/crates/uva-app-server/         @crochee
+/uva-web/                        @crochee
 /config.yaml                         @crochee
 
 # CI / 自动化 / 棘轮 —— 一处错就全 CI 红灯。
@@ -44,7 +44,6 @@
 /CONTRIBUTORS.md                     @crochee
 /CODE_OF_CONDUCT.md                   @crochee
 /LICENSE                              @crochee
-/CLAUDE.md                            @crochee
 
 # 文档体系。
 /README.md                           @crochee

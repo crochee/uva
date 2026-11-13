@@ -8,25 +8,25 @@
 # 命中规则从上到下; 先命中先生效.
 
 # ── 路径驱动 ────────────────────────────────────────────────────────────
-"area: crates/elysper-core":
+"area: crates/uva-core":
   - files:
-      - "crates/elysper-core/**"
+      - "crates/uva-core/**"
 
-"area: crates/elysper-harness":
+"area: crates/uva-harness":
   - files:
-      - "crates/elysper-harness/**"
+      - "crates/uva-harness/**"
 
-"area: crates/elysper-tool":
+"area: crates/uva-tool":
   - files:
-      - "crates/elysper-tool/**"
+      - "crates/uva-tool/**"
 
-"area: crates/elysper-app-server":
+"area: crates/uva-app-server":
   - files:
-      - "crates/elysper-app-server/**"
+      - "crates/uva-app-server/**"
 
-"area: elysper-web":
+"area: uva-web":
   - files:
-      - "elysper-web/**"
+      - "uva-web/**"
 
 "area: docs":
   - files:
@@ -56,61 +56,57 @@
 # ── 路径驱动 (按主题) ─────────────────────────────────────────────────
 provider:
   - files:
-      - "crates/elysper-provider/**"
+      - "crates/uva-provider/**"
 
 tool:
   - files:
-      - "crates/elysper-tool-*/**"
+      - "crates/uva-tool-*/**"
 
 search:
   - files:
-      - "crates/elysper-search/**"
-      - "crates/elysper-tool-search/**"
+      - "crates/uva-search/**"
+      - "crates/uva-tool-plugins/src/search/**"
 
 scheduler:
   - files:
-      - "crates/elysper-scheduler/**"
-      - "crates/elysper-tool-scheduler/**"
-
-workflow:
-  - files:
-      - "crates/elysper-workflow/**"
+      - "crates/uva-scheduler/**"
+      - "crates/uva-tool-plugins/src/scheduler/**"
 
 mcp:
   - files:
-      - "crates/elysper-mcp/**"
+      - "crates/uva-mcp/**"
 
 telemetry:
   - files:
-      - "crates/elysper-telemetry/**"
+      - "crates/uva-telemetry/**"
 
 session:
   - files:
-      - "crates/elysper-session/**"
+      - "crates/uva-session/**"
 
 context:
   - files:
-      - "crates/elysper-context/**"
+      - "crates/uva-context/**"
 
 steering:
   - files:
-      - "crates/elysper-steering/**"
+      - "crates/uva-steering/**"
 
 attachment:
   - files:
-      - "crates/elysper-attachment/**"
+      - "crates/uva-attachment/**"
 
 eval:
   - files:
-      - "crates/elysper-eval/**"
+      - "crates/uva-eval/**"
 
 macros:
   - files:
-      - "crates/elysper-macros/**"
+      - "crates/uva-macros/**"
 
 skill:
   - files:
-      - "crates/elysper-skill/**"
+      - "crates/uva-skill/**"
 
 # ── 标题驱动 (Conventional Commits) ─────────────────────────────────
 "type: feature":

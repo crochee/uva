@@ -8,7 +8,7 @@
 |---|---|---|
 | t01-json-flag | --json, CLI | `t01-json-flag` |
 | t02-empty-input-panic | empty input, panic | `t02-empty-input-panic` |
-| t03-log-env-rename | ELYSPER_LOG, ELYSPER_LOG_LEVEL | `t03-log-env-rename` |
+| t03-log-env-rename | UVA_LOG, UVA_LOG_LEVEL | `t03-log-env-rename` |
 
 ## Assertions
 

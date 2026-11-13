@@ -1,7 +1,7 @@
-# Elysper Deployment Guide
+# Uva Deployment Guide
 
 This document describes how to build, run, and deploy the
-full Elysper stack — `elysper-server` (Rust), `elysper-web`
+full Uva stack — `uva-app-server` (Rust), `uva-web`
 (React + Vite), and the supporting Nginx reverse proxy.
 
 ## Table of Contents
@@ -27,14 +27,14 @@ fronted by Nginx.
 ┌──────────────────────────────────────────────────────────┐
 │   Nginx (:80)                                            │
 │   - Serves the built React app from `/`                  │
-│   - Proxies `/api/*` to elysper-server                   │
+│   - Proxies `/api/*` to uva-app-server                   │
 │   - Proxies `/v1/*` (Anthropic Messages) to server       │
 │   - Proxies `/api/v1/sessions/{id}/follow` (SSE)         │
 └────────────────────┬─────────────────────────────────────┘
                      │
                      ▼
 ┌──────────────────────────────────────────────────────────┐
-│   elysper-server (Rust + Axum, :8080 internal)           │
+│   uva-app-server (Rust + Axum, :8080 internal)           │
 │   - Chat surface at `/api/v1/chat`                       │
 │   - Session event stream at `/api/v1/sessions/{id}/follow`│
 │   - Anthropic Messages at `/v1/messages`                 │
@@ -83,7 +83,7 @@ The frontend has **no automated test suite** by design (R72). The
 former Playwright e2e tree took 13 minutes per run and needed
 `cargo build` + Vite + Chromium, while its mocks rotted unnoticed. It is
 gone, along with `playwright.config.ts`, `.github/workflows/e2e.yml`,
-and an ad-hoc browser-script harness under `elysper-web/scripts/e2e/`.
+and an ad-hoc browser-script harness under `uva-web/scripts/e2e/`.
 
 What runs in CI is `make check-web` — `tsc --noEmit`, `eslint`, and
 `prettier --check`. Behaviour is verified by driving the running app
@@ -94,14 +94,14 @@ make dev            # backend :8080 + Vite :5173
 # then open the app through the MCP browser and exercise the change
 ```
 
-The MCP browser is supplied by the harness, not by `elysper-web`'s
+The MCP browser is supplied by the harness, not by `uva-web`'s
 dependencies — it keeps working with `playwright` uninstalled.
 
 ## Production deployment (separate)
 
 The recommended deployment is **split**: Nginx serves the
 compiled React app and reverse-proxies `/api/*` and `/v1/*` to
-`elysper-server`. This lets the two parts scale and ship
+`uva-app-server`. This lets the two parts scale and ship
 independently.
 
 `/v1/*` is the Anthropic Messages surface (`POST /v1/messages`).
@@ -116,8 +116,8 @@ make build-release
 ```
 
 This produces:
-- `target/release/elysper-server` — the server binary
-- `elysper-web/dist/` — the React app's static bundle
+- `target/release/uva-app-server` — the server binary
+- `uva-web/dist/` — the React app's static bundle
 
 ### 2. Containerize (recommended)
 
@@ -127,19 +127,44 @@ make docker-prod-up # starts the production compose stack
 ```
 
 The container topology:
-- `elysper-server` listens on internal port 8080 (no host port)
-- `elysper-web` (Nginx) listens on host port 80 and proxies
+- `uva-app-server` listens on internal port 8080 (no host port)
+- `uva-web` (Nginx) listens on host port 80 and proxies
   `/api/*` and `/v1/*` to the server over the docker network
 
 ### 3. Bare-metal deployment
 
-If you prefer to run on a single host without Docker, see
-[nginx.conf](./nginx.conf) for the Nginx server block. Place
-the React bundle in the configured `root` directory and run
-the server directly:
+If you prefer to run on a single host without Docker, give Nginx a server
+block like this one — it serves the React bundle and proxies both API
+surfaces to the server. `root` points at the directory holding the built
+bundle (`uva-web/dist/`).
+
+```nginx
+server {
+    listen 80;
+    root /srv/uva-web;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_buffering off;      # SSE: stream the answer as it arrives
+        proxy_read_timeout 3600s;
+    }
+
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_buffering off;      # the Messages surface answers SSE too
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+Then run the server and Nginx directly:
 
 ```bash
-./target/release/elysper-server &
+./target/release/uva-app-server &
 nginx -g "daemon off;"
 ```
 
@@ -152,7 +177,7 @@ URL a client is given is the deployment root — no path component:
 # through Nginx (compose prod, or a bare-metal nginx on :80)
 export ANTHROPIC_BASE_URL=http://localhost
 
-# or straight to elysper-server, bypassing the proxy
+# or straight to uva-app-server, bypassing the proxy
 export ANTHROPIC_BASE_URL=http://localhost:8080
 
 # the SDKs insist on a key; which values the server accepts
@@ -188,21 +213,21 @@ make clean-docker         # remove all containers + images
 
 ## Environment variables
 
-`elysper-server` reads:
+`uva-app-server` reads:
 
 | Var                    | Default       | Meaning                          |
 |------------------------|---------------|----------------------------------|
-| `ELYSPER_HOST`         | `0.0.0.0`     | bind address                     |
-| `ELYSPER_PORT`         | `8080`        | listen port                      |
+| `UVA_HOST`         | `0.0.0.0`     | bind address                     |
+| `UVA_PORT`         | `8080`        | listen port                      |
 | `RUST_LOG`             | `info`        | log level (`debug`/`info`/...)   |
 
-Precedence for the address: `--host`/`--port` → `ELYSPER_HOST`/
-`ELYSPER_PORT` → `host`/`port` in the deployment config → the binary's
+Precedence for the address: `--host`/`--port` → `UVA_HOST`/
+`UVA_PORT` → `host`/`port` in the deployment config → the binary's
 own defaults (`127.0.0.1:8080`). The container images set the two
 variables to `0.0.0.0:8080`, because a container that binds loopback is
 unreachable through a published port.
 
-`elysper-web` (Vite dev server only):
+`uva-web` (Vite dev server only):
 
 | Var                    | Default               | Meaning                |
 |------------------------|-----------------------|------------------------|
@@ -215,7 +240,7 @@ respective `config.toml` files in the workspace root.
 
 ### The deployment configuration file
 
-`elysper-server --config <path>` names the file that configures the
+`uva-app-server --config <path>` names the file that configures the
 boot: `providers` (base_url / api_key / models), `agents`
 (`max_steps`, `compaction`, `strategy`), `[tools]`, `[plugins]`,
 `auth`, `cors`, `operations`, and `mcp_servers`. **The whole file
@@ -227,11 +252,11 @@ the deployment file `.yaml`; a TOML document does not load.
 
 ```bash
 # everything from this file: providers, agents, tools, cors, mcp, …
-elysper-server --directory /srv/elysper --config /etc/elysper/deploy.yaml
+uva-app-server --directory /srv/uva --config /etc/uva/deploy.yaml
 ```
 
 Without `--config` the server tries `<directory>/config.toml`, then
-`<directory>/.elysper/config.toml`, then its defaults, and the provider
+`<directory>/.uva/config.toml`, then its defaults, and the provider
 additionally falls back to `<directory>/.agents/config.toml` and
 `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`. A named file that is missing or
 malformed is logged at `warn` and the next candidate is tried — a config
@@ -278,57 +303,28 @@ would be wrong for a multi-replica deployment anyway) and `skills`
 also where the API and the `skill` tool read them). Both are ignored by
 `serde`, so an existing file keeps working.
 
-### `[plugins]` — runtime composition
+### 第三方工具 — MCP server
 
-Which plugins a deployment runs comes from this section, not from
-cargo features:
+动态插件通道（进程插件 / Wasm 组件）已删除。第三方工具与脚本以
+**MCP server** 的形式接入：在一份 `mcp.json` 里按 `command` + `args`
+声明要拉起的服务器，服务器走 stdio 说话，它发布的工具注册进 agent
+用的同一个工具注册表：
 
-```yaml
-plugins:
-  - name: redactor
-    kind: remote
-    command: ["python", "-m", "redactor"]
-    transport: stdio        # accepted: stdio | http
-    capabilities: [tools]   # tools | observe | transform | gate
-    authority: reduced      # reduced | full
-    risk: unknown           # low | high | unknown
+```json
+{
+  "mcpServers": {
+    "redactor": { "command": "python", "args": ["-m", "redactor"] }
+  }
+}
 ```
 
-Defaults are `transport: stdio`, `authority: reduced`, `risk: unknown`,
-and no capabilities. The string fields are validated while parsing: an
-unknown value — or an unknown key — is a parse error naming the field
-and the values it accepts, never a silent fallback. `http` parses but
-is not implemented by the host, so selecting it skips that plugin with
-a diagnostic.
+文件位置与其它定义同一套双层布局：`<workspace>/.agents/mcp.json`、
+`~/.agents/mcp.json`；插件包里的 `<plugin>/mcp.json` 按
+`<plugin>/<server>` 命名空间落地。可选键 `env`（环境覆盖）与
+`enabled`（关掉这一台）由 `mcp.json` 的解析器校验。
 
-A plugin is optional capability, not a boot precondition. An entry that
-cannot be installed — the process will not start, the handshake fails,
-a `full` promotion the plugin cannot serve (it announces no `gate`), a
-static install that registers nothing, or a registration the host
-refuses when its tools meet the registry — is logged and skipped, and
-the boot continues. The composition owns the handles that keep the
-installed plugins' registrations alive for the process lifetime, and
-exposes the resolved and skipped sets through `Composition::resolved`
-and `Composition::skipped`. `GET /api/v1/plugins` is their reader — it
-returns both sets (`resolved`: name, kind, authority, risk, claimed
-tool names; `skipped`: name and the reason boot recorded), so an entry
-that did not install is visible without reading the log. The web UI
-shows the same panel on a session page.
-
-The composition installs into **one** deployment host, kept on the
-server for the process lifetime. Every agent the server builds — the
-boot agent, each per-run chat agent, eval agents and dynamically
-registered agents — receives a clone of that host and binds the node's
-one tool registry, so a plugin's tools are callable from a normal
-conversation, not only from the boot agent. A host clone shares the
-registrations (no per-run plugin process), and binding an already-bound
-registry is a no-op.
-
-A `static` entry names a factory compiled into the binary (`name` plus
-`kind: static`). No in-tree crate implements the harness's `Plugin`
-trait today, so the shipped table is **empty** and a `static` entry is
-skipped with a diagnostic. A fork that links a plugin crate registers
-its factory in the server's boot path, one line per plugin.
+一个服务器是可选能力，不是启动前提：拉不起来、握手失败或列不出工具
+的服务器会被记一条警告并跳过，boot 继续。
 
 ## Probe endpoints
 
@@ -359,7 +355,7 @@ block carries the identical settings.
 
 The proxy has no rule for `/v1/`, so the request reached the SPA
 fallback and Nginx answered `200` with `index.html`. Add the
-`location /v1/` block from [nginx.conf](./nginx.conf) — proxying to
+`location /v1/` block from the server block above — proxying to
 the same upstream as `/api/`, with `proxy_buffering off;` — and
 reload Nginx. The Vite dev server hides this: its proxy forwards
 `/v1` too, so the bug only shows up behind Nginx.
@@ -372,7 +368,7 @@ origins require a server restart.
 
 ### Container cannot reach the server
 
-The `elysper-server` container in `docker-compose.prod.yml`
+The `uva-app-server` container in `docker-compose.prod.yml`
 does not expose a host port — Nginx reaches it over the
 internal docker network. If you stop the server, Nginx health
 checks will fail.

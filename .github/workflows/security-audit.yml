@@ -4,7 +4,7 @@
 # 2. cargo-deny    — 许可证白名单 + 来源仓库 + 重复 crate 检测;
 # 3. gitleaks      — 历史 / 提交里的密钥模式 (R 后续可拆出独立 workflow).
 #
-# 每周一 03:00 UTC 跑 (master 周一合 PR 之前), + 每次 push / PR 触发.
+# 每 2 个月 1 号 03:00 UTC 跑 (奇数月: 1/3/5/7/9/11), + 每次 push / PR 触发.
 # 不在 master 上的"全量公告"失败不阻断 PR 合并: 公告数据库有滞后, 跑在
 # master 后才稳定; 但 deny 必须在 PR 上红灯.
 name: security-audit
@@ -15,8 +15,9 @@ on:
   pull_request:
     branches: [master]
   schedule:
-    # 周一 03:00 UTC — 比 dependabot 早 6 小时, 周一合 PR 前先看公告.
-    - cron: "0 3 * * 1"
+    # 每 2 个月 1 号 03:00 UTC (奇数月: 1/3/5/7/9/11) — 比 dependabot 的
+    # 同日 09:00 早 6 小时, 合 PR 前先看公告.
+    - cron: "0 3 1 */2 *"
   workflow_dispatch:
 
 permissions:
@@ -52,7 +53,7 @@ jobs:
         run: cargo install --locked cargo-audit
       - name: Audit
         # 在 PR 上不要求绿: 公告数据库滞后, 不在 master 的代码会让人
-        # 误以为 PR 引入公告; master 跑 + 周一 cron 跑是稳定信号.
+        # 误以为 PR 引入公告; master 跑 + 每 2 个月的 cron 跑是稳定信号.
         continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: cargo audit
 
@@ -124,7 +125,7 @@ jobs:
           #   - the public docs/QUICKSTART.md example key block.
           # Everything else reports and fails the build.
           [allowlist]
-          description = "Elysper v0.1.0 — per-path allowlist for non-production fixtures"
+          description = "Uva v0.1.0 — per-path allowlist for non-production fixtures"
           paths = [
             # Test fixtures: only files inside a `test` or `fixture`
             # directory tree; the rule still flags any high-entropy

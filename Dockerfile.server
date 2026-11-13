@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage Dockerfile for elysper-app-server (Rust) using
+# Multi-stage Dockerfile for uva-app-server (Rust) using
 # cargo-chef for dependency-layer caching.
 #
 # The image carries **both** halves of the application: the headless
@@ -8,16 +8,16 @@
 # in front of it, with the web front-end's built files baked into the
 # binary by the `embed-web` feature. One image, one process:
 #
-#   elysper-app-server serve --port 8080
+#   uva-app-server serve --port 8080
 #
 # Build identity baked at compile time via `build.rs`
-# (cargo:rustc-env=ELYSPER_*):
-#   - ELYSPER_GIT_SHA      — full 40-char commit SHA (release.yml,
+# (cargo:rustc-env=UVA_*):
+#   - UVA_GIT_SHA      — full 40-char commit SHA (release.yml,
 #                            Dockerfile.server, or `git log -1` fallback)
-#   - ELYSPER_BUILD_TIME   — ISO-8601 wall-clock (release.yml / build arg)
-#   - ELYSPER_TARGET       — full triple
-#   - ELYSPER_PROFILE      — "release" (defaults from CARGO_CFG_PROFILE)
-#   - ELYSPER_LONG_VERSION — pre-computed `<pkg> (<sha> <time>) <tgt> <prof>`
+#   - UVA_BUILD_TIME   — ISO-8601 wall-clock (release.yml / build arg)
+#   - UVA_TARGET       — full triple
+#   - UVA_PROFILE      — "release" (defaults from CARGO_CFG_PROFILE)
+#   - UVA_LONG_VERSION — pre-computed `<pkg> (<sha> <time>) <tgt> <prof>`
 #                            string, mirrors `build_info::long_version()`
 #                            so `clap` `--version` and `GET /version`
 #                            always agree
@@ -30,7 +30,7 @@
 #   2. cacher      — compile only third-party deps (the slowest
 #                    layer, cached on its own)
 #   3. web         — build the front-end's static files
-#   4. builder     — compile elysper-app-server's own crates (fast
+#   4. builder     — compile uva-app-server's own crates (fast
 #                    cache; invalidates only on source change)
 #   5. runtime     — minimal Alpine with tini + the binary
 #
@@ -40,20 +40,20 @@
 #
 # Example build:
 #   docker build -f Dockerfile.server \
-#     --build-arg ELYSPER_GIT_SHA=$(git rev-parse HEAD) \
-#     --build-arg ELYSPER_BUILD_TIME=$(date -u +%FT%TZ) \
-#     -t docker.io/crochee/elysper-app-server:0.1.0 .
+#     --build-arg UVA_GIT_SHA=$(git rev-parse HEAD) \
+#     --build-arg UVA_BUILD_TIME=$(date -u +%FT%TZ) \
+#     -t docker.io/crochee/uva-app-server:0.1.0 .
 
 ARG RUST_VERSION=1.98
 # 全局 ARG —— 必须在所有 FROM 之前声明, docker buildx 才能把
-# `--build-arg ELYSPER_*=...` 传给 runtime stage (Stage 5).
+# `--build-arg UVA_*=...` 传给 runtime stage (Stage 5).
 # 仅在每个 stage 内部重新声明才能引用 (ARG scope 是 stage 级的,
 # 见 https://docs.docker.com/build/building/variables/#scoping),
 # 但**值**继承自全局, 不需要在每个 stage 重新声明时给出 default.
-ARG ELYSPER_GIT_SHA=""
-ARG ELYSPER_BUILD_TIME=""
-ARG ELYSPER_TARGET="x86_64-unknown-linux-musl"
-ARG ELYSPER_VERSION="0.1.0"
+ARG UVA_GIT_SHA=""
+ARG UVA_BUILD_TIME=""
+ARG UVA_TARGET="x86_64-unknown-linux-musl"
+ARG UVA_VERSION="0.1.0"
 ARG NODE_VERSION=22
 
 ########## Stage 0: chef installer (toolchain only, reused) ##########
@@ -80,46 +80,46 @@ COPY --from=planner /app/recipe.json recipe.json
 # regress to fat LTO (which exhausts memory on small CI runners).
 ENV CARGO_PROFILE_RELEASE_LTO=thin \
     CARGO_PROFILE_RELEASE_STRIP=symbols
-RUN cargo chef cook --release -p elysper-app-server --bin elysper-app-server \
+RUN cargo chef cook --release -p uva-app-server --bin uva-app-server \
     --recipe-path recipe.json
 
 ########## Stage 3: the web front-end's static files ##########
 FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS web
 WORKDIR /web
-COPY elysper-web/package.json elysper-web/package-lock.json ./
+COPY uva-web/package.json uva-web/package-lock.json ./
 RUN npm ci
-COPY elysper-web/ ./
+COPY uva-web/ ./
 RUN npm run build
 
-########## Stage 4: build elysper-app-server with identity baked in ##########
+########## Stage 4: build uva-app-server with identity baked in ##########
 FROM cacher AS builder
 # CI-provided identity (also has `git log -1` fallback in build.rs).
 # ARG 已在全局作用域声明 (见文件顶部), builder stage 重新声明才能
 # 在 stage 内引用 (ARG scope 是 stage 级的).
-ARG ELYSPER_GIT_SHA
-ARG ELYSPER_BUILD_TIME
-ARG ELYSPER_TARGET
+ARG UVA_GIT_SHA
+ARG UVA_BUILD_TIME
+ARG UVA_TARGET
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-# `build.rs` lives at crates/elysper-app-server/build.rs; the
+# `build.rs` lives at crates/uva-app-server/build.rs; the
 # `COPY crates ./crates` above brings it along. No explicit copy.
 # The front-end's built files land where `build.rs` expects them
-# (`elysper-web/dist`), so the `embed-web` feature bakes them into
+# (`uva-web/dist`), so the `embed-web` feature bakes them into
 # the binary.
-COPY --from=web /web/dist ./elysper-web/dist
-ENV ELYSPER_GIT_SHA=${ELYSPER_GIT_SHA} \
-    ELYSPER_BUILD_TIME=${ELYSPER_BUILD_TIME} \
-    ELYSPER_PROFILE=release \
-    ELYSPER_TARGET=${ELYSPER_TARGET}
-RUN cargo build --release --locked -p elysper-app-server --features embed-web \
-    && cp target/release/elysper-app-server /app/elysper-app-server
+COPY --from=web /web/dist ./uva-web/dist
+ENV UVA_GIT_SHA=${UVA_GIT_SHA} \
+    UVA_BUILD_TIME=${UVA_BUILD_TIME} \
+    UVA_PROFILE=release \
+    UVA_TARGET=${UVA_TARGET}
+RUN cargo build --release --locked -p uva-app-server --features embed-web \
+    && cp target/release/uva-app-server /app/uva-app-server
 
 ########## Stage 4b: artifact —— scratch 导出层 (CI 用 `--output=...`) ##########
 # CI 与 `make server-artifact` 都用 `docker buildx build --target
 # artifact` 直接落到 dist/, 不进任何运行时镜像层. 镜像本身只在 buildx
 # cache 里短暂存在, 由 builder 阶段的可执行文件作 scratch 根.
 FROM scratch AS artifact
-COPY --from=builder /app/elysper-app-server /elysper-app-server
+COPY --from=builder /app/uva-app-server /uva-app-server
 
 ########## Stage 5: minimal Alpine runtime with tini ##########
 FROM alpine:3.19 AS runtime
@@ -130,19 +130,19 @@ WORKDIR /app
 # `docker inspect` shows them, and so future ENTRYPOINT scripts can
 # read them. ARG 已在全局作用域声明 (见文件顶部), runtime stage
 # 重新声明才能在 stage 内引用 (ARG scope 是 stage 级的).
-ARG ELYSPER_GIT_SHA
-ARG ELYSPER_BUILD_TIME
-ARG ELYSPER_TARGET
-ARG ELYSPER_VERSION
+ARG UVA_GIT_SHA
+ARG UVA_BUILD_TIME
+ARG UVA_TARGET
+ARG UVA_VERSION
 
-COPY --from=builder /app/elysper-app-server /usr/local/bin/elysper-app-server
+COPY --from=builder /app/uva-app-server /usr/local/bin/uva-app-server
 
-ENV ELYSPER_HOST=0.0.0.0 \
-    ELYSPER_PORT=8080 \
-    ELYSPER_VERSION=${ELYSPER_VERSION} \
-    ELYSPER_GIT_SHA=${ELYSPER_GIT_SHA} \
-    ELYSPER_BUILD_TIME=${ELYSPER_BUILD_TIME} \
-    ELYSPER_TARGET=${ELYSPER_TARGET} \
+ENV UVA_HOST=0.0.0.0 \
+    UVA_PORT=8080 \
+    UVA_VERSION=${UVA_VERSION} \
+    UVA_GIT_SHA=${UVA_GIT_SHA} \
+    UVA_BUILD_TIME=${UVA_BUILD_TIME} \
+    UVA_TARGET=${UVA_TARGET} \
     RUST_LOG=info
 
 EXPOSE 8080
@@ -151,15 +151,15 @@ EXPOSE 8080
 # shutdown (matches `tokio::signal::ctrl_c()` handler in main.rs).
 STOPSIGNAL SIGINT
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["elysper-app-server", "serve"]
+CMD ["uva-app-server", "serve"]
 
 # OCI image labels — surface under `docker inspect` / `podman
 # inspect` / Kubernetes `status.containerStatuses[].imageID` so a
 # support engineer can confirm the right image without running it.
-LABEL org.opencontainers.image.title="elysper-app-server" \
-      org.opencontainers.image.description="Elysper agent runtime — headless JSON-RPC core with a WebSocket gateway" \
-      org.opencontainers.image.source="https://github.com/crochee/elysper" \
+LABEL org.opencontainers.image.title="uva-app-server" \
+      org.opencontainers.image.description="Uva agent runtime — headless JSON-RPC core with a WebSocket gateway" \
+      org.opencontainers.image.source="https://github.com/crochee/uva" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version=${ELYSPER_VERSION} \
-      org.opencontainers.image.revision=${ELYSPER_GIT_SHA} \
-      org.opencontainers.image.created=${ELYSPER_BUILD_TIME}
+      org.opencontainers.image.version=${UVA_VERSION} \
+      org.opencontainers.image.revision=${UVA_GIT_SHA} \
+      org.opencontainers.image.created=${UVA_BUILD_TIME}

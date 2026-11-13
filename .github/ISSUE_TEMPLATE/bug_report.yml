@@ -15,7 +15,7 @@ body:
       label: 一句话描述
       description: 出了什么问题；预期是什么；实际是什么。
       placeholder: |
-        `elysper::harness::ReActAgent::run` 在 provider 返回空 content
+        `uva::harness::ReActAgent::run` 在 provider 返回空 content
         时死循环，预期应该走 `StopReason::NoOp`。
     validations:
       required: true
@@ -71,11 +71,11 @@ body:
     attributes:
       label: 环境
       description: |
-        OS / 架构 / Rust 工具链 / 关键依赖版本（`cargo tree -p elysper` 输出）。
+        OS / 架构 / Rust 工具链 / 关键依赖版本（`cargo tree -p uva` 输出）。
       placeholder: |
         ```
         Ubuntu 24.04 x86_64, rustc 1.95.0 stable,
-        elysper = 0.1.0, axum = 0.8, tokio = 1.40
+        uva = 0.1.0, axum = 0.8, tokio = 1.40
         ```
     validations:
       required: false
@@ -85,11 +85,11 @@ body:
     attributes:
       label: 关键日志 / 栈
       description: |
-        `RUST_BACKTRACE=1` 的栈；如有 `ELYSPER_OTLP_ENDPOINT` 设置的 OTLP
+        `RUST_BACKTRACE=1` 的栈；如有 `UVA_OTLP_ENDPOINT` 设置的 OTLP
         span 也可一并附上。
       placeholder: |
         ```
-        thread 'main' panicked at 'loop budget exceeded', crates/elysper-harness/src/agent/re_act/mod.rs:42:5
+        thread 'main' panicked at 'loop budget exceeded', crates/uva-harness/src/agent/re_act/mod.rs:42:5
         ```
     validations:
       required: false

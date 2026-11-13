@@ -1,27 +1,27 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage Dockerfile for elysper-mcp-server (stdio MCP binary).
+# Multi-stage Dockerfile for uva-mcp-server (stdio MCP binary).
 #
 # The binary speaks MCP over stdin / stdout; container usage is
-# typically `docker run --rm -i elysper/elysper-mcp-server
+# typically `docker run --rm -i uva/uva-mcp-server
 # --workspace /workspace` from an MCP client that spawns it as a
 # subprocess. The image is intentionally minimal — Alpine + the
 # statically-linked release binary + ca-certificates (the tool's
 # `web_fetch` needs them for outbound HTTPS).
 #
 # Build identity baked at compile time via `build.rs` of the
-# workspace members (the same ELYSPER_* triplet
+# workspace members (the same UVA_* triplet
 # `release.yml` / `Dockerfile.server` use):
-#   - ELYSPER_GIT_SHA      — full 40-char commit SHA
-#   - ELYSPER_BUILD_TIME   — ISO-8601 UTC wall-clock
-#   - ELYSPER_TARGET       — full target triple
-#   - ELYSPER_VERSION      — workspace version (0.1.0)
+#   - UVA_GIT_SHA      — full 40-char commit SHA
+#   - UVA_BUILD_TIME   — ISO-8601 UTC wall-clock
+#   - UVA_TARGET       — full target triple
+#   - UVA_VERSION      — workspace version (0.1.0)
 #
 # Stage layout (cargo-chef pattern, mirror of Dockerfile.server):
 #   0. chef     — install cargo-chef once
 #   1. planner  — emit a recipe.json from Cargo.lock
 #   2. cacher   — compile only third-party deps (slowest layer)
-#   3. builder  — compile elysper-mcp-server's own crates (fast)
+#   3. builder  — compile uva-mcp-server's own crates (fast)
 #   4. runtime  — minimal Alpine with tini + the binary
 #
 # First build: ~5 min (cacher). Subsequent builds with no
@@ -46,59 +46,59 @@ FROM chef AS cacher
 COPY --from=planner /app/recipe.json recipe.json
 ENV CARGO_PROFILE_RELEASE_LTO=thin \
     CARGO_PROFILE_RELEASE_STRIP=symbols
-RUN cargo chef cook --release -p elysper-mcp-server \
-    --bin elysper-mcp-server --recipe-path recipe.json
+RUN cargo chef cook --release -p uva-mcp-server \
+    --bin uva-mcp-server --recipe-path recipe.json
 
-########## Stage 3: build elysper-mcp-server with identity baked in ##########
+########## Stage 3: build uva-mcp-server with identity baked in ##########
 FROM cacher AS builder
-ARG ELYSPER_GIT_SHA=""
-ARG ELYSPER_BUILD_TIME=""
-ARG ELYSPER_TARGET="x86_64-unknown-linux-musl"
-ARG ELYSPER_VERSION="0.1.0"
+ARG UVA_GIT_SHA=""
+ARG UVA_BUILD_TIME=""
+ARG UVA_TARGET="x86_64-unknown-linux-musl"
+ARG UVA_VERSION="0.1.0"
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-ENV ELYSPER_GIT_SHA=${ELYSPER_GIT_SHA} \
-    ELYSPER_BUILD_TIME=${ELYSPER_BUILD_TIME} \
-    ELYSPER_PROFILE=release \
-    ELYSPER_TARGET=${ELYSPER_TARGET} \
-    ELYSPER_VERSION=${ELYSPER_VERSION}
-RUN cargo build --release --locked -p elysper-mcp-server \
-    && cp target/release/elysper-mcp-server /app/elysper-mcp-server
+ENV UVA_GIT_SHA=${UVA_GIT_SHA} \
+    UVA_BUILD_TIME=${UVA_BUILD_TIME} \
+    UVA_PROFILE=release \
+    UVA_TARGET=${UVA_TARGET} \
+    UVA_VERSION=${UVA_VERSION}
+RUN cargo build --release --locked -p uva-mcp-server \
+    && cp target/release/uva-mcp-server /app/uva-mcp-server
 
 ########## Stage 4: minimal Alpine runtime with tini ##########
 FROM alpine:3.19 AS runtime
 RUN apk add --no-cache ca-certificates tini
 WORKDIR /app
 
-ARG ELYSPER_GIT_SHA=""
-ARG ELYSPER_BUILD_TIME=""
-ARG ELYSPER_TARGET="x86_64-unknown-linux-musl"
-ARG ELYSPER_VERSION="0.1.0"
+ARG UVA_GIT_SHA=""
+ARG UVA_BUILD_TIME=""
+ARG UVA_TARGET="x86_64-unknown-linux-musl"
+ARG UVA_VERSION="0.1.0"
 
-COPY --from=builder /app/elysper-mcp-server /usr/local/bin/elysper-mcp-server
+COPY --from=builder /app/uva-mcp-server /usr/local/bin/uva-mcp-server
 
-ENV ELYSPER_VERSION=${ELYSPER_VERSION} \
-    ELYSPER_GIT_SHA=${ELYSPER_GIT_SHA} \
-    ELYSPER_BUILD_TIME=${ELYSPER_BUILD_TIME} \
-    ELYSPER_TARGET=${ELYSPER_TARGET} \
+ENV UVA_VERSION=${UVA_VERSION} \
+    UVA_GIT_SHA=${UVA_GIT_SHA} \
+    UVA_BUILD_TIME=${UVA_BUILD_TIME} \
+    UVA_TARGET=${UVA_TARGET} \
     RUST_LOG=info
 
 # Default workspace root; MCP clients typically override via
 # `docker run --workspace <host-path>` mapped into the container.
-ENV ELYSPER_WORKSPACE=/workspace
+ENV UVA_WORKSPACE=/workspace
 VOLUME ["/workspace"]
 
 # OCI image labels — surface under `docker inspect` so a support
 # engineer can confirm the right image without running it.
-LABEL org.opencontainers.image.title="elysper-mcp-server" \
-      org.opencontainers.image.description="Elysper stdio MCP server — plugin-brick tools shipped to any MCP client" \
-      org.opencontainers.image.source="https://github.com/crochee/elysper" \
+LABEL org.opencontainers.image.title="uva-mcp-server" \
+      org.opencontainers.image.description="Uva stdio MCP server — plugin-brick tools shipped to any MCP client" \
+      org.opencontainers.image.source="https://github.com/crochee/uva" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.version=${ELYSPER_VERSION} \
-      org.opencontainers.image.revision=${ELYSPER_GIT_SHA} \
-      org.opencontainers.image.created=${ELYSPER_BUILD_TIME}
+      org.opencontainers.image.version=${UVA_VERSION} \
+      org.opencontainers.image.revision=${UVA_GIT_SHA} \
+      org.opencontainers.image.created=${UVA_BUILD_TIME}
 
 # `tini` reaps zombies and forwards signals; SIGTERM -> graceful
 # shutdown (the binary exits on EOF / parent disconnect).
 ENTRYPOINT ["/sbin/tini", "--"]
-CMD ["elysper-mcp-server", "--help"]
+CMD ["uva-mcp-server", "--help"]

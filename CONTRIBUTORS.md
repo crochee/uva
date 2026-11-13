@@ -1,6 +1,6 @@
 # Contributors
 
-Elysper is built by the people listed below and by the larger
+Uva is built by the people listed below and by the larger
 community who report issues, review PRs, file bug reproductions,
 write specs, and keep the documentation honest. Thank you.
 

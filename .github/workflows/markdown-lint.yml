@@ -1,4 +1,4 @@
-# markdown-lint.yml — Elysper
+# markdown-lint.yml — Uva
 #
 # 与 .markdownlint.json 配对使用（单一真源）：
 #   - 锁每个 crate 顶层 README.md 的 markdown 格式；
@@ -7,11 +7,11 @@
 #   - 与 `make fmt-check` / `make check-web` 互不重叠（rustfmt + 前端
 #     prettier）；组成 "rustfmt + prettier + markdownlint" 三件套。
 #
-# scope 决定：显式列举 43 个 crate README + 顶层 CONTRIBUTORS.md（不是
+# scope 决定：显式列举 25 个 crate README + 顶层 CONTRIBUTORS.md（不是
 # glob 排除模式）— 这样新加一个目录不会"无意中"进入 lint 范围，而是
 # 显式决策后才加。这是 rust-lang/tokio 的同一做法。
 #
-# 触发: push / PR / 每天 UTC 04:00（与 stale-bot 错开 2 小时）。
+# 触发: push / PR / 每周二 UTC 04:00（与 stale-bot 错开一天）。
 name: markdown-lint
 
 on:
@@ -20,7 +20,7 @@ on:
   pull_request:
     branches: [master]
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 4 * * 2"
   workflow_dispatch:
 
 permissions:
@@ -44,32 +44,28 @@ jobs:
           config: .markdownlint.json
           globs: |
             CONTRIBUTORS.md
-            crates/elysper/README.md
-            crates/elysper-runtime/README.md
-            crates/elysper-core/README.md
-            crates/elysper-provider/README.md
-            crates/elysper-context/README.md
-            crates/elysper-session/README.md
-            crates/elysper-kernel/README.md
-            crates/elysper-tool/README.md
-            crates/elysper-tool-plugins/README.md
-            crates/elysper-policy-plugins/README.md
-            crates/elysper-plugin-runtime/README.md
-            crates/elysper-harness/README.md
-            crates/elysper-telemetry/README.md
-            crates/elysper-attachment/README.md
-            crates/elysper-mcp/README.md
-            crates/elysper-scheduler/README.md
-            crates/elysper-workflow/README.md
-            crates/elysper-eval/README.md
-            crates/elysper-search/README.md
-            crates/elysper-skill/README.md
-            crates/elysper-steering/README.md
-            crates/elysper-test-support/README.md
-            crates/elysper-app-server/README.md
-            crates/elysper-tui/README.md
-            crates/elysper-agents/README.md
-            crates/elysper-harness-tokio/README.md
-            crates/elysper-macros/README.md
-            crates/elysper-mcp-server/README.md
-            crates/elysper-gateway/README.md
+            crates/uva/README.md
+            crates/uva-runtime/README.md
+            crates/uva-core/README.md
+            crates/uva-provider/README.md
+            crates/uva-context/README.md
+            crates/uva-session/README.md
+            crates/uva-kernel/README.md
+            crates/uva-tool/README.md
+            crates/uva-tool-plugins/README.md
+            crates/uva-policy-plugins/README.md
+            crates/uva-harness/README.md
+            crates/uva-telemetry/README.md
+            crates/uva-attachment/README.md
+            crates/uva-mcp/README.md
+            crates/uva-scheduler/README.md
+            crates/uva-eval/README.md
+            crates/uva-search/README.md
+            crates/uva-skill/README.md
+            crates/uva-steering/README.md
+            crates/uva-test-support/README.md
+            crates/uva-app-server/README.md
+            crates/uva-tui/README.md
+            crates/uva-core-tokio/README.md
+            crates/uva-mcp-server/README.md
+            crates/uva-gateway/README.md

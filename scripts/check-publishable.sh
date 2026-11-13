@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publishable gate: every crate in the workspace must be packagable by
-# `cargo package`, i.e. a consumer can `cargo add elysper-<name>` and get
+# `cargo package`, i.e. a consumer can `cargo add uva-<name>` and get
 # a working crate instead of a resolution error.
 #
 # Why this exists: `cargo package` refuses a crate whose path-only
@@ -19,8 +19,8 @@
 # The `[patch.crates-io]` overrides passed via `--config` are what make
 # the gate runnable *before* the first publication: `cargo package`
 # rewrites a path dependency into a registry dependency, so resolving
-# `elysper-core` would hit crates.io and fail with "no matching package
-# named `elysper-core` found" until the crate is actually on the
+# `uva-core` would hit crates.io and fail with "no matching package
+# named `uva-core` found" until the crate is actually on the
 # registry. Pointing every sibling crate at its local path keeps the
 # resolution local, so the gate measures the manifest (the part this
 # gate is about) rather than the publication order. The overrides are
@@ -39,21 +39,21 @@ cd "$(dirname "$0")/.."
 # crate is only publishable once everything it depends on is on the
 # registry.
 #
-# Two members are package-only: `elysper-app-server` and `elysper-tui`
+# Two members are package-only: `uva-app-server` and `uva-tui`
 # carry `publish = false` (their surfaces are deployment contracts, not
 # crates.io ones), so `cargo publish` refuses them. They are still
 # packaged here — the gate is about "installable", and a crate that
 # cannot be packaged cannot be installed either.
 ORDER=(
-  elysper-core elysper-kernel elysper-macros elysper-agents
-  elysper-eval elysper-harness-tokio elysper-scheduler
-  elysper-telemetry elysper-workflow elysper-provider
-  elysper-attachment elysper-search elysper-session elysper-tool
-  elysper-context elysper-mcp elysper-skill elysper-test-support
-  elysper-steering elysper-harness elysper-policy-plugins
-  elysper-tool-plugins elysper-mcp-server elysper-plugin-runtime
-  elysper-runtime elysper elysper-app-server elysper-gateway
-  elysper-tui
+  uva-core uva-kernel
+  uva-eval uva-core-tokio uva-scheduler
+  uva-telemetry uva-provider
+  uva-attachment uva-search uva-session uva-tool
+  uva-context uva-mcp uva-skill uva-test-support
+  uva-steering uva-harness uva-policy-plugins
+  uva-tool-plugins uva-mcp-server
+  uva-runtime uva uva-app-server uva-gateway
+  uva-tui
 )
 
 # The gate must cover every workspace member. A member missing from
@@ -62,7 +62,7 @@ ORDER=(
 #
 # The member list comes from `cargo metadata --no-deps`, not from the
 # root manifest's `members` array: a path dependency of a member is a
-# member too (`elysper-attachment` is one today, and the manifest
+# member too (`uva-attachment` is one today, and the manifest
 # never names it), so the manifest's array alone would under-count.
 workspace_members() {
   # A package object starts with `{"name":"…","version":"…"`; a

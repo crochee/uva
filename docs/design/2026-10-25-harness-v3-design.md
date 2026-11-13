@@ -10,18 +10,18 @@
 
 ## 1. 意图与为什么
 
-`elysper-harness` 要同时满足三个目标，缺一不可：
+`uva-harness` 要同时满足三个目标，缺一不可：
 
 1. **可作为社区基座库**：第三方 crate 装进来加 tool / hook / 策略，不改 harness 一行。
 2. **崩溃后可精确恢复**：日志是唯一真源，resume 不重复、不缺口、不伪造历史。
 3. **上下文可长期运行**：模型历史是日志的投影，压缩是带 provenance 的替换。
 
-今天这三个目标各自只完成了一半：写者与 repair 在 `elysper-session`，循环仍以内存
+今天这三个目标各自只完成了一半：写者与 repair 在 `uva-session`，循环仍以内存
 `RunState.messages` 为真源；`Steering` 的 provider hook 只观察；插件挂载是编译期 builder；
-`elysper-server` 有 SSE、队列、取消、fork、导出，但没有审批、挂起、重连带基线、压缩可见性。
+`uva-app-server` 有 SSE、队列、取消、fork、导出，但没有审批、挂起、重连带基线、压缩可见性。
 
 **为什么现在做**：写者唯一化刚落地，日志的序号与 flush 语义已经稳定；此时把“日志真源 → 历史投影
-→ 事件接缝”接起来，不需要第二次重写。`elysper-server` 作为第一个宿主和教程，能在真实对话里
+→ 事件接缝”接起来，不需要第二次重写。`uva-app-server` 作为第一个宿主和教程，能在真实对话里
 暴露接缝是否够用。
 
 ---
@@ -31,7 +31,7 @@
 | 决定 | 内容 |
 |---|---|
 | 三条线都要 | 插件深度、崩溃/resume、长会话上下文效率，不是三选一 |
-| 首个宿主 | `elysper-server` 端到端跑通，并作为范式与教程 |
+| 首个宿主 | `uva-app-server` 端到端跑通，并作为范式与教程 |
 | 验收面 | 完整的 AI agent 对话体验（见 `docs/research/agent-conversation-experience-2026-10-25.md`） |
 | 审批范围 | **只在高风险工具上需要**，不是每次工具调用都问 |
 | 运行中纠偏 | 纳入本轮：queue（轮间）与 steer（step 边界注入）两种语义都要 |
@@ -52,7 +52,7 @@
 3. resume 前先 `repair`，只追加不截断；未闭合的 turn / step / tool 调用被显式关闭。
 4. 压缩是可选能力（seam），摘要以 replace 操作落盘，记录被遮蔽的 seq；UI 可见、可手动触发。
 5. 高风险工具在派发前挂起，等待批准/拒绝；恢复幂等，跨刷新与进程重启成立。
-6. `elysper-server` 满足完整对话验收剧本，并产出可照做的教程。
+6. `uva-app-server` 满足完整对话验收剧本，并产出可照做的教程。
 7. 删除零引用公开面、重复实现与失真的注释；门禁全绿。
 8. 运行中可注入纠偏（steer）；注入以日志为准，只在 step 边界生效，不打断在途模型调用。
 
@@ -80,10 +80,10 @@
 
 继承 `AGENTS.md`：
 
-- 库 crate 用 `thiserror`；`elysper-server` 用 `anyhow`。
+- 库 crate 用 `thiserror`；`uva-app-server` 用 `anyhow`。
 - `max_width = 80`；禁通配符导入；harness 生产代码函数 ≤100 行、嵌套 ≤4 层。
-- 墙钟走 `elysper_core::Clock`，ID 走 `elysper_core::IdGen`。
-- 依赖单向 `elysper` → `elysper-*` → `elysper-core`。
+- 墙钟走 `uva_core::Clock`，ID 走 `uva_core::IdGen`。
+- 依赖单向 `uva` → `uva-*` → `uva-core`。
 - `make check-public-api-runtime` / `check-no-runtime` / `check-harness-features` /
   `check-harness-shape` / `check-clock` / `check-harness-docs` 保持绿。
 - 注释预算只许降不许升；新模块的非显然约束与删除项在同一次提交内完成。
@@ -127,20 +127,20 @@
 
 | crate | 拥有 | 不拥有 |
 |---|---|---|
-| `elysper-session` | 日志行、`LogWriter`、`SessionSink`、`fold`、repair、compaction 检查点、token meter | 循环决策、provider 调用 |
-| `elysper-harness` | `ReActLoop`、`Agent`、`ReasoningStrategy`、`HookEvent` 派发、`Host` 注册表、`Suspension` | 具体工具、HTTP、存储后端 |
-| `elysper-steering` | hook 词表与 guard/hint/transformer | 运行时安装（由 harness 的 Host 调它） |
-| `elysper-tool` | `Tool` / `ToolRegistry` / `ToolAnnotations` / 派发 | 审批策略的具体值 |
-| `elysper-tool-*` | 单个工具及其风险声明 | 全局策略 |
-| `elysper-server` | 路由、SSE、审批 decision、配置、教程宿主 | agent 语义、日志格式 |
+| `uva-session` | 日志行、`LogWriter`、`SessionSink`、`fold`、repair、compaction 检查点、token meter | 循环决策、provider 调用 |
+| `uva-harness` | `ReActLoop`、`Agent`、`ReasoningStrategy`、`HookEvent` 派发、`Host` 注册表、`Suspension` | 具体工具、HTTP、存储后端 |
+| `uva-steering` | hook 词表与 guard/hint/transformer | 运行时安装（由 harness 的 Host 调它） |
+| `uva-tool` | `Tool` / `ToolRegistry` / `ToolAnnotations` / 派发 | 审批策略的具体值 |
+| `uva-tool-*` | 单个工具及其风险声明 | 全局策略 |
+| `uva-app-server` | 路由、SSE、审批 decision、配置、教程宿主 | agent 语义、日志格式 |
 
-**不新建 `elysper-plugin` crate。** 插件的语义就是 harness 的接缝（能观察/改写哪些点），拆出去会
+**不新建 `uva-plugin` crate。** 插件的语义就是 harness 的接缝（能观察/改写哪些点），拆出去会
 出现“插件 crate 依赖 harness 类型、harness 又依赖插件 crate”的环。插件实现放在独立 crate；
 宿主是 harness 的私有模块 + 窄公开面。
 
 ### 5.3 seam 规则
 
-沿用 `elysper-harness/src/lib.rs` 的判据：
+沿用 `uva-harness/src/lib.rs` 的判据：
 
 - **`dyn`**：下游必须在运行时安装——`Tool`、`Hook`、`Checkpointer`、`ContextManager`、
   `SessionSink`、`Clock`、`IdGen`、`CancelToken`、`Spawner`、`Compactor`。
@@ -236,9 +236,9 @@ pub trait Compactor: Send + Sync {
 }
 ```
 
-- 默认实现：`elysper-session` 的摘要压缩（现有 `CompactionSettings`）。
+- 默认实现：`uva-session` 的摘要压缩（现有 `CompactionSettings`）。
 - 摘要调用可设超时：`SummaryCompactor::with_timeout`。harness 运行时无关，不自己
-  武装定时器；`elysper-server` 在手动压缩上安装 `DEFAULT_SUMMARY_TIMEOUT`（120s）。
+  武装定时器；`uva-app-server` 在手动压缩上安装 `DEFAULT_SUMMARY_TIMEOUT`（120s）。
   超时产生 `CompactionError::Timeout`，审计行记为 `Failed`，turn 继续而不是挂死。
 - 摘要以 replace 落盘：`user/message` + `surface_op: { op: "replace", start, end }`，
   同时记录 `shadowed_seqs`、`shadowed_token_count`、provider/model/usage。
@@ -262,7 +262,7 @@ pub trait Compactor: Send + Sync {
 
 ### 8.1 核心事件是封闭枚举
 
-沿用 `elysper_steering::HookEvent`，不新造第二套词表。v1 的决策点：
+沿用 `uva_steering::HookEvent`，不新造第二套词表。v1 的决策点：
 
 | 点 | 时机 | 允许的决策 |
 |---|---|---|
@@ -379,7 +379,7 @@ pub trait DelegatingTool: Send + Sync {
 ```
 
 `DelegationCall` 提供 `call`、`emit`、`cancel`、`depth`、`ToolContext`。派发从
-`claims(name)` 线性扫描改为按名查表。`elysper-tool-task` 在同一次切换中迁移。
+`claims(name)` 线性扫描改为按名查表。`uva-tool-task` 在同一次切换中迁移。
 
 **子 agent 的审批**：策略在每个 agent 上独立生效，子 agent 不能借用父级的 `Never`。
 子 agent 挂起时，`DelegationCall::emit` 把 `Suspended` 事件转发给父 run；父 run 以
@@ -630,7 +630,7 @@ BeforeTool batch
 | 2 | `derive_history` + 循环改读投影；`Checkpointer` 退为加速 | 是（harness 内） |
 | 3 | 运行中注入：`delivery: queue / steer`、step 边界重 derive、UI 状态 | 是（server + web） |
 | 4 | Host + Hook 决策扩展 + `Registration`；`Steering` 并入统一派发 | 是（steering/harness） |
-| 5 | `DelegatingTool`；`elysper-tool-task` 迁移 | 是（跨 crate） |
+| 5 | `DelegatingTool`；`uva-tool-task` 迁移 | 是（跨 crate） |
 | 6 | `Suspension` + 审批策略 + log rows；`AgentEvent` / `SystemEvent` 扩展 | 是（事件词表） |
 | 7 | server：`follow` / `resume` / `compact` / `usage`；web 同步切 | 是（路由） |
 | 8 | 教程与验收脚本；`make` 入口 | 无 |
@@ -645,7 +645,7 @@ follow 路由也要在同一次提交内换掉前端，不留双写。
 
 | 决定 | 理由 |
 |---|---|
-| 不新建 `elysper-plugin` crate | 避免 harness ↔ plugin 的依赖环；插件实现可独立成 crate |
+| 不新建 `uva-plugin` crate | 避免 harness ↔ plugin 的依赖环；插件实现可独立成 crate |
 | 核心事件封闭 + `PluginEvent` JSON 逃生通道 | 不做泛型事件词表，避免签名污染；插件领域事件不需要参与循环决策 |
 | 不改变 `Agent::run` 返回类型，用 `SystemEvent::Suspended` + `SessionEndReason::Suspended` | 旧设计的返回类型变更会击穿全部 strategy crate；事件表扩展更小 |
 | 审批只问 `destructive` / `open_world`，无注解默认放行 | 用户明确“只在高风险工具”；`ask_unknown` 可由运维打开 |
@@ -683,6 +683,6 @@ follow 路由也要在同一次提交内换掉前端，不留双写。
 “完成”指：
 
 1. 上述七步全部落地，`make ci` / `make check-web` / `make test-guides` 绿。
-2. 验收剧本 A–G 在真实 `elysper-server` + `elysper-web` 上跑通，有可复现命令与观察记录。
+2. 验收剧本 A–G 在真实 `uva-app-server` + `uva-web` 上跑通，有可复现命令与观察记录。
 3. 一个外部最小消费方（不依赖 server）能安装一个自有插件并跑通一轮；证明接缝不是 server 专用。
 4. 教程 `docs/tutorial/complete-agent.md` 可从空环境照做，不需要读源码。

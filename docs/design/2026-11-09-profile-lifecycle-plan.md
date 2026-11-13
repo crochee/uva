@@ -4,7 +4,7 @@
 
 **Goal:** 让 profile 的每一行自带启用位（`true` / `false` / 插件判定），禁用的行不进 Fiber 树（能力与界面同时消失）；让一次 profile 变更成为**事务**（整组提交或整组不生效），结果回报四态 `applied` / `restart-required` / `overridden` / `failed`；让创建 / 删除能力走**内置 MCP 通道**（界面与 agent 都不直接写文件）。
 
-**Architecture:** 全部落在既有 seam 上，**`elysper-kernel` 一行不改**。启用位是 profile 数据模型的新字段（`Entry.enabled`），在**装配边界**（build / mount 之前）被求值成"有效行集"（`effective`）：`enabled = false` 或判定不可用的行被过滤掉，于是 enable 翻转天然复用现有 `diff_profiles` 的 `added` / `removed` 语义与 `AppState::reload_profile` 的行级 remount。boot 用**两波挂载**（先挂静态行，再用挂好的 Context 求值判定行并挂第二波）——这是对既有 `mount_all` 的两次普通调用（HMR reload 已经在同一个 Context 上做"boot 组 + reload 组"的多组挂载，语义已被验证）。事务性写入器 `ProfileStore` 是 app-server 内的新模块：编辑文档层 → 内存重解析整层栈 → `overridden` 检测 → **试装**（复用 reload 的 build-before-unload + 失败回滚）→ 成功才**原子替换**正式文件 → 广播 `profile/changed`。内置 MCP = 既有 self-management loopback server（`self_mcp.rs`）加第 10 个工具 `profile`，与新的 JSON-RPC 方法 `profile/*` 共享同一条写入路径；agent 的写动作靠 MCP 协议原生的 `annotations.destructiveHint` → `Risk::High` 走既有审批 stance。
+**Architecture:** 全部落在既有 seam 上，**`uva-kernel` 一行不改**。启用位是 profile 数据模型的新字段（`Entry.enabled`），在**装配边界**（build / mount 之前）被求值成"有效行集"（`effective`）：`enabled = false` 或判定不可用的行被过滤掉，于是 enable 翻转天然复用现有 `diff_profiles` 的 `added` / `removed` 语义与 `AppState::reload_profile` 的行级 remount。boot 用**两波挂载**（先挂静态行，再用挂好的 Context 求值判定行并挂第二波）——这是对既有 `mount_all` 的两次普通调用（HMR reload 已经在同一个 Context 上做"boot 组 + reload 组"的多组挂载，语义已被验证）。事务性写入器 `ProfileStore` 是 app-server 内的新模块：编辑文档层 → 内存重解析整层栈 → `overridden` 检测 → **试装**（复用 reload 的 build-before-unload + 失败回滚）→ 成功才**原子替换**正式文件 → 广播 `profile/changed`。内置 MCP = 既有 self-management loopback server（`self_mcp.rs`）加第 10 个工具 `profile`，与新的 JSON-RPC 方法 `profile/*` 共享同一条写入路径；agent 的写动作靠 MCP 协议原生的 `annotations.destructiveHint` → `Risk::High` 走既有审批 stance。
 
 **Tech Stack:** Rust 1.98（stable 通道）、tokio 1.x（既有，按需 feature）、serde / serde_json 1.0、toml（既有 profile 解析依赖）、thiserror 2.0（lib）、anyhow 1.0（仅二进制边界，本刀不新增）
 
@@ -12,15 +12,15 @@
 
 ## Global Constraints
 
-- **核心一行不动**：本刀不改 `crates/elysper-kernel` 的任何文件，不改 Fiber / Effect / Service / Event 语义。全部启用位求值、四态编排、写入事务都落在 `elysper-app-server`（宿主层）与两个非 kernel 的既有 crate（`elysper-core` 加一个纯新增叶子模块、`elysper-skill` 实现第一个判定服务、`elysper-mcp` 贯通协议原生的 annotations 字段）。
-- **`elysper-core` 只加 `pub mod enable;`，不加 crate-root `pub use`**：`scripts/check-frozen-api.sh` 钉的是 lib.rs 的 crate-root `pub use` 名单，`scripts/check-pub-surface-strict.sh` 钉的是 crate-root `pub use` 行数——新契约以模块路径消费（`elysper::core::enable::EnableChecks`，照 `elysper_core::layout` 的先例），两个基线都**不必**动。新模块的每个 `pub` 项必须有 doc comment（`make check-public-docs` 的 `elysper-core` 未文档化计数只降不升，现为 93）。
-- 错误处理：lib 用 `thiserror`，app 用 `anyhow`（AGENTS.md §3.1）。`elysper-app-server` 是 app crate ⇒ 新模块的对外错误用 `String` / `RpcError`（照 `reload_profile` 的 `Result<ProfileDiff, String>` 现状），不引 anyhow 到 lib 面。
+- **核心一行不动**：本刀不改 `crates/uva-kernel` 的任何文件，不改 Fiber / Effect / Service / Event 语义。全部启用位求值、四态编排、写入事务都落在 `uva-app-server`（宿主层）与两个非 kernel 的既有 crate（`uva-core` 加一个纯新增叶子模块、`uva-skill` 实现第一个判定服务、`uva-mcp` 贯通协议原生的 annotations 字段）。
+- **`uva-core` 只加 `pub mod enable;`，不加 crate-root `pub use`**：`scripts/check-frozen-api.sh` 钉的是 lib.rs 的 crate-root `pub use` 名单，`scripts/check-pub-surface-strict.sh` 钉的是 crate-root `pub use` 行数——新契约以模块路径消费（`uva::core::enable::EnableChecks`，照 `uva_core::layout` 的先例），两个基线都**不必**动。新模块的每个 `pub` 项必须有 doc comment（`make check-public-docs` 的 `uva-core` 未文档化计数只降不升，现为 93）。
+- 错误处理：lib 用 `thiserror`，app 用 `anyhow`（AGENTS.md §3.1）。`uva-app-server` 是 app crate ⇒ 新模块的对外错误用 `String` / `RpcError`（照 `reload_profile` 的 `Result<ProfileDiff, String>` 现状），不引 anyhow 到 lib 面。
 - 依赖版本一律 `major.minor`、复用 `[workspace.dependencies]`；本刀**不新增任何依赖**（toml / serde_json / thiserror 都已在用）。
-- tokio feature 按需声明；`elysper-app-server` 的 lib 面不出现 `tokio::` 路径（该 crate 本就在 `check-public-api-runtime` 豁免名单里，但新模块照旧不把运行时类型漏到公开面）。
+- tokio feature 按需声明；`uva-app-server` 的 lib 面不出现 `tokio::` 路径（该 crate 本就在 `check-public-api-runtime` 豁免名单里，但新模块照旧不把运行时类型漏到公开面）。
 - 禁止 `pub use <mod>::*;` 与通配符导入；禁止 `map_or` / `for_each`（AGENTS.md §3.5）。
 - **时间戳一律取 `state.clock`**（`make check-clock` 禁止直接 `Utc::now` / `Local::now`）。
 - 单个生产文件的内联 `#[cfg(test)] mod` 不超过 300 行带（`make check-test-layout`）：新模块的测试放**兄弟测试文件**（照 `composition/kernel/tests.rs` 的先例，`#[cfg(test)] mod enabled_tests;`）。
-- `elysper-mcp` / `elysper-skill` 的文件行数不超过 `scripts/plugin-shape/baseline`（现为 1086；两 crate 现最大文件分别是 `supervisor.rs` 620 行与 `provider.rs` 675 行，余量充足）。
+- `uva-mcp` / `uva-skill` 的文件行数不超过 `scripts/plugin-shape/baseline`（现为 1086；两 crate 现最大文件分别是 `supervisor.rs` 620 行与 `provider.rs` 675 行，余量充足）。
 - 每次提交前：`cargo +nightly fmt --all` + `cargo clippy --all-targets --all-features --tests --all -- -D warnings`。
 - 测试按 crate 分批：`cargo test -p <crate>`（**禁止** `cargo test --workspace`，AGENTS.md §3.3）。
 - 不 push 远程仓库；`openspec/` 本地层不入库。
@@ -43,20 +43,20 @@
 ### Task 1: `Enabled` 落进 profile 数据模型
 
 **Files:**
-- Modify: `crates/elysper-app-server/src/profile/model.rs`（`Entry.enabled` / `EntryPatch.enabled` / wire 解析）
-- Modify: `crates/elysper-app-server/src/profile/merge.rs`（`apply_replacement` 应用 `enabled`）
-- Modify: `crates/elysper-app-server/src/profile/mod.rs`（`dump` 渲染 `enabled`；导出新类型）
-- Modify: `crates/elysper-app-server/src/composition/kernel/mod.rs:181`（`native_profile` 的 `Entry` 字面量）
-- Modify: `crates/elysper-app-server/src/ui/schema.rs:273`（测试助手 `fn entry`）
-- Modify: 其余 `Entry` 字面量点（用 `grep -rn 'Entry {' crates/elysper-app-server/` 枚举；已知：`src/composition/tests.rs`、`src/composition/kernel/tests.rs`、`src/state/tests/support.rs`、`tests/profile.rs`）
-- Create: `crates/elysper-app-server/src/profile/enabled_tests.rs`（兄弟测试文件，`profile/mod.rs` 里 `#[cfg(test)] mod enabled_tests;`——Task 2 起共用）
+- Modify: `crates/uva-app-server/src/profile/model.rs`（`Entry.enabled` / `EntryPatch.enabled` / wire 解析）
+- Modify: `crates/uva-app-server/src/profile/merge.rs`（`apply_replacement` 应用 `enabled`）
+- Modify: `crates/uva-app-server/src/profile/mod.rs`（`dump` 渲染 `enabled`；导出新类型）
+- Modify: `crates/uva-app-server/src/composition/kernel/mod.rs:181`（`native_profile` 的 `Entry` 字面量）
+- Modify: `crates/uva-app-server/src/ui/schema.rs:273`（测试助手 `fn entry`）
+- Modify: 其余 `Entry` 字面量点（用 `grep -rn 'Entry {' crates/uva-app-server/` 枚举；已知：`src/composition/tests.rs`、`src/composition/kernel/tests.rs`、`src/state/tests/support.rs`、`tests/profile.rs`）
+- Create: `crates/uva-app-server/src/profile/enabled_tests.rs`（兄弟测试文件，`profile/mod.rs` 里 `#[cfg(test)] mod enabled_tests;`——Task 2 起共用）
 
 **Interfaces:**
 - Consumes: 既有 `WireEntry`（`id` / `runtime` / `config` / `capabilities`，无 `deny_unknown_fields`）、`Profile::from_toml_str`、`Patch::from_toml_str`
 - Produces:
 
 ```rust
-// crates/elysper-app-server/src/profile/model.rs
+// crates/uva-app-server/src/profile/model.rs
 /// One row's enablement: on (default), off, or delegated to a
 /// plugin-provided check (D39).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,7 +96,7 @@ entries = [
 
 - [ ] **Step 1: 写失败的解析测试**
 
-`crates/elysper-app-server/src/profile/enabled_tests.rs`（新）：
+`crates/uva-app-server/src/profile/enabled_tests.rs`（新）：
 
 ```rust
 use crate::profile::{EnableCheck, Enabled, Profile};
@@ -139,7 +139,7 @@ entries = [{ id = "a", runtime = "native", enabled = "maybe" }]
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-app-server --lib profile`
+Run: `cargo test -p uva-app-server --lib profile`
 Expected: FAIL（`no field 'enabled'` / `cannot find type Enabled` 编译错）
 
 - [ ] **Step 3: 实现模型与 wire**
@@ -152,7 +152,7 @@ Expected: FAIL（`no field 'enabled'` / `cannot find type Enabled` 编译错）
 
 - [ ] **Step 5: 跑本 crate 测试确认通过**
 
-Run: `cargo test -p elysper-app-server --lib && cargo test -p elysper-app-server --test profile`
+Run: `cargo test -p uva-app-server --lib && cargo test -p uva-app-server --test profile`
 Expected: PASS（含既有 `dump_is_deterministic` 等 golden 不变）
 
 ---
@@ -160,19 +160,19 @@ Expected: PASS（含既有 `dump_is_deterministic` 等 golden 不变）
 ### Task 2: 判定契约（`EnableChecks`）与求值器（effective）
 
 **Files:**
-- Create: `crates/elysper-core/src/enable.rs`（新叶子模块，纯新增）
-- Modify: `crates/elysper-core/src/lib.rs`（仅加一行 `pub mod enable;`，**不加** crate-root `pub use`）
-- Create: `crates/elysper-app-server/src/profile/enabled.rs`（求值器）
-- Modify: `crates/elysper-app-server/src/profile/mod.rs`（`mod enabled;` + 导出）
-- Modify: `crates/elysper-skill/src/plugin.rs`（第一个 judge：提供 `skill-checks` 服务）
-- Modify: `crates/elysper-app-server/src/composition/kernel/mod.rs`（skill 工厂的 manifest 不动——manifest 由 `SkillPlugin::new` 自带，见下）
+- Create: `crates/uva-core/src/enable.rs`（新叶子模块，纯新增）
+- Modify: `crates/uva-core/src/lib.rs`（仅加一行 `pub mod enable;`，**不加** crate-root `pub use`）
+- Create: `crates/uva-app-server/src/profile/enabled.rs`（求值器）
+- Modify: `crates/uva-app-server/src/profile/mod.rs`（`mod enabled;` + 导出）
+- Modify: `crates/uva-skill/src/plugin.rs`（第一个 judge：提供 `skill-checks` 服务）
+- Modify: `crates/uva-app-server/src/composition/kernel/mod.rs`（skill 工厂的 manifest 不动——manifest 由 `SkillPlugin::new` 自带，见下）
 
 **Interfaces:**
-- Consumes: `elysper::kernel::Context::get::<T>(&str) -> Result<Option<Arc<T>>, PluginError>`（trait-object 服务先例：`Arc<dyn ModelProvider>` @ `KEY_LLM_DEFAULT`、`Arc<dyn Memory>` @ `KEY_MEMORY`）、`PluginFactories::manifest()`（`provides` / `inject`，无需 build 即可读）
+- Consumes: `uva::kernel::Context::get::<T>(&str) -> Result<Option<Arc<T>>, PluginError>`（trait-object 服务先例：`Arc<dyn ModelProvider>` @ `KEY_LLM_DEFAULT`、`Arc<dyn Memory>` @ `KEY_MEMORY`）、`PluginFactories::manifest()`（`provides` / `inject`，无需 build 即可读）
 - Produces:
 
 ```rust
-// crates/elysper-core/src/enable.rs —— 判定契约，宿主与插件共见
+// crates/uva-core/src/enable.rs —— 判定契约，宿主与插件共见
 /// A plugin-provided enablement judge (D39).
 ///
 /// A profile row may delegate its enablement to a plugin: the row
@@ -186,7 +186,7 @@ pub trait EnableChecks: Send + Sync {
 ```
 
 ```rust
-// crates/elysper-app-server/src/profile/enabled.rs —— 装配边界求值器
+// crates/uva-app-server/src/profile/enabled.rs —— 装配边界求值器
 /// Where the host asks judges; implemented over the mounted kernel
 /// context in the app-server, over fixtures in tests.
 pub trait CheckSource {
@@ -234,7 +234,7 @@ app-server 侧的 `CheckSource` 实现（放 `state/app_state/mod.rs` 或 `compo
 
 ```rust
 /// Answers enable checks from the currently mounted kernel context.
-struct KernelChecks<'a>(&'a elysper::kernel::Context);
+struct KernelChecks<'a>(&'a uva::kernel::Context);
 
 impl CheckSource for KernelChecks<'_> {
     fn check(&self, service: &str, method: &str, arg: &Value)
@@ -255,24 +255,24 @@ impl CheckSource for KernelChecks<'_> {
 }
 ```
 
-skill judge（`elysper-skill/src/plugin.rs`）：`SkillPlugin::apply` 在发布 `KEY_SKILLS`（`"skills"`）之外，再发布 `pub const KEY_SKILL_CHECKS: &str = "skill-checks"` 的 `Arc<dyn EnableChecks>`（实现读 `SkillRegistry` 里该 skill 的 frontmatter `metadata.enabled`，缺省 `true`；未知 skill 返回 `None` ⇒ fail-closed），manifest 的 `provides` 加入该键。设计文档 D39 示例里的 `"skill-registry"` 是示意名；本刀落成 `"skill-checks"`（`"skills"` 已被 `Arc<SkillRegistry>` 占用，一键一型）。
+skill judge（`uva-skill/src/plugin.rs`）：`SkillPlugin::apply` 在发布 `KEY_SKILLS`（`"skills"`）之外，再发布 `pub const KEY_SKILL_CHECKS: &str = "skill-checks"` 的 `Arc<dyn EnableChecks>`（实现读 `SkillRegistry` 里该 skill 的 frontmatter `metadata.enabled`，缺省 `true`；未知 skill 返回 `None` ⇒ fail-closed），manifest 的 `provides` 加入该键。设计文档 D39 示例里的 `"skill-registry"` 是示意名；本刀落成 `"skill-checks"`（`"skills"` 已被 `Arc<SkillRegistry>` 占用，一键一型）。
 
 - [ ] **Step 1: 先证明 trait-object 服务查找可用（本刀最关键的前置事实）**
 
-`crates/elysper-app-server/src/profile/enabled_tests.rs` 加一个内核级测试：`Context::new()` 上 `mount_all` 一个仅 `provide_arc::<dyn EnableChecks>("t", …)` 的最小插件（用 `elysper::kernel::{Context, Plugin, PluginManifest, mount_all}`，照 `src/state/tests/build_prompt_context.rs:25` 的写法），然后断言 `ctx.get::<Arc<dyn EnableChecks>>("t")` 命中。
+`crates/uva-app-server/src/profile/enabled_tests.rs` 加一个内核级测试：`Context::new()` 上 `mount_all` 一个仅 `provide_arc::<dyn EnableChecks>("t", …)` 的最小插件（用 `uva::kernel::{Context, Plugin, PluginManifest, mount_all}`，照 `src/state/tests/build_prompt_context.rs:25` 的写法），然后断言 `ctx.get::<Arc<dyn EnableChecks>>("t")` 命中。
 
-Run: `cargo test -p elysper-app-server --lib profile`
+Run: `cargo test -p uva-app-server --lib profile`
 Expected: FAIL（`enable` 模块尚不存在）→ 实现后 PASS。**若此步失败**（cordis 对新 trait 的 TypeId 注册与 `Arc<dyn ModelProvider>` 行为不同），停下来报告——那是需要新核心能力的信号，不得绕过。
 
-- [ ] **Step 2: 落 `elysper-core/src/enable.rs`**
+- [ ] **Step 2: 落 `uva-core/src/enable.rs`**
 
-只含 `EnableChecks` trait（doc comment 全覆盖）。`lib.rs` 加 `pub mod enable;`（放在 `pub mod layout;` 旁）。不新增依赖（`serde_json` 已在 `elysper-core` 的 `[dependencies]`）。
+只含 `EnableChecks` trait（doc comment 全覆盖）。`lib.rs` 加 `pub mod enable;`（放在 `pub mod layout;` 旁）。不新增依赖（`serde_json` 已在 `uva-core` 的 `[dependencies]`）。
 
-Run: `cargo test -p elysper-core --lib`
+Run: `cargo test -p uva-core --lib`
 Expected: PASS
 
 Run: `make check-public-docs`
-Expected: `OK`（`elysper-core` 未文档化计数不升，仍为 93）
+Expected: `OK`（`uva-core` 未文档化计数不升，仍为 93）
 
 Run: `make check-frozen-api && make check-pub-surface-strict`
 Expected: 两个 `OK`（没有 crate-root `pub use` 变更，基线不动）
@@ -281,14 +281,14 @@ Expected: 两个 `OK`（没有 crate-root `pub use` 变更，基线不动）
 
 `enabled.rs` 按上述接口实现；`enabled_tests.rs` 用一个假 `CheckSource` 覆盖四种回答 × core/ui 两段：On 保留、Off 进 skipped、Check-Enabled 保留、Check-Disabled 进 skipped、**Unavailable 进 skipped（fail-closed）**。
 
-Run: `cargo test -p elysper-app-server --lib profile`
+Run: `cargo test -p uva-app-server --lib profile`
 Expected: PASS
 
 - [ ] **Step 4: skill judge**
 
-`elysper-skill/src/plugin.rs`：`KEY_SKILL_CHECKS` 常量 + manifest `provides` 加入 + `apply` 里 `provide_arc` 一个包着 `Arc<SkillRegistry>` 的判定实现（registry 在 `apply` 里 discover 后即可克隆）。测试：临时目录放一个 `metadata.enabled = false` 的 SKILL.md，断言 `check("is_enabled", "x")` 分别对已知启用 / 已知禁用 / 未知名字返回 `Some(true)` / `Some(false)` / `None`。
+`uva-skill/src/plugin.rs`：`KEY_SKILL_CHECKS` 常量 + manifest `provides` 加入 + `apply` 里 `provide_arc` 一个包着 `Arc<SkillRegistry>` 的判定实现（registry 在 `apply` 里 discover 后即可克隆）。测试：临时目录放一个 `metadata.enabled = false` 的 SKILL.md，断言 `check("is_enabled", "x")` 分别对已知启用 / 已知禁用 / 未知名字返回 `Some(true)` / `Some(false)` / `None`。
 
-Run: `cargo test -p elysper-skill --lib`
+Run: `cargo test -p uva-skill --lib`
 Expected: PASS
 
 Run: `make check-plugin-shape`
@@ -299,11 +299,11 @@ Expected: `OK`（`plugin.rs` 增量远低于 1086 行基线）
 ### Task 3: 装配边界接 effective（两波 boot + reload 拆分）
 
 **Files:**
-- Modify: `crates/elysper-app-server/src/composition/kernel/mod.rs`（`mount_profile` 两波化）
-- Modify: `crates/elysper-app-server/src/state/app_state/mod.rs`（`assembly` 字段；`reload_profile` 拆 `reconcile` / `apply_resolved`）
-- Modify: `crates/elysper-app-server/src/state/app_state/boot.rs`（构造器填 `assembly`；存 `profile_store` 占位 None）
-- Modify: `crates/elysper-app-server/src/state/app_state/for_test.rs`（fixture 默认值）
-- Modify: `crates/elysper-app-server/src/state/tests/reload.rs`（effective 感知的用例）
+- Modify: `crates/uva-app-server/src/composition/kernel/mod.rs`（`mount_profile` 两波化）
+- Modify: `crates/uva-app-server/src/state/app_state/mod.rs`（`assembly` 字段；`reload_profile` 拆 `reconcile` / `apply_resolved`）
+- Modify: `crates/uva-app-server/src/state/app_state/boot.rs`（构造器填 `assembly`；存 `profile_store` 占位 None）
+- Modify: `crates/uva-app-server/src/state/app_state/for_test.rs`（fixture 默认值）
+- Modify: `crates/uva-app-server/src/state/tests/reload.rs`（effective 感知的用例）
 
 **Interfaces:**
 - Consumes: `mount_all(&Context, &[Arc<dyn Plugin>])`（可对同一 Context 多次调用——HMR 已在做 boot 组 + reload 组）、`PluginFactory::manifest()`（不 build 即得 `provides` / `inject`）、`diff_profiles` / `build_plugins` / `rows_for` / `unload_plugin`
@@ -381,26 +381,26 @@ pub struct Reconciled {
 
 (b) `judge_flip_reads_as_presence_change`：fixture 挂一个假 judge（Task 2 Step 1 的最小插件，服务键 `"test-judge"`，回答由 `AtomicBool` 控制），profile 里加一行 `enabled = Check { service: "test-judge", check: "is_enabled", arg: "x" }` 的行（用已有工厂 id，如 `skills` 的克隆行不行——id 必须唯一且工厂已注册；用 `eval` 行替换法或直接改现有行），翻转布尔后断言 diff 的 `removed` / `added`。
 
-Run: `cargo test -p elysper-app-server --lib state::tests::reload`
+Run: `cargo test -p uva-app-server --lib state::tests::reload`
 Expected: FAIL（`assembly` / `apply_resolved` 尚不存在）
 
 - [ ] **Step 2: 实现 `partition_waves` 与两波 `mount_profile`**
 
 `profile/enabled.rs` 加 `partition_waves`；`composition/kernel/mod.rs` 的 `mount_profile` 改两波（`composition/kernel/tests.rs` 既有用例补 `enabled` 字段后应全绿——无判定行的 profile 退化为单波，行为不变）。
 
-Run: `cargo test -p elysper-app-server --lib composition`
+Run: `cargo test -p uva-app-server --lib composition`
 Expected: PASS
 
 - [ ] **Step 3: AppState 加 `assembly`、boot 填充、`reconcile` 拆分**
 
 `state/app_state/boot.rs`：boot 的 `effective_profile` 先过 `effective(raw, &KernelChecks(空))`？——**不**：boot 的两波求值在 `mount_profile` 内部完成，boot 传入 raw（含判定行），mount 完成后 `assembly = effective_profile 过滤后的行集`（`mount_profile` 需要把实际挂上的行集返回，或在 boot 里重算一次 `effective`——取后者，简单且两次求值幂等）。`for_test.rs` / 构造器补默认。`reload_profile` / `apply_resolved` / `reconcile` 按上述契约重构（挂载编排的 90 行逻辑只搬不复制）。
 
-Run: `cargo test -p elysper-app-server --lib`
+Run: `cargo test -p uva-app-server --lib`
 Expected: PASS（含 Step 1 两组新用例与既有 reload 用例）
 
 - [ ] **Step 4: 回归 stdio 集成测试**
 
-Run: `cargo test -p elysper-app-server --test stdio_roundtrip`
+Run: `cargo test -p uva-app-server --test stdio_roundtrip`
 Expected: PASS（boot 路径改动不破坏分帧协议与 ready 通知）
 
 ---
@@ -408,11 +408,11 @@ Expected: PASS（boot 路径改动不破坏分帧协议与 ready 通知）
 ### Task 4: 事务性写入器 `ProfileStore`（四态）
 
 **Files:**
-- Create: `crates/elysper-app-server/src/profile/store.rs`（文档层编辑 / 序列化 / 层栈重解析——纯函数，无 AppState 依赖）
-- Modify: `crates/elysper-app-server/src/profile/mod.rs`（`mod store;` + 导出）
-- Modify: `crates/elysper-app-server/src/state/app_state/mod.rs`（`profile_store` / `profile_write` 字段 + 编排方法）
-- Modify: `crates/elysper-app-server/src/state/app_state/boot.rs`、`crates/elysper-app-server/src/boot.rs`、`crates/elysper-app-server/src/main.rs`（把 `ProfileInputs` 的四个路径传进 state）
-- Create: `crates/elysper-app-server/src/profile/store_tests.rs`
+- Create: `crates/uva-app-server/src/profile/store.rs`（文档层编辑 / 序列化 / 层栈重解析——纯函数，无 AppState 依赖）
+- Modify: `crates/uva-app-server/src/profile/mod.rs`（`mod store;` + 导出）
+- Modify: `crates/uva-app-server/src/state/app_state/mod.rs`（`profile_store` / `profile_write` 字段 + 编排方法）
+- Modify: `crates/uva-app-server/src/state/app_state/boot.rs`、`crates/uva-app-server/src/boot.rs`、`crates/uva-app-server/src/main.rs`（把 `ProfileInputs` 的四个路径传进 state）
+- Create: `crates/uva-app-server/src/profile/store_tests.rs`
 
 **Interfaces:**
 - Consumes: `resolve(&[ProfileSource], Option<Patch>)`（公开，内存层栈）、`Profile::from_path` / `Patch::from_toml_str` / `Profile::from_toml_str`、`apply_resolved`、`Outbound::notify`、`state.clock`
@@ -503,20 +503,20 @@ impl AppState {
 6. **试装**：`apply_resolved(next_raw.clone()).await`——build 在 unload 之前、mount 失败自动回滚旧行（既有保证）；Err ⇒ `failed`（文件未动、树未动——刀 7 验收第二条）。
 7. `reconciled.mcp_touched` ⇒ `restart-required`（reason 引用 `reload_profile` 的 Residuals 说明），否则 `applied`。
 8. **提交文件**：写同目录临时文件（`<doc>.tmp-<pid>`）→ `std::fs::rename` 原子替换；io 失败 ⇒ `failed`（Review Focus 4 的窗口，reason 明写自愈路径）。
-9. **审计 + 通知**：`tracing::info!(target: "elysper::profile", actor, action, ids, state, "profile change")`；`self.rpc.outbound().notify("profile/changed", json!({ "actor": …, "state": …, "ids": …, "at": <state.clock 时间戳> }))`——通知**不带** `session_id`，网关 `gateway.rs:232-234` 的规则会把它广播给全部连接（D33）。
+9. **审计 + 通知**：`tracing::info!(target: "uva::profile", actor, action, ids, state, "profile change")`；`self.rpc.outbound().notify("profile/changed", json!({ "actor": …, "state": …, "ids": …, "at": <state.clock 时间戳> }))`——通知**不带** `session_id`，网关 `gateway.rs:232-234` 的规则会把它广播给全部连接（D33）。
 
-`CapabilityAction` 的落点：`Create { domain: Agent, .. }` 复用 `elysper::agents::write(&definition)`（`routes/agents.rs:363` 已用同一写入口）写排布数据文件 + 文档层 `[[insert]]` 对应行，再走同一事务；`Skill` 域写 SKILL.md（复用 `routes/skills.rs` 的 create 逻辑思路）+ 插行。**MCP server 行不做 create/delete**：`mcp.json` 的 `enabled` 位已由 `McpServerEntry::is_enabled`（`elysper-mcp/src/config_file.rs`）读取，且 `mcp` 行的 remount 本就 restart-required（Review Focus 6）——写它没有热生效价值，留给后续刀。
+`CapabilityAction` 的落点：`Create { domain: Agent, .. }` 复用 `uva::agents::write(&definition)`（`routes/agents.rs:363` 已用同一写入口）写排布数据文件 + 文档层 `[[insert]]` 对应行，再走同一事务；`Skill` 域写 SKILL.md（复用 `routes/skills.rs` 的 create 逻辑思路）+ 插行。**MCP server 行不做 create/delete**：`mcp.json` 的 `enabled` 位已由 `McpServerEntry::is_enabled`（`uva-mcp/src/config_file.rs`）读取，且 `mcp` 行的 remount 本就 restart-required（Review Focus 6）——写它没有热生效价值，留给后续刀。
 
 - [ ] **Step 1: 写失败的 store 单测（纯函数部分）**
 
 `store_tests.rs` 覆盖：(a) 无文档时物化默认并插入编辑；(b) `enabled` 编辑后 `from_toml_str` round-trip 相等；(c) home patch 覆盖该行 ⇒ 步骤 5 的 overridden 判定函数返回真；(d) 序列化拒绝 TOML 无法表达的值（null / 异构数组）⇒ 报错不落盘。
 
-Run: `cargo test -p elysper-app-server --lib profile`
+Run: `cargo test -p uva-app-server --lib profile`
 Expected: FAIL（`store` 模块不存在）
 
 - [ ] **Step 2: 实现 `store.rs` 并过单测**
 
-Run: `cargo test -p elysper-app-server --lib profile`
+Run: `cargo test -p uva-app-server --lib profile`
 Expected: PASS
 
 - [ ] **Step 3: `AppState::profile_apply` 编排 + 四态集成测试**
@@ -525,17 +525,17 @@ Expected: PASS
 
 - `applied`：改一行 config ⇒ 文件内容变化、`assembly` 更新、outbound 收到 `profile/changed`（用 `RpcRuntime::channel()` 观察）。
 - `failed`：写入装不起来的行（`config` 违反 manifest schema，如给 `skills` 行塞非法字段）⇒ `Err` 回报、**文件字节不变**、`plugin_state` 不变。
-- `overridden`：`ELYSPER_HOME_PROFILE` 指向的 home patch 替换该行 config ⇒ 请求 config 无效。
+- `overridden`：`UVA_HOME_PROFILE` 指向的 home patch 替换该行 config ⇒ 请求 config 无效。
 - `restart-required`：diff 触到 `mcp` 行。
 
-Run: `cargo test -p elysper-app-server --lib state`
+Run: `cargo test -p uva-app-server --lib state`
 Expected: PASS
 
 - [ ] **Step 4: 打通 `ProfileInputs` → `AppState`**
 
 `main.rs` 的 `run_core` 把 `ProfileInputs` 四路径装成 `ProfileStore` 传给 `boot_core`（`boot.rs` 的 `boot_core` 加一个 `store: Option<ProfileStore>` 参数，唯一调用点是 `main.rs:288`）；`serve` 模式经 spawn 的 core 同样受益（网关透传 `--profile` 等参数已存在）。
 
-Run: `cargo test -p elysper-app-server --lib && cargo build -p elysper-app-server`
+Run: `cargo test -p uva-app-server --lib && cargo build -p uva-app-server`
 Expected: PASS / 编译通过
 
 ---
@@ -543,16 +543,16 @@ Expected: PASS / 编译通过
 ### Task 5: 内置 MCP 工具 + JSON-RPC 方法 + 审批贯通
 
 **Files:**
-- Create: `crates/elysper-app-server/src/rpc/methods/profile.rs`
-- Modify: `crates/elysper-app-server/src/rpc/methods/mod.rs`（`register_all` 加一行）
-- Modify: `crates/elysper-app-server/src/rpc/notify.rs`（`pub const PROFILE_CHANGED: &str = "profile/changed";`）
-- Modify: `crates/elysper-app-server/src/state/app_state/self_mcp.rs`（第 10 个工具）
-- Modify: `crates/elysper-mcp/src/server.rs`（`ServerTool` 增可选 annotations）
-- Modify: `crates/elysper-mcp/src/client.rs`（`McpToolSpec` 增可选 annotations，`tools/list` 透传）
-- Modify: `crates/elysper-mcp/src/tool.rs`（`McpTool` 实现 `Tool::annotations`）
+- Create: `crates/uva-app-server/src/rpc/methods/profile.rs`
+- Modify: `crates/uva-app-server/src/rpc/methods/mod.rs`（`register_all` 加一行）
+- Modify: `crates/uva-app-server/src/rpc/notify.rs`（`pub const PROFILE_CHANGED: &str = "profile/changed";`）
+- Modify: `crates/uva-app-server/src/state/app_state/self_mcp.rs`（第 10 个工具）
+- Modify: `crates/uva-mcp/src/server.rs`（`ServerTool` 增可选 annotations）
+- Modify: `crates/uva-mcp/src/client.rs`（`McpToolSpec` 增可选 annotations，`tools/list` 透传）
+- Modify: `crates/uva-mcp/src/tool.rs`（`McpTool` 实现 `Tool::annotations`）
 
 **Interfaces:**
-- Consumes: `ServerTool::new(name, description, input_schema, handler)`（`server.rs:110`）、`register_mcp_tools` / `loopback_pair` / `serve`（`self_mcp.rs` 的既有 wiring）、`Risk::from_annotations`（`destructive_hint == Some(true)` ⇒ `Risk::High`，`elysper-tool/src/traits.rs:75`）、`Tool::annotations() -> Option<ToolAnnotations>`（默认 `None`）
+- Consumes: `ServerTool::new(name, description, input_schema, handler)`（`server.rs:110`）、`register_mcp_tools` / `loopback_pair` / `serve`（`self_mcp.rs` 的既有 wiring）、`Risk::from_annotations`（`destructive_hint == Some(true)` ⇒ `Risk::High`，`uva-tool/src/traits.rs:75`）、`Tool::annotations() -> Option<ToolAnnotations>`（默认 `None`）
 - Produces（调用链，验收要求的核心）:
 
 ```
@@ -579,7 +579,7 @@ AppState::profile_apply          stance 持有，审批后才进 handler）
 - `profile/set`：`{ id, enabled?, config? }` → `ChangeOutcome`。
 - `profile/create` / `profile/delete`：`CapabilityAction` → `ChangeOutcome`。
 
-elysper-mcp 的 annotations 贯通（MCP 协议原生字段，旧 server 不带 ⇒ `None` ⇒ 现状不变）：
+uva-mcp 的 annotations 贯通（MCP 协议原生字段，旧 server 不带 ⇒ `None` ⇒ 现状不变）：
 
 ```rust
 // ServerTool 增 builder；McpToolSpec 增字段并在 tools_list_result /
@@ -592,25 +592,25 @@ impl Tool for McpTool {
 }
 ```
 
-- [ ] **Step 1: elysper-mcp annotations 贯通（测试先行）**
+- [ ] **Step 1: uva-mcp annotations 贯通（测试先行）**
 
-`elysper-mcp` 既有内联测试（`server.rs` / `client.rs` 的 `mod tests`）加：`ServerTool` 带 `destructive_hint` 时 `tools_list_result` 含 `annotations`；`McpTool::annotations()` 回出该值 ⇒ `Tool::risk(input)` 为 `Risk::High`。
+`uva-mcp` 既有内联测试（`server.rs` / `client.rs` 的 `mod tests`）加：`ServerTool` 带 `destructive_hint` 时 `tools_list_result` 含 `annotations`；`McpTool::annotations()` 回出该值 ⇒ `Tool::risk(input)` 为 `Risk::High`。
 
-Run: `cargo test -p elysper-mcp --lib`
+Run: `cargo test -p uva-mcp --lib`
 Expected: FAIL → 实现 → PASS
 
 - [ ] **Step 2: RPC 方法**
 
 `rpc/methods/profile.rs` 按 `misc.rs` 的注册式样写五个 handler（`parse::<T>` 入参、`encode` 出参、全部委托 `AppState`）；`register_all` 加 `profile::register(router);`。测试：`RpcRouter` 直连 handler，mock state 断言四态响应形状。
 
-Run: `cargo test -p elysper-app-server --lib rpc`
+Run: `cargo test -p uva-app-server --lib rpc`
 Expected: PASS
 
 - [ ] **Step 3: self-MCP 第 10 个工具**
 
 `self_mcp.rs`：`self_mcp_tools` 加 `profile_tool(state)`（action 判别式照邻居；`list` / `get` 只读，`set` / `create` / `delete` 声明 `destructiveHint = true`）；`src/state/tests/self_mcp.rs` 加一条：工具描述出现在 `tools/list`、写动作带 annotations。
 
-Run: `cargo test -p elysper-app-server --lib state::tests::self_mcp`
+Run: `cargo test -p uva-app-server --lib state::tests::self_mcp`
 Expected: PASS
 
 ---
@@ -620,8 +620,8 @@ Expected: PASS
 **Files:**
 - Modify: `CHANGELOG.md`（`[Unreleased]`）
 - Modify: `AGENTS.md` §1（app-server 条目补一句启用位与事务写路径）
-- Modify: `crates/elysper-app-server/README.md`（profile 段：`enabled` wire 形状、四态、`profile/changed`、内置 MCP 工具）
-- Modify: `crates/elysper-core/README.md`（若其模块清单逐项列名，加 `enable`；否则跳过——改前先读）
+- Modify: `crates/uva-app-server/README.md`（profile 段：`enabled` wire 形状、四态、`profile/changed`、内置 MCP 工具）
+- Modify: `crates/uva-core/README.md`（若其模块清单逐项列名，加 `enable`；否则跳过——改前先读）
 
 **Interfaces:** 纯文档。
 
@@ -646,7 +646,7 @@ Expected: 全 `OK`（注意 claim-language 门禁：文档不得出现未验证�
 ### Task 7: 端到端验收（集成测试 + 手工冒烟）
 
 **Files:**
-- Create: `crates/elysper-app-server/tests/profile_rpc.rs`（照 `tests/stdio_roundtrip.rs` 的 `Core` 驱动器 + `tests/support/mod.rs` 的 `install_test_provider`）
+- Create: `crates/uva-app-server/tests/profile_rpc.rs`（照 `tests/stdio_roundtrip.rs` 的 `Core` 驱动器 + `tests/support/mod.rs` 的 `install_test_provider`）
 
 **Interfaces:**
 - Consumes: `tests/support` 的 hermetic provider 布置、`stdio_roundtrip.rs` 的 Content-Length 分帧驱动
@@ -654,22 +654,22 @@ Expected: 全 `OK`（注意 claim-language 门禁：文档不得出现未验证�
 
 - [ ] **Step 1: stdio 集成测试**
 
-tempdir 里放 `profile.toml`（含一行 `enabled = false` 的 `skills` 行 + 一行判定行），spawn `target/debug/elysper-app-server core --directory <temp>`，分帧驱动：
+tempdir 里放 `profile.toml`（含一行 `enabled = false` 的 `skills` 行 + 一行判定行），spawn `target/debug/uva-app-server core --directory <temp>`，分帧驱动：
 
 1. `ready` 后发 `profile/list` ⇒ 断言两行都在（含 off 行与 reason）。
 2. 发 `profile/set { "id": "skills", "enabled": true }` ⇒ `state == "applied"`；随后 `plugins` 域可见证该能力（如 `tools/list` 出现 `skill` 工具）∧ 收到 `profile/changed` 通知帧。
 3. 再发一个装不起来的 `profile/set`（非法 config）⇒ `state == "failed"`；读回 `profile.toml` 字节与写前一致。
 4. 再把该行 `enabled` 置 false ⇒ `applied` 后能力消失（`tools/list` 无 `skill`）∧ 第二条 `profile/changed`。
 
-Run: `cargo test -p elysper-app-server --test profile_rpc`
+Run: `cargo test -p uva-app-server --test profile_rpc`
 Expected: PASS（四条验收对应四组断言）
 
 - [ ] **Step 2: 手工冒烟（网关 + 广播验证）**
 
 ```bash
-cargo build -p elysper-app-server
+cargo build -p uva-app-server
 mkdir -p /tmp/k7/.agents && cp <测试用 profile.toml> /tmp/k7/profile.toml
-ELYSPER_BOOT_TEST_KEY=test-key ./target/debug/elysper-app-server serve \
+UVA_BOOT_TEST_KEY=test-key ./target/debug/uva-app-server serve \
   --port 18099 --directory /tmp/k7
 ```
 
@@ -680,13 +680,13 @@ ELYSPER_BOOT_TEST_KEY=test-key ./target/debug/elysper-app-server serve \
 ```bash
 cargo +nightly fmt --all
 cargo clippy --all-targets --all-features --tests --all -- -D warnings
-cargo test -p elysper-core --lib
-cargo test -p elysper-skill --lib
-cargo test -p elysper-mcp --lib
-cargo test -p elysper-app-server --lib
-cargo test -p elysper-app-server --test profile
-cargo test -p elysper-app-server --test profile_rpc
-cargo test -p elysper-app-server --test stdio_roundtrip
+cargo test -p uva-core --lib
+cargo test -p uva-skill --lib
+cargo test -p uva-mcp --lib
+cargo test -p uva-app-server --lib
+cargo test -p uva-app-server --test profile
+cargo test -p uva-app-server --test profile_rpc
+cargo test -p uva-app-server --test stdio_roundtrip
 make ci
 ```
 
@@ -699,4 +699,4 @@ Expected: 全部 PASS / `OK`（`make ci` 含 frozen-api / public-docs / plugin-s
 - 启用位求值全部发生在 **app-server 的装配边界**（`effective` / `partition_waves` / `reconcile`），kernel 的 `mount_all` / `MountHandle::dispose_plugin` / `Context::{provide_arc, get}` 均按现契约使用。
 - 两波挂载 = 对同一 `Context` 的两次普通 `mount_all`；第二次的 `inject` 校验走 kernel 既有的 parent-context 探测（`mount.rs:456` `parent_service_available`），与 HMR reload 组挂到 boot 组旁边是同一操作。
 - enable-flip 复用 `diff_profiles` 的 presence 语义（过滤后行消失 ⇒ `removed` / `added`），`watch.rs` 无需感知 `enabled` 字段。
-- 判定契约 `EnableChecks` 是**宿主与插件共见的词汇**，落 `elysper-core` 新叶子模块（纯新增、零语义改动、不加 crate-root re-export，frozen-api / pub-surface 基线不动）——这是本刀唯一落在 `elysper-app-server` 之外的库改动，与"核心（kernel 及其 Fiber/Effect/Service/Event 语义）一行不动"不冲突。
+- 判定契约 `EnableChecks` 是**宿主与插件共见的词汇**，落 `uva-core` 新叶子模块（纯新增、零语义改动、不加 crate-root re-export，frozen-api / pub-surface 基线不动）——这是本刀唯一落在 `uva-app-server` 之外的库改动，与"核心（kernel 及其 Fiber/Effect/Service/Event 语义）一行不动"不冲突。

@@ -177,11 +177,11 @@ jobs:
           node-version: 20
           cache: npm
           # The single frontend lock (R72 consolidated four into this
-          # one; `elysper-web` is no longer an npm workspace member).
-          cache-dependency-path: elysper-web/package-lock.json
+          # one; `uva-web` is no longer an npm workspace member).
+          cache-dependency-path: uva-web/package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: elysper-web
+        working-directory: uva-web
         run: npm ci
 
       # No browser needed: AGENTS.md §4 requires 0 lint and formatting,
@@ -196,7 +196,7 @@ jobs:
       # no longer resolves) must fail here, not in whoever packages the
       # desktop shell. The desktop job builds the same `dist`.
       - name: production build
-        working-directory: elysper-web
+        working-directory: uva-web
         run: npm run build
 
   bench:

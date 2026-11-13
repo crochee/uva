@@ -11,17 +11,17 @@
 
 **Architecture:** 一份 tracked 文档 + 一个 throwaway 脚本。文档四层结构：§2「行 → 域 → 界面」
 总表（行全集 = `native_profile()` 的 22 个内置行 + `wasm` 可选行 + `[ui]` 段的 `ui.*` 行，
-`provides` / `inject` 列以 `elysper-app-server --dump-config` 的真实输出为证）；§3「目录约定 → 域」
+`provides` / `inject` 列以 `uva-app-server --dump-config` 的真实输出为证）；§3「目录约定 → 域」
 （`.agents/` 两层布局 + `mcp.json` + 运行时状态目录）；§4 每域四要素小节；§5 一次性核对记录。
-核对脚本放 **`/tmp/elysper-knife4-audit.sh`（用完即弃、不入库）**：构造一个**合成部署**
+核对脚本放 **`/tmp/uva-knife4-audit.sh`（用完即弃、不入库）**：构造一个**合成部署**
 （隔离 `HOME`，防 home patch 泄入），跑两份 `--dump-config`（全量 24 行 / 精简 5 行），做三面
 双向对账（dump 行 ↔ 文档表、目录约定 ↔ 文档表、文档引用的方法名 ↔ 服务器注册表），打印
 "行 → 域 → 界面"对照表供人工签核。**不入 `scripts/`**：本轮没有新增门禁脚本，AGENTS.md §3.6
 的"`make lint-sh` 清单 + `shellcheck.yml` + §3.6 表"三处同步**不触发**（D15 已明示"本轮没有
 新增门禁脚本"）。
 
-**Tech Stack:** Markdown（入库）+ bash（一次性核对）+ 既有 CLI `elysper-app-server --dump-config`
-（确定性 dump：稳定行序、逐深度排序的对象键，见 `crates/elysper-app-server/src/main.rs:103-108`
+**Tech Stack:** Markdown（入库）+ bash（一次性核对）+ 既有 CLI `uva-app-server --dump-config`
+（确定性 dump：稳定行序、逐深度排序的对象键，见 `crates/uva-app-server/src/main.rs:103-108`
 与 `src/profile/mod.rs:454-507`）+ grep / find。零新依赖。
 
 **Spec:** `docs/design/2026-11-09-desktop-frontend-tree-design.md` —— §6.1（能力域 → 落点表、
@@ -30,13 +30,13 @@
 
 ## Global Constraints
 
-- **刀 4 只出文档 + 核对**：不引入任何新的运行时机制；不改 `crates/**`、`elysper-web/**`、
+- **刀 4 只出文档 + 核对**：不引入任何新的运行时机制；不改 `crates/**`、`uva-web/**`、
   `desktop/**`、`Makefile`、`.github/**`、`scripts/**`、`AGENTS.md`。核心一行不动（D38 前提）。
 - **唯一新建文件**是 `docs/host-capabilities.md`；唯一修改文件是 `CHANGELOG.md`（`[Unreleased]`）。
-  一次性脚本在 `/tmp/`，**用完即弃**（`rm -rf /tmp/elysper-knife4 /tmp/elysper-knife4-audit.sh`），
+  一次性脚本在 `/tmp/`，**用完即弃**（`rm -rf /tmp/uva-knife4 /tmp/uva-knife4-audit.sh`），
   绝不落进仓库。
 - **矩阵不是手写愿望清单**：每行必须能追溯到一个 profile 行（以 `--dump-config` 输出或
-  `native_profile()` 源码为证）或一个目录约定（以 `crates/elysper-core/src/layout.rs` 为证）。
+  `native_profile()` 源码为证）或一个目录约定（以 `crates/uva-core/src/layout.rs` 为证）。
   写不出来的行不许出现在矩阵里。
 - **事实以仓库为准，不照抄设计文档**：设计文档 §6.1 与仓库事实存在**三处漂移**（`.agents/providers`
   目录不存在 / Hooks 无目录约定 / 命令无独立数据源），矩阵必须记仓库事实并显式列出漂移
@@ -60,7 +60,7 @@
 2. **照抄设计文档的路径**。§6.1 写"模型 ← `.agents/providers`"——仓库里**没有**这个目录
    （provider 来自 `model-adapter` 行 config → `.agents/config.toml` `[providers]` → 环境变量，
    `src/main.rs:63-77`）。§6.1 写"Hooks ← plugin 排布"——`.agents` 布局里**没有** hooks 目录
-   （hook 是挂载的插件行在 harness `Host` 上的注册，`crates/elysper-harness/src/agent/host/mod.rs:16-21`）。
+   （hook 是挂载的插件行在 harness `Host` 上的注册，`crates/uva-harness/src/agent/host/mod.rs:16-21`）。
    钉子：Task 4 Step 3 的漂移表 + Task 5 的目录约定对账（合成树里**不造** hooks 目录，矩阵
    也**不写** hooks 路径）。
 3. **两类"缺行"语义混为一谈**。boot 必需行（`agent-loop` / `model-adapter`）缺 → **boot 直接
@@ -81,8 +81,8 @@
 ### Task 1: 事实基线复核（只读）
 
 **Files:**
-- Read only: `crates/elysper-app-server/src/composition/kernel/mod.rs`、`src/main.rs`、
-  `src/rpc/methods/**`、`src/routes/**`、`crates/elysper-core/src/layout.rs`
+- Read only: `crates/uva-app-server/src/composition/kernel/mod.rs`、`src/main.rs`、
+  `src/rpc/methods/**`、`src/routes/**`、`crates/uva-core/src/layout.rs`
 
 **Interfaces:**
 - Consumes: 无
@@ -90,34 +90,34 @@
 
 - [ ] **Step 1: 确认内置行全集还是 22 个**
 
-Run: `sed -n '/const ENTRIES: \&str; 22/,/^    \];/p' crates/elysper-app-server/src/composition/kernel/mod.rs | grep -c '^\s*"'`
+Run: `sed -n '/const ENTRIES: \&str; 22/,/^    \];/p' crates/uva-app-server/src/composition/kernel/mod.rs | grep -c '^\s*"'`
 Expected: `22`。若不是 22，**停下**：以新的 `native_profile()` 全集为准重排本计划的行清单
 （Task 3 的合成 profile 与 §2 表同步改），其余任务结构不变。
 
 - [ ] **Step 2: 确认方法注册表的规模**
 
-Run: `grep -c 'router\.register("' crates/elysper-app-server/src/rpc/methods/agents.rs crates/elysper-app-server/src/rpc/methods/automation.rs crates/elysper-app-server/src/rpc/methods/chat.rs crates/elysper-app-server/src/rpc/methods/misc.rs crates/elysper-app-server/src/rpc/methods/sessions.rs`
+Run: `grep -c 'router\.register("' crates/uva-app-server/src/rpc/methods/agents.rs crates/uva-app-server/src/rpc/methods/automation.rs crates/uva-app-server/src/rpc/methods/chat.rs crates/uva-app-server/src/rpc/methods/misc.rs crates/uva-app-server/src/rpc/methods/sessions.rs`
 Expected:
 
 ```
-crates/elysper-app-server/src/rpc/methods/agents.rs:14
-crates/elysper-app-server/src/rpc/methods/automation.rs:19
-crates/elysper-app-server/src/rpc/methods/chat.rs:7
-crates/elysper-app-server/src/rpc/methods/misc.rs:12
-crates/elysper-app-server/src/rpc/methods/sessions.rs:14
+crates/uva-app-server/src/rpc/methods/agents.rs:14
+crates/uva-app-server/src/rpc/methods/automation.rs:19
+crates/uva-app-server/src/rpc/methods/chat.rs:7
+crates/uva-app-server/src/rpc/methods/misc.rs:12
+crates/uva-app-server/src/rpc/methods/sessions.rs:14
 ```
 
 （合计 66；矩阵引用的任何 `域/动词` 都要能在这里面 grep 到。）
 
 - [ ] **Step 3: 确认 dump 路径没有 native 兜底**
 
-Run: `sed -n '173,181p' crates/elysper-app-server/src/main.rs`
+Run: `sed -n '173,181p' crates/uva-app-server/src/main.rs`
 Expected: 看到 `if args.dump_config { let profile = inputs.resolve()?; … print!(…dump_profile…); return Ok(()); }`——
 dump 的是**层序解析结果**（bundle → profile → home patch → CLI overlay），没有 `native_profile()` 兜底。
 
 - [ ] **Step 4: 确认目录约定的三常量**
 
-Run: `grep -n 'PLUGIN_MANIFEST\|MCP_CONFIG\|AGENTS_DIR' crates/elysper-core/src/layout.rs | head -6`
+Run: `grep -n 'PLUGIN_MANIFEST\|MCP_CONFIG\|AGENTS_DIR' crates/uva-core/src/layout.rs | head -6`
 Expected: 前三行为 `50:pub const PLUGIN_MANIFEST: &str = "plugin.json";`、
 `53:pub const MCP_CONFIG: &str = "mcp.json";`、`56:pub const AGENTS_DIR: &str = ".agents";`
 （其余命中是 `AGENTS_DIR` 的使用点）。
@@ -148,8 +148,8 @@ Expected: 前三行为 `50:pub const PLUGIN_MANIFEST: &str = "plugin.json";`、
 
 ## 1. 这份矩阵怎么读
 
-- **行的唯一真源**：解析后的 profile（`elysper-app-server --dump-config` 的输出）与
-  `.agents/` 目录约定（`crates/elysper-core/src/layout.rs`）。本文件不发明行。
+- **行的唯一真源**：解析后的 profile（`uva-app-server --dump-config` 的输出）与
+  `.agents/` 目录约定（`crates/uva-core/src/layout.rs`）。本文件不发明行。
 - **四要素**：宿主界面落点 / 数据来源 / 拥有者（profile 行）/ 缺行时的行为。
 - **缺行的两类语义**：boot 必需行缺 → 启动失败；其余行缺 → 不挂载，能力与界面同消（D32）。
 - **范围注记**：设置面的「账户 / 通用」分区不是能力域（无能力行：账户是本机身份、通用是
@@ -202,17 +202,17 @@ Expected: `5` 与 `4`（五个二级标题；四处 `待填` 占位——§1 漂
 
 **Files:**
 - Modify: `docs/host-capabilities.md`（§2 表）
-- 临时（不入库）: `/tmp/elysper-knife4/`（合成部署与两份 dump）
+- 临时（不入库）: `/tmp/uva-knife4/`（合成部署与两份 dump）
 
 **Interfaces:**
-- Consumes: `elysper-app-server --dump-config --directory <path>`（全局 flag，`main.rs:103-108`）；
+- Consumes: `uva-app-server --dump-config --directory <path>`（全局 flag，`main.rs:103-108`）；
   profile TOML 形状（`hmr` + `[core] entries` + `[ui] entries`，`src/profile/model.rs:220-234`）
 - Produces: §2 表的 24 行（行 id + 域 + 落点 + dump 实测的 provides/inject + 缺行行为）
 
 - [ ] **Step 1: 造合成部署（全量行 + 全部目录约定形态）**
 
 ```bash
-WORK=/tmp/elysper-knife4
+WORK=/tmp/uva-knife4
 rm -rf "$WORK" && mkdir -p "$WORK/home" "$WORK/mini" \
   "$WORK/full/.agents/skills/demo" "$WORK/full/.agents/agents/reviewer" \
   "$WORK/full/.agents/tasks/daily" "$WORK/full/.agents/plugins/acme"
@@ -282,15 +282,15 @@ EOF
 - [ ] **Step 2: 跑全量 dump 并断言形状**
 
 ```bash
-export HOME=/tmp/elysper-knife4/home   # 隔离 home patch（~/.agents/profile.toml）
-unset ELYSPER_HOME_PROFILE
-cargo run -q -p elysper-app-server -- --dump-config --directory /tmp/elysper-knife4/full \
-  > /tmp/elysper-knife4/full.json
-grep -c '"id":' /tmp/elysper-knife4/full.json
-grep -c '"runtime": "native"' /tmp/elysper-knife4/full.json
-grep -c '"runtime": "wasm"' /tmp/elysper-knife4/full.json
-grep -c '"runtime": "ui-bundle"' /tmp/elysper-knife4/full.json
-grep -c '"provides":' /tmp/elysper-knife4/full.json
+export HOME=/tmp/uva-knife4/home   # 隔离 home patch（~/.agents/profile.toml）
+unset UVA_HOME_PROFILE
+cargo run -q -p uva-app-server -- --dump-config --directory /tmp/uva-knife4/full \
+  > /tmp/uva-knife4/full.json
+grep -c '"id":' /tmp/uva-knife4/full.json
+grep -c '"runtime": "native"' /tmp/uva-knife4/full.json
+grep -c '"runtime": "wasm"' /tmp/uva-knife4/full.json
+grep -c '"runtime": "ui-bundle"' /tmp/uva-knife4/full.json
+grep -c '"provides":' /tmp/uva-knife4/full.json
 ```
 
 Expected: `24` / `22` / `1` / `1` / `24`（每行都打 `provides`——无工厂的行打空数组，
@@ -299,10 +299,10 @@ Expected: `24` / `22` / `1` / `1` / `24`（每行都打 `provides`——无工�
 - [ ] **Step 3: 跑精简 dump 并断言"缺行 = dump 缺行"**
 
 ```bash
-cargo run -q -p elysper-app-server -- --dump-config --directory /tmp/elysper-knife4/mini \
-  > /tmp/elysper-knife4/mini.json
-grep -o '"id": "[^"]*"' /tmp/elysper-knife4/mini.json | sed 's/"id": "//;s/"$//'
-grep -c '"id": "eval"' /tmp/elysper-knife4/mini.json || echo "eval 缺行（预期）"
+cargo run -q -p uva-app-server -- --dump-config --directory /tmp/uva-knife4/mini \
+  > /tmp/uva-knife4/mini.json
+grep -o '"id": "[^"]*"' /tmp/uva-knife4/mini.json | sed 's/"id": "//;s/"$//'
+grep -c '"id": "eval"' /tmp/uva-knife4/mini.json || echo "eval 缺行（预期）"
 ```
 
 Expected: 第一条列出恰好 5 个 id（`model-adapter` / `agent-loop` / `session-store` / `skills` /
@@ -357,7 +357,7 @@ Expected: `24`（§2 表的数据行 = dump 的全部 id：22 个内置行 + `wa
 - Modify: `docs/host-capabilities.md`（§1 漂移表、§3 表、§4 的 15 个小节）
 
 **Interfaces:**
-- Consumes: `crates/elysper-core/src/layout.rs`（布局契约）、Task 3 的事实基线
+- Consumes: `crates/uva-core/src/layout.rs`（布局契约）、Task 3 的事实基线
 - Produces: 矩阵的主体内容
 
 - [ ] **Step 1: 填 §3 目录约定表**
@@ -366,15 +366,15 @@ Expected: `24`（§2 表的数据行 = dump 的全部 id：22 个内置行 + `wa
 
 | 目录 / 文件约定 | 域 | 规则 | 现状证据 |
 | --- | --- | --- | --- |
-| `.agents/skills/<name>/SKILL.md` | 技能 | 四源优先级：项目直定义 > 项目插件包 > 全局直定义 > 全局插件包；legacy `~/.elysper` 只读、仅 skills 域读 | `crates/elysper-core/src/layout.rs:84-114`、`crates/elysper-app-server/src/routes/skills.rs:3-4` |
-| `.agents/agents/<name>/agent.md`（+ 可选 `config.json`） | Agent | 同上四源；frontmatter + 正文合成一个 `AgentDescriptor` | `crates/elysper-agents/src/discovery.rs:1-11`、`crates/elysper-agents/README.md:5-8` |
-| `.agents/tasks/<name>/task.md` | 计划 | 声明文件（what / how often / prompt）；运行时状态在 ScheduleStore | `crates/elysper-app-server/src/state/app_state/tasks.rs:5-9` |
-| `.agents/mcp.json` | MCP | `mcpServers` 映射、仅 stdio；插件包内以 `<plugin>/<server>` 命名空间 | `crates/elysper-core/src/layout.rs:242-275`、`crates/elysper-app-server/README.md:134-135` |
-| `.agents/plugins/<name>/plugin.json` | 插件目录 | 带 manifest 的目录才算插件包（同构子树，可带 `skills/` / `agents/` / `tasks/` / `mcp.json`） | `crates/elysper-core/src/layout.rs:277-301`、`routes/plugins/mod.rs:60-131` |
-| `.agents/config.toml`（`[providers]`） | 模型 | provider 回退输入（`model-adapter` 行 config 优先） | `crates/elysper-app-server/src/main.rs:63-77`、`src/state/app_state/boot.rs:763-794` |
+| `.agents/skills/<name>/SKILL.md` | 技能 | 四源优先级：项目直定义 > 项目插件包 > 全局直定义 > 全局插件包；legacy `~/.uva` 只读、仅 skills 域读 | `crates/uva-core/src/layout.rs:84-114`、`crates/uva-app-server/src/routes/skills.rs:3-4` |
+| `.agents/agents/<name>/agent.md`（+ 可选 `config.json`） | Agent | 同上四源；frontmatter + 正文合成一个 `AgentDescriptor` | `crates/uva-agents/src/discovery.rs:1-11`、`crates/uva-agents/README.md:5-8` |
+| `.agents/tasks/<name>/task.md` | 计划 | 声明文件（what / how often / prompt）；运行时状态在 ScheduleStore | `crates/uva-app-server/src/state/app_state/tasks.rs:5-9` |
+| `.agents/mcp.json` | MCP | `mcpServers` 映射、仅 stdio；插件包内以 `<plugin>/<server>` 命名空间 | `crates/uva-core/src/layout.rs:242-275`、`crates/uva-app-server/README.md:134-135` |
+| `.agents/plugins/<name>/plugin.json` | 插件目录 | 带 manifest 的目录才算插件包（同构子树，可带 `skills/` / `agents/` / `tasks/` / `mcp.json`） | `crates/uva-core/src/layout.rs:277-301`、`routes/plugins/mod.rs:60-131` |
+| `.agents/config.toml`（`[providers]`） | 模型 | provider 回退输入（`model-adapter` 行 config 优先） | `crates/uva-app-server/src/main.rs:63-77`、`src/state/app_state/boot.rs:763-794` |
 | `~/.agents/profile.toml` | （装配层）home patch | 层序里排在 profile 文档之后、CLI overlay 之前 | `src/profile/merge.rs:217-231` |
 | `<workspace>/profile.toml` | （装配层）profile 文档 | `--profile` 缺省时的默认位置 | `src/main.rs:225-237` |
-| `<workspace>/sessions/` | 会话（运行时状态） | durable 真源，不在 `.agents`（布局明文：runtime state 不进定义目录） | `src/state/app_state/boot.rs:137-139`、`crates/elysper-core/src/layout.rs:32-37` |
+| `<workspace>/sessions/` | 会话（运行时状态） | durable 真源，不在 `.agents`（布局明文：runtime state 不进定义目录） | `src/state/app_state/boot.rs:137-139`、`crates/uva-core/src/layout.rs:32-37` |
 
 - [ ] **Step 2: 填 §4 的 15 个小节**
 
@@ -388,8 +388,8 @@ Expected: `24`（§2 表的数据行 = dump 的全部 id：22 个内置行 + `wa
 | 插件目录 | 设置 · 插件 | profile 全部行 + `.agents/plugins/<name>/plugin.json` + `[plugins]` composition（resolved / skipped） | 装配本身；`process-plugins`（进程插件）、`wasm`（wasm 插件） | 无插件包 → `plugins/list` 的 `bundles` 空数组（空态） |
 | 模型 | 设置 · 模型 | `model-adapter` 行 config（权威）→ `.agents/config.toml` `[providers]` → 环境变量 | `model-adapter` | 卸载 → agent-loop 停摆、建会话报错（`sessions.rs:351-357`） |
 | Agent | 设置 · 智能体（内置默认 agent 不可停用） | `.agents/agents/<name>/agent.md` + `config.json`（四源）；内置默认 agent 来自 `agent-loop` 行 | `agent-loop`；目录定义经 boot 收进注册表 | 目录空 → 只剩内置 `agent`（`routes/agents.rs:44-48` 保护名） |
-| 技能 | 设置 · 技能与命令 | `.agents/skills/<name>/SKILL.md`；boot 会 seed 默认技能（`state/app_state/boot.rs:171-177`） | `skills`（inject `tools`，注册 `skill` 工具——D38 / D40） | 行缺 → 服务与工具一并撤销（两贡献皆可逆，`elysper-skill/src/plugin.rs:1-46`）；目录空 → 空列表 |
-| 命令 | 设置 · 技能与命令（与技能同区） | **现状无独立数据源**——技能的 slash-command 扩展位（`elysper-skill/src/skill.rs:123-126`） | `skills`（同技能） | 现状即无独立行；分区命令区显示空态并注明"命令随技能提供" |
+| 技能 | 设置 · 技能与命令 | `.agents/skills/<name>/SKILL.md`；boot 会 seed 默认技能（`state/app_state/boot.rs:171-177`） | `skills`（inject `tools`，注册 `skill` 工具——D38 / D40） | 行缺 → 服务与工具一并撤销（两贡献皆可逆，`uva-skill/src/plugin.rs:1-46`）；目录空 → 空列表 |
+| 命令 | 设置 · 技能与命令（与技能同区） | **现状无独立数据源**——技能的 slash-command 扩展位（`uva-skill/src/skill.rs:123-126`） | `skills`（同技能） | 现状即无独立行；分区命令区显示空态并注明"命令随技能提供" |
 | MCP | 设置 · MCP | `.agents/mcp.json`（两层 + 插件包命名空间） | `mcp` | 行缺 → MCP 工具不进注册表（D32）；文件缺 → 无 server（空态） |
 | Hooks | 设置 · Hooks（运行方式 + 运行日志；不从别处导入，D24） | **无目录约定**——挂载的插件行在 harness `Host` 上注册（六条 pass 链 + 五个观察点） | 各提供 hook 的插件行（steering 面） | 无注册 → 分区空态；行禁用 → 其 hook 随 Registration 撤销（`host/mod.rs:644-674`） |
 | 计划 | 设置 · 自动化（`[手动新建] [在对话中创建]` + 三标签 + 空态） | 声明 `.agents/tasks/<name>/task.md` + 运行时 ScheduleStore | `scheduler` + `schedule-tool` | 行缺 → 计划不跑（D32）；声明目录空 → 只剩运行时条目 |
@@ -425,7 +425,7 @@ Expected: `1`（只剩 §5 的一次性核对记录）。
 
 **Files:**
 - Modify: `docs/host-capabilities.md`（§5 核对记录）
-- 临时（用完即弃，**不入库**）: `/tmp/elysper-knife4-audit.sh`、`/tmp/elysper-knife4/`
+- 临时（用完即弃，**不入库**）: `/tmp/uva-knife4-audit.sh`、`/tmp/uva-knife4/`
 
 **Interfaces:**
 - Consumes: Task 3 / Task 4 的文档内容；`--dump-config`；`router.register` 注册表
@@ -436,7 +436,7 @@ Expected: `1`（只剩 §5 的一次性核对记录）。
 刀 4 明确不新增门禁（D15："本轮没有新增门禁脚本"），为一次性对账引入三处同步是维护面净增。
 故脚本放 `/tmp/`，跑完即弃。
 
-- [ ] **Step 1: 写核对脚本到 `/tmp/elysper-knife4-audit.sh`**
+- [ ] **Step 1: 写核对脚本到 `/tmp/uva-knife4-audit.sh`**
 
 ```bash
 #!/usr/bin/env bash
@@ -446,7 +446,7 @@ set -euo pipefail
 
 REPO=$(git rev-parse --show-toplevel)
 DOC=$REPO/docs/host-capabilities.md
-WORK=/tmp/elysper-knife4
+WORK=/tmp/uva-knife4
 fail=0
 
 # --- 1. 合成部署（若 Task 3 的产物还在则复用，否则重建） ---
@@ -454,11 +454,11 @@ if [ ! -f "$WORK/full/profile.toml" ]; then
   echo "!! 合成部署不存在，先跑计划 Task 3 Step 1"; exit 2
 fi
 export HOME=$WORK/home
-unset ELYSPER_HOME_PROFILE
+unset UVA_HOME_PROFILE
 
 cd "$REPO"
-cargo run -q -p elysper-app-server -- --dump-config --directory "$WORK/full"  > "$WORK/full.json"
-cargo run -q -p elysper-app-server -- --dump-config --directory "$WORK/mini"  > "$WORK/mini.json"
+cargo run -q -p uva-app-server -- --dump-config --directory "$WORK/full"  > "$WORK/full.json"
+cargo run -q -p uva-app-server -- --dump-config --directory "$WORK/mini"  > "$WORK/mini.json"
 
 # --- 2. 行 ↔ 文档 双向对账 ---
 grep -o '"id": "[^"]*"' "$WORK/full.json" | sed 's/"id": "//;s/"$//' | sort -u > "$WORK/rows.txt"
@@ -488,7 +488,7 @@ grep -oE '\`[a-z]+(/[a-z-]+)+\`' "$DOC" | tr -d '\`' | sort -u \
   | grep -vxF -e session/event -e anthropic/messages/event -e ready \
   > "$WORK/methods.txt" || true
 while IFS= read -r m; do
-  grep -rq "router.register(\"$m\"" "$REPO/crates/elysper-app-server/src/rpc/methods/" \
+  grep -rq "router.register(\"$m\"" "$REPO/crates/uva-app-server/src/rpc/methods/" \
     || { echo "MISS(registry): 矩阵引用的方法 \`$m\` 不在服务器注册表"; fail=1; }
 done < "$WORK/methods.txt"
 
@@ -514,7 +514,7 @@ exit "$fail"
 
 - [ ] **Step 2: 跑核对**
 
-Run: `bash /tmp/elysper-knife4-audit.sh`
+Run: `bash /tmp/uva-knife4-audit.sh`
 Expected: 末行 `OK: 行 / 目录 / 方法三面全部对上（24 行、<N> 个方法名）`，退出码 0。
 任何 `MISS(...)` 行都表示矩阵与事实脱节——**先修矩阵再重跑**，不许改脚本迁就矩阵。
 （`<N>` 以实际输出为准，抄进 §5。）
@@ -529,7 +529,7 @@ Expected: 末行 `OK: 行 / 目录 / 方法三面全部对上（24 行、<N> 个
 ## 5. 一次性核对记录
 
 - **日期**：2026-11-XX（执行日）
-- **方法**：临时脚本 `/tmp/elysper-knife4-audit.sh`（已弃置，未入库）——合成部署（隔离
+- **方法**：临时脚本 `/tmp/uva-knife4-audit.sh`（已弃置，未入库）——合成部署（隔离
   `HOME`）→ 两份 `--dump-config` → 行 / 目录约定 / 方法名三面双向对账 → 打印对照表目检。
 - **结果**：`OK: 行 / 目录 / 方法三面全部对上（24 行、<N> 个方法名）`；精简部署确认
   "缺行 = dump 缺行"。
@@ -540,8 +540,8 @@ Expected: 末行 `OK: 行 / 目录 / 方法三面全部对上（24 行、<N> 个
 
 - [ ] **Step 4: 弃置临时产物**
 
-Run: `rm -rf /tmp/elysper-knife4 /tmp/elysper-knife4-audit.sh && ls /tmp/elysper-knife4* 2>&1 || true`
-Expected: `ls: cannot access '/tmp/elysper-knife4*': No such file or directory`（脚本与合成
+Run: `rm -rf /tmp/uva-knife4 /tmp/uva-knife4-audit.sh && ls /tmp/uva-knife4* 2>&1 || true`
+Expected: `ls: cannot access '/tmp/uva-knife4*': No such file or directory`（脚本与合成
 部署已删；仓库里本来就没有它们的痕迹）。
 
 - [ ] **Step 5: 确认矩阵没有未填占位**
@@ -582,7 +582,7 @@ Expected: ` M CHANGELOG.md` 与 `?? docs/host-capabilities.md` 必在；至多�
 
 - [ ] **Step 3: 确认零代码 / 零门禁改动**
 
-Run: `git diff --exit-code Makefile AGENTS.md scripts/ .github/ crates/ elysper-web/ Cargo.toml && echo CLEAN`
+Run: `git diff --exit-code Makefile AGENTS.md scripts/ .github/ crates/ uva-web/ Cargo.toml && echo CLEAN`
 Expected: `CLEAN`（门禁清单、workflows、源码全部未动——lint-sh 三处同步自然不触发）。
 
 - [ ] **Step 4: 跑受影响的门禁**
@@ -605,23 +605,23 @@ git commit -m "docs: 能力矩阵——15 域从解析后的 profile 反推，�
 
 | 事实 | 位置 |
 | --- | --- |
-| 内置行全集 = 22（`native_profile()`） | `crates/elysper-app-server/src/composition/kernel/mod.rs:153-177` |
+| 内置行全集 = 22（`native_profile()`） | `crates/uva-app-server/src/composition/kernel/mod.rs:153-177` |
 | `wasm` 行注册工厂但不在内置集（opt-in） | `composition/kernel/mod.rs:343-349` |
 | native 兜底只在 boot，不在 dump | `src/main.rs:173-181` vs `src/state/app_state/boot.rs:242-243` |
 | dump 形状（`hmr` / `core` / `ui`；每行 `id`/`runtime`/`capabilities`/`config`/`provides`/`inject`） | `src/profile/mod.rs:454-507`、`:510-591` |
 | profile TOML 形状（`hmr` + `[core] entries` + `[ui] entries`） | `src/profile/model.rs:220-234` |
-| home patch 层（`~/.agents/profile.toml` / `ELYSPER_HOME_PROFILE`） | `src/profile/merge.rs:217-231` |
+| home patch 层（`~/.agents/profile.toml` / `UVA_HOME_PROFILE`） | `src/profile/merge.rs:217-231` |
 | `agent-loop` 缺 → boot 失败的报错原文 | `src/state/app_state/boot.rs:445-450` |
 | `model-adapter` 卸载 → 建会话报错原文 | `src/state/sessions.rs:351-357` |
-| 行缺 = 不挂载（省略内置 id 即禁用；未知 id 失败；空解析挂内置集） | `crates/elysper-app-server/README.md:181-183` |
-| `.agents` 布局三常量（`plugin.json` / `mcp.json` / `.agents`）与四源优先级 | `crates/elysper-core/src/layout.rs:49-56`、`:18-30` |
-| `Domain` = Skills / Agents / Tasks（目录名）；legacy 仅 skills 读 | `crates/elysper-core/src/layout.rs:84-114` |
-| `mcp.json` 命名空间（`<plugin>/<server>`） | `crates/elysper-core/src/layout.rs:242-275` |
-| MCP 仅 stdio | `crates/elysper-app-server/README.md:134-135` |
-| skills 行 inject `tools`、注册 `skill` 工具、两贡献皆可逆 | `crates/elysper-skill/src/plugin.rs:1-46` |
-| 命令 = 技能的 slash-command 扩展位（现状无独立面） | `crates/elysper-skill/src/skill.rs:123-126` |
+| 行缺 = 不挂载（省略内置 id 即禁用；未知 id 失败；空解析挂内置集） | `crates/uva-app-server/README.md:181-183` |
+| `.agents` 布局三常量（`plugin.json` / `mcp.json` / `.agents`）与四源优先级 | `crates/uva-core/src/layout.rs:49-56`、`:18-30` |
+| `Domain` = Skills / Agents / Tasks（目录名）；legacy 仅 skills 读 | `crates/uva-core/src/layout.rs:84-114` |
+| `mcp.json` 命名空间（`<plugin>/<server>`） | `crates/uva-core/src/layout.rs:242-275` |
+| MCP 仅 stdio | `crates/uva-app-server/README.md:134-135` |
+| skills 行 inject `tools`、注册 `skill` 工具、两贡献皆可逆 | `crates/uva-skill/src/plugin.rs:1-46` |
+| 命令 = 技能的 slash-command 扩展位（现状无独立面） | `crates/uva-skill/src/skill.rs:123-126` |
 | boot seed 默认技能 | `src/state/app_state/boot.rs:171-177` |
-| agent 定义（`agent.md` + `config.json`、四源） | `crates/elysper-agents/src/discovery.rs:1-11` |
+| agent 定义（`agent.md` + `config.json`、四源） | `crates/uva-agents/src/discovery.rs:1-11` |
 | 内置保护名 `agent` 不可删 | `src/routes/agents.rs:44-48` |
 | `models/list` 来自 provider catalogue；provider 回退链 | `src/rpc/methods/misc.rs:34-36`、`src/main.rs:63-77`、`src/state/app_state/boot.rs:763-794` |
 | `plugins/list` = composition + `bundles`（origin project/global） | `src/routes/plugins/mod.rs:60-131` |
@@ -630,9 +630,9 @@ git commit -m "docs: 能力矩阵——15 域从解析后的 profile 反推，�
 | 工作流 = AppState 内存 registry | `src/routes/workflows.rs:1-17` |
 | 评测 = AppState 内存 registry | `src/routes/evals.rs:1-9` |
 | 搜索 = 六域 fan-out（tool/mcp/skill/memory/agent/session） | `src/routes/search.rs:1-47`、`src/rpc/methods/misc.rs:47-51` |
-| Hooks = `Host::hook` 注册（六 pass 链 + 五观察点、可撤销） | `crates/elysper-harness/src/agent/host/mod.rs:16-21`、`:644-674` |
-| `[ui]` 行约束（`ui.` 前缀、`ui-bundle`、components 形状、拒可执行载荷） | `crates/elysper-app-server/src/ui/schema.rs:88-123` |
+| Hooks = `Host::hook` 注册（六 pass 链 + 五观察点、可撤销） | `crates/uva-harness/src/agent/host/mod.rs:16-21`、`:644-674` |
+| `[ui]` 行约束（`ui.` 前缀、`ui-bundle`、components 形状、拒可执行载荷） | `crates/uva-app-server/src/ui/schema.rs:88-123` |
 | 会话目录 `<workspace>/sessions` | `src/state/app_state/boot.rs:137-139` |
-| 方法注册表规模 66（agents 14 / automation 19 / chat 7 / misc 12 / sessions 14） | `grep -c 'router.register("' crates/elysper-app-server/src/rpc/methods/*.rs` |
+| 方法注册表规模 66（agents 14 / automation 19 / chat 7 / misc 12 / sessions 14） | `grep -c 'router.register("' crates/uva-app-server/src/rpc/methods/*.rs` |
 | lint-sh 三处同步规则；本轮 11 个门禁脚本清单不变 | `AGENTS.md` §3.6、`.github/workflows/shellcheck.yml:45-60` |
 | CHANGELOG `[Unreleased]` 在 claim-language 扫描范围；docs/ 不在 markdownlint 范围 | `AGENTS.md` §3.6（check-claim-language 行）、`.markdownlint.json` |

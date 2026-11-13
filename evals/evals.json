@@ -19,7 +19,7 @@
     {
       "id": "t03-log-env-rename",
       "diff": "fixtures/t03-log-env-rename.diff",
-      "facts": ["ELYSPER_LOG", "ELYSPER_LOG_LEVEL"]
+      "facts": ["UVA_LOG", "UVA_LOG_LEVEL"]
     }
   ]
 }

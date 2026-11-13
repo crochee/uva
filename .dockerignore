@@ -1,6 +1,6 @@
-# Elysper .dockerignore — exhaustive list, mirrors the build
+# Uva .dockerignore — exhaustive list, mirrors the build
 # context's actual needs (Cargo + Cargo.lock + crates/ +
-# config.yaml + nginx.conf + elysper-web/) and nothing else.
+# config.yaml + nginx.conf + uva-web/) and nothing else.
 #
 # Anything not listed here gets shipped to the daemon when a
 # `docker build` starts, which inflates the build context to many
@@ -23,10 +23,10 @@ target/
 
 # ---- Node / web build artefacts ----
 **/node_modules
-elysper-web/node_modules
-elysper-web/dist
-elysper-web/tsconfig.tsbuildinfo
-elysper-web/.vite
+uva-web/node_modules
+uva-web/dist
+uva-web/tsconfig.tsbuildinfo
+uva-web/.vite
 contract-closure/node_modules
 contract-closure/dist
 
@@ -46,7 +46,7 @@ server.local.*
 .dev/
 .omc/
 .omp/
-.elysper/
+.uva/
 .trae/
 .worktrees/
 .attachments/
@@ -93,7 +93,6 @@ MAINTAINERS.md
 CONTRIBUTORS.md
 CHANGELOG.md
 LICENSE
-CLAUDE.md
 AGENTS.md
 .editorconfig
 .markdownlint.json

@@ -2,12 +2,12 @@
 
 ## 我有一个问题 / 用例 / 设计讨论
 
-[GitHub Discussions](https://github.com/crochee/elysper/discussions) —
+[GitHub Discussions](https://github.com/crochee/uva/discussions) —
 选对应类别（Q&A / Ideas / Show and tell / General）。
 
 ## 我想提一个 bug / 请求一个 feature
 
-[GitHub Issues](https://github.com/crochee/elysper/issues/new/choose) —
+[GitHub Issues](https://github.com/crochee/uva/issues/new/choose) —
 模板：`bug_report.yml` / `feature_request.yml` / `question.yml`。
 提 PR 前请先在 Discussions 或 Issues 搜过一遍。
 

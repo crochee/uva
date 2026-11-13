@@ -1,4 +1,4 @@
-//! # The minimal Elysper agent, proven by compiling it
+//! # The minimal Uva agent, proven by compiling it
 //!
 //! The executable form of [`MINIMAL.md`](../../../MINIMAL.md): **one**
 //! dependency, the seven-piece feature subset the guide names, and a
@@ -19,13 +19,13 @@
 //!
 //! | Absent | Why it is not needed for an MVP |
 //! |---|---|
-//! | `elysper-macros` (`#[derive(Tool)]`) | one hand-written `Tool` impl is four small methods |
-//! | `elysper-mcp` / `elysper-skill` | remote tools and skills are opt-in extensions |
-//! | `elysper-scheduler` / `elysper-workflow` / `elysper-eval` | cron, workflows and eval suites are separate products |
+//! | one hand-written `Tool` impl | five small methods per tool |
+//! | `uva-mcp` / `uva-skill` | remote tools and skills are opt-in extensions |
+//! | `uva-scheduler` / `uva-eval` | cron and eval suites are separate products |
 //! | `sqlite` | memory persistence is a storage decision the consumer makes |
-//! | `elysper-server` / `elysper-telemetry` | an HTTP deployment and an OTLP pipeline are deployment choices |
+//! | `uva-app-server` / `uva-telemetry` | an HTTP deployment and an OTLP pipeline are deployment choices |
 //!
-//! Every remaining dependency is a `elysper-*` crate or a wire type
+//! Every remaining dependency is a `uva-*` crate or a wire type
 //! (`futures`, `serde_json`); `tokio` is the consumer's own choice of
 //! executor for `main`, not a framework requirement.
 
@@ -35,8 +35,8 @@ use std::sync::{
 };
 
 use futures::StreamExt;
-use elysper::prelude::*;
-use elysper::session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
+use uva::prelude::*;
+use uva::session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 
 // ---------------------------------------------------------------------
 // 1. The provider — the only piece with no default.
@@ -90,7 +90,7 @@ impl ModelProvider for ScriptedProvider {
     ) -> Result<CompletionResponse, Error> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let content = if call == 0 {
-            Content::parts(vec![ContentPart::ToolUse(elysper::provider::ToolUse {
+            Content::parts(vec![ContentPart::ToolUse(uva::provider::ToolUse {
                 id: "call-1".to_string(),
                 name: "echo".to_string(),
                 input: serde_json::json!({ "text": "minimal" }),
@@ -146,7 +146,7 @@ impl Tool for EchoTool {
 
 #[tokio::main]
 async fn main() {
-    println!("=== elysper: the minimal agent (7 features, 1 dependency) ===\n");
+    println!("=== uva: the minimal agent (7 features, 1 dependency) ===\n");
 
     let model_calls = Arc::new(AtomicUsize::new(0));
     let tool_calls = Arc::new(AtomicUsize::new(0));
@@ -165,7 +165,7 @@ async fn main() {
     // `tool-web` — live in this feature configuration — and by
     // `make check-mvp-deps`.)
     let registry = ToolRegistry::new();
-    registry.register_entry(elysper::tool::ToolEntry::new(Arc::new(EchoTool {
+    registry.register_entry(uva::tool::ToolEntry::new(Arc::new(EchoTool {
         calls: Arc::clone(&tool_calls),
     })));
     // The registry holds the hand-written tool and nothing else: if

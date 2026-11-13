@@ -1,0 +1,58 @@
+[package]
+name = "uva-tool"
+description = "Tool paradigm for uva: Tool trait, ToolRegistry, scoping, deferred exposure, workspace path confinement, synthetic contracts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+[dependencies]
+uva-core.workspace = true
+uva-provider.workspace = true
+# The `tools` service is a native kernel plugin, so this crate
+# implements the kernel's `Plugin` contract. The kernel is runtime-free
+# (`cordis-rs` has an empty dependency table), so the crate's own
+# `[dependencies]` stay tokio-free.
+uva-kernel.workspace = true
+# `metrics` only: tool dispatch records the Prometheus counters. The
+# OTLP exporter (and with it the whole opentelemetry + transport
+# stack) is deliberately NOT linked, so every agent consumer of this
+# crate stays free of it.
+uva-telemetry = { workspace = true, default-features = false, features = [
+  "metrics",
+] }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+schemars = { workspace = true, features = ["preserve_order"] }
+# schemars 1.2.2 has a `#[cfg(feature = "schemars_derive")]` gate on
+# its `pub use schemars_derive::*`, but that gate is broken: Cargo
+# only forwards `feature="default"` to the rustc invocation, so the
+# `schemars_derive` feature is never activated for transitive
+# consumers. We depend on the derive crate directly and import the
+# macro via `use schemars_derive::JsonSchema`. Remove the direct
+# dep once upstream aligns the gate with the documented `derive`
+# feature name.
+schemars_derive.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+futures.workspace = true
+[dev-dependencies]
+# `macros` + `rt-multi-thread` drive the `#[tokio::test]` /
+# `#[tokio::main]` tests and examples. The production library is
+# runtime-free (dispatch runs on the caller's poll; the spill
+# writer blocks).
+tokio = { workspace = true, features = [
+  "macros",
+  "rt-multi-thread",
+] }
+tokio-stream.workspace = true
+tempfile.workspace = true
+uva-test-support.workspace = true
+tracing-subscriber.workspace = true

@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Elysper are documented in this file. The format
+All notable changes to Uva are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
@@ -12,30 +12,200 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Removed (the dynamic plugin channel and the workflow domain are gone)
+
+- **动态插件通道整条删除**（`crates/uva-plugin-runtime` 全部消失）：三个断面
+  ——`protocol`（serde-only 词汇）、`host`（拉起插件进程说 JSON-RPC over stdio）、
+  `wasm`（WebAssembly 组件运行时）—— 连同 facade 的 `plugin-protocol` /
+  `plugin-host` / `wasm` feature、app-server 的 `process-plugins` 与 `wasm`
+  profile 行、`[plugins]` 部署配置段、`plugins/list` 方法与路由、会话的
+  plugin 事件通道、`uva-core` 的 bundle `code` 组件全部删除。
+  **第三方工具与脚本改走 MCP server**：`mcp.json` 的 `mcpServers` 映射按
+  `command` + `args` 声明，stdio 传输，server 发布的工具注册进同一个
+  `ToolRegistry`（`crates/uva-app-server/src/state/app_state/boot.rs:370`）。
+  MCP 不承载的角色（结果改写 / gate / authority 分级）随通道一起消失。
+  顺带删掉仓里唯一那个 JIT 依赖（`wasmtime` 50）与它的门禁 `check-wasm-deps` /
+  基准 `bench-wasm`。
+- **`uva-workflow` crate 与 workflows 域整条删除**：声明式多智能体工作流运行时
+  （`WorkflowSpec` / `WorkflowStore` / `WorkflowRuntime` / `WorkflowHost`）
+  连同 app-server 的 workflows 域——RPC 方法 `workflows/list|create|get|replace|
+  delete|run`、HTTP `/api/v1/workflows/*`、MCP 自工具 `workflows`、web 的
+  workflows API 与「自动化」分区里的工作流块、TUI 的工作流目录项——全部消失。
+  **已存在磁盘上的 `<workspace>/workflows/*.json` 不再被任何代码读取，可自行删除。**
+  workspace member 从 27 个减到 **25** 个。
+
+### Changed (docs: the front door and the agent contract, restructured)
+
+- **`README.md` 重写为项目门面**：状态表 → 5 分钟上手 → 为什么是 Uva → 架构 →
+  工作区分层 → 文档索引 → 社区与治理，读者从"这是什么"到"怎么参与"只走一条路。
+  crate 清单不再在三张表里重复（改为分层表 + 指向 `docs/architecture.md`），
+  逐轮"composition primitives"大表移到 [`docs/composition-primitives.md`](docs/composition-primitives.md)。
+  事实校正：workspace member 按 `cargo metadata` 是 **25** 个（不是 29 / 40）；
+  明确写出**尚未发布到 crates.io**（发布计划见 `RELEASE.md`）；
+  SBOM / 签名 / provenance 归入路线图，不再当作现状承诺。
+- **`AGENTS.md` 精简**：674 → 约 300 行。硬不变量留在正文并各自挂上门禁，
+  理由下沉到 [`docs/architecture.md`](docs/architecture.md)；40 行的 Makefile
+  目标表换成"`make help` 是唯一清单 + 门禁护什么"；新增 §3.9（异步与并发）
+  与 §3.10（依赖与供应链）两节，对齐 `rust-dev` 的硬性要求。
+- **新增文档**：`docs/architecture.md`（crate 全景 + 不变量与理由）、
+  `docs/README.md`（文档树入口）、`docs/ROADMAP.md`（当前轮次与后续供应链路线）。
+- **死链修复**：`MINIMAL.md`（`docs/architecture/adr/` → `docs/architecture.md`）、
+  `CONTRIBUTING.md`（三个不存在的 `uva-tool-*` crate → `uva-tool-plugins` 的对应 feature）、
+  `RELEASE.md`（`identity.rs` → `build_info.rs`；移除不存在的 `contract-closure.yml`）、
+  `DEPLOYMENT.md`（缺失的 `nginx.conf` 改为内联 server block）、
+  `docs/api-surface.md` 与 `docs/log-format.md`（相对路径修正）。全仓相对链接 0 死链。
+
+### Changed (repo hygiene: agent instructions consolidated)
+
+- **`CLAUDE.md` 已并入 `AGENTS.md`**：仓库根不再保留独立的 `CLAUDE.md`。
+  它的"怎么做"部分（Think before coding / Simplicity first / Surgical
+  changes / Goal-driven execution / Skills / Task-centric execution）逐行
+  迁入 `AGENTS.md` §5（`## 5.1`–`## 5.6`），与"做什么"的 §1–§4 合流为
+  单一真源；内容与 Anthropic Claude Code 上游标准保持一致，只改了标题
+  层级与两处交叉引用。`CODEOWNERS` / `.dockerignore` 中的对应条目同步移除。
+- **工程 skill 配置落地**：新增 `docs/agents/`（issue tracker / triage labels
+  / domain docs）与 `AGENTS.md` 的 `## Agent skills` 段。issue tracker 走
+  本地 markdown（`.scratch/<feature>/`，已 gitignore），不依赖 `gh`。
+
+### Changed (CI cadence: the periodic jobs run less often)
+
+- **依赖检测从每周一次改为每 2 个月一次**：`security-audit.yml` 的 cron 从
+  `0 3 * * 1`（每周一 03:00 UTC）改为 `0 3 1 */2 *`（每 2 个月 1 日 03:00 UTC，
+  即 1/3/5/7/9/11 月）；`dependabot.yml` 的三个 ecosystem（cargo /
+  GitHub Actions / npm）从 `interval: "weekly"` 改为 `interval: "cron"` +
+  `cronjob: "0 9 1 */2 *"`，三者同日 09:00 UTC 跑，比 security-audit 晚 6 小时。
+  **`interval: "cron"` + `cronjob` 是这里唯一可用的写法**：GitHub 的具名 interval
+  只到 `monthly`，`quarterly` / `semiannually` / `yearly` 仅 GitHub Enterprise
+  Server ≥ 3.19 可用。
+- **其余周期任务同步拉长**：`stale.yml`（每天 → 每周一 02:00 UTC）、
+  `markdown-lint.yml`（每天 → 每周二 04:00 UTC）、`shellcheck.yml`（每天 →
+  每周三 05:00 UTC），三者错开在不同的工作日，不再同一天挤在一起。
+- **push / PR 触发不受影响**：这五个 workflow 的 `push` / `pull_request` 触发器
+  一个没动——变的是 cron 巡检的周期，PR 门禁的即时性完全不变。
+
+### Changed (breaking: the project is renamed from elysper to uva)
+
+- **crate / 包 / 目录全部改名**：`elysper` → `uva`、`elysper-core` → `uva-core`、……
+  共 27 个 crate；三个二进制改名 `uva-app-server` / `uva-tui` / `uva-mcp-server`，
+  前端包目录 `elysper-web/` → `uva-web/`。
+- **对外可见的标识一起改名**（breaking）：环境变量 `ELYSPER_*` → `UVA_*`；
+  wire 字段 `metadata.elysper_session_id` / `metadata.elysper_agent_name` →
+  `metadata.uva_session_id` / `metadata.uva_agent_name`；tracing target `elysper.*` →
+  `uva.*`；运行时目录 `~/.elysper/` → `~/.uva/`；Docker 镜像与 k8s 资源名同步。
+- **facade 的公开路径**：`elysper::…` → `uva::…`（facade 包名本身就是 `elysper`）。
+
+### Changed (crate topology: the tokio adapters are renamed to what they are)
+
+- **`uva-harness-tokio` → `uva-core-tokio`**：这个 crate 的库面只有三个零大小
+  适配器（`TokioSpawner` / `TokioSleeper` / `TokioBlocking`），实现的是
+  **`uva-core`** 的三个 runtime-neutral trait（`spawn::Spawner` /
+  `sleeper::Sleeper` / `blocking::Blocking`）——`src/lib.rs` 一行都没 import
+  `uva_harness`，lib 的依赖只有 `uva-core` + `tokio(rt,time)`（harness 只在
+  dev-dependencies 里给 example 用）。名字里的 `-harness-` 是历史遗留的误导：它不是
+  harness 的运行时，而是 core 那三个 seam 的 tokio 实现。改名后名字回答了"这是谁的
+  适配器"这个问题。
+- **crate 本身仍然独立**：core 与 harness 都不得带 tokio（`make check-harness-features`
+  与 `make check-no-runtime` 断言），适配器只能住在第三个 crate——上一轮
+  （29 → 27）的审阅结论同样如此，本次只改名字、不动结构。
+- **facade 的公开路径一字未改**：`harness-tokio` feature 与 `uva::harness_tokio::*`
+  保持原样（沿用插件族聚合与 `uva-agents` 内敛两次先例：底层动、facade 不动），
+  变的只有它转发的底层 crate 名。`docs/api-frozen.md` 的非冻结清单同步。
+- 引用同步：`uva-core` 三个 trait 的文档注释、`uva-session` /
+  `uva-policy-plugins` 的 seam 说明、`SEAMS.md`、facade 的 feature 表与
+  `check-publishable.sh` 的打包序。历史设计文档（`docs/design/`、`docs/superpowers/`）
+  按 R46 先例保持原样——它们记录的是当时的轮次。
+
+### Changed (CLI surface: every binary's command line is clap's)
+
+- **`uva-mcp-server` 迁到 clap**：手写的 `parse_argv`（`crates/uva-mcp-server/src/lib.rs`
+  的私有 `config` 模块）删除，命令行定义落到 `crates/uva-mcp-server/src/cli.rs` 的
+  `Args` / `Command` / `ServerConfig` 上。**对外契约不变**：`--workspace` / `-w` 与
+  `--name` / `-n` 的拼写、默认值（`$PWD` 与 `uva`）与失败语义（workspace 必须是
+  已存在目录）逐字保留；`parse_argv` 这个公开函数随之删除（crate 尚未发布到
+  crates.io，这是最便宜的时刻）。
+- **`--help` 的退出码从 2 修正为 0**：旧的手写解析把 `--help` 当成"用法错误"返回，
+  任何用退出码判断"帮助是否成功"的脚本都会误判；现在 `--help` / `--version` 是成功
+  路径（exit 0），用法错误仍是 exit 2。
+- **协议模式的帮助文本改走 stderr**：`uva-app-server` 的 `core` 子命令与整个
+  `uva-mcp-server` 的 stdout 是 JSON-RPC 帧通道，clap 默认把 `--help` / `--version`
+  打到 stdout 会被对端读成坏帧——和一行日志落在 stdout 上是同一种故障。这两个模式
+  因此把帮助与版本渲染到 stderr（`core` 的 `--help` / `--version` 是自定义 flag，
+  clap 的自动帮助在该子命令上关闭）；`serve` / `translate` 与 TUI 保持 stdout 的常规
+  行为。
+- **命令行定义统一落在各 crate 的 `src/cli.rs`**：`uva-app-server` 与 `uva-tui`
+  原来把 clap 的 `Args` / `Mode` / `ServeArgs` 写在 `main.rs` 里，现在搬进库的
+  `cli` 模块——`clap::CommandFactory::debug_assert()`（查互相矛盾的参数定义）因此
+  第一次进入 CI，`main.rs` 也只剩薄壳。
+- **新增两道门禁与契约测试**：`make check-cli-surface` 断言库代码不再手写 argv 解析
+  （`env::args` / `env::args_os`），且协议模式不使用 clap 的 stdout 帮助打印器；三个
+  二进制各自的 `tests/cli_surface.rs` 真实 spawn 进程，断言 stdout 为空、stderr 有
+  内容、退出码符合约定。
+
+### Changed (crate topology: non-plugin crates inlined, 29 → 27)
+
+- **`uva-agents` 内敛进 `uva-core`**：它不是 kernel 插件（不实现 `Plugin`），
+  仓内唯一的消费方是 facade——而 facade 只是转发。真正决定它该住哪的是**它与 core
+  共享的同一份概念**：`uva_core::AgentDescriptor`（身份）、`uva_core::layout`
+  （`Domain::Agents` 的四源发现顺序）、以及它自己的文件格式（`agent.md` +
+  `config.json`）。三者拆在两个 crate 里，"一个 agent" 就要跨 crate 编辑；现在它们
+  同处 `uva-core` 的 `agent_def` 模块——身份、位置、格式同源，`Domain::Skills` /
+  `Domain::Tasks` 未来也能沿用同一条缝。
+  - **公开路径不变**：facade 的 `agents` 模块改为转发 `uva_core::agent_def`，
+    `uva::agents::AgentDefinition` / `write` / `discover` 一字未改，app-server
+    源码零改动（663 测试全绿）。
+  - **`uva-core` 新增 `tracing` 依赖**：发现流程要 warn 掉一个解析失败的定义。
+    `tracing` 是日志门面而非运行时（无 reactor、无 worker pool），不破坏 core 的
+    tokio-free 契约；`make check-no-runtime` 仍然通过。
+- **删除 `uva-macros`**（578 行 proc-macro + 286 行测试 + 89 行 example）：仓内
+  **零使用**——九个工具插件全部手写 `impl Tool`，连"第三方插件作者"的参考样例
+  （`docs/examples/plugin-author`）也是手写。它还带来三重代价：
+  1. **覆盖不全**：宏只生成 `name` / `description` / `parameters` / `call` 四个方法，
+     而真实工具还要写 `output_definition` / `annotations`——省下的样板比失去的多；
+  2. **隐含约定**：`execute` 方法名、doc comment 当描述、snake_case 当工具名、
+     `mode` 字符串映射——正是"少约定、少隐含逻辑"要减的东西；
+  3. **依赖画像**：`proc-macro2` + `quote` + `syn` 进了默认 feature 集。
+  facade 的 `macros` feature 与 `uva::macros` 模块随之删除。
+- **判定表（本轮审阅的结论）**：其余非插件 crate 逐一核对后**全部保留**，理由分别是——
+  `core` / `kernel` / `provider` / `tool` / `harness` / `session` / `context` /
+  `steering` / `search` / `telemetry` / `test-support` 是多方消费的范式基座；
+  `uva-harness-tokio` 必须独立（core 与 harness 都不得带 tokio，适配器只能住
+  第三个 crate）；`uva-workflow` 有 69 个测试 + 3 个 example，是多 agent 编排的
+  完整领域能力；`gateway` / `tui` / `mcp-server` / `app-server` 是二进制与跨 workspace
+  契约。
+
 ### Changed (crate topology: plugin families)
 
 - **按插件维度聚合成族 crate（45 → 29 个 crate）**：同构的插件实现不再一人一个 crate，
   而是"**一个族 = 一个插件维度**，族内**一个插件 = 一个模块 + 一个 feature**"：
-  - `elysper-tool-plugins` —— 九个工具插件（`read` / `write` / `shell` / `todo` /
+  - `uva-tool-plugins` —— 九个工具插件（`read` / `write` / `shell` / `todo` /
     `web` / `task` / `scheduler` / `search` / `memo`）；
-  - `elysper-policy-plugins` —— 七个策略插件（`cache` / `resilience` / `budget` /
+  - `uva-policy-plugins` —— 七个策略插件（`cache` / `resilience` / `budget` /
     `reflection` / `cot` / `plan-execute` / `best-of-n`）；
-  - `elysper-plugin-runtime` —— 插件通道的三个断面（`protocol` / `host` / `wasm`）。
+  - `uva-plugin-runtime` —— 插件通道的三个断面（`protocol` / `host` / `wasm`）。
 - **插件专属依赖逐插件 optional**：一个工具的依赖由它自己的 feature 打开
-  （`web` → `reqwest`、`task` → `elysper-harness`、`scheduler` → `elysper-scheduler`、
-  `search` → `elysper-search`、`memo` → `blake3`），族 crate 的默认构建什么也不带；
+  （`web` → `reqwest`、`task` → `uva-harness`、`scheduler` → `uva-scheduler`、
+  `search` → `uva-search`、`memo` → `blake3`），族 crate 的默认构建什么也不带；
   `make check-mvp-deps` 改为按 **feature 组合** 断言，并反向断言 `web` 确实是打开
   `reqwest` 的那个开关。
-- **消费方零改动**：facade 的 feature 名（48 个）与模块路径（`elysper::tool_read::…`）
-  一字未改，`Cargo.toml` 与源码都不需要动；三个独立 consumer proof 与
-  `make examples` 全部照旧通过。
-- **范式 crate 不动**：`elysper-tool` / `-provider` / `-core` / `-kernel` / `-harness`
-  等公开面与冻结基线一字未改；`elysper-harness-tokio` 保持独立（harness 不得带 feature）。
+- **消费方源码零改动**：facade 的 feature 名（48 个）与模块名（`uva::tool_read::…`）
+  一字未改，消费方的 `Cargo.toml` 与源码都不需要动；仓内四个消费方（harness 的
+  dev-deps / mcp-server / runtime / external-consumer）的 manifest 改指族 crate；
+  三个独立 consumer proof 与 `make examples` 全部照旧通过。
+- **Breaking（两处嵌套模块改名）**：内层模块与外层同名会触发 `module_inception`
+  （deny-by-default），故 `uva::tool_task::task::*` → `uva::tool_task::core::*`，
+  `uva::budget::budget::*` → `uva::budget::model::*`。**类型路径不变**
+  （`uva::tool_task::TaskSpec` / `uva::budget::Budget` 仍在模块根部转出）。
+- **依赖画像变化（消费方可见）**：工具族把 `tokio`（fs / process）带进了每个工具
+  feature——此前 `task` / `scheduler` / `search` / `memo` 四个插件是 runtime-free 的，
+  现在这四个插件的消费者会多一个 `tokio`。插件通道的 `protocol` 半边保持
+  serde-only（默认 feature 只开它）。
+- **范式 crate 不动**：`uva-tool` / `-provider` / `-core` / `-kernel` / `-harness`
+  等公开面与冻结基线一字未改；`uva-harness-tokio` 保持独立（harness 不得带 feature）。
 - **门禁按新拓扑改写**：`check-plugin-shape` 递归扫描族 crate 的模块目录（否则会静默
   失效）；`check-publishable` 的打包序 45 → 29 项；三个族 crate 各有 `pub use` 预算基线。
 - **插件目录**：[`docs/plugins.md`](docs/plugins.md) 给出"我要 X → 装哪个 feature →
   实现哪个 trait"的路线，配套可运行的第三方插件样例
-  （`docs/examples/plugin-author`，只依赖 `elysper` 一个入口）。
+  （`docs/examples/plugin-author`，只依赖 `uva` 一个入口）。
 
 ### Added (SPA information architecture, knife 9)
 
@@ -66,10 +236,10 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `restart-required` / `overridden` / `failed` 四态；创建 / 删除能力经内置
   MCP 通道与 `profile/*` JSON-RPC 方法走同一条写路径，agent 写动作按
   `Risk::High` 走既有审批；提交后广播无 `session_id` 的 `profile/changed`。
-- `elysper-core` 新增叶子模块 `enable`（`EnableChecks` 判定契约，不加
-  crate-root re-export，frozen 基线不动）；`elysper-skill` 的 `skills` 行
+- `uva-core` 新增叶子模块 `enable`（`EnableChecks` 判定契约，不加
+  crate-root re-export，frozen 基线不动）；`uva-skill` 的 `skills` 行
   发布第一个判定服务 `skill-checks`（读 SKILL.md 的 `metadata.enabled`）。
-- `elysper-mcp` 贯通协议原生的 `annotations`：`ServerTool` 可声明、
+- `uva-mcp` 贯通协议原生的 `annotations`：`ServerTool` 可声明、
   `tools/list` 透传、`McpTool` 落到 `Tool::annotations`（旧服务器不带该字段
   时行为不变）。
 
@@ -100,7 +270,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (TUI directory browsing, wave 1: sessions + chat)
 
-- **The TUI grows a directory browser.** `crates/elysper-tui/src/domains.rs`
+- **The TUI grows a directory browser.** `crates/uva-tui/src/domains.rs`
   is one column table per domain (list method, row pointer, columns, `get`
   method, per-operation param key); `views/list.rs` renders any domain's
   `List<T>` envelope through it, `views/detail.rs` flattens any object
@@ -124,7 +294,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **`docs/host-capabilities.md`** — the knife-4 capability matrix: 15
   capability domains, each with host landing / data source / owning
   profile row / behavior when the row is absent. Rows are derived from
-  the resolved profile (`elysper-app-server --dump-config`, measured on
+  the resolved profile (`uva-app-server --dump-config`, measured on
   a synthetic deployment) and the `~/.agents` layout conventions, not
   hand-curated; the file also records the one-shot reconciliation (24
   rows / 20 referenced method names all present in the registry) and
@@ -136,13 +306,13 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   its own workspace — deliberately not a root-workspace member, so
   the webkit system stack never becomes a prerequisite for
   `make ci`. The shell does exactly four things, all through
-  `crates/elysper-gateway`: launch the `elysper-app-server serve`
+  `crates/uva-gateway`: launch the `uva-app-server serve`
   sidecar, wait for `/readyz`, open a window on the gateway's
-  `base_url` (the same `elysper-web/dist` the browser serves), and
+  `base_url` (the same `uva-web/dist` the browser serves), and
   re-navigate the window when a restarted generation lands on a new
   address / reap the sidecar when the window closes (no orphans). It
   speaks no protocol — no `tokio-tungstenite`, and the direct
-  dependency list stays at `tauri` + `elysper-gateway` + `anyhow`.
+  dependency list stays at `tauri` + `uva-gateway` + `anyhow`.
   The new `.github/workflows/desktop.yml` carries the shell's own
   fmt / clippy / test / `cargo deny` gates (closing the gap where
   the root `cargo deny` never sees the desktop lockfile's
@@ -150,8 +320,8 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Changed (projection wave 2: the TUI joins the gateway)
 
-- **`elysper-tui` no longer talks to a core.** The transport layer now
-  drives `elysper-app-server serve` through `elysper-gateway` — the
+- **`uva-tui` no longer talks to a core.** The transport layer now
+  drives `uva-app-server serve` through `uva-gateway` — the
   same `/rpc` WebSocket the browser speaks — instead of spawning
   `core` and framing `Content-Length` over stdio. Process
   supervision (spawn, `/readyz`, the 1s → 5s backoff, reaping) moved
@@ -167,7 +337,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   to an already-running gateway without spawning or supervising one;
   a dropped gateway is reported as unreachable while the client
   keeps reconnecting on its own. The crate's dependency moved from
-  `elysper-app-server` to `elysper-gateway`; the reducer and the
+  `uva-app-server` to `uva-gateway`; the reducer and the
   ratatui renderer are untouched. The gateway crate learned two
   things the TUI needs: `GatewayClient::subscribe_all` (a local
   catch-all — nothing registered on the wire, nothing replayed) and
@@ -177,9 +347,9 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (projection wave 2: the shared gateway crate)
 
-- **`elysper-gateway` — the foundation of projection wave 2.** A
+- **`uva-gateway` — the foundation of projection wave 2.** A
   `publish = false` support crate the TUI and the desktop shell both
-  build on: a supervisor that launches `elysper-app-server serve`,
+  build on: a supervisor that launches `uva-app-server serve`,
   waits for the `/readyz` **status line** (never just "the port
   accepts a connection"), restarts a dead gateway with the 1s → 5s
   backoff, and reaps the child on drop; plus a JSON-RPC 2.0 client
@@ -288,7 +458,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (plugin-spine stage 1: everything-a-plugin assembly)
 
-- **`elysper-runtime`, the config-driven assembly crate.** The
+- **`uva-runtime`, the config-driven assembly crate.** The
   provider catalogue (`ProviderCatalogue`, tier-1 wrapping chain
   `wrap_tier1_providers`, `ModelAdapterConfig`) and the agent-loop
   factory (`server_agent_loop`, `AgentLoopDefaults`) move out of the
@@ -313,7 +483,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   transitively — a provider swap reaches new runs without
   restarting, while in-flight turns keep their handles. Disposing
   `model-adapter` parks `agent-loop` until a remount recovers it.
-- **`elysper-app-server translate`** migrates a legacy `config.yaml`
+- **`uva-app-server translate`** migrates a legacy `config.yaml`
   into a profile TOML's `model-adapter` row, reporting the sections
   it maps and the ones it leaves on `ServerConfig::load`.
 
@@ -328,7 +498,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (the app-server boots through the kernel)
 - **The native plugin set is mounted, not hand-wired.** Boot builds a
-  `elysper::kernel::Context`, registers the built-in factories
+  `uva::kernel::Context`, registers the built-in factories
   (`tool-registry`, `model-adapter`, `session-store`, `sandbox`,
   `subagent-backend`, `context-compactor`, `approval`, `skills`,
   `agent-loop`, `mcp`, `eval`, `scheduler`, `schedule-tool`,
@@ -337,7 +507,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   context and the `MountHandle`; `AppState::unload_plugin(id)` unloads
   one plugin, and `shutdown_kernel` unloads the rest on shutdown.
 - **`MountHandle::dispose_plugin(id)` and `PluginState`** land in
-  `elysper-kernel`: one plugin's tracked effects and fiber are disposed
+  `uva-kernel`: one plugin's tracked effects and fiber are disposed
   in place, consumers that injected its services park as `Pending`, and
   every sibling keeps running. Disposal is idempotent.
 - **The prompt builder reads the `skills` service.** Boot no longer
@@ -362,7 +532,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   loader rejects a core key and any executable field (`script`,
   `stylesheet`, …). v1 never executes remote JavaScript or CSS — the
   frontend renders only the kinds in
-  `elysper-web/src/components/ui-schema/` (`panel`, `list`,
+  `uva-web/src/components/ui-schema/` (`panel`, `list`,
   `key-value`) and shows an unknown kind as a placeholder.
 - **The core remounts only the rows a profile change names.** With
   `hmr = true`, the core polls the profile layers once a second,
@@ -380,11 +550,11 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   command now builds the registered `PluginFactories` (over a
   manifest-only host) and calls `dump_with_manifests`; a row with no
   factory prints explicit empty arrays, and the UI segment does too.
-- **The facade's feature table names `kernel`.** `elysper::kernel`
+- **The facade's feature table names `kernel`.** `uva::kernel`
   re-exports `Plugin`, `PluginManifest`, `mount_all`, `MountHandle`,
   `Context`, `EffectHandle`, `PluginState`, and the `ui.` namespace
   boundary.
-- **Deprecation direction (not removal).** `elysper_harness::Host` and
+- **Deprecation direction (not removal).** `uva_harness::Host` and
   the app-server's `AgentAssembly` stay with a documented direction
   toward kernel effects / the `agentLoop` service: chat still assembles
   each run through `AgentAssembly`, so deleting the wrapper now would
@@ -393,7 +563,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (the plugin kernel gains an opt-in Wasm component runtime)
 
-- **`elysper-wasm-runtime`** loads a WebAssembly **component** exporting
+- **`uva-wasm-runtime`** loads a WebAssembly **component** exporting
   `describe() -> string` and `execute(input: string) -> string`, calls
   `describe()` exactly once at mount, and caches the JSON schema.
   Components are cached by content hash, and a successful call reuses its
@@ -430,10 +600,10 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (profile TOML assembly, a deterministic dump, and HMR diffing)
 
-- **`elysper-app-server` accepts `--profile`, `--bundle`, `--patch`, and
+- **`uva-app-server` accepts `--profile`, `--bundle`, `--patch`, and
   `--dump-config`.** Layers apply in the documented order — empty →
   bundle patch → profile document → home patch (`~/.agents/profile.toml`
-  or `ELYSPER_HOME_PROFILE`, only when it exists) → CLI overlay — with
+  or `UVA_HOME_PROFILE`, only when it exists) → CLI overlay — with
   whole-config replacement, `insert`, and `disabled`; an unknown patch id
   is an error. `--dump-config` prints the resolved tree as deterministic
   JSON and exits 0, and `dump_with_manifests` adds each row's
@@ -447,14 +617,14 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   boot wiring that registers factories, mounts the result, and performs
   the remount loop lands with the kernel cutover.
 
-### Changed (breaking: `elysper-app-server` — a headless JSON-RPC core, a WebSocket gateway, and the `~/.agents/` layout)
+### Changed (breaking: `uva-app-server` — a headless JSON-RPC core, a WebSocket gateway, and the `~/.agents/` layout)
 
-- **`elysper-server` is now `elysper-app-server`**, and one binary
+- **`uva-app-server` is now `uva-app-server`**, and one binary
   carries two subcommands. `core` (the default) is a headless process
   speaking JSON-RPC 2.0 on stdio — Content-Length framed envelopes
   (`Content-Length: <n>\r\n\r\n` plus exactly `n` bytes, default
   ceiling 8 MiB); stdout carries only protocol frames
-  (logs go to stderr, selected by `elysper-telemetry`'s new
+  (logs go to stderr, selected by `uva-telemetry`'s new
   `log_writer`), and the process announces itself with one `ready`
   notification after boot. `serve` is the App Server gateway: it
   spawns `<current_exe> core`, forwards every browser WebSocket frame
@@ -472,11 +642,11 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   (`user_id = "dev"`). The gateway keeps exactly four HTTP probes —
   `/livez`, `/readyz` (core alive **and** `ready` seen), `/version`,
   `/metrics` (the Prometheus exposition via
-  `elysper::telemetry::gather_text()`; the HTTP RED middleware that
+  `uva::telemetry::gather_text()`; the HTTP RED middleware that
   used to fill it went with the HTTP surface, so the exposition is
   empty until gateway-level counters land) — and serves the web UI
   statically (`--web-dir`, or the
-  `embed-web` feature, which bakes `elysper-web/dist` into the binary
+  `embed-web` feature, which bakes `uva-web/dist` into the binary
   with rust-embed). The management and chat surfaces live on ~57 RPC
   methods (`sessions/*` with `sessions/follow`, `chat/*`,
   `agents/*`, `skills/*`, `tools/*`, `schedules/*`, `workflows/*`,
@@ -490,19 +660,19 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   replaced by `tests/stdio_roundtrip.rs`, which spawns the binary
   and drives the wire end to end.
 - **Definitions live in a two-layer `~/.agents/` layout.**
-  `elysper-core::layout` (std-only) defines the roots —
-  `<workspace>/.agents` and `~/.agents`, with `~/.elysper` as the
+  `uva-core::layout` (std-only) defines the roots —
+  `<workspace>/.agents` and `~/.agents`, with `~/.uva` as the
   legacy global — and the four-source precedence: 项目直定义 >
   项目插件包 > 全局直定义 > 全局插件包. Skills, agents and task
   declarations are discovered from it; the `~/.claude` compatibility
-  root is gone. The new `elysper-agents` crate makes
+  root is gone. The new `uva-agents` crate makes
   `agents/<name>/agent.md` (+ optional `config.json`) the storage an
   agent definition is: file-as-storage, so what the operator edits is
   what the process reads, and the boot materializes each file-backed
   agent (the built-in `agent` name is protected from shadowing).
-  `elysper-scheduler` grows `task_file` — `tasks/<name>/task.md`
+  `uva-scheduler` grows `task_file` — `tasks/<name>/task.md`
   declarations the boot syncs with the store by name, exporting
-  undeclared active jobs back to files. `elysper-mcp` grows
+  undeclared active jobs back to files. `uva-mcp` grows
   `config_file`: MCP servers come from the layout's `mcp.json` files
   (a bundle's servers namespaced `<plugin>/<server>`), replacing the
   removed `[mcp_servers]` config section. A plugin bundle may also
@@ -514,14 +684,14 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   third array, `bundles`, so an operator can see what the layout
   declared.
 - **The config chain gained a global fallback and a parse fix.**
-  `~/.agents/config.toml` (then legacy `~/.elysper/config.toml`) back
+  `~/.agents/config.toml` (then legacy `~/.uva/config.toml`) back
   the workspace config, and a config file is parsed by its extension
   (`.yaml`/`.yml` → YAML, `.toml` → TOML, otherwise JSON) — the old
   reader parsed every file as JSON.
 - **The MCP supervisor is kept alive.** The boot dropped it on the
   floor after the first tick, so a server that died never came back;
   it now lives on `AppState` and the scheduler driver ticks it.
-- **The web frontend speaks the one protocol.** `elysper-web` gains
+- **The web frontend speaks the one protocol.** `uva-web` gains
   `src/api/rpc.ts` (one WebSocket at `/rpc`, string ids, a
   notification bus, capped-backoff reconnect); `src/api/client.ts`
   keeps every exported call signature but translates the REST paths
@@ -530,13 +700,13 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   with reconnect re-follow; the dev proxy forwards `/rpc`
   (`ws: true`) beside the probes.
 
-### Removed (breaking: the Redis cluster backend, `elysper-hpc-batch`, and the deployment split)
+### Removed (breaking: the Redis cluster backend, `uva-hpc-batch`, and the deployment split)
 
 - `cluster-redis` (the Redis pub/sub bus and lease backend; the local
-  in-process bus stays, inert on one node), the `elysper-hpc-batch`
+  in-process bus stays, inert on one node), the `uva-hpc-batch`
   crate and the facade's `hpc-batch` feature, `Dockerfile.web`,
   `nginx*`, `docker-compose.prod.yml` (the release image is one
-  artifact: `elysper-app-server serve` with `embed-web`), and the
+  artifact: `uva-app-server serve` with `embed-web`), and the
   `contract-closure/` scanner with `make contract-scan/report/check`
   and its workflow — its subject, the REST router, no longer exists;
   the wire contract is exercised by the stdio roundtrip test and the
@@ -544,8 +714,8 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Changed (breaking: harness 0.2 — one kernel, reversible extensions, a log-owned transcript)
 
-- **One interception registry.** `elysper_steering::{Steering, HookMap}`
-  are gone. `elysper_harness::Host` holds every extension point —
+- **One interception registry.** `uva_steering::{Steering, HookMap}`
+  are gone. `uva_harness::Host` holds every extension point —
   `Hook`, `Gate`, `Guard`, `Hint`, `Tracker`, `OutputTransformer`,
   request / result transformers, prompt sections, tools and
   delegators — and each registration is reversible: dropping its
@@ -562,15 +732,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **The `Checkpointer` seam is deleted.** Resume is driven by the
   session log only; `CheckpointSnapshot`, `InMemoryCheckpointer` and
   `AgentInput`'s snapshot semantics are removed.
-- **`elysper-session` owns the log contract.** New `SessionLog`
+- **`uva-session` owns the log contract.** New `SessionLog`
   (object-safe: read / append / flush / repair), `RepairReport`,
   `repair_log`, and `CompactionSettings` (moved from
-  `elysper-context`). `begin_compaction` / `finish_compaction` take
+  `uva-context`). `begin_compaction` / `finish_compaction` take
   `&dyn SessionLog`; `plan_compaction` takes
   `(history, surface_seqs, compactor, budget)` and
   `plan_compaction_from_rows` is the rows-based entry. `CompactionCheckpoint`,
   `TypedEventRecord` and their views are deleted.
-- **One compaction engine.** `elysper-context`'s
+- **One compaction engine.** `uva-context`'s
   `SummarizingContextManager`, `DagContextManager`, `SessionMemory`,
   `events_to_messages`, `repair_session` and the compaction-settings
   module are deleted. A `ContextManager` only projects or trims the
@@ -592,7 +762,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   resolves them instead of falling back to the default), forwards a
   remote submit's model to the owner, projects the live turn on any
   node from the owner's frames, and uses
-  `elysper_harness_tokio::{TokioSpawner, TokioBlocking, TokioSleeper}`
+  `uva_harness_tokio::{TokioSpawner, TokioBlocking, TokioSleeper}`
   instead of its own adapters.
 
 ### Changed (durable rows name the configured provider, not its model)
@@ -643,14 +813,14 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - `make check-test-layout` is back to its permanent shape: no inline
   test module may reach 400 lines, and the 300-line band is zero.
 - `RUNTIME_FREE` (the `check-no-runtime` list) now also covers
-  `elysper-harness`, `elysper-context`, `elysper-steering`,
-  `elysper-plugin-protocol` and `elysper-tool-task`, which the 0.2
+  `uva-harness`, `uva-context`, `uva-steering`,
+  `uva-plugin-protocol` and `uva-tool-task`, which the 0.2
   split made runtime-free.
 
-### Removed (breaking: the `elysper-safety` crate and the facade's `safety` feature)
+### Removed (breaking: the `uva-safety` crate and the facade's `safety` feature)
 
-- **`elysper-safety` is deleted**, together with the facade's `safety`
-  feature and `elysper::safety` module. Nothing in the workspace ever
+- **`uva-safety` is deleted**, together with the facade's `safety`
+  feature and `uva::safety` module. Nothing in the workspace ever
   constructed a `SafetyScanner`, so the crate documented a wiring that
   did not exist. Content scanning is a `Host::hook` registration a
   consumer installs; it was never a built-in feature of the loop.
@@ -712,13 +882,13 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   itself changed.
 - **`docs/interface-contract/SMOKE.md`** — the reproducible
   end-to-end smoke path next to the scanned artifacts: boot a
-  keyless deployment (`cargo run -p elysper-server --features
+  keyless deployment (`cargo run -p uva-app-server --features
   test-utils -- --directory …` — the `demo` provider only exists
   under that feature), send a message with an attachment, read the
   history back, send two messages and see three turns, restart the
   node and see the history again.
 
-### Changed (`elysper-server`: queued prompts are durable parks, and one message is one turn)
+### Changed (`uva-app-server`: queued prompts are durable parks, and one message is one turn)
 
 - **`Prompt` / `Steer` land as `parked_prompt` rows.** A queued
   plain-text turn used to live only in the process's in-memory
@@ -748,7 +918,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   session, the answer means the turn was forwarded to that owner,
   which parks it in its own log.
 
-### Fixed (`elysper-server`: a dead session controller is never reused or leaked)
+### Fixed (`uva-app-server`: a dead session controller is never reused or leaked)
 
 - **The active-session cache refuses corpses.** A cache hit used to
   return whatever entry was there without checking it, so a client
@@ -776,19 +946,19 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   tour), `docs/log-format.md` (the v2 shape),
   `docs/contributing/first-steps.md` (clone → build → first change).
 
-### Added (`elysper`: the tokio seam adapters, behind an opt-in feature)
+### Added (`uva`: the tokio seam adapters, behind an opt-in feature)
 
 - **`harness-tokio`.** `TokioSpawner` / `TokioSleeper` /
   `TokioBlocking` reach the facade through one opt-in feature. The
   feature adds no runtime to a consumer that opts in: it pulls
-  `elysper-harness-tokio`, whose only runtime dependency is `tokio`
+  `uva-harness-tokio`, whose only runtime dependency is `tokio`
   with the `rt` + `time` features. A consumer on `smol` / `async-std`
   / a bare `futures` executor reaches the adapters not at all, and a
   consumer on tokio gets them with the one dependency instead of a
   second. The facade's **default** features are a different matter:
   they include the two HTTP provider adapters, which carry
   `reqwest` → `hyper-rustls` → `hyper` → `h2` → `tokio`, so
-  `cargo tree -p elysper -e normal` measures four tokio packages
+  `cargo tree -p uva -e normal` measures four tokio packages
   there against zero for the seven-feature MVP subset. A consumer
   that wants a runtime-free tree says `default-features = false`.
 
@@ -822,15 +992,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Fixed (the four crate suites that were red before this round)
 
-- `elysper-resilience` and `elysper-tool-memo` compile and test green
+- `uva-resilience` and `uva-tool-memo` compile and test green
   (tokio features declared per actual use, waits through the
-  `Sleeper` seam); `elysper-budget` and `elysper-semantic-cache`
+  `Sleeper` seam); `uva-budget` and `uva-semantic-cache`
   doctests compile against the real signatures.
 - **`make ci` now lists `make test-crates` among its
   prerequisites**, so a red member suite can no longer hide from
   the gate that guards the branch.
 
-### Added (`elysper-server`: the plugin composition is observable)
+### Added (`uva-app-server`: the plugin composition is observable)
 
 - **`GET /api/v1/plugins`.** Boot has always recorded which plugins
   installed (`Composition::resolved`) and which entries it skipped with
@@ -853,7 +1023,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   risk and tools, and — always visible, with a count in the section
   header — every skipped entry with the reason boot recorded.
 - **`docs/examples/harness-only-consumer`.** A standalone crate (not a
-  workspace member) depending on `elysper-harness`, driven by
+  workspace member) depending on `uva-harness`, driven by
   `futures::executor::block_on` over a `std::thread` spawner: its
   `cargo tree` contains **zero** `tokio`, which `make examples` asserts
   before running it. The harness closure is runtime-*free*, not merely
@@ -863,11 +1033,11 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   plugin" (a crate: `impl Plugin` → `install` → `PluginHandle`, then
   the binary's `StaticPlugins` factory table and the two-field config
   entry) and "write a dynamic plugin" (a stdlib-only Python process
-  speaking the `elysper-plugin-protocol` method set, its config entry,
+  speaking the `uva-plugin-protocol` method set, its config entry,
   and what `GET /api/v1/plugins` shows afterwards). Run transcripts are
   the observed ones.
 
-### Fixed (`elysper-session`: a retried flush does not write a row twice)
+### Fixed (`uva-session`: a retried flush does not write a row twice)
 
 - **The sink recognises a row it already holds.** A flush that
   failed after its bytes reached the file used to be written again
@@ -892,7 +1062,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   sink's mark rests on: a row that arrived after a later ordinal was
   written would otherwise look like a row the log already holds.
 
-### Fixed (`elysper-context`: automatic compaction keeps each tool call with its result)
+### Fixed (`uva-context`: automatic compaction keeps each tool call with its result)
 
 - **The summarising manager no longer splits a `tool_use` from its
   `tool_result`.** It replaced the contiguous run of tool-result
@@ -902,7 +1072,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   messages …`) and the turn ended in error. Every seed run is now
   widened into its tool-call group before splicing: the start moves
   back to the nearest cut whose prefix has no unanswered `tool_use`
-  (the same `balanced_prefix` predicate `elysper-session` exposes for
+  (the same `balanced_prefix` predicate `uva-session` exposes for
   the manual path) and the end moves forward until the range answers
   every call inside it. The summary-size guard compares against the
   extended range, and `CompactionRecord` reports the extended span so
@@ -916,26 +1086,26 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   below the fixed prompt cost (~9.3k tokens), so every turn compacted
   — a poor example that also hid how rare the bad boundary was. The
   tutorial uses the model's real window; 3000 stays as the
-  `elysper-context` regression value.
+  `uva-context` regression value.
 
 ### Fixed (two examples had a tokio feature their code already used)
 
-- `elysper-test-support`'s library calls `tokio::time::sleep` for
+- `uva-test-support`'s library calls `tokio::time::sleep` for
   `ReplayProvider`'s optional `pace`, but declared tokio with only
   `sync`; the lib did not compile in a build that enabled nothing else
   (it worked only where another crate in the same build happened to
-  turn `time` on). `elysper-hpc-batch`'s `completer_batch_demo` had the
+  turn `time` on). `uva-hpc-batch`'s `completer_batch_demo` had the
   same mismatch in its dev-dependencies. Both now declare `time`, so
   `make examples` is green from a clean tree.
 
-### Added (`elysper-server`: the per-node session state is a cache, not the truth)
+### Added (`uva-app-server`: the per-node session state is a cache, not the truth)
 
 - **A parked prompt is a log row.** `SessionEvent::ParkedPrompt`
   (`parked_prompt`) is appended — and flushed — the moment a multimodal
   prompt parks, so a crash between the park and the run no longer loses
   the turn. The row carries the prompt's text, the turn's agent
   selection, its rerun flag and `AttachmentRefRow`s; it never carries
-  the bytes. `elysper_session::repair::parked_prompts` reads back the
+  the bytes. `uva_session::repair::parked_prompts` reads back the
   prompts no run consumed, and a node that acquires the session lease
   re-queues them.
 - **Attachment refs are re-readable.** A multimodal part's payload is
@@ -972,7 +1142,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   already holds work, appending nothing: the operation a takeover uses
   to run a prompt the previous owner had parked.
 
-### Changed (`elysper-server`: a lease takeover rebuilds from the log)
+### Changed (`uva-app-server`: a lease takeover rebuilds from the log)
 
 - **`follow`'s baseline reads the tail.** The route called
   `SessionSink::read()` and sliced the last `FOLLOW_WINDOW` rows in
@@ -1028,7 +1198,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   registry did not hold the tool yet and the entry was silently skipped
   as unknown.
 
-### Fixed (`elysper-server`, `elysper-plugin-host`, `elysper-tool`: refused registrations)
+### Fixed (`uva-app-server`, `uva-plugin-host`, `uva-tool`: refused registrations)
 
 - **The bind runs before any install.** A host already bound to a
   different registry refuses the bind, and installing first registered
@@ -1063,15 +1233,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   can ask the same question; `ToolRegistry::register_core_entry` is the
   way to file a tool as `Core`.
 
-### Added (`elysper-plugin-host`: a plugin can be a process)
+### Added (`uva-plugin-host`: a plugin can be a process)
 
-- **The host half of the dynamic plugin channel.** `elysper-plugin-host`
+- **The host half of the dynamic plugin channel.** `uva-plugin-host`
   spawns a plugin with `std::process::Command`, speaks line-delimited
   JSON-RPC 2.0 to it over stdin/stdout — requests correlated by `id`,
   one reader thread per plugin — and turns the plugin's
-  `elysper/tools/list` descriptors into `elysper_tool::Tool`
+  `uva/tools/list` descriptors into `uva_tool::Tool`
   implementations registered on the harness's `Host`. The wire
-  vocabulary is `elysper-plugin-protocol`'s, unchanged.
+  vocabulary is `uva-plugin-protocol`'s, unchanged.
 - **A remote tool's risk is the host's decision.** `RemoteTool::risk`
   returns `RemotePluginConfig::risk`, never
   `Risk::from_annotations(..)`: a plugin that advertises
@@ -1080,7 +1250,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **Authority has two levels and one default.** `Authority::Reduced`
   (the default) registers tools and — when both the config and the
   handshake announce `observe` — a read-only observer that forwards
-  hook events as `elysper/event` notifications. A reduced plugin gets
+  hook events as `uva/event` notifications. A reduced plugin gets
   no gate, no request transformer and no prompt section;
   `RemotePlugin::exposes_gate()` reports `Authority::Full`, which only
   an operator can grant. The gate's decision mapping and the audit row
@@ -1097,7 +1267,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   hanging.
 - **The crate is runtime-free.** No tokio in its dependency graph or
   its public API: the plugin is a `std::process::Command` and blocking
-  protocol IO runs through `elysper_core::blocking::Blocking`
+  protocol IO runs through `uva_core::blocking::Blocking`
   (`RemotePlugin::with_blocking`). The deadline is not a sleep — a
   delay seam's wait cannot be cancelled, so a reaper built on one would
   either spawn a thread per request or delay shutdown by a whole
@@ -1121,10 +1291,10 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 ### Added (the remote authority matrix, and an audit row for a rewrite)
 
 - **A `Full`-authority plugin can veto a tool call; a `Reduced` one
-  cannot.** `RemotePlugin::install` registers `elysper_harness::Gate`
+  cannot.** `RemotePlugin::install` registers `uva_harness::Gate`
   behind `exposes_gate()`, the one branch that decides the escalation,
   so a reduced plugin has no path to a veto. The gate answers
-  `PluginDecision` over `elysper/gate` and the host maps it onto
+  `PluginDecision` over `uva/gate` and the host maps it onto
   `HookDecision` (`Allow` / `Block` / `Ask` / `Terminate`); a variant
   this build does not know reads as `Allow`, because an uninterpretable
   decision must not become a veto. Only `before_tool` is gated — it is
@@ -1155,7 +1325,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `Host::has_result_rewriters` first.
 - **`gate` is a capability, not an inference.** `PluginCapabilities`
   gains `gate: bool` (absent key = `false`, so the wire stays
-  compatible both ways). The host speaks `elysper/gate` only to a plugin
+  compatible both ways). The host speaks `uva/gate` only to a plugin
   that is both promoted to `authority: full` and announces the flag, and
   `install` now refuses the promotion when a plugin does not announce it
   — naming the fix — instead of installing cleanly and then blocking
@@ -1171,11 +1341,11 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 ### Removed (five dead public items)
 
 - Five public items with exactly one reference each — their own
-  definition — are gone: `elysper_session::TypedEventRecord::as_value`,
-  `elysper_session::SummaryCompactor::with_prune_threshold`,
-  `elysper_provider::WorkspaceConfig::create_default_provider`,
-  `elysper_provider::OpenAIProfile::openai_compat`, and
-  `elysper_context::SummarizingContextManager::with_archive`. Nothing
+  definition — are gone: `uva_session::TypedEventRecord::as_value`,
+  `uva_session::SummaryCompactor::with_prune_threshold`,
+  `uva_provider::WorkspaceConfig::create_default_provider`,
+  `uva_provider::OpenAIProfile::openai_compat`, and
+  `uva_context::SummarizingContextManager::with_archive`. Nothing
   in the tree called any of them, so nothing in the tree changes
   behaviour:
   - `with_prune_threshold` was the only writer of `prune_min_chars`,
@@ -1196,12 +1366,12 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - `CacheControlMark::hash_to_u64` is **not** removed but no longer
   public: its ten references all sit in its own module's tests, so it
   is now a `#[cfg(test)]` private function. `ahash` follows it to
-  `[dev-dependencies]`, so a consumer of `elysper-provider` no longer
+  `[dev-dependencies]`, so a consumer of `uva-provider` no longer
   compiles a hasher no production path calls.
-- `elysper-server` is marked `publish = false`: it is the application
+- `uva-app-server` is marked `publish = false`: it is the application
   crate and its 40k lines are not a crates.io contract. The **facade
-  `elysper` stays publishable** — it is the documented `cargo add
-  elysper` entry point.
+  `uva` stays publishable** — it is the documented `cargo add
+  uva` entry point.
 
 ### Fixed (harness: a plugin's prompt section reaches the model)
 
@@ -1251,7 +1421,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (a runtime-neutral delay seam)
 
-- **`elysper_core::Sleeper`** — the delay a timeout needs, with no
+- **`uva_core::Sleeper`** — the delay a timeout needs, with no
   runtime in the signature: `sleep(&self, duration) -> BoxFuture<'static, ()>`.
   Arming a timer is the one thing a library cannot do for its caller
   without naming a runtime, so the seam is a trait the consumer fills:
@@ -1264,7 +1434,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (a runtime-neutral blocking seam)
 
-- **`elysper_core::Blocking`** — the offload a blocking call needs,
+- **`uva_core::Blocking`** — the offload a blocking call needs,
   with no runtime in the signature: `run(&self, f) -> BoxFuture<'static, ()>`.
   Moving a file write off the caller's thread is the one thing a
   library cannot do for its caller without naming a runtime, so the
@@ -1278,15 +1448,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Changed (provider and steering carry no tokio dependency)
 
-- **`elysper-provider`'s `tokio` is optional**, enabled by the
+- **`uva-provider`'s `tokio` is optional**, enabled by the
   `anthropic` / `openai` features — the adapter code (the SSE pump,
   the retry backoff) is the only production code that awaits a runtime
   primitive. A build with `default-features = false` now compiles no
-  tokio at all, and `elysper-provider` / `elysper-steering` no longer
-  turn on `elysper-core`'s `tokio-util` feature from their normal
+  tokio at all, and `uva-provider` / `uva-steering` no longer
+  turn on `uva-core`'s `tokio-util` feature from their normal
   dependency list: the `CancellationToken` bridge there is a
   test-time convenience in both crates.
-- **`elysper-server` cancels with `elysper_core::AtomicCancelToken`**
+- **`uva-app-server` cancels with `uva_core::AtomicCancelToken`**
   instead of `tokio_util::sync::CancellationToken` — the run-stream
   factory, the controller's in-flight run handle, and the binary's
   graceful-shutdown token. The server drops `tokio-util` entirely; the
@@ -1296,22 +1466,22 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Removed (provider: two dead retry helpers)
 
-- **`elysper_provider::retry_with_backoff` and
-  `elysper_provider::retry_with_retry_after`** — both had zero call
+- **`uva_provider::retry_with_backoff` and
+  `uva_provider::retry_with_retry_after`** — both had zero call
   sites; their only references were the `lib.rs` re-exports.
   `retry_with_classification` stays, now compiled only with an adapter
   feature (its only callers) and reachable as
-  `elysper_provider::retry::retry_with_classification` — it leaves the
+  `uva_provider::retry::retry_with_classification` — it leaves the
   crate root so the retry vocabulary keeps its one-line re-export. The
-  same-named helper in `elysper-resilience` is unrelated and unchanged.
+  same-named helper in `uva-resilience` is unrelated and unchanged.
 
-### Changed (`elysper-session` is runtime-free)
+### Changed (`uva-session` is runtime-free)
 
-- **`elysper-session` compiles no tokio.** Its normal dependency list
+- **`uva-session` compiles no tokio.** Its normal dependency list
   no longer names a runtime: the `tokio::sync::Mutex` over the file
   handle is `futures::lock::Mutex`, and the three `spawn_blocking`
   fs calls (append, batch append, read) go through the new
-  `elysper_session::fs::FsBackend` over the `Blocking` seam. The
+  `uva_session::fs::FsBackend` over the `Blocking` seam. The
   search index's store walk takes the same seam. Both default to the
   runtime-free implementation, so the sink works on a bare `futures`
   executor; a host on a runtime swaps its own in with
@@ -1325,7 +1495,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   outcomes and the cancellation-first priority. The default
   `ThreadSleeper` needs no reactor, so the deadline now works with
   `with_timeout` on any executor.
-- **The server installs its own tokio adapters.** `elysper-server`'s
+- **The server installs its own tokio adapters.** `uva-app-server`'s
   `spawner` module gains `ServerBlocking` and `ServerSleeper` beside
   `ServerSpawner` (same reason: R121 keeps the server on the facade,
   so the ~10-line adapters are local rather than a facade feature),
@@ -1333,14 +1503,14 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   or the manual compactor installs them. `ServerSleeper::sleep`
   anchors its deadline on first poll, as the trait requires.
 
-### Removed (`elysper::session::manager::InputQueue`)
+### Removed (`uva::session::manager::InputQueue`)
 
 - **`InputQueue` is now the server's type**
-  (`elysper_server::session::input_queue::InputQueue`), not the
+  (`uva_server::session::input_queue::InputQueue`), not the
   session crate's: it is the application's bridge between
   `submit(Prompt | Steer)` and its run loop, not a property of a
-  durable log. The facade path `elysper::session::manager::InputQueue`
-  is **gone, not aliased** — no alias, no shim. `elysper-session` drops
+  durable log. The facade path `uva::session::manager::InputQueue`
+  is **gone, not aliased** — no alias, no shim. `uva-session` drops
   the type and its `PendingEntry`, and the queue is held by
   `AppState` (one per process, cloned into every controller) so a
   route or a test sees the same queue the controller drains. The
@@ -1352,8 +1522,8 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   /api/v1/sessions/{id}/follow`.** Every open replaces the window from
   the baseline (header, durable window, cursor, live projection, context
   meter, pending interrupts, request fingerprint), then applies rows past
-  the cursor. The local `elysper.messages.*` cache and the
-  `elysper.streamIndex.*` replay cursor are gone: a reconnect is a
+  the cursor. The local `uva.messages.*` cache and the
+  `uva.streamIndex.*` replay cursor are gone: a reconnect is a
   replace, not a splice, so partial text can neither duplicate nor go
   missing.
 - **`GET /api/v1/chat/sessions/{id}/messages/stream` is removed**, not
@@ -1415,7 +1585,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (compaction seam: a summary that replaces a span, with provenance)
 
-- **`elysper_session::Compactor`.** `plan` decides which projected
+- **`uva_session::Compactor`.** `plan` decides which projected
   messages to shadow and `summarize` produces the replacement; the trait
   owns no provider, so a deployment can summarise with a cheap model
   without teaching the loop about it. `SummaryCompactor` is the default:
@@ -1447,7 +1617,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Changed (the compaction lifecycle outcome is named for its lifecycle)
 
-- **`elysper_session::CompactionOutcome` → `CompactionLifecycleOutcome`**
+- **`uva_session::CompactionOutcome` → `CompactionLifecycleOutcome`**
   (breaking). `CompactionOutcome` now names the seam's result
   (`summary`, `shadowed_seqs`, `shadowed_tokens`); the old enum still
   serialises as `committed` / `failed` / `interrupted` and still drives
@@ -1465,7 +1635,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   advertised definitions once per run, so a run with several delegators
   pays one map lookup.
 - **`DelegationCall` carries `context`.** A delegator receives the same
-  `elysper_tool::Context` (workspace root, session id, output bound) a
+  `uva_tool::Context` (workspace root, session id, output bound) a
   registry tool gets; `emit` / `cancel` / `depth` / `subagent_writers`
   are unchanged.
 - **`DelegatingTool::mode()` / `annotations()`.** `mode()` defaults to
@@ -1575,7 +1745,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 ### Changed (the harness's structural rows go through the session's writer)
 
 - **The harness writes its structural rows through the session's one
-  writer.** `EventSink` now holds an `Option<Arc<elysper_session::LogWriter>>`
+  writer.** `EventSink` now holds an `Option<Arc<uva_session::LogWriter>>`
   and nothing else: `EventSink::new(tx, log_writer)` takes two
   parameters, and `emit_typed` writes the row through the writer's
   non-waiting path (`append_event_nowait`) — the loop must not block on
@@ -1584,7 +1754,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   structural row is a log fact, and a run with no writer has no log.
   `ReActAgent::with_log_writer` now takes the session crate's writer;
   the harness's own writer and its `log` module are gone.
-- **The typed-event channel is gone.** `elysper_session::TypedEventSink`
+- **The typed-event channel is gone.** `uva_session::TypedEventSink`
   and `TypedEventReceiver` are removed — the channel was fire-and-forget,
   so a full buffer dropped a structural row and left a hole in the
   log's ordinals that no later reader could repair. The writer replaced
@@ -1597,9 +1767,9 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `ModelDone` are emitted as they stream; its row is written and
   flushed right after the turn completes.) The server's own rows are
   queued and land on the same flush. With the enum gone,
-  `elysper::harness::{LogWriter, Durability}` no longer has a place in
+  `uva::harness::{LogWriter, Durability}` no longer has a place in
   the public surface; the writer's path is
-  `elysper::session::LogWriter`.
+  `uva::session::LogWriter`.
 - **The server writes the agent's structural rows through the same
   writer.** `AgentRunConfig::typed_event_sink` becomes
   `AgentRunConfig::log_writer`, and the run task installs the session's
@@ -1641,9 +1811,9 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   checkpoint's provenance unresolvable. `append_with_key` and
   `append_many` follow the same shape.
 - **A writer stamps each row's ordinal.** (Superseded below: the
-  writer this bullet announced first lived in `elysper-harness` and
+  writer this bullet announced first lived in `uva-harness` and
   selected its flush cadence with a `Durability` enum. The writer
-  moved to `elysper-session` — one per session, handed out by the
+  moved to `uva-session` — one per session, handed out by the
   registry — its cadence is the caller's, and `Durability` is gone.
   Read the "one writer per session" and "the harness's structural
   rows" sections for the shipped shape.)
@@ -1661,13 +1831,13 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Changed (harness refinement: spawn-free dispatch, zero-feature paradigm crate)
 
-- **`elysper-tool` dispatch is spawn-free.** `ToolRegistry::run_stream`
+- **`uva-tool` dispatch is spawn-free.** `ToolRegistry::run_stream`
   resolves the whole batch under one read lock, then drives the
   per-tool drains from a single `flatten_unordered` stream — no
   per-call task, channel, or spawner. Dropping the stream still
   cancels every in-flight call; the panic / missing-`Result` /
   progress contracts are unchanged (tests pin them). The registry
-  no longer has `with_spawner`; `elysper-tool`'s `[dependencies]`
+  no longer has `with_spawner`; `uva-tool`'s `[dependencies]`
   names no runtime crate at all (tokio moved to
   `[dev-dependencies]`; `make check-no-runtime` asserts the
   direct-deps discipline).
@@ -1691,7 +1861,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   constructors go through `build_completion_request`; the loop
   collects every synthetic definition once per run (fingerprint +
   projection share the vec).
-- **`elysper-server` assembles agents in one place.**
+- **`uva-app-server` assembles agents in one place.**
   `AgentAssembly` (private module) is the only `with_*` chain and
   the only `TaskDelegator` install site; boot's default member, the
   session run factory, dynamic agent registration, and the eval
@@ -1700,15 +1870,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Added (durable workflows / evals, real eval runner)
 
-- **`WorkflowStore`** (`elysper-workflow`, re-exported): atomic JSON
+- **`WorkflowStore`** (`uva-workflow`, re-exported): atomic JSON
   persistence for `WorkflowSpec`s under `<workspace>/workflows/` —
   `temp + sync_all + rename` writes, lazy directory creation, and a
   `load` that skips unreadable or malformed files with a `warn!`
   (the `ScheduleStore` honest-recovery posture). Ids that could not
   name a plain file (`../`, separators, empty) are refused.
-- **`EvalStore`** (`elysper-eval`, re-exported): the same contract for
+- **`EvalStore`** (`uva-eval`, re-exported): the same contract for
   `EvalSuite`s under `<workspace>/evals/`, keyed by suite name.
-- **`elysper-server` workflows / evals are durable now.**
+- **`uva-app-server` workflows / evals are durable now.**
   `WorkflowsState::build(&workspace_root)` / `EvalsState::build(..)`
   load from the stores at boot (a load failure degrades to empty with
   a `warn!`), and `create` / `replace` / `remove` write through under
@@ -1724,7 +1894,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **Server agents detach on the tokio runtime.** Every server-side
   `ReActAgent` assembly (the run factory, the registry default, the
   eval agent) installs a local tokio-backed `Spawner`
-  (`elysper_server::spawner::ServerSpawner`). The harness default
+  (`uva_server::spawner::ServerSpawner`). The harness default
   (`InlineSpawner`) runs the loop on a bare std thread with no
   reactor, so any tool awaiting `tokio::fs` (`read` / `write`)
   panicked mid-run; that failure was latent because most tests never
@@ -1752,7 +1922,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   dispatcher applies peer mutations to the local registry
   (`ToolEntry::dynamic` is complete, so a peer replays it verbatim).
   `ForwardOp`/`CancelSession` frames route to the local owner.
-- **Docs**: `crates/elysper-server/README.md` gains the multi-node
+- **Docs**: `crates/uva-app-server/README.md` gains the multi-node
   deployment contract (shared filesystem, lease/TTL, per-node
   `/metrics` and usage, no background scheduler tick today).
 
@@ -1781,7 +1951,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Changed (harness refinement: touched projection home, cheap checkpoints, `after_step` hook)
 
-- **`TouchedPair` / `touched_target` moved to `elysper-context`** and are
+- **`TouchedPair` / `touched_target` moved to `uva-context`** and are
   re-exported from it: the `read` / `write` projection feeds
   `CompactionDetails`, so the compaction layer owns it and the loop no
   longer knows tool names.
@@ -1811,7 +1981,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   and single-part user input is `Content::Single` instead of a
   one-element `Content::Multi`.
 - **`ToolRegistry::get` is an inherent sync method** (one read lock +
-  one clone, LIFO top). The `elysper_core::registry::Registry` impl
+  one clone, LIFO top). The `uva_core::registry::Registry` impl
   delegates to it, and the ReAct dispatch path no longer boxes a
   future per tool call. In-tree callers migrated off the async form.
 - **Module layout converged** (no public paths changed): `agent/run/`
@@ -1842,7 +2012,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   three setters (`with_synthetic_tool` / `with_tool_restriction` /
   `with_steering`) were literal duplicates of `ReActAgent`'s, which
   also ran `validate_synthetic` twice for the same install path.
-  Per-run variation is unchanged in practice — `elysper-server`
+  Per-run variation is unchanged in practice — `uva-app-server`
   rebuilt the whole `ReActAgent` per request anyway.
 - **`AgentHandle` / `DetachedAgent` deleted.** The deferred-run pair
   had zero consumers in the workspace and no equivalent in either
@@ -1854,7 +2024,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   It called `ContextManager::frozen_segments`, whose only
   implementation returns `&[]`, so every iteration allocated a
   `Vec` copy check to reach a guaranteed-empty result. The
-  `ContextManager` trait methods stay in `elysper-context` (removing
+  `ContextManager` trait methods stay in `uva-context` (removing
   them would break every impl); the harness simply stops calling them.
 - **Duplicate accessors collapsed.** `AgentCaps::{model_config,
   system_prompt}` and `ReActAgent::{model_config, system_prompt}`
@@ -1945,12 +2115,12 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **Prompt-context fallback has one spelling**:
   `prompt::resolve_prompt_context(input, caps)` — used by both the
   loop's `assemble_system_prompt` and the single-shot strategies.
-- **`elysper-harness-tokio` demotes `elysper-harness` to a
+- **`uva-harness-tokio` demotes `uva-harness` to a
   dev-dependency.** The adapter's lib only implements
-  `elysper_core::spawn::Spawner`; the harness types appear in the
+  `uva_core::spawn::Spawner`; the harness types appear in the
   example and doc prose, which now use plain code spans instead of
   cross-crate intra-doc links.
-- **`crates/elysper-harness/README.md`** replaces the seam table
+- **`crates/uva-harness/README.md`** replaces the seam table
   with a "Where new behavior goes" extension map (one row per need →
   the seam that answers it) and drops the hook example duplicated
   from "Extending the loop" (283 → 247 lines).
@@ -2021,11 +2191,11 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   zero-reference count.
 - **Comment budget ratcheted** (`make check-harness-docs`): 717 → 523
   doc-comment lines on non-`pub` items under
-  `crates/elysper-harness/src`. The public surface is unchanged.
+  `crates/uva-harness/src`. The public surface is unchanged.
 - **Docs that contradicted the code are corrected**: the facade no
   longer promises `from_name("chain-of-thought")` (it resolves
   `"react"` / `"re-act"` / `"re_act"` and errors otherwise — CoT and
-  BestOfN ship as `elysper-strategy-cot` / `-best-of-n` behind the
+  BestOfN ship as `uva-strategy-cot` / `-best-of-n` behind the
   facade features); `SEAMS.md` §1 moved them to their real crates;
   the ~50 `Report:` links to `docs/optimization-report-R*.md` and
   `docs/reference-parity.md` are gone (those files are not in this
@@ -2095,20 +2265,20 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `ReActAgent::with_interceptor` → `with_synthetic_tool`
   (`try_with_interceptor` → `try_with_synthetic_tool`). The file
   path stays `runtime/interceptors.rs`. Consumer update:
-  `elysper-tool-task`'s `DelegatorInterceptor` implements the
+  `uva-tool-task`'s `DelegatorInterceptor` implements the
   renamed trait; the server's three call sites renamed.
 
-- **`elysper-harness` is runtime-free**: its `[dependencies]` carries
+- **`uva-harness` is runtime-free**: its `[dependencies]` carries
   zero tokio. `TokioSpawner` moved to the new sibling crate
-  `elysper-harness-tokio` (`elysper::TokioSpawner` does not exist —
+  `uva-harness-tokio` (`uva::TokioSpawner` does not exist —
   the facade would fail `make check-public-api-runtime`; depend on
-  the sibling crate directly). `cargo tree -p elysper-harness -e
+  the sibling crate directly). `cargo tree -p uva-harness -e
   normal` names no tokio / async-std / smol.
 - **Alternative reasoning strategies moved to plugin crates**:
-  `ChainOfThoughtStrategy` → `elysper-strategy-cot` (facade feature
+  `ChainOfThoughtStrategy` → `uva-strategy-cot` (facade feature
   `strategy-cot`), `BestOfNStrategy` / `CandidateScorer` /
   `LongestAnswer` / `LlmJudgeScorer` / `DEFAULT_JUDGE_PROMPT` →
-  `elysper-strategy-best-of-n` (facade feature
+  `uva-strategy-best-of-n` (facade feature
   `strategy-best-of-n`). The harness ships only the canonical
   `ReActStrategy`; `from_name("react")` still works, and plugin
   strategies resolve through `StrategyRegistry::register` or the
@@ -2116,12 +2286,12 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `with_best_of_n` / `AgentBuilder::chain_of_thought` /
   `best_of_n` sugar setters deleted — install the plugin strategies
   via `with_strategy(Arc::new(...))`.
-- **`AgentRunConfig` / `RunOverrides` moved to `elysper-server`**
+- **`AgentRunConfig` / `RunOverrides` moved to `uva-app-server`**
   (`crate::agent_run_config`): server-only wire types, not part of
   the library's public surface.
 - **`CompactionEmitters` /
   `context_manager_for_compaction_with_emitters` moved to
-  `elysper-server`**: the harness's `runtime_for_run` inlines the
+  `uva-app-server`**: the harness's `runtime_for_run` inlines the
   same decision core; hand-built factories call the server-side
   entry.
 - **`AgentRuntime` fields are now `pub(crate)`** — the 19
@@ -2132,21 +2302,21 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `ModelProvider::complete_with_stream` take `&Arc<dyn …>`;
   mutating one now goes through the existing chainable
   `with_descriptor` / `with_spawner` / `with_context_manager` /
-  `with_cancel`. Migrated: `elysper-strategy-cot`,
-  `elysper-strategy-best-of-n`, `elysper-strategy-plan-execute`.
-- **`elysper_harness::extension` deleted** (breaking): the
+  `with_cancel`. Migrated: `uva-strategy-cot`,
+  `uva-strategy-best-of-n`, `uva-strategy-plan-execute`.
+- **`uva_harness::extension` deleted** (breaking): the
   `Extensions` registry / `Extension<T>` trait were fully
   implemented, exported, documented — and never called by the
   orchestrator, so every consumer wiring (the `lib_grade` example
   among them) exercised code that could not run end-to-end. The
-  already-wired seam is `elysper_steering::AgentHook`, and the
+  already-wired seam is `uva_steering::AgentHook`, and the
   orchestrator calls that one. `ReActAgent::with_extensions` /
   `extensions()` and `AgentRuntime::extensions` go with it. No
   deprecated alias — the type was unreachable in practice, so
   nothing outside the crate could have depended on it.
-- **`elysper_harness::agent::re_act::runtime::registry` deleted**:
+- **`uva_harness::agent::re_act::runtime::registry` deleted**:
   `AgentEntry` moved next to the `AgentRegistry` that stores it
-  (`elysper_harness::agent::AgentEntry`, unchanged path). The old
+  (`uva_harness::agent::AgentEntry`, unchanged path). The old
   module only existed because the registry imported its own entry
   type through a cross-module hop, and it re-exported
   `AgentDescriptor` as a side effect.
@@ -2170,54 +2340,54 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   Off by default; with the feature disabled the adapters keep
   building `reqwest::Client::new()`.
 - **`hpc-simd`** — arch-specific dot products for vector search
-  (`elysper-search` feature `simd`): AVX2 / SSE2 on x86_64, NEON on
+  (`uva-search` feature `simd`): AVX2 / SSE2 on x86_64, NEON on
   aarch64, scalar elsewhere, selected at runtime and reported by
   `DotRoute`; `SimdVectorStore` dispatches to the selected kernel.
   Off by default.
-- **`hpc-batch`** — new `elysper-hpc-batch` crate. `BatchEmbedder`
+- **`hpc-batch`** — new `uva-hpc-batch` crate. `BatchEmbedder`
   wraps any `Arc<dyn Embedder>`, `BatchCompleter` wraps any
   `Arc<dyn ModelProvider>`; both are governed by
   `BatchPolicy { chunk_size, max_inflight }` and report `BatchStats`.
   No HTTP, telemetry, or database dependencies. Off by default.
 - **`hpc-pipeline`** — out-of-band context compaction
-  (`elysper-harness` feature `pipeline`, forwarded from
-  `elysper-context/prefetch`). `ReActAgent::with_pipeline` overlaps
+  (`uva-harness` feature `pipeline`, forwarded from
+  `uva-context/prefetch`). `ReActAgent::with_pipeline` overlaps
   compaction of frozen message segments with the next LLM request,
   detaching through the consumer's `Spawner`; `ContextManager` gains
   default no-op `frozen_segments` / `prefetch_compaction` methods, so
   existing implementations compile unchanged. Off by default.
-- **`safety`** — new `elysper-safety` crate. A `SafetyScanner`
+- **`safety`** — new `uva-safety` crate. A `SafetyScanner`
   checks four stages — Input, ToolCall, ToolOutput, Output — for
   injection / jailbreak / PII-exfiltration patterns. The crate ships
   scanners, not harness wiring: a consumer installs one through its
-  own `elysper_steering::AgentHook` (`on_provider_start` for input,
+  own `uva_steering::AgentHook` (`on_provider_start` for input,
   `before_tool_execute` / `after_tool_execute` for the tool stages);
   the harness loop itself calls no scanner. Off by default.
-- **`resilience`** — new `elysper-resilience` crate:
+- **`resilience`** — new `uva-resilience` crate:
   `ResilientProvider` / `ResilientTool` wrap any provider or tool
   with a circuit breaker, adaptive backoff, and jitter, on top of
-  the new runtime-neutral `elysper_core::BreakerState`. Off by
+  the new runtime-neutral `uva_core::BreakerState`. Off by
   default.
-- **`semantic-cache`** — new `elysper-semantic-cache` crate:
+- **`semantic-cache`** — new `uva-semantic-cache` crate:
   `SemanticCacheProvider` wraps a `ModelProvider` and short-circuits
   near-duplicate completions via embedding cosine similarity over a
   pluggable store. Off by default.
-- **`tool-memo`** — new `elysper-tool-memo` crate: `MemoizedTool`
+- **`tool-memo`** — new `uva-tool-memo` crate: `MemoizedTool`
   wraps any tool and short-circuits identical invocations through an
   LRU + TTL store. Off by default.
-- **`strategy-plan-execute`** — new `elysper-strategy-plan-execute`
+- **`strategy-plan-execute`** — new `uva-strategy-plan-execute`
   crate: a `ReasoningStrategy` that decomposes the prompt into
   numbered steps and runs each step through the model's tool loop.
   Registers through the new `StrategyRegistry`. Off by default.
-- **`reflection`** — new `elysper-reflection` crate: a
+- **`reflection`** — new `uva-reflection` crate: a
   `ReflectionHook` that every `every_n_steps` tool calls asks a
   cheap critic model to critique the trajectory and steer the next
   step. Off by default.
-- **`budget`** — new `elysper-budget` crate: `BudgetProvider` /
+- **`budget`** — new `uva-budget` crate: `BudgetProvider` /
   `BudgetTool` enforce token / latency / cost ceilings per provider
   and tool, with per-model pricing. Off by default.
 - **OpenTelemetry metrics, span taxonomy, and redaction**
-  (`elysper-telemetry`): an OTLP meter path alongside the existing
+  (`uva-telemetry`): an OTLP meter path alongside the existing
   Prometheus one, a typed `SpanKind` annotating every lifecycle
   span, and exporter-side redaction of `sensitive_keys` span
   attributes.
@@ -2259,7 +2429,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `typed_sink`, plus sugar methods `chain_of_thought` /
   `best_of_n`. The legacy `ReActAgent::new(...).with_*(...)` chain
   remains as a post-construction mutator surface.
-- **`crates/elysper-harness/docs/extension-points.md`** — public
+- **`crates/uva-harness/docs/extension-points.md`** — public
   extension guide: one section per extension trait (`Provider`,
   `Tool` / `ToolRegistry`, `ContextManager`, `ReasoningStrategy`,
   `ToolInterceptor`, `LifecycleHook`, `Checkpointer`, `RunInbox`,
@@ -2271,30 +2441,30 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ### Removed (the facade's two forwarding feature paths)
 
-- **`elysper::checkpoint` and `elysper::transcript` are gone**, together
+- **`uva::checkpoint` and `uva::transcript` are gone**, together
   with the `checkpoint` and `transcript` facade features that gated
   them. Both modules were pure forwarding shims: each re-exported one
   crate's types under a second path, so the same name lived at two
   places and the facade had a module per *concept* instead of per
   crate. The types keep their reachability at the one path each crate
   owns:
-  - `elysper::harness::{Checkpointer, InMemoryCheckpointer,
+  - `uva::harness::{Checkpointer, InMemoryCheckpointer,
     CheckpointSnapshot, CheckpointError}` — the durability seam, from
-    `elysper-harness`.
-  - `elysper::eval::{Transcript, TranscriptSink, JsonlTranscriptSink,
+    `uva-harness`.
+  - `uva::eval::{Transcript, TranscriptSink, JsonlTranscriptSink,
     TranscriptOutcome, ToolCallRecord, SpanRecord, Usage}` — the
-    evaluation trajectory, from `elysper-eval`.
+    evaluation trajectory, from `uva-eval`.
   A consumer that wrote `features = ["checkpoint"]` (or
-  `["transcript"]`) in its `elysper` dependency drops the feature and
-  reaches the types under `elysper::harness::*` / `elysper::eval::*`;
+  `["transcript"]`) in its `uva` dependency drops the feature and
+  reaches the types under `uva::harness::*` / `uva::eval::*`;
   no other code changes.
 
 ### Changed
 - **Breaking:** the six harness cargo features
   (`tokio-spawner`, `otel`, `safety`, `chain-of-thought`,
-  `best-of-n`, `llm-judge`) are removed. `elysper-harness`
+  `best-of-n`, `llm-judge`) are removed. `uva-harness`
   ships a single always-on build; the same symbol table (byte-
-  identical `libelysper_harness.rlib` across default /
+  identical `libuva_harness.rlib` across default /
   `--all-features` / `--no-default-features`) is the verification
   artifact. What used to be feature-gated is opt-in via types and
   traits: `TokioSpawner` is unconditional, the four safety scan
@@ -2302,7 +2472,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   `scan_assistant_output`) compile unconditionally and return
   `Continue` when the scanner is `None`, `ChainOfThoughtStrategy` /
   `BestOfNStrategy` / `LlmJudgeScorer` are unconditional, and OTel
-  emission is enabled through `elysper-telemetry/otlp` (not via the
+  emission is enabled through `uva-telemetry/otlp` (not via the
   harness).
 - **Breaking:** the `LoopInputs` per-run mutable shim
   (`src/agent/re_act/runtime/inputs.rs`) is removed; the three
@@ -2313,8 +2483,8 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   removed (the harness's default spawner is now `InlineSpawner` in
   the always-on build; consumers that want `TokioSpawner` install
   it via `ReActAgent::builder(...).spawner(Arc::new(TokioSpawner))`).
-- **Breaking:** the `elysper-harness/safety` feature is removed;
-  the facade's `safety` feature still forwards `elysper-safety`
+- **Breaking:** the `uva-harness/safety` feature is removed;
+  the facade's `safety` feature still forwards `uva-safety`
   (the small scanner crate), but the harness's scan points compile
   unconditionally.
 
@@ -2342,7 +2512,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - `act_loop/dispatch.rs` is renamed `act_loop/iteration.rs`
   (iteration outcome routing), ending the name collision with
   `act_loop/seams/dispatch.rs` (single tool-call routing).
-- `elysper-harness` internal layout: the 688-line
+- `uva-harness` internal layout: the 688-line
   `act_loop/seams.rs` is split into `seams/{veto,dispatch}`;
   `builder/agent.rs` moves to `re_act/agent.rs`; the default
   dependency bundles get single-source constructors
@@ -2423,26 +2593,26 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [0.1.0] - 2026-09-30
 
-The first open-source cut of Elysper. A modular, runtime-neutral AI
+The first open-source cut of Uva. A modular, runtime-neutral AI
 agent framework in Rust: a ReAct loop driven by a pluggable provider
-surface, a one-crate facade (`elysper`) that re-exports every component
+surface, a one-crate facade (`uva`) that re-exports every component
 behind feature flags, eight plugin-brick tools (`read` / `write` /
 `shell` / `todo` / `web_fetch` / `schedule` / `search` / `task`), an
-HTTP / SSE / WebSocket server (`elysper-server`), a React/Vite web UI
-(`elysper-web`), and a stdio MCP binary (`elysper-mcp-server`) that
+HTTP / SSE / WebSocket server (`uva-app-server`), a React/Vite web UI
+(`uva-web`), and a stdio MCP binary (`uva-mcp-server`) that
 exposes the same tools to any external MCP client. Tag-driven
 `release.yml` emits cross-platform container images
-(`docker.io/crochee/elysper-{server,web}` linux/amd64 + linux/arm64)
+(`docker.io/crochee/uva-{server,web}` linux/amd64 + linux/arm64)
 with OCI labels for runtime identity verification.
 
 ### Highlights
 
-- **One facade, 28 crates.** `cargo add elysper` is the consumer entry
-  point; `elysper` re-exports the SDK pieces behind feature flags and
-  ships a curated `prelude`. Every crate except `elysper-server` and
-  `elysper-mcp-server` (the two application / binary crates) is
+- **One facade, 28 crates.** `cargo add uva` is the consumer entry
+  point; `uva` re-exports the SDK pieces behind feature flags and
+  ships a curated `prelude`. Every crate except `uva-app-server` and
+  `uva-mcp-server` (the two application / binary crates) is
   runtime-neutral: public APIs name `futures::Stream` /
-  `elysper_core::CancelToken` / `elysper_core::spawn::Spawner`, not
+  `uva_core::CancelToken` / `uva_core::spawn::Spawner`, not
   `tokio::*`, so a consumer can run the loop on
   `std::thread + futures::executor::block_on`.
 - **ReAct loop with full event streaming.** The harness is a
@@ -2467,8 +2637,8 @@ with OCI labels for runtime identity verification.
   bounded inlining (text up to 16 KiB, otherwise a "contents not
   inlined" note); an Anthropic `document` block on the `/v1/messages`
   protocol endpoint.
-- **MCP dual surface.** `elysper-mcp` drives external MCP servers and
-  publishes their tools locally; `elysper-mcp-server` is the
+- **MCP dual surface.** `uva-mcp` drives external MCP servers and
+  publishes their tools locally; `uva-mcp-server` is the
   outbound stdio binary any MCP client (Claude Code, `pi`, the
   Anthropic SDK, …) spawns to get the eight plugin tools.
 - **Multi-agent workflows.** Declarative `WorkflowSpec` (agent /
@@ -2477,8 +2647,8 @@ with OCI labels for runtime identity verification.
 - **Cron + interval + once scheduling.** Hierarchical `TimingWheel`
   driven by the host's `tick(now)`; opt-in `cron` feature on the
   facade so a consumer can also create cron jobs.
-- **Cross-domain search.** `elysper-search` Registry over BM25 +
-  embedder + reranker; `elysper-tool-search` exposes it as the
+- **Cross-domain search.** `uva-search` Registry over BM25 +
+  embedder + reranker; `uva-tool-search` exposes it as the
   model-facing `search` tool (cold-start `Deferred` schema, promotes
   on first call).
 - **HTTP server with full protocol coverage.** `/api/v1/chat/*` REST
@@ -2494,18 +2664,18 @@ with OCI labels for runtime identity verification.
   CI, rust-quality, release, docs, security-audit, contract-closure,
   dependabot-auto-merge, markdown-lint, shellcheck, stale, labeler.
   Tag-driven `release.yml` builds and pushes cross-platform container
-  images (`docker.io/crochee/elysper-{server,web}` linux/amd64 +
+  images (`docker.io/crochee/uva-{server,web}` linux/amd64 +
   linux/arm64) with two tags each (`<tag>` and `<tag>-<short-sha>`)
   and verifies identity via OCI labels at release time.
 - **Container images with baked identity.** Two release images
-  (`elysper-server`, `elysper-web`) ship the exact commit SHA + build
+  (`uva-app-server`, `uva-web`) ship the exact commit SHA + build
   time + version through both the embedded binary (`--version`) and
   OCI image labels
   (`org.opencontainers.image.revision` /
   `org.opencontainers.image.version` /
-  `org.opencontainers.image.created`). nginx config in `elysper-web`
-  is templated: `ELYSPER_BACKEND_HOST` / `ELYSPER_BACKEND_PORT` set
-  the upstream at runtime. (`elysper-mcp-server` is a stdio binary
+  `org.opencontainers.image.created`). nginx config in `uva-web`
+  is templated: `UVA_BACKEND_HOST` / `UVA_BACKEND_PORT` set
+  the upstream at runtime. (`uva-mcp-server` is a stdio binary
   and is not published as a release image.)
 - **Kubernetes-ready.** `k8s/server.yaml` + `k8s/web.yaml` —
   Deployments + ClusterIP Services + PodDisruptionBudgets +
@@ -2528,7 +2698,7 @@ pin to it.
   `[agents.<name>]` is parsed but not yet bound to a per-run shell
   policy; the boot-time default policy is in effect. The follow-up
   wires the parsed policy into `ShellTool::with_policy` at run
-  factory. (`docs/research/elysper-r124-holistic-design.md` §2.)
+  factory. (`docs/research/uva-r124-holistic-design.md` §2.)
 - **Phase 3 trait abstractions**: `LoopDetector`, `PermissionPolicy`
   sub-traits, `OsSandbox`, and `Message::cache_control` field
   abstractions deferred 6 months (re-evaluate 2026-12-10) per the
@@ -2543,26 +2713,26 @@ pin to it.
 
 ```sh
 # Latest container images (linux/amd64 + linux/arm64):
-docker pull docker.io/crochee/elysper-server:0.1.0
-docker pull docker.io/crochee/elysper-web:0.1.0
+docker pull docker.io/crochee/uva-app-server:0.1.0
+docker pull docker.io/crochee/uva-web:0.1.0
 
 # Verify the server image's baked identity:
-docker run --rm docker.io/crochee/elysper-server:0.1.0 --version
-# → elysper-server 0.1.0 (<7-char sha> <build-time-utc>) linux release
+docker run --rm docker.io/crochee/uva-app-server:0.1.0 --version
+# → uva-app-server 0.1.0 (<7-char sha> <build-time-utc>) linux release
 
 # Verify image labels (matches the running binary's --version line):
-docker buildx imagetools inspect docker.io/crochee/elysper-server:0.1.0 \
+docker buildx imagetools inspect docker.io/crochee/uva-app-server:0.1.0 \
   --format '{{json .Image.Labels}}' | jq -r '."org.opencontainers.image.revision"'
 ```
 
 ### Acknowledgements
 
-Elysper's plugin split, MCP surface, multi-agent traces, and
+Uva's plugin split, MCP surface, multi-agent traces, and
 search domain are adopted from a community reading of `pi-mono`,
 `traitclaw`, `dsh`, Claude Code, Codex, Cline, Continue, Aider,
 Goose, OpenCode, and the broader agent ecosystem. The R124 holistic
 design pass tracks 95% community convergence and the rationale for
-each divergence. See `docs/research/elysper-r124-holistic-design.md`
+each divergence. See `docs/research/uva-r124-holistic-design.md`
 for the audit trail and `docs/optimization-report-*.md` for the
 per-round record.
 
@@ -2590,7 +2760,7 @@ its tag at the time; the entries themselves are immutable.
   re-attached, and `TURN_TERMINAL` never matched, so a completed turn's
   typing indicator could only clear on the next live frame. The helper
   now folds both wire shapes onto one suffix
-  (`elysper-web/src/pages/ChatPage.tsx`).
+  (`uva-web/src/pages/ChatPage.tsx`).
 - **A locally-owned turn stream takes the resume stream's place.**
   `handleSubmit` / `handleRetry` / `handleRegenerate` now set
   `turnStreamRef` and abort the resume controller; the resume effect's
@@ -2621,7 +2791,7 @@ its tag at the time; the entries themselves are immutable.
   that is now read as "no status yet" (status stays `null`) instead of
   `unknown`.
 
-Verified against a running `elysper-server` + `elysper-web` (headless
+Verified against a running `uva-app-server` + `uva-web` (headless
 Chromium, network + server logs):
 
 - Session `50d53d32…`: the SSE attaches at mount, re-attaches after the
@@ -2639,20 +2809,20 @@ Chromium, network + server logs):
 
 ### Added
 
-- `elysper-server`: end-to-end `crates/elysper-server/examples/observability.rs`
-  — an executable proof that boots `elysper::telemetry::init_tracing`
-  against either the OTLP pipeline (when `ELYSPER_OTLP_ENDPOINT` is
+- `uva-app-server`: end-to-end `crates/uva-app-server/examples/observability.rs`
+  — an executable proof that boots `uva::telemetry::init_tracing`
+  against either the OTLP pipeline (when `UVA_OTLP_ENDPOINT` is
   set) or the console fallback (when it isn't), round-trips a W3C
   `traceparent` through extract + inject, and confirms the
   Prometheus text exposition encoder returns within microseconds. Prints
   the proof line `OBSERVABILITY-EXAMPLE: OK` so `make examples`
   picks it up automatically — same `Makefile` walker every other
   example in the workspace already conforms to. No new dep; reuses
-  the existing `opentelemetry` dev-dep in `crates/elysper-server`.
-  Spec: `docs/research/elysper-r124-holistic-design.md` §3 (Adopt C,
+  the existing `opentelemetry` dev-dep in `crates/uva-app-server`.
+  Spec: `docs/research/uva-r124-holistic-design.md` §3 (Adopt C,
   observability-example half).
 
-- `elysper-server`: `state::unapplied_agent_keys` now classifies
+- `uva-app-server`: `state::unapplied_agent_keys` now classifies
   `sandbox` (R62) as inert so the boot log names the gap. R62
   adopted the parser (`AgentConfig::sandbox_policy_name`) but never
   wired a consumer — every run still uses the boot-time
@@ -2660,17 +2830,17 @@ Chromium, network + server logs):
   operator who wrote `sandbox = "read-only"` has restricted nothing
   and now sees a one-line warning per configured agent. The actual
   consumer (per-run `ShellTool::with_policy` re-bind in the run
-  factory) is tracked in `docs/research/elysper-r124-holistic-design.md`
+  factory) is tracked in `docs/research/uva-r124-holistic-design.md`
   §2 as a follow-up; this round surfaces the gap rather than fixing
   it because the production-grade fix touches `AgentRunConfig` +
   `RunStreamFactory` + `RunDependencies` and deserves its own
   scoped round.
-  Spec: `docs/research/elysper-r124-holistic-design.md` §2 (Adopt B,
+  Spec: `docs/research/uva-r124-holistic-design.md` §2 (Adopt B,
   audit-half).
 
-- `elysper-tool`: `ToolAnnotations` re-exported at the crate root (was
-  already public as `elysper_tool::registry::ToolAnnotations`, now
-  reachable as `elysper_tool::ToolAnnotations`) and the seven plugin
+- `uva-tool`: `ToolAnnotations` re-exported at the crate root (was
+  already public as `uva_tool::registry::ToolAnnotations`, now
+  reachable as `uva_tool::ToolAnnotations`) and the seven plugin
   tools that implement `Tool` (read / write / shell / todo / web_fetch
   / schedule / search) now override `annotations()` to publish the
   MCP-native `readOnlyHint` / `destructiveHint` / `idempotentHint` /
@@ -2680,12 +2850,12 @@ Chromium, network + server logs):
   boundary the call enforces; `web_fetch`'s `openWorldHint: true`
   surfaces the public-internet dependency that was previously
   invisible at the descriptor layer. All hints ride on the existing
-  `From<ToolAnnotations> for elysper_provider::ToolAnnotations`
+  `From<ToolAnnotations> for uva_provider::ToolAnnotations`
   projection (R62), so the wire shape stays additive and old
   consumers ignore the new field. `task` is a `ToolInterceptor`, not
   a `Tool`, so it correctly stays out of this round.
-  Spec: `docs/research/elysper-r124-holistic-design.md` §1.
-- `elysper-tool-search`: the `search` tool's `parameters()` schema
+  Spec: `docs/research/uva-r124-holistic-design.md` §1.
+- `uva-tool-search`: the `search` tool's `parameters()` schema
   now declares top-level `"additionalProperties": false` so a model
   that emits a typo (`lmit` instead of `limit`, `qury` instead of
   `query`) gets a model-facing error instead of a silent default;
@@ -2693,7 +2863,7 @@ Chromium, network + server logs):
   so the regression is caught in CI. Closes the only schema drift
   among the eight plugin tool schemas; the other seven already
   pinned it through `schemars`'s `#[schemars(extend(...))]` derive.
-  Spec: `docs/research/elysper-r124-holistic-design.md` §1.3.
+  Spec: `docs/research/uva-r124-holistic-design.md` §1.3.
 
 ### Design
 
@@ -2702,12 +2872,12 @@ Chromium, network + server logs):
   Continue / Aider / Goose / OpenCode / dsh). Five parallel expert
   audits covered TraitClaw 8-trait parity, pi-mono adoption delta,
   plugin-tool UX unification, seams + file-size, and additive
-  candidates. Elysper is at **95% community convergence**; the design
+  candidates. Uva is at **95% community convergence**; the design
   selects three concrete adopts for this round and tracks the rest
   with deferral reasoning.
-  Spec: `docs/research/elysper-r124-holistic-design.md`.
+  Spec: `docs/research/uva-r124-holistic-design.md`.
 
-- `elysper-session`: `SessionSink` gains two **default-implemented**
+- `uva-session`: `SessionSink` gains two **default-implemented**
   methods, so a backend that needs neither stays at the original
   five-method surface. `append_with_key(key, event)` is the idempotency
   seam: `Some(key)` callers that re-submit the same key observe the
@@ -2721,15 +2891,15 @@ Chromium, network + server logs):
   `write_all` + one `fsync`, and rolls `next_seq` back on failure so a
   retry cannot double-write. `fork_session` now uses it — a 27 086-row
   fork that took 63.8 s completes in well under a second.
-- `elysper-session`: `JsonlSessionSink` writes a **schema-version
+- `uva-session`: `JsonlSessionSink` writes a **schema-version
   metadata header** as the first line of a fresh `events.jsonl`
-  (`{"_meta":{"kind":"elysper_session_meta","schema_version":1,"id":
+  (`{"_meta":{"kind":"uva_session_meta","schema_version":1,"id":
   …}}`). Readers detect it off the first non-empty line and treat a
   file without one as `schema_version = 0` (every line an event row) —
   so pre-existing logs keep reading byte-identically, and `count_lines`
   / `read` / `read_from` all skip a header when present. `CURRENT_
   SCHEMA_VERSION` and `SessionMetadataHeader` are public.
-- `elysper-server`: `POST /api/v1/sessions/{id}/fork` — **branch a
+- `uva-app-server`: `POST /api/v1/sessions/{id}/fork` — **branch a
   session**. The child is a copy of the parent's durable transcript up
   to `from_stream_index` (the whole log when omitted) and is registered
   through the same path as `POST /api/v1/chat/sessions`, so it is an
@@ -2749,7 +2919,7 @@ Chromium, network + server logs):
   untouched, the cutoff truncates, a registered-but-empty parent forks
   empty, the child's next append lands at the ordinal after the prefix,
   and an unknown parent is a 404.
-- `elysper-server`: the session lifecycle gains **delete** and **export**
+- `uva-app-server`: the session lifecycle gains **delete** and **export**
   — `DELETE /api/v1/sessions/{id}` (`204`; `404` for an id neither
   source knows; `409` `session_busy` while a turn is running, because
   the run still owns its sink and is mid-append) and
@@ -2767,13 +2937,13 @@ Chromium, network + server logs):
   non-JSON body, so a download carries the same `Authorization` header
   as every other call. 6 route tests + the `turn_in_flight` contract
   test.
-- `elysper-search`: `SearchEngine::save`/`load` — snapshot + op-log persistence
+- `uva-search`: `SearchEngine::save`/`load` — snapshot + op-log persistence
   (`<root>/snapshot.json` full state, `<root>/ops.jsonl` incremental append,
   serde boundary at the file edge; vectors persist with the snapshot so
   provider-class non-deterministic embedders are not re-embedded on load);
   `VectorStore::vector_at` snapshot accessor; `SearchError::Persist`.
   Spec: `docs/superpowers/specs/2026-09-19-wheel-cron-search-persistence-design.md` §1.
-- `elysper-scheduler`: hierarchical `TimingWheel` (host-tick driven; O(1)
+- `uva-scheduler`: hierarchical `TimingWheel` (host-tick driven; O(1)
   empty tick and next-deadline; overflow sweep) + the `JobTrigger` seam
   (`OnceTrigger` / `IntervalTrigger`) + the opt-in `cron` feature's
   `CronTrigger` (5-field POSIX; the dom/dow conjunction divergence is
@@ -2782,18 +2952,18 @@ Chromium, network + server logs):
   — is visible to the next `tick` / `next_deadline`, because each pass
   compares the store's revision with the one its wheel was built from
   (`ScheduleStore::version`), so `Scheduler::resync` is an explicit
-  rebuild rather than something the host owes; `elysper-tool-scheduler`:
+  rebuild rather than something the host owes; `uva-tool-scheduler`:
   with the `cron` feature forwarded, `create kind=cron` is accepted —
   feature off is byte-identical to before.
   Spec: `docs/superpowers/specs/2026-09-19-wheel-cron-search-persistence-design.md` §2.
-- `elysper` (facade): `cron` feature — the whole cron path behind one
-  switch (`scheduler` + `elysper-scheduler/cron`, `tool-scheduler` +
-  `elysper-tool-scheduler/cron`), so a consumer who enables cron can also
+- `uva` (facade): `cron` feature — the whole cron path behind one
+  switch (`scheduler` + `uva-scheduler/cron`, `tool-scheduler` +
+  `uva-tool-scheduler/cron`), so a consumer who enables cron can also
   create cron jobs. A parser-only feature would leave the `schedule` tool
   refusing `kind: "cron"`, i.e. half of the round's user-visible win
   reachable and half not. Stays out of the default feature set.
-- `elysper-tool-search` (facade feature `tool-search`): the cross-domain
-  `search` tool — one `Tool` over a host-built `elysper-search::Registry`,
+- `uva-tool-search` (facade feature `tool-search`): the cross-domain
+  `search` tool — one `Tool` over a host-built `uva-search::Registry`,
   so a query fans out across every registered engine (tool / mcp /
   skill / memory / agent / session catalogs) and returns the
   agent-facing projection (`domain` / `id` / `title` / `why` / `score`,
@@ -2808,7 +2978,7 @@ Chromium, network + server logs):
   parallel execution. Offline (no HTTP client) and asserted by
   `check-mvp-deps` via `OFFLINE_TOOL_CRATES`.
   Spec: `docs/superpowers/specs/2026-09-19-wheel-cron-search-persistence-design.md` §3.
-- `elysper-search`: the `Registry` is keyed by **domain label** —
+- `uva-search`: the `Registry` is keyed by **domain label** —
   `register` keeps `std::any::type_name::<T>()`, `register_domain` /
   `register_erased` take a host-chosen label (`"tool"`, `"skill"`, …), so
   several engines of one `T` can coexist and every `Hit` is stamped with
@@ -2822,7 +2992,7 @@ Chromium, network + server logs):
   `AgentCandidate` gain `domain` and an optional `preview`
   (`Searchable::preview`), and `search_tool_ctx` accepts a caller-built
   `QueryContext` (domain filter, host routing facts).
-- `elysper-server`: `crates/elysper-server/src/search/` — the six-domain
+- `uva-app-server`: `crates/uva-app-server/src/search/` — the six-domain
   wrap. Tool / MCP / skill / agent catalogs become `SearchDoc` rows in
   self-refreshing `CatalogEngine`s (tool + mcp re-probe
   `ToolRegistry::version`, agents `AgentRegistry::version`, skills on a
@@ -2840,27 +3010,27 @@ Chromium, network + server logs):
   session hits are scoped to the requesting user and the agent view
   never exposes transcripts at all. AppState gains
   `memory: Arc<dyn Memory>` (file-backed tier under the workspace's
-  `.elysper/memory*` scopes) and `search: Arc<SearchService>`. With the
+  `.uva/memory*` scopes) and `search: Arc<SearchService>`. With the
   wrap live, MCP tools register as `ToolExposure::Deferred` (name +
   description per request; schema promotes on first call) and the
   `[tools]` `max_visible` cap now counts the `search` tool — both are
   prompt-economy wins, not behaviour changes to dispatch. The
   `/api/v1/memory/search` skills-directory proxy is deleted: the unified
   endpoint replaces it (clean cutover, no shim).
-- `elysper-server`: `GET /api/v1/search` — cross-domain search over the
+- `uva-app-server`: `GET /api/v1/search` — cross-domain search over the
   deployment's tool / mcp / skill / memory / agent / session catalogs.
   The v1 `List<T>` envelope with search-owned ordering (best-first, no
   cursor), `domains` as a comma-separated filter, `limit` clamped to
   50, `q` required; session hits scoped to the requesting user with the
   same auth-layer fallback as `/api/v1/sessions/search`.
-- `elysper-web`: the Sessions page's two search cards (the
+- `uva-web`: the Sessions page's two search cards (the
   skills-directory memory proxy and the session-history search) collapse
   into one **unified search card** over `GET /api/v1/search` — results
   carry their domain badge and preview, session hits link to the
   transcript, and the command palette queries the same endpoint once the
   user types (server-ranked hits bypass the local fuzzy filter, which
   would otherwise drop semantic matches).
-- `elysper-server`: the model selector is real — a turn's `model`
+- `uva-app-server`: the model selector is real — a turn's `model`
   selection now picks the provider that samples it, on every surface
   that carries one. `AppState::provider_catalogue` is built at boot from
   `[providers.<name>]` (each entry built through
@@ -2881,7 +3051,7 @@ Chromium, network + server logs):
   `request_header` row now names the provider that actually ran rather
   than the deployment default a selected turn overrode.
   Spec: the model-selector defect (a parsed-and-ignored `model` field).
-- `elysper-server`: the Messages endpoint's `document` block is real, so a
+- `uva-app-server`: the Messages endpoint's `document` block is real, so a
   PDF / text / Markdown attachment sent over `POST /v1/messages` reaches
   the agent again. The block was a field-less stub that converted to a
   `400` naming it, which the web composer's `accept` list never reflected:
@@ -2903,7 +3073,7 @@ Chromium, network + server logs):
   audio attachment kind and its player were removed, and an audio file
   is now refused at selection time with a visible message rather than
   being queued and dropped at send.
-- `elysper-server`: **the Anthropic Messages protocol endpoint** —
+- `uva-app-server`: **the Anthropic Messages protocol endpoint** —
   `POST /v1/messages` (non-streaming and `stream:true` SSE), so an
   Anthropic-protocol client (the Anthropic SDK, Claude Code, Cursor-style
   tools) can point its base URL at this server and drive the same agent
@@ -2922,16 +3092,16 @@ Chromium, network + server logs):
   A malformed body is a `400` in the protocol envelope, naming the field
   or value at fault.
   Two opt-in extensions, both gated on the presence of
-  `metadata.elysper_session_id`, keep the web client working on this wire
+  `metadata.uva_session_id`, keep the web client working on this wire
   while external clients see today's bytes: a session binding (the named
   session is adopted, validated with the same resource-name rule as every
   path parameter and scoped to the requesting user, with history seeding
   skipped once the session holds rows and no close/evict at turn end), and
   an in-thread tool surface (the call and its result are observable in one
   turn, which the protocol's own `tool_use` / `tool_result` pairing cannot
-  express for a server that executes its own tools). `metadata.elysper_agent_name`
+  express for a server that executes its own tools). `metadata.uva_agent_name`
   selects the agent for the turn.
-- `elysper-web`: the chat client now speaks that protocol — turns are
+- `uva-web`: the chat client now speaks that protocol — turns are
   `POST /v1/messages` (`stream:true`) with the same credential, and the
   Anthropic SSE frames lower into the existing `SessionStreamEvent`
   vocabulary, so the reducer, tool-block pairing, cancel, regenerate,
@@ -2939,14 +3109,14 @@ Chromium, network + server logs):
   transcript projection renders a turn's attachments from the persisted
   refs (below), so a reloaded file or image turn shows a labelled chip
   instead of an empty bubble.
-- `elysper-server`: a multimodal turn's durable `UserInput` row now
+- `uva-app-server`: a multimodal turn's durable `UserInput` row now
   carries **byte-free attachment references** (`kind` / `name` /
   `mime_type` / `byte_len`) under `data.attachments`. The bytes stay out
   of the log deliberately — base64 images would bloat a session file —
   which is why the refs exist: without them a reloaded transcript could
   not show that the turn carried anything. A text-only turn omits the
   field, and an attachment-only turn now writes a row at all.
-- `elysper-provider`: a `ContentPart::Resource` projects into a prompt as
+- `uva-provider`: a `ContentPart::Resource` projects into a prompt as
   a bounded, readable note instead of the resource itself. The OpenAI
   adapter previously inlined the whole `data:` URI — a 1 MB PDF became
   ~1.4 M characters of base64 that blow the context window and teach the
@@ -2955,7 +3125,7 @@ Chromium, network + server logs):
   name and media type always, plus the decoded text for a `text/*`
   payload up to 16 KiB, and an explicit "contents not inlined (N bytes)"
   note otherwise.
-- `elysper-web`: the UI pass bringing the shell closer to the reference
+- `uva-web`: the UI pass bringing the shell closer to the reference
   desktop client, with the existing colour/typography theme untouched —
   a collapsible left sidebar (`Ctrl/Cmd+B`, persisted, keyboard-accessible,
   and inert while typing), a command palette (`Ctrl/Cmd+K`) that
@@ -2964,65 +3134,65 @@ Chromium, network + server logs):
   before the model selector), a "jump to latest" affordance that appears
   only when the thread is scrolled away from the bottom, and layout /
   control-height tokens replacing one-off pixel values.
-- `elysper-server`: the Messages endpoint's unbound sessions
+- `uva-app-server`: the Messages endpoint's unbound sessions
   (`anthropic-<uuid>`, minted for external clients that pin no session)
   are excluded from the management listing, so a community client's
   throwaway turns do not accumulate in the user's own Sessions page. The
   namespace lives in one `pub(crate)` constant; the listing hides the
   rows while `GET /api/v1/sessions/{id}` still serves them, and an id
   that merely shares the prefix letters is not filtered.
-- `elysper-server`: `GET /api/v1/sessions` and the session detail read the
+- `uva-app-server`: `GET /api/v1/sessions` and the session detail read the
   durable transcript store as well as the in-process registry, so a
   conversation survives a backend restart. Previously the listing showed
   only sessions created since the process started (5 of 1265 on this
   workspace) and "View Detail" 404'd for anything older; a session known
   only from disk is still 404-free and cannot escape the sessions root.
-- `elysper-server`: usage counters are recorded. `/api/v1/chat/usage`
+- `uva-app-server`: usage counters are recorded. `/api/v1/chat/usage`
   read three atomics that nothing ever incremented, so the header chip
   was permanently `0 in · 0 out · 0 turns`; the controller's event funnel
   now folds each `SystemEvent::Usage` into the token totals and each
   `SessionEnded` into the turn count.
-- `elysper-web`: the modal no longer steals focus on every keystroke.
+- `uva-web`: the modal no longer steals focus on every keystroke.
   Its focus effect was keyed on an `onClose` prop that every render
   replaced, so the cleanup re-focused the trigger after the first
   character and a typed name kept only its first letter.
-- `elysper-server`: `?limit=` is accepted on the list endpoints. A plain
+- `uva-app-server`: `?limit=` is accepted on the list endpoints. A plain
   `Option<u64>` cannot deserialize from a query string through
   `#[serde(flatten)]`, so `?limit=20` was a `400` on exactly the
   endpoints that document the parameter.
-- `elysper-server`: `list_models` compares `If-None-Match` instead of
+- `uva-app-server`: `list_models` compares `If-None-Match` instead of
   treating its presence as a match, and derives the `ETag` from the
   response body. Previously any `If-None-Match` returned `304`, so with
   `Cache-Control: no-cache` a browser was pinned to the first model list
   it ever cached — a redeploy never reached it.
 
-### Added (R125 — `elysper-mcp-server` stdio binary: outbound MCP, the plugin-brick tools shipped to any MCP client)
+### Added (R125 — `uva-mcp-server` stdio binary: outbound MCP, the plugin-brick tools shipped to any MCP client)
 
 The "outbound" counterpart to R124's in-process `self_mcp`:
 R124 let the agent reach into its own deployment via MCP; R125 lets
 **any foreign MCP client** (the `pi` coding agent, a Claude Code
-plugin, the Anthropic SDK, …) spawn `elysper-mcp-server` as a
+plugin, the Anthropic SDK, …) spawn `uva-mcp-server` as a
 subprocess and immediately have the same plugin-brick surface under
 its existing JSON-RPC 2.0 stack. No Rust in the caller's process, no
 network, no API key.
 
-- **New crate `crates/elysper-mcp-server/`** — single binary
-  (`elysper-mcp-server`) speaking MCP over stdin / stdout. Two
+- **New crate `crates/uva-mcp-server/`** — single binary
+  (`uva-mcp-server`) speaking MCP over stdin / stdout. Two
   `pub` modules: `lib.rs` (`ServerSurface`, `parse_argv`,
   `bridge`, `render_output`, `overview_tool`) and `stdio.rs`
-  (`run`). Same protocol core as `elysper-mcp::server::serve` —
+  (`run`). Same protocol core as `uva-mcp::server::serve` —
   inlined here because the stdio transport owns stdin / stdout
   directly rather than going through a loopback pair. A
   successful call against this binary is therefore also a
   successful end-to-end proof of the in-process MCP server seam.
-- **Eight tools exposed by default**: `read` (`elysper-tool-read`),
-  `write` (`elysper-tool-write`), `shell` (`elysper-tool-shell`,
-  default safety policy), `TodoWrite` (`elysper-tool-todo`),
-  `web_fetch` (`elysper-tool-web`, the only one that pulls
-  `reqwest`), `schedule` (`elysper-tool-scheduler` over an empty
-  `ScheduleStore` rooted at `<workspace>/.elysper/schedules/`),
-  `search` (`elysper-tool-search` over an empty `elysper-search
-  Registry`), and `elysper` (the synthetic overview tool
+- **Eight tools exposed by default**: `read` (`uva-tool-read`),
+  `write` (`uva-tool-write`), `shell` (`uva-tool-shell`,
+  default safety policy), `TodoWrite` (`uva-tool-todo`),
+  `web_fetch` (`uva-tool-web`, the only one that pulls
+  `reqwest`), `schedule` (`uva-tool-scheduler` over an empty
+  `ScheduleStore` rooted at `<workspace>/.uva/schedules/`),
+  `search` (`uva-tool-search` over an empty `uva-search
+  Registry`), and `uva` (the synthetic overview tool
   returning the binary version, the workspace root, and the
   eight-name tool list in either JSON or text format). The bridge
   (`bridge`) adapts `Arc<dyn Tool>` to the `ServerTool` handler
@@ -3030,49 +3200,49 @@ network, no API key.
   data the registry itself does not carry.
 - **CLI**: `--workspace <PATH>` (default: `$PWD`,
   canonicalised, must be a directory) and `--name <NAME>`
-  (default: `elysper`). `--help` and unknown flags report to
+  (default: `uva`). `--help` and unknown flags report to
   stderr and exit code 2. argv parsing is a hand-rolled matcher
   in `parse_argv`; the binary owns no third-party CLI dep.
 - **One `Context` per binary** — `surface.context("test-session")`
   builds the single `Context` (`session_id` + `workspace_root` +
   default truncation) every plugin-brick tool receives, so a
   foreign MCP client's subprocess keeps the same workspace
-  confinement as a `elysper-server`-hosted agent. The
+  confinement as a `uva-app-server`-hosted agent. The
   `SharedClock` is also injected here (and threaded into
   `SchedulerTool::with_clock`) so tests pin time without racing
   the real clock; production defaults to `SharedClock::system()`.
-- **`crates/elysper-mcp-server/tests/stdio_roundtrip.rs`** — 5
+- **`crates/uva-mcp-server/tests/stdio_roundtrip.rs`** — 5
   integration tests that spawn the binary and drive the full
   MCP wire (initialize / notifications/initialized / tools/list /
-  tools/call read+write / `elysper` overview / unknown-tool
+  tools/call read+write / `uva` overview / unknown-tool
   error envelope). All green.
-- **`crates/elysper-mcp-server/tests/pi-integration.ts`** — a
+- **`crates/uva-mcp-server/tests/pi-integration.ts`** — a
   cross-language smoke that drives the binary from Node.js the
   way a foreign MCP client does (over stdin / stdout). Prints
-  `OK: cross-language smoke passed (Node ↔ elysper-mcp-server)`.
+  `OK: cross-language smoke passed (Node ↔ uva-mcp-server)`.
   Same wire shape `pi` would speak if a `pi-mcp-adapter`
   extension wired it as a subprocess.
 
-Verification: `cargo test -p elysper-mcp-server --lib`
+Verification: `cargo test -p uva-mcp-server --lib`
 **5/5** (`argv_parsing_round_trip`, `plugin_brick_tools_assemble`,
 `overview_tool_round_trips`, `bridge_passes_input_through_to_the_tool`,
 `render_output_errors_are_surfaced_as_err`);
-`cargo test -p elysper-mcp-server --test stdio_roundtrip`
+`cargo test -p uva-mcp-server --test stdio_roundtrip`
 **5/5** (`initialize_advertises_protocol_version_and_tools`,
 `read_tool_round_trips_through_stdio`,
 `write_tool_creates_files_under_the_workspace`,
-`elysper_overview_tool_lists_every_exposed_tool`,
+`uva_overview_tool_lists_every_exposed_tool`,
 `tools_call_with_unknown_tool_returns_error_envelope`);
 `cargo clippy --all-targets --all-features --tests --all -- -D warnings`
 0; `cargo +nightly fmt --all --check` 0;
-`cargo doc --no-deps -p elysper-mcp-server` 0;
+`cargo doc --no-deps -p uva-mcp-server` 0;
 `make ci` (every gate: `check-mvp-deps`, `check-no-runtime`,
 `check-public-api-runtime`, `check-pub-surface`,
 `check-claim-language`, `check-clock`, `check-harness-shape`,
 `check-test-layout`, `test-guides`) green;
 `node tests/pi-integration.ts` → `OK: cross-language smoke passed`.
-Reproduction: `cargo build -p elysper-mcp-server` →
-`./target/debug/elysper-mcp-server --workspace /tmp/ws --name pi` →
+Reproduction: `cargo build -p uva-mcp-server` →
+`./target/debug/uva-mcp-server --workspace /tmp/ws --name pi` →
 send `{"jsonrpc":"2.0","id":1,"method":"initialize",…}` /
 `{"jsonrpc":"2.0","id":2,"method":"tools/list"}` /
 `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read",…}}`
@@ -3090,16 +3260,16 @@ keeps only two lightweight `subagent_enter` / `subagent_exit` marker rows
 naming the child; the `task` tool result carries `[subagent session: <id>]`
 so the chat can link to the child.
 
-- `elysper-harness`: `AgentMeta` gains `agent_name: Option<String>` (the
+- `uva-harness`: `AgentMeta` gains `agent_name: Option<String>` (the
   registry name of the delegated peer) and `prompt: Option<String>` (the
   dispatch prompt — set on the **first** forwarded event of the child
   only, so a session router can persist it as the child's `UserInput`
   row without cloning it onto every event of the run).
-- `elysper-tool-task`: `run_subagent` sets `meta.agent_name` and
+- `uva-tool-task`: `run_subagent` sets `meta.agent_name` and
   `prompt`, and appends `\n\n[subagent session: <child_id>]` to every
   task result (success / failure / cancelled / empty) so the chat
   surface has a stable place to read the child id.
-- `elysper-server`: new `session::subagent_router::SubagentRouter`
+- `uva-app-server`: new `session::subagent_router::SubagentRouter`
   persists wrapped `AgentEvent::Agent` frames into their own sessions
   via `SessionRegistry::sink(user, child)` instead of inlining them
   into the parent's log; durable inner events (the child's own
@@ -3113,28 +3283,28 @@ so the chat can link to the child.
   parent's SSE never carries the child's events either. `ControllerInner`
   gains `subagent_router` and `record_usage_tree` walks the
   sub-tree so child token counts still hit `/api/v1/chat/usage`.
-- `elysper-server`: `routes/sessions.rs` — `SessionSummary` /
+- `uva-app-server`: `routes/sessions.rs` — `SessionSummary` /
   `SessionDetail` carry `parent_session_id` + `agent_name`; the
   registry loop reuses its single `sink.read()` for status + timestamps
   + attribution, and `scan_unregistered_transcripts` reads the first
   row of each disk transcript for the same `subagent_enter` marker.
   `ScannedSession` is a small struct that carries both the
   cursor-paginated row and the attribution.
-- `elysper-server`: `routes/tasks.rs` rebased on the new markers
+- `uva-app-server`: `routes/tasks.rs` rebased on the new markers
   (previously walked the parent log for `{type:"Agent"}` envelopes,
   which the router no longer writes). `TaskDelegation.prompt` is read
   from the child session's `UserInput` row on detail (kept empty on
   the list to avoid the extra sink reads); status is the exit marker
   when present, else `"running"`. `TaskDetailPage` no longer 404s on a
   valid delegation.
-- `elysper-mcp`: an in-process **MCP server** + a **loopback transport**
+- `uva-mcp`: an in-process **MCP server** + a **loopback transport**
   pair. `serve()` handles `initialize` / `tools/list` / `tools/call`
-  with the same JSON-RPC 2.0 wire `elysper::mcp::McpClient` already
+  with the same JSON-RPC 2.0 wire `uva::mcp::McpClient` already
   speaks (no protocol fork), and the loopback pair gives the in-process
   case the same request / oneshot-reply semantics stdio / HTTP use.
   Every error path falls through to a single `server.respond(framed)`
   so the client never hangs on an unset `id`.
-- `elysper-server`: `state::app_state::self_mcp` — the deployment's
+- `uva-app-server`: `state::app_state::self_mcp` — the deployment's
   own management surface, served over MCP. Nine `mcp__self__*` tools
   (`agents` / `tools` / `skills` / `schedules` / `workflows` / `evals`
   / `tasks` / `models` / `attachments`), each action-discriminated
@@ -3146,16 +3316,16 @@ so the chat can link to the child.
   grows per-tool code: handlers close over `Arc<AppState>`. Session /
   message endpoints are deliberately excluded — the agent managing
   its own transcript is the foot-gun the carve-out exists to prevent.
-- `elysper-web`: a chat **side panel** (`src/components/chat/SessionSidePanel.tsx`)
+- `uva-web`: a chat **side panel** (`src/components/chat/SessionSidePanel.tsx`)
   fed by pure derivations in `src/lib/session-panel-data.ts` over the
   same `Message[]` the list renders: the latest `TodoWrite` list
   (checklist + progress bar), every `task` delegation (peer name +
   status + link to `/sessions/<child>`), and every file the agent wrote
   (`write` tool blocks, newest write per path). The panel is
   default-open and its state persists in `localStorage` under
-  `elysper.chatPanelOpen`; the toggle uses the right-side precedent in
+  `uva.chatPanelOpen`; the toggle uses the right-side precedent in
   `useSidebarCollapse` (`Ctrl/Cmd+B`).
-- `elysper-web`: inline distinction inside `SegmentView`'s
+- `uva-web`: inline distinction inside `SegmentView`'s
   `tool_block` branch — `TodoWrite` calls render as a checklist +
   `n/m` progress, `task` calls as a sub-agent card with a
   `查看子会话 →` link to `/sessions/<child>`, `write` calls as a
@@ -3163,12 +3333,12 @@ so the chat can link to the child.
   JSON body stays one click away under the existing toggle, so
   debugging and reproduction are not sacrificed for the at-a-glance
   rendering.
-- `elysper-web`: thinking-block visual separation — the
+- `uva-web`: thinking-block visual separation — the
   `.nt-chat__segment--thinking` block gains a tinted surface, a
   dashed left accent rail, italic body, the label `思考过程`, and a
   one-line preview under the collapsed header. Together they read
   the scratchpad apart from the answer at a glance.
-- `elysper-web`: `SessionSummary.parent_session_id` /
+- `uva-web`: `SessionSummary.parent_session_id` /
   `agent_name` and the matching `SessionDetail` fields drive a
   `子代理 · <agent>` badge on every child-session card and a
   `PARENT SESSION` / `SUB-AGENT` pair on the detail page. The
@@ -3198,26 +3368,26 @@ so the chat can link to the child.
   `state/app_state/evals.rs:115` (`generated_at`),
   `routes/schedules.rs:172` / `routes/schedules.rs:249` (create + tick
   handlers). Each now reads "now" through the injected
-  `elysper::core::SharedClock` — `SchedulesState` and `EvalsState`
+  `uva::core::SharedClock` — `SchedulesState` and `EvalsState`
   gained a `clock` field + a `build_with_clock` constructor (the
   existing `build()` defaults to `SharedClock::system()`) and a
   `SchedulesState::clock()` accessor so route handlers read from the
   state. No `CLOCK_BASELINE` change was needed.
 
 Verification: `make ci` green; `make check-web` green;
-`cargo test -p elysper-harness --lib` **241/241**,
-`cargo test -p elysper-session --lib` **151/151**,
-`cargo test -p elysper-tool-task --lib` **76/76**,
-`cargo test -p elysper-mcp --lib` **28/28**,
-`cargo test -p elysper-server --lib` **477/477**;
-end-to-end browser verification (elysper-server + vite running
+`cargo test -p uva-harness --lib` **241/241**,
+`cargo test -p uva-session --lib` **151/151**,
+`cargo test -p uva-tool-task --lib` **76/76**,
+`cargo test -p uva-mcp --lib` **28/28**,
+`cargo test -p uva-app-server --lib` **477/477**;
+end-to-end browser verification (uva-app-server + vite running
 locally, model invoked through `/v1/messages`) confirmed the chat
 panel populated, the inline checklists / sub-agent cards / file
 chips rendered, the sub-agent link opened its child session page,
 and `GET /api/v1/tools` listed all nine `mcp__self__*` tools with
 `Deferred` exposure.
 
-Live MCP proof (elysper-server `:18780`, /tmp/elysper-pi-test workspace):
+Live MCP proof (uva-app-server `:18780`, /tmp/uva-pi-test workspace):
 the agent, prompted via `/api/v1/chat/sessions/.../messages`, issued
 `tool_use id=call_190b3a1678c042108a0534d5 name=mcp__self__models
 input={"action":"list"}`; the persisted `events.jsonl` records
@@ -3226,7 +3396,7 @@ came from `state.provider_catalogue` / `state.workspace_config`. A
 second turn created a real skill through MCP
 (`tool_use mcp__self__skills action=create name=e2e-pi-demo …` →
 `tool_result metadata.mcp_server="self" text="created skill
-'e2e-pi-demo'"`) — `find /tmp/elysper-pi-test/.agents/skills/` shows
+'e2e-pi-demo'"`) — `find /tmp/uva-pi-test/.agents/skills/` shows
 `e2e-pi-demo/SKILL.md` with the content the agent sent, and
 `GET /api/v1/skills` lists it alongside the three bundled skills.
 This proves the in-process MCP server is the same code path the
@@ -3238,7 +3408,7 @@ sees them.
 
 ### Changed (R123 — harness surface audit: runtime-neutral event channel, order-independent compaction, hidden-tool refusal)
 
-An audit of `elysper-harness` against its own claims (runtime neutrality,
+An audit of `uva-harness` against its own claims (runtime neutrality,
 lego assembly, minimal public surface, accuracy of the docs) found four
 places where the code and the documented contract disagreed, and one
 dispatch-path hole. Each is fixed at the seam the contract names, not at
@@ -3283,18 +3453,18 @@ the symptom.
   in-repo caller (the server's run factory) uses the sibling. `resolve`
   drops to `pub(crate)`.
 - **Demoted: `AgentEntry::descriptor_mut`.** It was reachable as
-  `elysper_harness::agent::AgentEntry::descriptor_mut` (the type is a
+  `uva_harness::agent::AgentEntry::descriptor_mut` (the type is a
   curated re-export) and self-described "test-only" — it existed so the
   registry's own tests could seed a version / tool list / owner by hand.
   Now `#[cfg(test)] pub(crate)`: a write handle on a descriptor cache
   that is otherwise write-once at registration, absent from production
   builds entirely. The same-named `ReActAgent::descriptor_mut` stays
   `pub` — it replaces a running agent's descriptor wholesale, and
-  `elysper-tool-task`'s tests call it across crates.
+  `uva-tool-task`'s tests call it across crates.
 - **Module paths closed:** `config`, `input`, `prompt` and `compaction`
   are private modules; their types were already re-exported at the crate
   root, and no consumer used the module path.
-- **Dependency placement:** `elysper-skill` moved from `[dependencies]`
+- **Dependency placement:** `uva-skill` moved from `[dependencies]`
   to `[dev-dependencies]` (only `examples/assemble_with_skills.rs` names
   it, and that example exercises no harness type), and `tokio-util` moved
   to `[dev-dependencies]` (every use is inside `#[cfg(test)]`). Both were
@@ -3347,15 +3517,15 @@ the symptom.
   background buffer" and the module layer tables called `AgentHandle`
   "background execution" — the run starts at the first `join` and the
   handle holds no executor, so no task is detached at `spawn_detached`
-  at all (0 sites left; `elysper-tool-task`'s `GroupJoin` and
+  at all (0 sites left; `uva-tool-task`'s `GroupJoin` and
   `SubagentPool` use the word for their own lanes, which is accurate);
   `runtime_context.rs` said the production loop "passes
   `chrono::Utc::now()`" (it reads the injected `SharedClock`, which is
   what §3.8 requires); the event enum's doc said "five top-level
   variants" for a four-variant enum; and `AgentRunConfig`'s rustdoc
   opened mid-sentence. Six live docs also named a crate that does not
-  exist (`elysper_agent::`) in copy-pasteable snippets — now
-  `elysper_harness::`.
+  exist (`uva_agent::`) in copy-pasteable snippets — now
+  `uva_harness::`.
 - **`run`'s tests moved to a sibling `tests.rs`.** `handle.rs`'s inline
   block had grown past the 400-line hard limit
   `make check-test-layout` is specified to enforce (the gate currently
@@ -3380,7 +3550,7 @@ the symptom.
   registry path, so it needed its own guard), the `ModelProvider`, the
   consumer-supplied `ContextManager`, the `RunInbox`, and `steering`'s
   `Hint` (both injection points) + `Tracker` (all four methods). The
-  extractor stays shared in `elysper_core::panic_message`; the guards
+  extractor stays shared in `uva_core::panic_message`; the guards
   themselves live in the harness, which is their only user. Adding the
   `Hint` guard surfaced a second defect on the same call site:
   `inject_hints` evaluated every hint's `should_trigger`/`generate`
@@ -3446,11 +3616,11 @@ the symptom.
   fix).
 - **One panic extractor, where there were four — and one fallback, where
   there were three.** The payload-to-string conversion existed in
-  `elysper-tool`'s dispatcher, `elysper-steering`'s hook runner, its
-  guard runner, and inline in `elysper-server`'s error middleware, with
+  `uva-tool`'s dispatcher, `uva-steering`'s hook runner, its
+  guard runner, and inline in `uva-app-server`'s error middleware, with
   fallbacks `"<non-string panic>"`, `"unknown panic payload"` (twice) and
   `"unknown panic"`. All four now call
-  `elysper_core::panic_message`, whose fallback is the named
+  `uva_core::panic_message`, whose fallback is the named
   `NON_STRING_PANIC` = `"(non-string panic payload)"`. **Behaviour
   change:** logs that used to contain `unknown panic payload` or
   `unknown panic` now carry `(non-string panic payload)`, so a grep for
@@ -3474,7 +3644,7 @@ the symptom.
   that reproduces the `EmptyStream` report; `loop_lifecycle` gained
   `panicking_tool_still_reports_session_end` and
   `panicking_interceptor_still_reports_session_end`, and
-  `elysper-tool`'s `tool_panic_isolation` now asserts the panic message
+  `uva-tool`'s `tool_panic_isolation` now asserts the panic message
   survives — each verified to fail against the pre-fix code. The four tautological `AgentOutput` tests
   (field construction, `Clone`/`Debug` presence, `Vec` ordering) were
   deleted with the field they pinned.
@@ -3486,14 +3656,14 @@ the symptom.
   where the panic would have terminated the run with no `SessionEnded`
   to report it with.
 
-Verification: `cargo test -p elysper-harness --lib` **233/233**;
-`cargo test -p elysper-server --lib` **398/398**; `make ci` green;
+Verification: `cargo test -p uva-harness --lib` **233/233**;
+`cargo test -p uva-app-server --lib` **398/398**; `make ci` green;
 `make examples` green; `scripts/check-public-api-runtime.sh` green
 (plus the harness-shape script and the inline gate targets).
 
 ### Changed (R122 — the harness gets a shape: layered modules, a private surface, and the `team` layer deleted)
 
-`elysper-agent` had grown a public surface that was really internal
+`uva-agent` had grown a public surface that was really internal
 structure. `agent::` exposed ten modules including `re_act`'s own
 submodule tree, an out-of-band "team protocol" layer no caller in this
 repo used, and a subagent-batching type whose only consumer lives in
@@ -3513,7 +3683,7 @@ with no caller is weight*, and each of its three pieces has a
 first-class home elsewhere in this workspace:
 
 - **Delegation is the `task` tool.** `TaskDelegator` in
-  `elysper-tool-task` runs a registered peer as a depth-capped child,
+  `uva-tool-task` runs a registered peer as a depth-capped child,
   forwards its events, and commits its final text — with gates,
   worktree isolation and admission control the `prompt -> text` seam
   never had. `BoundAgent`/`FnAgent` were a *second*, thinner
@@ -3521,7 +3691,7 @@ first-class home elsewhere in this workspace:
   synthetic tools become plugin crates implementing `ToolInterceptor`.
 - **Verify-then-retry is a scorer.** `CandidateScorer` behind
   `BestOfNStrategy` (or `LlmJudgeScorer`) samples N answers and keeps
-  the best; a `elysper-workflow` gate re-runs a call until its command
+  the best; a `uva-workflow` gate re-runs a call until its command
   exits zero. `VerificationChain` was a third mechanism for the same
   job, with a *different* retry policy (`max_attempts` + a
   `with_feedback` flag) that nothing outside its own tests selected.
@@ -3531,21 +3701,21 @@ first-class home elsewhere in this workspace:
   vocabulary nothing in the repo composed.
 
 The outward-facing proof that nothing was lost is that the workspace
-still declares every one of those capabilities — in `elysper-tool-task`,
-`elysper-workflow` and the strategy seam — and the whole workspace
+still declares every one of those capabilities — in `uva-tool-task`,
+`uva-workflow` and the strategy seam — and the whole workspace
 compiles with zero references to the deleted names. `docs/reference-parity.md`
 now records the two declined halves with their reasons instead of
 mapping them onto types that no longer exist.
 
-**`GroupJoin` moved to `elysper-tool-task`, where its consumer is.**
+**`GroupJoin` moved to `uva-tool-task`, where its consumer is.**
 Batching a fan-out's completions into one notification is a thing *a
 host that runs subagents* wants; a host that does not has nothing to
-batch. It was in `elysper-agent` next to the loop, and its own example
+batch. It was in `uva-agent` next to the loop, and its own example
 had to name `AgentHandle`/`DetachedAgent` from a different module to
 explain itself. Both moved, and both now say what they are for:
 `pool` decides *whether* a child starts, `GroupJoin` decides *when the
-host hears about it*. `elysper_harness::GroupJoin` is gone; import it
-from `elysper_tool_task`.
+host hears about it*. `uva_harness::GroupJoin` is gone; import it
+from `uva_tool_task`.
 
 **The three reasoning strategies moved to `agent::strategy`.** They were
 `agent::{cot, best_of_n, best_of_n_llm_judge}` — siblings of the *seam*
@@ -3591,7 +3761,7 @@ background and abandon the wait without cancelling the work; push
 messages into it) — and neither knows which strategy is running, nor is
 either needed to run an agent. They are `agent::run`.
 
-**`elysper-tool::Context` lost three dead fields.** `dispatch_mode`
+**`uva-tool::Context` lost three dead fields.** `dispatch_mode`
 (with the whole `DispatchMode` enum: `Fork` / `Teammate` / `Worktree`,
 whose `Teammate` variant is the last trace of the deleted team layer),
 `caller_agent`, and `messages` (+ `with_messages`) were never set by any
@@ -3681,10 +3851,10 @@ the last gate not invoked through a `make` target (AGENTS.md §3.6). `SEAMS.md` 
 hand-checked, recorded in `docs/README.md`'s Known gaps with the reason
 the obvious gate cannot work.
 
-`make check-harness-shape` keeps it that way: no `elysper-agent`
+`make check-harness-shape` keeps it that way: no `uva-agent`
 **production** function over 100 lines or 4 levels of nesting
 (`too_many_lines` + `excessive_nesting`, the two lints clippy's own doc
-recommends in place of the inert one), scoped to `elysper-agent` on
+recommends in place of the inert one), scoped to `uva-agent` on
 purpose — a workspace-wide run at this threshold reports **24** sites,
 of which **14 are production code** (the other 10 are benches, examples
 and test files, which `--lib` excludes anyway), and this round touched
@@ -3694,7 +3864,7 @@ those hard errors would be an unrequested refactor.
 Scoping is not cosmetic here, and getting it wrong the first time is
 worth recording. Writing either threshold into the root `clippy.toml`
 **enables the lint for every crate**, so with `make lint-rust`'s `-D
-warnings` it turned an untouched `elysper-core` block into a hard error.
+warnings` it turned an untouched `uva-core` block into a hard error.
 The thresholds therefore live in `scripts/harness-shape/clippy.toml`,
 which the gate injects via `CLIPPY_CONF_DIR`; three facts about this
 arrangement were each verified rather than assumed, because each was
@@ -3702,7 +3872,7 @@ wrong on the first attempt:
 
 1. `excessive_nesting` defaults to **0 = disabled**, so a threshold is
    what makes the lint able to fire at all; and a threshold at the root
-   enables it globally (proved: `-D warnings` on `elysper-core` exits 0
+   enables it globally (proved: `-D warnings` on `uva-core` exits 0
    without the key and 101 with it).
 2. `CLIPPY_CONF_DIR` is honoured (proved: the same 7-level function
    reports 0 diagnostics without the variable and 1 with it).
@@ -3741,12 +3911,12 @@ the "after" figures the same command here. Both totals include doctests.
 
 | Crate | Before | After | Composition |
 |---|---|---|---|
-| `elysper-agent` | 254 | 232 | −10 `agent::team` tests and −2 team doctests (deleted with the module), −10 `agent::group_join` tests and −1 group_join doctest (moved to the plugin), +1 `scorer.rs` test = −22. Re-pathing `best_of_n` / `best_of_n_llm_judge` / `cot` under `strategy`, and `handle` / `run_inbox` under `run`, renames 32 test names without changing the count |
-| `elysper-tool-task` | 72 | 83 | +11: the 10 tests and 1 doctest that arrived with `group_join` |
-| `elysper-tool` | 226 | 216 | −10, exactly the `DispatchMode` / `caller_agent` / `with_messages` test fns (`git diff` lists them); doctests unchanged at 4 |
-| `elysper-server` | 455 | 455 | unchanged: `git diff` over the crate shows no test function added or removed, only module paths in doc comments and `use` lines |
+| `uva-agent` | 254 | 232 | −10 `agent::team` tests and −2 team doctests (deleted with the module), −10 `agent::group_join` tests and −1 group_join doctest (moved to the plugin), +1 `scorer.rs` test = −22. Re-pathing `best_of_n` / `best_of_n_llm_judge` / `cot` under `strategy`, and `handle` / `run_inbox` under `run`, renames 32 test names without changing the count |
+| `uva-tool-task` | 72 | 83 | +11: the 10 tests and 1 doctest that arrived with `group_join` |
+| `uva-tool` | 226 | 216 | −10, exactly the `DispatchMode` / `caller_agent` / `with_messages` test fns (`git diff` lists them); doctests unchanged at 4 |
+| `uva-app-server` | 455 | 455 | unchanged: `git diff` over the crate shows no test function added or removed, only module paths in doc comments and `use` lines |
 
-The `elysper-agent` delta reconciles against the test-name diff, but the
+The `uva-agent` delta reconciles against the test-name diff, but the
 raw counts must be read with the renames factored out: 55 names gone and
 33 added, of which **32 are renames** (the same test under a new module
 path — `best_of_n` / `best_of_n_llm_judge` / `cot` under `strategy`,
@@ -3759,14 +3929,14 @@ shows for `prompt/mod.rs` is `rust,ignore`.)
 
 ### Added (the two crates nobody could call become tools)
 
-`elysper-mcp` and `elysper-scheduler` were complete library crates with
+`uva-mcp` and `uva-scheduler` were complete library crates with
 no model-facing surface. An MCP server's tools reached the model only
 if the *host* had published them at boot, and a scheduled job could not
 be created from a conversation at all. Both gaps are the same shape —
 *a capability the framework has and the model cannot reach* — and both
 are closed by an adapter crate/tool, not by widening the harness.
 
-**`elysper-mcp` gains `McpControlTool` — the `mcp` tool.** The existing
+**`uva-mcp` gains `McpControlTool` — the `mcp` tool.** The existing
 path publishes one local `Tool` per remote tool
 (`register_mcp_tools`), which is right when the catalog is known at
 assembly time and wrong when it is large, volatile, or discovered
@@ -3822,10 +3992,10 @@ which is the configuration its claim actually describes (the agent's
 surface is the single `mcp` tool; the catalog is read on demand), and
 the doc says the contrast is one of configuration, not of reach.
 
-**`elysper-tool-scheduler` (new crate) — the `schedule` tool.**
+**`uva-tool-scheduler` (new crate) — the `schedule` tool.**
 `Scheduler` is deliberately host-driven: `tick(now)` reports due jobs to
-whoever drives it. Nothing in `elysper-scheduler` is a `Tool`, so the
-adapter is a new plugin crate following the `elysper-tool-*`
+whoever drives it. Nothing in `uva-scheduler` is a `Tool`, so the
+adapter is a new plugin crate following the `uva-tool-*`
 convention: `list` / `create` / `pause` / `resume` / `remove` over a
 shared `ScheduleStore`, jobs addressed by id **or** name, `Tool::call`
 in, `ToolOutput` out.
@@ -3856,7 +4026,7 @@ Three decisions worth naming:
   It is a convention, not validation: the host interprets the payload.
 
 **Where it is not wired, and why that is deliberate.** Neither the
-`mcp` tool nor the `schedule` tool is installed by `elysper-server`.
+`mcp` tool nor the `schedule` tool is installed by `uva-app-server`.
 For `mcp`, `register_configured_mcp_servers` ticks its supervisor
 exactly **once** at boot and drops it — only `healthy_clients()` and
 `tick.health` escape, and `AppState::mcp_health` is that frozen
@@ -3871,10 +4041,10 @@ into the server's registry at boot. Both new tools are
 consumer-assembled, and `MINIMAL.md` / `SEAMS.md` carry the
 registration lines.
 
-**Naming.** The crate is `elysper-tool-scheduler` (not
-`-schedule`): the `elysper-tool-*` crates name the *domain* they adapt
+**Naming.** The crate is `uva-tool-scheduler` (not
+`-schedule`): the `uva-tool-*` crates name the *domain* they adapt
 (`-todo` ships `TodoWrite`, `-web` ships `web_fetch`), so mirroring the
-crate it adapts — `elysper-scheduler`, whose tool is `schedule` — is
+crate it adapts — `uva-scheduler`, whose tool is `schedule` — is
 the consistent choice.
 
 **A remotely triggerable host DoS, closed.** `create` accepted any
@@ -3887,7 +4057,7 @@ never persisted, the panic repeated on every subsequent tick. A value
 above `i64::MAX` was the quieter variant: `as i64` wrapped negative,
 leaving a past `next_fire_at` and a job that re-fires forever. Both are
 now refused at `create` against a new documented bound,
-`elysper_scheduler::MAX_INTERVAL_SECS` (10 years — far beyond any
+`uva_scheduler::MAX_INTERVAL_SECS` (10 years — far beyond any
 scheduling horizon, ~13 orders of magnitude below the limit), with the
 schema carrying the matching `maximum`.
 
@@ -3943,7 +4113,7 @@ on disk and nothing in-tree reaps them (`gc_completed` collects only
 `Completed` rows, and only when the host calls it), so a model looping on
 `create` grew `<root>/schedules/` without limit. `MAX_JOBS` (64) caps it
 before the write, and the model is told the limit in the tool's
-description — the same shape `elysper-tool-todo` uses for
+description — the same shape `uva-tool-todo` uses for
 `MAX_TODO_ITEMS`. Unlike the interval bound this one has no schema slot
 (`create` adds one job per call; no argument carries a count), so the
 description is where it lives.
@@ -3979,17 +4149,17 @@ belongs in the default set) with the module, table row, and a
 HTTP/OTel/DB dependency. Docs swept: `README.md` (member count 19 → 26,
 which had gone stale, plus the plugin rows and example ladder),
 `MINIMAL.md`, `SEAMS.md`, `AGENTS.md` §1/§3.6/§3.7,
-`docs/examples/README.md`, `elysper-tool`'s crate docs, and the facade's
+`docs/examples/README.md`, `uva-tool`'s crate docs, and the facade's
 `mcp` / `scheduler` / `tool` module docs.
 
-**Verification** — `cargo test -p elysper-mcp` 74/74 (15 in
+**Verification** — `cargo test -p uva-mcp` 74/74 (15 in
 `tests/control_tool.rs`, including the governance and re-sync ones),
-`cargo test -p elysper-tool-scheduler` 24/24 (18 integration + 5 unit +
-1 doc), `cargo test -p elysper-scheduler` 19/19 lib (the crate has no
+`cargo test -p uva-tool-scheduler` 24/24 (18 integration + 5 unit +
+1 doc), `cargo test -p uva-scheduler` 19/19 lib (the crate has no
 doctests) after the `Arc` change and the totality work,
-`cargo test -p elysper` 12/12 doc tests on the default set and 20/20 on
+`cargo test -p uva` 12/12 doc tests on the default set and 20/20 on
 the CI MVP subset, 19/19 `--all-features` (the new `tool-scheduler`
-reachability test included), `elysper-tool` 196+ and `elysper-server`
+reachability test included), `uva-tool` 196+ and `uva-app-server`
 402+ unchanged. Three defects were proven by reproduction before the
 fix, each by reverting it: the host-DoS chain (one `create` with
 `interval_seconds: 1e16` → `Scheduler::tick` panicked in `chrono` at
@@ -4003,28 +4173,28 @@ job that never fired). All three are regression tests now
 `a_failed_advance_does_not_stamp_last_fired`,
 `out_of_range_interval_is_an_error_not_a_panic`). Both examples run
 against real dependencies and print their proof line: `cargo run
---example mcp_control_tool -p elysper-mcp` → `MCP-CONTROL-TOOL: OK` (a
+--example mcp_control_tool -p uva-mcp` → `MCP-CONTROL-TOOL: OK` (a
 real `sh` MCP child spawned, catalogued at run time, called, and the
 agent's surface confirmed as the single `mcp` tool), `cargo run --example
-schedule_jobs -p elysper-tool-scheduler` → `SCHEDULE-TOOL: OK` (the job
+schedule_jobs -p uva-tool-scheduler` → `SCHEDULE-TOOL: OK` (the job
 the tool created is the job the host's tick delivers). `make ci` **9/9**,
 `make check-mvp-deps` and `make check-no-runtime` green (the sixth
-offline tool crate stays HTTP-free, and `elysper-scheduler` stays
+offline tool crate stays HTTP-free, and `uva-scheduler` stays
 tokio-free — the `Tool` impl lives in its own crate, never in the
 runtime-free one).
 
-### Changed (R121 — the shell owns its execution policy; the `task` tool becomes a `elysper-tool-*` crate)
+### Changed (R121 — the shell owns its execution policy; the `task` tool becomes a `uva-tool-*` crate)
 
 Two pieces of one concern: *a tool's boundary belongs to the tool, and
-every agent-facing tool is a `elysper-tool-*` plugin crate*.
+every agent-facing tool is a `uva-tool-*` plugin crate*.
 
 **The OS execution policy left the paradigm crate.** `ExecutionPolicy`,
 `SandboxBackend`, `BwrapBackend`, `NoopBackend`, `ConfinedCommand`,
 `SandboxError`, `BackendAvailability`, `bwrap_profile_args`,
 `resolve_confined_command`, `denial_dialect`, `classify_denial`,
 `denial_marker`, `policy_prompt_block` and `effective_policy` moved
-from `elysper-tool::sandbox` to `elysper-tool-shell::sandbox` (re-owned
-by `elysper-tool-shell`, which already re-exports them from its root).
+from `uva-tool::sandbox` to `uva-tool-shell::sandbox` (re-owned
+by `uva-tool-shell`, which already re-exports them from its root).
 The defect this closes was real and silent: the policy lived on the
 shared `Context` (`policy` + `sandbox` fields), and **no production
 code ever set it** — the loop builds `Context::new(..)` — so
@@ -4038,34 +4208,34 @@ would let one tool's setting change another's behaviour).
 
 `effective_policy` also stopped taking `&[SessionEvent]`: it folds the
 `sandbox_mode` wire names (`&[&str]`), which was the sole reason
-`elysper-tool` depended on `elysper-session`. The tool paradigm now
-depends on `elysper-core`, `elysper-provider` and `elysper-telemetry`
+`uva-tool` depended on `uva-session`. The tool paradigm now
+depends on `uva-core`, `uva-provider` and `uva-telemetry`
 only, and the tool plugin crates stay free of the session crate as
-`AGENTS.md` §3.7 requires. `elysper-tool` also dropped its two
+`AGENTS.md` §3.7 requires. `uva-tool` also dropped its two
 now-unused dependencies — `libc` (nothing in the crate mentions it;
-the `SIGTERM`/`SIGKILL` escalation lives in `elysper-tool-shell`'s own
+the `SIGTERM`/`SIGKILL` escalation lives in `uva-tool-shell`'s own
 manifest) and `chrono` (zero `chrono::` uses in `src/`, the old
 `sandbox.rs` included) — which is why they disappear from the lock
 diff.
 
-**The delegation plugin is now a tool plugin.** `elysper-delegation`
-→ `elysper-tool-task` (facade feature `delegation` → `tool-task`,
-module `elysper::tool_task`), so the crate that ships the model-facing
+**The delegation plugin is now a tool plugin.** `uva-delegation`
+→ `uva-tool-task` (facade feature `delegation` → `tool-task`,
+module `uva::tool_task`), so the crate that ships the model-facing
 `task` tool follows the same convention as `-read` / `-write` /
 `-shell` / `-todo` / `-web`. Modules, types and examples are unchanged
 (`task`, `gate`, `worktree`, `pool`, `router`, `route_rules`,
 `mention_clone`; `TaskDelegator`, `TaskSpec`, `SubagentPool`, …). It is
-the one plugin that also depends on `elysper-agent`, because it
+the one plugin that also depends on `uva-agent`, because it
 installs through the `ToolInterceptor` seam — `AGENTS.md` §3.7 now says
 so instead of implying every tool plugin depends on the paradigm crate
 alone. `make check-mvp-deps` gained it to the offline list (five
 crates, none pulling an HTTP client), and the doc/gate sweep covers
 `README.md`, `AGENTS.md`, `MINIMAL.md`, `SEAMS.md`, `docs/README.md`,
-`docs/examples/README.md`, `crates/elysper-agent/README.md` and the
+`docs/examples/README.md`, `crates/uva-agent/README.md` and the
 facade module docs.
 
 **A behaviour change, not just a deletion: `write` now runs
-sequentially, and the queue it replaces is gone.** `elysper-tool`'s
+sequentially, and the queue it replaces is gone.** `uva-tool`'s
 `mutation_queue` (per-canonical-path write serialisation, ~180 lines +
 3 tests) had **zero consumers** repo-wide — its own doc named
 `WriteTool` as the consumer, and `WriteTool` never used it. That is the
@@ -4078,14 +4248,14 @@ two concurrent `write` calls in `append` mode (`read_to_string` → build
 framework already has the mechanism, which the write tool simply was
 not using. `WriteTool::mode()` now returns
 `ExecutionMode::Sequential`, joining `shell`, `web_fetch` and the MCP
-proxy tools, and `elysper-tool-write` pins that in a test.
+proxy tools, and `uva-tool-write` pins that in a test.
 
 **User-visible consequence**: a batch of `write` calls in one LLM pass
 now executes one call at a time (the Parallel bucket completes first),
 and the loop's Sequential bucket aborts the remaining calls of the
 round after the first failure. Only the serial package is affected —
 `read` and `todo` stay `Parallel` (read-only / in-memory). The finer
-per-path queue can come back inside `elysper-tool-write` if write
+per-path queue can come back inside `uva-tool-write` if write
 throughput ever justifies it; the paradigm crate is no longer where it
 would live.
 
@@ -4103,28 +4273,28 @@ lines (`CONSUMER-PROOF: OK`, `MVP-OK`, `SANDBOX-POLICY: OK`).
 The full workspace sweep — every member, one crate at a time per
 `AGENTS.md` §3.3 — is **2746 passing / 0 failing** across all 25
 crates. The ones this change touches:
-`elysper-tool` **226** (196 lib — the 16 moved sandbox tests
+`uva-tool` **226** (196 lib — the 16 moved sandbox tests
 and the 3 deleted queue tests are gone, nothing else changed),
-`elysper-tool-shell` **39** (33 lib = the 17 pre-existing shell tests
-plus the 16 that moved in from `elysper-tool`, plus the 6-case
+`uva-tool-shell` **39** (33 lib = the 17 pre-existing shell tests
+plus the 16 that moved in from `uva-tool`, plus the 6-case
 `sandbox_smoke` integration suite),
-`elysper-tool-task` **72** (66 lib, test-name set
-byte-identical to the pre-rename `elysper-delegation`), `elysper-tool-write`
-**15** (+1: the `Sequential` mode pin), `elysper-agent` **254**
-(240 lib). `elysper-server`'s test inventory is byte-identical to
+`uva-tool-task` **72** (66 lib, test-name set
+byte-identical to the pre-rename `uva-delegation`), `uva-tool-write`
+**15** (+1: the `Sequential` mode pin), `uva-agent` **254**
+(240 lib). `uva-app-server`'s test inventory is byte-identical to
 pre-R121 HEAD (its only edit is a one-line import rename), so its count
 is unchanged by this change.
 
 Test inventories were diffed **by test-function name** before/after
 each move rather than by count: the 16 `sandbox` tests moved
-`elysper-tool` → `elysper-tool-shell` and the 70 delegation tests
+`uva-tool` → `uva-tool-shell` and the 70 delegation tests
 carried over unchanged; the only removals anywhere are the 3
 `mutation_queue` tests that went with the deleted module.
 
 ### Changed (R111 — four deferred ≥120-line inline test blocks moved to sibling tests.rs)
 
 R110c deferred four inline `#[cfg(test)] mod` blocks inside
-`elysper-agent` production files; this round moves them, pure
+`uva-agent` production files; this round moves them, pure
 code motion in the R106/R109 pattern:
 
 - `re_act/stream.rs` 464 → 343 (+ `stream/tests.rs` 120) —
@@ -4145,10 +4315,10 @@ under the same name, one path segment deeper
 ratchet only tracks the ≥300 band, which is unchanged at 20.
 
 ### Added (R115)
-- `elysper-search` crate: generic multi-domain search engine — BM25 + vector hybrid with pluggable `Tokenizer` / `Embedder` / `VectorStore` / `Filter<T>` / `Reranker<T>`, incremental add / tombstone remove / threshold-triggered compact, thread-safe `Arc<SearchEngine<T>>`, cross-`T` `Registry` keyed by `type_name`, agent-facing JSON projection (`agent_view` / `search_tool`). `HashingEmbedder` ships default; `ModelProviderEmbedder` behind the crate's opt-in `provider` feature (transport-free). Exposed on the facade via the `search` feature (default off). `check-mvp-deps` gains a dedicated elysper-search stanza (default + `provider`); `check-no-runtime` covers the crate's default build.
+- `uva-search` crate: generic multi-domain search engine — BM25 + vector hybrid with pluggable `Tokenizer` / `Embedder` / `VectorStore` / `Filter<T>` / `Reranker<T>`, incremental add / tombstone remove / threshold-triggered compact, thread-safe `Arc<SearchEngine<T>>`, cross-`T` `Registry` keyed by `type_name`, agent-facing JSON projection (`agent_view` / `search_tool`). `HashingEmbedder` ships default; `ModelProviderEmbedder` behind the crate's opt-in `provider` feature (transport-free). Exposed on the facade via the `search` feature (default off). `check-mvp-deps` gains a dedicated uva-search stanza (default + `provider`); `check-no-runtime` covers the crate's default build.
 
-Verification: `elysper-agent` lib **240/240** (test-name set
-identical modulo the path change); `elysper-server` **403/403**;
+Verification: `uva-agent` lib **240/240** (test-name set
+identical modulo the path change); `uva-app-server` **403/403**;
 `cargo clippy --all-targets -D warnings` 0; fmt clean; `make ci`
 **8/8** OK.
 
@@ -4168,7 +4338,7 @@ collapse into one:
   `compaction.rs` 212 → deleted); its remaining concerns moved:
 - `CompactionEmitters` / `context_manager_for_compaction*` /
   `resolve_context_manager` (now `resolve`) moved to a new
-  top-level `elysper_agent::compaction` module — they are the
+  top-level `uva_agent::compaction` module — they are the
   server-side run factory's helpers, not the agent's plumbing.
   Re-exported from the crate root as before.
 - `with_compaction_settings(s)` + `with_typed_event_sink(sink)`
@@ -4190,19 +4360,19 @@ Every existing call site updated:
   chained `with_*` setters — `assemble_with_builder` is
   unchanged in shape (still proves the full one-expression
   assembly), only the type name changes.
-- The facade example (`elysper/examples/assemble_from_zero.rs`)
+- The facade example (`uva/examples/assemble_from_zero.rs`)
   and the two external-consumer examples
   (`docs/examples/external-consumer`, `docs/examples/minimal-consumer`)
   use the prelude's `ReActAgent` directly.
 - The server was already `ReActAgent::with_*` (never built
   through `AgentBuilder`); no change.
-- `elysper::prelude` exposes `ReActAgent` (not `AgentBuilder`).
+- `uva::prelude` exposes `ReActAgent` (not `AgentBuilder`).
 
-Verification: `elysper-agent` **239/239** lib tests green
+Verification: `uva-agent` **239/239** lib tests green
 (down from 247: the 8 `AgentBuilder`-specific setter/clone tests
 are absorbed into `ReActAgent`'s own setter coverage, plus the
-2 `compaction::tests`); `elysper-server` **403/403** byte-identical;
-`elysper` facade + every example + the two external-consumer
+2 `compaction::tests`); `uva-app-server` **403/403** byte-identical;
+`uva` facade + every example + the two external-consumer
 examples print their proof line; `make ci` **8/8** OK; clippy
 `--all-targets -D warnings` 0; `make check-mvp-deps` and
 `make check-no-runtime` OK; `make check-test-layout` band ratchet
@@ -4223,14 +4393,14 @@ live behind `super::drive_hooks`.
 
 `loop_/mod.rs`'s layout table gained the `drive_hooks` row.
 
-Verification: `elysper-agent` lib **240/240** OK
-(byte-identical list); `elysper-server` **403/403**;
+Verification: `uva-agent` lib **240/240** OK
+(byte-identical list); `uva-app-server` **403/403**;
 `cargo clippy --all-targets -D warnings` 0; `make ci` **8/8**
 OK; fmt clean.
 
 ### Changed (R110b — `re_act/agent.rs` split: one concern per file)
 
-`crates/elysper-agent/src/agent/re_act/agent.rs` (653 lines) held
+`crates/uva-agent/src/agent/re_act/agent.rs` (653 lines) held
 five distinct concerns — the struct + four constructors +
 `default_descriptor`, descriptor-mutation setters, runtime
 setters + `resolve_compaction_now` + `runtime_for_run`, the
@@ -4264,10 +4434,10 @@ established "every concern in its own file" pattern:
 unchanged — every existing `ReActAgent::with_*` call site,
 example, server factory, and external consumer kept its name.
 
-Verification: `elysper-agent` lib **240/240** OK
-(byte-identical test list vs R110a); `elysper-server`
+Verification: `uva-agent` lib **240/240** OK
+(byte-identical test list vs R110a); `uva-app-server`
 **403/403**; `cargo clippy --all-targets -D warnings`
-0 warnings; `make ci` 8/8 OK; the `elysper-agent` docs comment
+0 warnings; `make ci` 8/8 OK; the `uva-agent` docs comment
 in `agent.rs` now carries a per-module table pointing each
 caller at the right file.
 
@@ -4302,7 +4472,7 @@ dispatcher with its panic-capturing drain, and the private
 `Registry` impl — split into `registry/` (`mod` 349, `catalog`
 110, `entry` 242, `scope` 130, `snapshot` 180, `dispatch` 321,
 `registry_trait` 92, the last promoted from an inline `mod` with
-its body byte-identical). Every `elysper_tool::*` facade path is
+its body byte-identical). Every `uva_tool::*` facade path is
 unchanged; stale `// 1.`–`// 11.` section-number comments removed
 with their sections.
 
@@ -4352,7 +4522,7 @@ Verification: core **151/151**, tool **215/215**, session
 
 ### Changed (R105 — the R89 test-block sweep extended workspace-wide; workflow runtime split per concern)
 
-The audit that closed R104 inside `elysper-agent` had never run
+The audit that closed R104 inside `uva-agent` had never run
 on the other crates: 66 production files still carried 200+-
 line inline test blocks, and the five worst held 3.8k lines of
 interleaved tests. All five are resolved:
@@ -4375,10 +4545,10 @@ delegation **66/66**, context **95/95** (+ sqlite **103/103**)
 — all test-name sets baseline-identical; `make ci` **7/7**;
 workspace clippy 0 warnings.
 
-### Changed (R104 — the agent registry's test block moved out; the R89 sweep of elysper-agent is closed)
+### Changed (R104 — the agent registry's test block moved out; the R89 sweep of uva-agent is closed)
 
 `agent/registry.rs` (463 = 178 production + 284 inline tests)
-was the last production file in `elysper-agent` holding an
+was the last production file in `uva-agent` holding an
 oversized inline test block: the `AgentRegistry` catalog
 interleaved with its `StubAgent` fixture and 14 CRUD /
 filter-matrix / pagination tests.
@@ -4388,7 +4558,7 @@ The `agent::registry` re-export surface is untouched.
 
 Report: `docs/optimization-report-R104-2026-09-17.md`.
 
-Verification: elysper-agent lib **247/247** (baseline-identical);
+Verification: uva-agent lib **247/247** (baseline-identical);
 `make ci` **7/7 green**; server **403/403**; delegation **66/66**.
 Final crate state after R99–R104: every production file <500
 lines except R98's documented `drive.rs`; every inline test block
@@ -4412,11 +4582,11 @@ is untouched.
 
 Report: `docs/optimization-report-R103-2026-09-17.md`.
 
-Verification: elysper-agent lib **247/247** (baseline-identical;
+Verification: uva-agent lib **247/247** (baseline-identical;
 65/65 in the events module, same as pre-split); `make ci`
 **7/7 green**; server **403/403**; delegation **66/66**;
 `assemble_from_zero` proof line prints; fmt clean. Every
-production file in `elysper-agent/src/` is now under 500 lines
+production file in `uva-agent/src/` is now under 500 lines
 except R98's documented `drive.rs` orchestrator.
 
 ### Changed (R102 — the two strategy files' inline test blocks moved to sibling tests.rs)
@@ -4433,9 +4603,9 @@ layout: `best_of_n.rs` 348 + `best_of_n/tests.rs` 326;
 
 Report: `docs/optimization-report-R102-2026-09-17.md`.
 
-Verification: elysper-agent lib **247/247** (baseline-identical);
+Verification: uva-agent lib **247/247** (baseline-identical);
 `make ci` **7/7 green**; `strategy_swap` proof line prints; fmt +
-clippy clean. Every production file in `elysper-agent/src/` is
+clippy clean. Every production file in `uva-agent/src/` is
 now single-concern and below 500 lines except R98's documented
 `drive.rs` orchestrator.
 
@@ -4453,12 +4623,12 @@ Pure code motion, public paths unchanged. `team.rs` is now a
 `group_chat.rs` (324), `tests.rs` (292), and a 90-line `mod.rs`
 that keeps the module docs and re-exports every public name, so
 the `agent/mod.rs` re-export block and every consumer
-(`agent_teams` example, `cot.rs` doc link, `elysper-delegation`)
+(`agent_teams` example, `cot.rs` doc link, `uva-delegation`)
 resolves unchanged.
 
 Report: `docs/optimization-report-R101-2026-09-17.md`.
 
-Verification: `make ci` **7/7 green**; elysper-agent lib
+Verification: `make ci` **7/7 green**; uva-agent lib
 **247/247** (baseline-identical); server **403/403**; delegation
 **66/66**; `agent_teams` prints its proof line; fmt clean.
 
@@ -4477,15 +4647,15 @@ Pure code motion, public paths unchanged. `builder.rs` is now a
 `builder/` directory: `mod.rs` (432 — the struct + setters +
 `build()`), `compaction.rs` (212 — emitters, view mirrors, the
 public entries, the `pub(super)` decision core), `tests.rs` (378).
-The crate-root re-exports (`elysper_agent::CompactionEmitters`,
+The crate-root re-exports (`uva_agent::CompactionEmitters`,
 `context_manager_for_compaction_with_emitters`, …) resolve
 unchanged; `resolve_context_manager` widened file-private →
 `pub(super)` so the sibling tests keep driving its decision table.
 
 Report: `docs/optimization-report-R100-2026-09-17.md`.
 
-Verification: `make ci` **7/7 green**; elysper-agent lib
-**247/247** (baseline-identical); elysper-server **403/403** (the
+Verification: `make ci` **7/7 green**; uva-agent lib
+**247/247** (baseline-identical); uva-app-server **403/403** (the
 moved API's direct consumer); delegation **66/66**;
 `assemble_from_zero` + `runtime_agnostic` proof lines print;
 fmt clean.
@@ -4519,9 +4689,9 @@ were never touched; `default_for_test` stays `pub(crate)` +
 
 Report: `docs/optimization-report-R99-2026-09-17.md`.
 
-Verification: `make ci` **7/7 green**; elysper-agent lib tests
+Verification: `make ci` **7/7 green**; uva-agent lib tests
 **247/247** (baseline-identical, verified via `git stash`
-round-trip); elysper-delegation **66/66**; `strategy_swap` and
+round-trip); uva-delegation **66/66**; `strategy_swap` and
 `runtime_agnostic` examples both print their proof lines;
 complexity scan zero violations; `cargo +nightly fmt --all`
 clean.
@@ -4531,7 +4701,7 @@ clean.
 R97 closed the dispatch seam into four focused sibling
 modules. The follow-up audit turned to the main loop
 body itself: `ReActLoop::drive()` in
-`elysper-agent/agent/re_act/loop_/mod.rs` was 215 lines
+`uva-agent/agent/re_act/loop_/mod.rs` was 215 lines
 of inline state machine — the "MVP harness, simple明了,
 harness自身也要分好层次和布局" property that R88's plugin
 split established at the *crate* level had not yet been
@@ -4596,7 +4766,7 @@ the type system:
 
 Behaviour byte-identical. The previously-passing
 `follow_up_revival_rebudgets_before_the_next_sample`
-test continues to pass (256/256 elysper-agent lib
+test continues to pass (256/256 uva-agent lib
 tests); it explicitly checks the two-`apply_context`
 behaviour the split preserves via
 `!dispatch.context_pruned && !Completed`.
@@ -4621,14 +4791,14 @@ Verification: `make ci` **7/7 green**; `make test-unit`
 `cargo clippy --workspace --all-targets --all-features
 --tests --all -- -W clippy::cognitive_complexity` reports
 **zero violations** (R96 baseline holds); 256/256
-elysper-agent lib tests; 66/66 elysper-delegation lib
+uva-agent lib tests; 66/66 uva-delegation lib
 tests; `cargo +nightly fmt --all` clean.
 
 
 ### Changed (R97 — the harness dispatch seam is now a façade, not a 900-line file)
 
 R92 closed the harness's per-iteration loop helpers. The
-follow-up audit turned to the **layout** of `elysper-agent`
+follow-up audit turned to the **layout** of `uva-agent`
 where R88's plugin split left a single 900-line module
 owning four distinct concerns. The split had been *named*
 (each helper carried a phase comment) but the four
@@ -4638,7 +4808,7 @@ concern in its own file, every orchestrator reads as the
 step list its doc promises" now holds inside the file
 boundary too.
 
-`elysper-agent/agent/re_act/loop_/dispatch.rs`: **900 → 167
+`uva-agent/agent/re_act/loop_/dispatch.rs`: **900 → 167
 lines**. Now holds only the three pieces the dispatch seam
 as a whole *shares*: `WireToolResult` (the wire payload
 produced by `bucket` and `steps`, consumed by `commit`),
@@ -4648,7 +4818,7 @@ memoised projection), and `append_tool_result_hints` +
 dispatch step but don't belong to any one bucket).
 
 New single-concern sibling modules under
-`elysper-agent/agent/re_act/loop_/`:
+`uva-agent/agent/re_act/loop_/`:
 
 - **`bucket.rs` (339 lines)** — the `execute_tools`
   orchestrator + Parallel / Sequential bucketing, semaphore
@@ -4695,7 +4865,7 @@ Verification: `make ci` **7/7 green**; `make test-unit`
 `cargo clippy --workspace --all-targets --all-features
 --tests --all -- -W clippy::cognitive_complexity` reports
 **zero violations** (R96 baseline holds); 256/256
-elysper-agent lib tests; 66/66 elysper-delegation lib
+uva-agent lib tests; 66/66 uva-delegation lib
 tests (the downstream that exercises the dispatch path
 through real tool calls); `cargo +nightly fmt --all`
 clean.
@@ -4710,14 +4880,14 @@ All notable changes to this project will be documented in this file.
 R95 closed the lib side. Four `#[cfg(test)]` functions still
 over the 20 threshold:
 
-- `elysper-core::error::tests::helpers_produce_distinct_variants`
+- `uva-core::error::tests::helpers_produce_distinct_variants`
   (was 73/20) — 35 `assert!(matches!(...))` lines, one per Error
   helper. Replaced with an in-module `assert_variant!` macro and
   8 per-domain tests (lookup_and_validation, provider_and_protocol,
   stream_variants, auth_and_config, lifecycle_and_memory,
   model_and_rate_limit, edit_and_retry, from_std_io). 144
-  elysper-core tests pass.
-- `elysper-server::config::tests::test_server_config_full_round_trip`
+  uva-core tests pass.
+- `uva-app-server::config::tests::test_server_config_full_round_trip`
   (was 27/20) — 110-line build-and-assert body. Split into a
   11-line orchestrator + `build_sample_server_config()` + 7
   per-domain assert helpers (`assert_top_level_round_trips`,
@@ -4725,21 +4895,21 @@ over the 20 threshold:
   `_tools_surface_round_trips` [R34], `_auth_cors_round_trips`,
   `_providers_agents_round_trips`, `_operations_round_trips` [R29]).
   All 30 field-level assertions preserved byte-identical.
-- `elysper-provider::streaming::anthropic::tests::two_parallel_tool_use_blocks_emit_independent_streams`
+- `uva-provider::streaming::anthropic::tests::two_parallel_tool_use_blocks_emit_independent_streams`
   (was 27/20) and
   `tool_use_emits_start_delta_end_with_is_done` (was 21/20) —
   extracted `build_parallel_tool_use_events` +
   `build_single_tool_use_events` + `process_each_event` + 8
   per-shape assertion helpers. 46 anthropic tests pass.
-- `elysper-session::log_surface::compaction_op` (was 23/20;
+- `uva-session::log_surface::compaction_op` (was 23/20;
   splitLogSurfaceTest went one layer deeper than the audit
   named, since the post-R95 lib function still hit the 20
   threshold) — split into `compaction_op_value` +
-  `parse_replace_op`. 147 elysper-session tests pass.
+  `parse_replace_op`. 147 uva-session tests pass.
 
 Verification: `make ci` 7/7 green; `make test-unit`
 **2453/2453** (+7 from the per-domain tests added in
-`elysper-core/error.rs`); `cargo clippy --workspace
+`uva-core/error.rs`); `cargo clippy --workspace
 --all-targets --all-features --tests --all -- -W
 clippy::cognitive_complexity` reports **zero violations,
 
@@ -4765,7 +4935,7 @@ are inside the clippy test allow-list and stay as-is).
   46 streaming tests pass.
 - `server::state::boot::build_configured_retriever` (was 26/20)
   — the per-file read+chunk loop folds into `index_path`
-  (read-or-warn-and-skip). 403 elysper-server tests pass.
+  (read-or-warn-and-skip). 403 uva-app-server tests pass.
 - `server::state::boot::apply_tools_config` (was 25/20) — the
   active-group activation step folds into `activate_groups`
   (mutates `active_groups` + `skipped` + logs). The existing
@@ -4781,7 +4951,7 @@ are inside the clippy test allow-list and stay as-is).
 - `session::log_surface::classify_compaction` (was 25/20) —
   `compaction_op` (validates `surface_op` + Replace guard) and
   `compaction_payload` (the data-shape match) carry the two
-  phases. 147 elysper-session tests pass.
+  phases. 147 uva-session tests pass.
 - `provider::streaming::idle_watchdog::pump_sse` (was 23/20) —
   four helpers (`cancelled`, `append_chunk`, `emit_tail`,
   `abort_after_grace`) replace the inline cancel check, the
@@ -4794,12 +4964,12 @@ are inside the clippy test allow-list and stay as-is).
   `discover_project_skills` + `discover_user_skills` +
   `collect_skills` (parse + intra-batch dedup + warn) +
   `merge_project_then_user` (project-wins-on-collision via
-  `HashSet<String>` of project names). 56 elysper-skill
+  `HashSet<String>` of project names). 56 uva-skill
   tests pass.
 - `steering::hook::run_hook_gated` (was 22/20) — `hook_span`
   + `run_hook_inner` (panic-isolated execution) + `gate_rejection`
   (gated branch builder) carry the three phases. 72
-  elysper-steering lib tests pass.
+  uva-steering lib tests pass.
 
 Verification: `make ci` 7/7 green; `make test-unit`
 **2446/2446**; `cargo clippy --workspace --all-targets
@@ -4812,7 +4982,7 @@ R93 closed `run_controller_loop` (144→under) and named
 the `ControllerInner` trio as the next target: `finalise_shutdown`
 (28/20), `maybe_start_run` (29/20), `persist_and_broadcast`
 (33/20). All three split into named single-concern helpers;
-**no function in `elysper-server/session/controller.rs`
+**no function in `uva-app-server/session/controller.rs`
 exceeds the 20 threshold anymore**.
 
 - **`finalise_shutdown` (was 28/20)** — the lifecycle event
@@ -4844,23 +5014,23 @@ exceeds the 20 threshold anymore**.
   one-sentence pipeline the doc comment promised.
 
 Result: `clippy --workspace -W cognitive_complexity`
-reports **no violations in `elysper-server/session/
+reports **no violations in `uva-app-server/session/
 controller.rs`**. Remaining workspace hits: `provider`
 streaming processor (39/20), `session/log_surface.rs`
-(25/20), `elysper-skill/discovery.rs` (23/20),
-`elysper-steering/hook.rs` (22/20), scattered 21-26s in
+(25/20), `uva-skill/discovery.rs` (23/20),
+`uva-steering/hook.rs` (22/20), scattered 21-26s in
 `chat.rs`, `state/boot.rs`, `idle_watchdog.rs` — and
 `run_controller_loop` is now also at risk of re-entering
 the list if the surrounding modules grow.
 
 Verification: `make ci` 7/7 green; `make test-unit`
-**2446/2446** (`elysper-server` 403, including the
+**2446/2446** (`uva-app-server` 403, including the
 snapshot-bus test that surfaced the duplicate-publish bug
 
 ### Changed (R93 — `run_controller_loop` split; the workspace's 144/20 monster eliminated)
 
 R92's report named `run_controller_loop`
-(`elysper-server/session/controller.rs`) the next target:
+(`uva-app-server/session/controller.rs`) the next target:
 at **144/20** it was 6× over the threshold and the single
 largest function left in the workspace. The 373-line body
 was a `tokio::select!` with four arms, the op arm holding a
@@ -4894,18 +5064,18 @@ pre-existing `ControllerInner` methods untouched this
 round) are the R94 candidate.
 
 Verification: `make ci` 7/7 green; `make test-unit`
-**2446/2446** (`elysper-server` 403, unchanged — the
+**2446/2446** (`uva-app-server` 403, unchanged — the
 lifecycle / cancel / rerun / prompt_multi test suites pin
 the loop's behaviour byte-for-byte); `cargo +nightly fmt
 --all` clean.
 
-### Changed (R92 — the harness loop's dispatch split; every elysper-agent function under the complexity threshold)
+### Changed (R92 — the harness loop's dispatch split; every uva-agent function under the complexity threshold)
 
 The R91 report pointed at the harness core itself: the
 `re_act/loop_/` files held the workspace's worst production
 cognitive-complexity scores (`dispatch.rs` 62/20, 42/20,
 38/20; `steps.rs` 33/20, 24/20). All five split into named
-single-concern helpers; **no function in `elysper-agent`
+single-concern helpers; **no function in `uva-agent`
 exceeds the 20 threshold anymore**.
 
 - **`execute_tools` (was 62/20)** — the four numbered
@@ -4946,13 +5116,13 @@ error path in `steps.rs` reuses the exact fan-out the hook
 veto path uses.
 
 Result: `clippy --workspace -W cognitive_complexity` reports
-zero violations in `elysper-agent`. Remaining workspace hits
+zero violations in `uva-agent`. Remaining workspace hits
 are server-app code (`run_controller_loop` 144/20 — R93
-candidate), `elysper-provider` streaming (39/20), and test
+candidate), `uva-provider` streaming (39/20), and test
 functions.
 
 Verification: `make ci` 7/7 green; `make test-unit`
-**2446/2446** (`elysper-agent` 256, unchanged — behaviour
+**2446/2446** (`uva-agent` 256, unchanged — behaviour
 byte-identical, only shape moved); `cargo +nightly fmt
 --all` clean.
 
@@ -4993,9 +5163,9 @@ Result: `clippy -W cognitive_complexity` no longer flags
 `with_server_config` + 23/20 `load_workspace_config`).
 
 Verification: `make ci` 7/7 green; `make test-unit`
-2446/2446 passed (`elysper-server` 403, unchanged);
+2446/2446 passed (`uva-app-server` 403, unchanged);
 `make examples` exit 0 (CONSUMER-PROOF: OK, MVP-OK).
-`cargo build -p elysper-server --all-targets
+`cargo build -p uva-app-server --all-targets
 --all-features --tests` zero warnings.
 
 ### Changed (R90 — state/ split: `app_state.rs` test block + boot helpers)
@@ -5006,7 +5176,7 @@ directive: the production file had grown to 2639 lines,
 1186 of which were tests and 553 of which were boot
 helpers that the `AppState` impl only calls.
 
-- **Test block split** (`crates/elysper-server/src/state/tests/`):
+- **Test block split** (`crates/uva-app-server/src/state/tests/`):
   the 1186-line `#[cfg(test)] mod tests { ... }` block in
   `app_state.rs` now lives in nine focused submodules,
   each named after the surface it pins:
@@ -5037,7 +5207,7 @@ helpers that the `AppState` impl only calls.
   test surface is 1186 lines spread across 9 focused
   files plus a shared `support.rs`.
 
-- **Boot helpers extracted** (`crates/elysper-server/src/state/boot.rs`):
+- **Boot helpers extracted** (`crates/uva-app-server/src/state/boot.rs`):
   the 553-line tail of `app_state.rs` (every free function
   the boot calls: `load_default_max_iterations`,
   `load_default_compaction`, `load_default_tool_restriction`,
@@ -5071,8 +5241,8 @@ helpers that the `AppState` impl only calls.
 Verification: `make ci` (fmt + clippy + doc + dep
 invariants + clock + claim) **7/7 green**; `make test-unit`
 **2446 passed, 0 failed** across the workspace
-(elysper-server 403 — same total as before the split);
-`make lint-rust` and `cargo build -p elysper-server
+(uva-app-server 403 — same total as before the split);
+`make lint-rust` and `cargo build -p uva-app-server
 --all-targets --all-features --tests` zero warnings.
 
 Four large production files used to bundle a giant
@@ -5086,10 +5256,10 @@ file:
 
 | File (before) | Production lines (before) | Test lines (before) | New layout |
 |---|---|---|---|
-| `crates/elysper-agent/src/prompt/mod.rs`        | 378 | 543 | `prompt/tests/{assemble,identity,skills_agents,runtime_context,support}.rs` |
-| `crates/elysper-agent/src/agent/re_act/tests.rs` | n/a (single 4511-line test file) | 4511 | `re_act/tests/{agent_smoke,prompt_integration,end_to_end_runtime,loop_lifecycle,multi_agent_panel,parallel_dispatch,tool_projection_memo,tool_restriction,steering_wiring,run_inbox,support}.rs` |
-| `crates/elysper-tool/src/registry.rs`           | 1367 | 1929 | `registry/tests/{exposure,session_scope,registration,snapshot,dispatch,mutations,argument_validation,support}.rs` |
-| `crates/elysper-server/src/session/controller.rs` | 2157 | 2339 | `controller/tests/{lifecycle,cancel,event_emission,history,run_log,prompt_multi,rerun,run_config,context_manager,truncate,support}.rs` |
+| `crates/uva-agent/src/prompt/mod.rs`        | 378 | 543 | `prompt/tests/{assemble,identity,skills_agents,runtime_context,support}.rs` |
+| `crates/uva-agent/src/agent/re_act/tests.rs` | n/a (single 4511-line test file) | 4511 | `re_act/tests/{agent_smoke,prompt_integration,end_to_end_runtime,loop_lifecycle,multi_agent_panel,parallel_dispatch,tool_projection_memo,tool_restriction,steering_wiring,run_inbox,support}.rs` |
+| `crates/uva-tool/src/registry.rs`           | 1367 | 1929 | `registry/tests/{exposure,session_scope,registration,snapshot,dispatch,mutations,argument_validation,support}.rs` |
+| `crates/uva-app-server/src/session/controller.rs` | 2157 | 2339 | `controller/tests/{lifecycle,cancel,event_emission,history,run_log,prompt_multi,rerun,run_config,context_manager,truncate,support}.rs` |
 
 Behaviour, test names, and assertion text are byte-identical
 to the previous monolithic blocks. The only changes are
@@ -5100,8 +5270,8 @@ submodule's first lines import the fixtures it needs.
 
 Verification: `make ci` (fmt + clippy + dep invariants +
 clock + claim) passes, `make test-unit` reports
-**2446 passed, 0 failed** across the workspace (elysper-agent
-256, elysper-tool 215, elysper-server 403, plus the other
+**2446 passed, 0 failed** across the workspace (uva-agent
+256, uva-tool 215, uva-app-server 403, plus the other
 20 crates — same totals as before the split).
 
 ### Changed (R89 — harness-construction dedup, typed-event seam extracted, dead tool API removed)
@@ -5125,7 +5295,7 @@ documented caller exercises.
   call it and forward to `with_descriptor`, which is the
   one place that owns the default state vector. Net
   effect: the four constructors each fit in a screen and
-  there is one source of truth for "the default Elysper
+  there is one source of truth for "the default Uva
   descriptor". Behaviour, descriptor bytes, and
   round-tripped `RuntimeContext` snapshots are
   byte-identical.
@@ -5143,7 +5313,7 @@ documented caller exercises.
   submodule. This is the same "one concern per file"
   split R89 already applied to the test blocks.
 - **Dead tool API removed**:
-  - `elysper-tool-read::ReadTool::mark_read` and the
+  - `uva-tool-read::ReadTool::mark_read` and the
     `read_history: Mutex<Vec<String>>` field it pushed
     into had no reader anywhere in the workspace and
     existed only "for future edit-after-read
@@ -5151,7 +5321,7 @@ documented caller exercises.
     §3.2 explicitly bans. Both removed; `ReadTool` is
     now a unit struct, the `parking_lot` dependency is
     no longer needed, and `Cargo.toml` drops it.
-  - `elysper-tool-web::WebFetchTool::truncate_response_body`
+  - `uva-tool-web::WebFetchTool::truncate_response_body`
     was `pub` but only used by `Tool::execute` inside
     the same crate. Re-classified `pub(crate)` so the
     external surface only carries the things external
@@ -5159,9 +5329,9 @@ documented caller exercises.
     `is_url_allowed` for introspection).
 
 Verification: `make lint-rust` and `cargo test -p
-elysper-agent -p elysper-tool-read -p elysper-tool-write
--p elysper-tool-shell -p elysper-tool-todo -p
-elysper-tool-web --lib` all pass; the per-crate test
+uva-agent -p uva-tool-read -p uva-tool-write
+-p uva-tool-shell -p uva-tool-todo -p
+uva-tool-web --lib` all pass; the per-crate test
 totals (256 / 14 / 10 / 17 / 18 / 14) are unchanged.
 
 
@@ -5169,10 +5339,10 @@ totals (256 / 14 / 10 / 17 / 18 / 14) are unchanged.
 ### Changed (plugin split — the harness is the MVP; every tool and the task tool are plugins)
 
 The framework's core is now exactly the harness. Everything that
-was welded into `elysper-tool` or `elysper-agent` but is not the
+was welded into `uva-tool` or `uva-agent` but is not the
 loop itself became a plugin crate the consumer composes:
 
-- **`elysper-tool` is the paradigm**: `Tool`, `ToolEntry`,
+- **`uva-tool` is the paradigm**: `Tool`, `ToolEntry`,
   `ToolRegistry`, the exposure projection, output/truncation, the
   read-side registries, plus the two cross-cutting policies every
   implementation shares — `sandbox` (process confinement) and the
@@ -5181,21 +5351,21 @@ loop itself became a plugin crate the consumer composes:
   only `Tool` impls left in it are the two synthetic contracts the
   harness needs (`__get_full_output`, `structured_output`) and the
   registry's `ToolEntry::dynamic` passthrough.
-- **Five tool plugins, one tool each**: `elysper-tool-read`,
-  `elysper-tool-write`, `elysper-tool-shell`, `elysper-tool-todo`,
-  `elysper-tool-web`. Each depends only on `elysper-tool`, carries
+- **Five tool plugins, one tool each**: `uva-tool-read`,
+  `uva-tool-write`, `uva-tool-shell`, `uva-tool-todo`,
+  `uva-tool-web`. Each depends only on `uva-tool`, carries
   its own tests and one runnable example, and is the only thing
-  that pulls what that tool needs (`elysper-tool-web` owns
+  that pulls what that tool needs (`uva-tool-web` owns
   `reqwest`; the other four are offline). `build_default_tool_registry`
   is gone — a consumer registers the bricks it wants with
   `registry.register_entry(ToolEntry::new(Arc::new(ReadTool::new())))`.
 - **The `task` tool left the agent crate**: the new
-  `elysper-delegation` plugin owns the whole multi-agent family —
+  `uva-delegation` plugin owns the whole multi-agent family —
   `TaskSpec` + `task_tool_definition`, the verification `gate`, git
   `worktree` isolation, the `@agent:` `router` / `route_rules`, the
   `mention_clone` path, and the two-lane `SubagentPool`.
 - **A generic interceptor seam replaced the hard-coded branch**:
-  `elysper_agent::ToolInterceptor` (`definitions` / `claims` /
+  `uva_agent::ToolInterceptor` (`definitions` / `claims` /
   `execute`, handed an `InterceptorCall` carrying the run's cancel
   token, depth and event emitter) plus
   `ReActAgent::with_interceptor` / `AgentBuilder::interceptor`. The
@@ -5206,14 +5376,14 @@ loop itself became a plugin crate the consumer composes:
   harness. `TaskDelegator` is that trait's first implementation.
 - **Facade**: `tool-read` / `tool-write` / `tool-shell` /
   `tool-todo` / `tool-web` / `delegation` are features and modules of
-  their own (`elysper::tool_read::ReadTool`, …), all in the default
+  their own (`uva::tool_read::ReadTool`, …), all in the default
   set; `tool` now means the paradigm. `prelude` exports `ToolEntry`
   in place of the removed `build_default_tool_registry`.
 - **Gates and docs**: `make check-mvp-deps` additionally asserts the
   four offline tool crates pull no HTTP/OTel/DB dependency;
   MINIMAL.md, SEAMS.md, README.md, AGENTS.md §1/§3.7, and the example
   index describe the plugin composition.
-- **Server**: `elysper-server` composes the plugin tools
+- **Server**: `uva-app-server` composes the plugin tools
   (`plugin_tool_registry()`) and installs `TaskDelegator` through
   `with_interceptor` at all three wiring sites (default member,
   `/agents` route, session factory).
@@ -5227,7 +5397,7 @@ the pre-fix code before landing.
 - **Reasoning now reaches the conversation history.** `stream.rs` folded
   chunks itself and carried no reasoning at all, so `commit_assistant` —
   which rebuilt the assistant message from `assistant_text` +
-  `tool_uses` — dropped every thinking block. `elysper-provider` states
+  `tool_uses` — dropped every thinking block. `uva-provider` states
   the contract as the *agent layer's* job in four places
   (`anthropic/types.rs`: the `signature` is "Required to preserve
   reasoning continuity across turns"; `types/stream_chunk.rs`: it is
@@ -5339,7 +5509,7 @@ block back.
 
 **Reachability, stated plainly.** The *signed*-reasoning half is
 latent, and the CHANGELOG should not pretend otherwise: nothing in
-`elysper-provider/src/anthropic` ever sets a `thinking` / `budget_tokens`
+`uva-provider/src/anthropic` ever sets a `thinking` / `budget_tokens`
 request field and `AnthropicRequest` never reads `extra_body`, so
 extended thinking cannot be enabled through this adapter, and only real
 extended thinking makes the upstream emit `signature_delta`. The
@@ -5368,8 +5538,8 @@ requires the block back and a resumed turn would not have it. The fix
 belongs with that enablement, not before it: making reasoning durable
 changes log size, `/sessions/:id` rendering, and session search.
 
-Verification: `cargo test -p elysper-harness --lib` **241/241**,
-`cargo test -p elysper-provider --lib` **695/695**, the `provider_test`
+Verification: `cargo test -p uva-harness --lib` **241/241**,
+`cargo test -p uva-provider --lib` **695/695**, the `provider_test`
 integration target **47/47**, `make ci`, `make test-crates`,
 `make examples` all green.
 
@@ -5412,10 +5582,10 @@ already understands — so every projection agrees at once:
   (`rerun_prompt_row_shadows_the_turn_it_replaces`,
   `chained_rerun_shadows_the_previous_rerun`,
   `rerun_without_a_user_turn_appends_plainly`);
-  `cargo test -p elysper-server` 400 → 403 lib tests,
+  `cargo test -p uva-app-server` 400 → 403 lib tests,
   all green.
 - **Verified end-to-end** (Playwright MCP against
-  `elysper-server` + Vite): the durable log holds the turn
+  `uva-app-server` + Vite): the durable log holds the turn
   twice with the op citing the shadowed rows; `/chat/:id`
   renders one prompt + the new answer; `/sessions/:id`
   renders the same.
@@ -5465,7 +5635,7 @@ in library code and read each call site. Six files,
   of cross-crate coupling the gates are for.
 
 Legitimate `#[allow(dead_code)]` kept: the
-`elysper-mcp` `Child` field (held for `Drop` impl),
+`uva-mcp` `Child` field (held for `Drop` impl),
 and the test-module clippy allowlists.
 
 `cargo build --workspace --all-targets`: zero warnings.
@@ -5484,7 +5654,7 @@ The deferred list is now closed.
 
 This is the audit-closure round: no code moves. The
 parent `mod tests` block at
-`crates/elysper-tool/src/registry.rs` (lines 1369–3297)
+`crates/uva-tool/src/registry.rs` (lines 1369–3297)
 now holds exactly:
 
 - 8 sub-module declarations (`mod fixtures` + 7
@@ -5503,7 +5673,7 @@ sub-modules are all verified by name-filter
 → 16, `dispatch` → 17, `mutations` → 2,
 `argument_validation` → 5).
 
-`cargo test -p elysper-tool --lib` 283/283 (unchanged);
+`cargo test -p uva-tool --lib` 283/283 (unchanged);
 `make ci` 6/6; `make examples` exit 0 with proof lines.
 
 ### Changed (R85 — dispatch tests moved to a focused sub-module)
@@ -5523,7 +5693,7 @@ these tests.
   behaviour change.
 - `mod dispatch` is `#[cfg(test)]`-only; `make
   check-public-api-runtime` green.
-- `cargo test -p elysper-tool --lib dispatch` → 17
+- `cargo test -p uva-tool --lib dispatch` → 17
   passed (the 4 fixtures are `#[derive(Debug)]`
   structs without tests; the 6 new `dispatch::*` tests
   plus 11 existing `dispatch_*` tests in
@@ -5536,7 +5706,7 @@ parent `mod tests` block: `argument_validation` /
 `mutations` (R81–R82), `fixtures` (R83),
 `registration` (R84), `dispatch` (R85).
 
-`cargo test -p elysper-tool --lib` 283/283 (unchanged);
+`cargo test -p uva-tool --lib` 283/283 (unchanged);
 `make ci` 6/6; `make examples` exit 0 with proof lines.
 
 ### Changed (R84 — registration/trait tests moved to a focused sub-module)
@@ -5560,7 +5730,7 @@ sibling module).
   behaviour change.
 - `mod registration` is `#[cfg(test)]`-only; `make
   check-public-api-runtime` green.
-- `cargo test -p elysper-tool --lib registration` →
+- `cargo test -p uva-tool --lib registration` →
   24 passed (filtered).
 
 Six sub-modules now own focused concerns within the
@@ -5569,7 +5739,7 @@ parent `mod tests` block: `argument_validation`
 `snapshot` (R82), `mutations` (R82), `fixtures`
 (R83), and `registration` (R84).
 
-`cargo test -p elysper-tool --lib` 283/283 (unchanged);
+`cargo test -p uva-tool --lib` 283/283 (unchanged);
 `make ci` 6/6; `make examples` exit 0 with proof lines.
 
 ### Changed (R83 — shared test fixtures moved to a focused sub-module)
@@ -5597,7 +5767,7 @@ compiling unchanged.
 - Sets up `mod registration` (R84) for a pure section move
   on the same R81/R82 pattern.
 
-`cargo test -p elysper-tool --lib` 283/283 (unchanged);
+`cargo test -p uva-tool --lib` 283/283 (unchanged);
 `make ci` 6/6; `make examples` exit 0 with proof lines.
 
 ### Changed (R82 — four more test sections moved to focused sub-modules)
@@ -5636,7 +5806,7 @@ sub-modules; every filter verified
 (`session_scope` → 4, `exposure` → 5, `snapshot::` → 7,
 `mutations` → 2, `argument_validation` → 5).
 
-`cargo test -p elysper-tool --lib` 283/283 after each
+`cargo test -p uva-tool --lib` 283/283 after each
 commit; `make ci` 6/6; `make test-unit` 2447/2447
 (unchanged); `make examples` exit 0 with proof lines.
 
@@ -5646,7 +5816,7 @@ candidates on the same pattern.
 
 ### Changed (R81 — R74 tests moved to a focused sub-module)
 
-`elysper_tool::registry::tests` was 1692 lines / 56 822
+`uva_tool::registry::tests` was 1692 lines / 56 822
 bytes — the largest `mod tests` in the workspace. The
 R74 argument-validation block (198 lines, lines 2862–3059)
 was the most self-contained section: recent, focused,
@@ -5665,7 +5835,7 @@ with its own `ShellTool` fixture. Extracted to a new
 - No test logic changes; no fixture changes; no new
   public surface.
 
-`cargo test -p elysper-tool --lib` 283/283 (unchanged
+`cargo test -p uva-tool --lib` 283/283 (unchanged
 total; the 5 R74 tests just moved sub-module). `make ci`
 6/6; `make test-unit` 2447/2447 (unchanged).
 
@@ -5686,9 +5856,9 @@ establishes the pattern.
 Same drift pattern as R77/R78/R79, but for a
 **constant** rather than a function. Two near-duplicates
 of the same value, in two crates, with a doc comment
-saying *"MUST stay in sync"*: `elysper_core::registry::
+saying *"MUST stay in sync"*: `uva_core::registry::
 REGISTRY_MAX_LIMIT = 100` (private, used by
-`paginate_registry_list`) and `elysper_server::api::v1::
+`paginate_registry_list`) and `uva_server::api::v1::
 page_query::MAX_LIMIT = 100` (public, 8 reference sites
 including handlers and tests). A refactor that changed
 one without the other would silently desync the
@@ -5700,15 +5870,15 @@ cap.
   documents the role and the relationship to the
   server's wire-level cap.
 - The server's `MAX_LIMIT` is now `pub const MAX_LIMIT:
-  u64 = elysper_core::registry::MAX_LIMIT;` — same
+  u64 = uva_core::registry::MAX_LIMIT;` — same
   public symbol name, value sourced from core. The
   doc comment explains the alias and the
   single-source-of-truth contract.
-- 1 new test in `elysper-core` (135 total, was 134):
+- 1 new test in `uva-core` (135 total, was 134):
   `max_limit_matches_spec` — pins the value to `100`.
   The server's existing `constants_match_spec` test
   also asserts the alias equality — drift detector.
-- `elysper_core::lib.rs` re-exports `MAX_LIMIT`; the
+- `uva_core::lib.rs` re-exports `MAX_LIMIT`; the
   module-doc table row for `registry` mentions the
   constant.
 
@@ -5721,17 +5891,17 @@ exit 0 with `CONSUMER-PROOF: OK` + `MVP-OK` +
 
 ### Added (R79 — shared cursor codec, one canonical home)
 
-`elysper_core::registry::encode_registry_cursor` and
+`uva_core::registry::encode_registry_cursor` and
 `decode_registry_cursor` were private 3-line copies whose
 doc comment said *"The encoding MUST match
-`elysper_server::api::v1::decode_cursor`"* — the exact
+`uva_server::api::v1::decode_cursor`"* — the exact
 drift surface R76 closed for the judge parser. Two
 near-duplicates of the same URL-safe base64 codec, one
 in core (the in-memory registry pagination) and one in
 the server (the HTTP transport), that *must* stay in
 lockstep but were physically separate.
 
-New module `crates/elysper-core/src/cursor.rs` —
+New module `crates/uva-core/src/cursor.rs` —
 `pub fn encode(id: &str) -> String` and
 `pub fn decode(cursor: &str) -> Result<String, Error>`.
 The contract: URL-safe base64, no padding, UTF-8
@@ -5740,11 +5910,11 @@ UTF-8) collapse to `Error::InvalidItem` because a
 wire-level bad-request is the same regardless of which
 stage failed. The module-doc documents the encoding's
 *stability* guarantee (a cursor emitted by an older
-`elysper-core` round-trips on a newer one and vice
+`uva-core` round-trips on a newer one and vice
 versa) so a future algorithm change is a documented
 breaking change.
 
-6 new tests in `elysper-core` (134 total, was 128):
+6 new tests in `uva-core` (134 total, was 128):
 `encode_matches_spec_example` (the literal
 `task_abc → dGFza19hYmM` from the doc comment, pinned
 as a doctest AND a test), ASCII round-trip, unicode
@@ -5765,7 +5935,7 @@ over the new public functions. The server's
 `decode_cursor_rejects_non_utf8_payload`) pass
 byte-for-byte against the delegation. The
 non-UTF-8 test still uses `base64` directly to
-build a payload `elysper_core::cursor::encode`
+build a payload `uva_core::cursor::encode`
 cannot produce (a non-UTF-8 string).
 
 `make ci` 6/6; `make test-unit` 2446/2446; `make examples`
@@ -5777,33 +5947,33 @@ exit 0 with `CONSUMER-PROOF: OK` + `MVP-OK` +
 
 ### Added (R78 — shared redaction helper, one canonical home)
 
-`elysper_server::api::v1::validation::api_key_mask` was a
+`uva_server::api::v1::validation::api_key_mask` was a
 19-line function with 6 dedicated unit tests for the
 partial-redaction contract (first 4 + `***` + last 3,
 ≤7-char full-mask, multibyte safe, no-leak guarantee).
-The natural home for it is `elysper_core::sensitive` —
+The natural home for it is `uva_core::sensitive` —
 the same crate that already hosts `Sensitive` /
 `SensitiveData` (the `Debug`-time redaction newtype), and
 whose module-doc explicitly calls itself *"Sensitive
 information encryption / redaction primitives"*.
 
-- `elysper_core::sensitive::redact_partial(s: &str) -> String`
+- `uva_core::sensitive::redact_partial(s: &str) -> String`
   — first 4 + `***` + last 3, ≤7-char full-mask fallback,
   multibyte safe, empty input → empty output. The 4+3
   shape is the most common API key contract (Anthropic
   `sk-ant-…`, OpenAI `sk-…`, GitHub `ghp_…`).
-- `elysper_core::sensitive::redact_partial_with(s,
+- `uva_core::sensitive::redact_partial_with(s,
   keep_first, keep_last) -> String` — caller chooses the
   prefix/suffix lengths; falls back to `"***"` when the
   sum would equal or exceed the input.
-- 8 new tests in `elysper-core` (128 total, was 120):
+- 8 new tests in `uva-core` (128 total, was 120):
   long key shape, empty, short input, exactly 8 chars,
   multibyte safe, no-leak guarantee, parameterised
   variant, parameterised fallback.
 - The server's `api_key_mask` becomes 2 lines of
   delegation. The 6 server tests pass byte-for-byte.
-  The public surface of `elysper-server` is unchanged.
-- `elysper_core::lib.rs` re-exports `redact_partial` and
+  The public surface of `uva-app-server` is unchanged.
+- `uva_core::lib.rs` re-exports `redact_partial` and
   `redact_partial_with` alongside `Sensitive` /
   `SensitiveData`; the module-doc table row mentions
   the new helper.
@@ -5819,27 +5989,27 @@ exit 0 with `CONSUMER-PROOF: OK` + `MVP-OK` +
 
 A workspace-wide grep for `s.chars().take(N).collect()` found
 11 inline sites across 8 crates
-(`elysper-mcp`, `elysper-session`, `elysper-steering`,
-`elysper-rag`, `elysper-attachment`, `elysper-agent`,
-`elysper-provider`, `elysper-tool`, plus `elysper-server`).
+(`uva-mcp`, `uva-session`, `uva-steering`,
+`uva-rag`, `uva-attachment`, `uva-agent`,
+`uva-provider`, `uva-tool`, plus `uva-app-server`).
 Each site had its own slight variation; the marker formats
 were inconsistent (`…`, `...`, `[truncated]`,
 `[truncated N chars]`, or none).
 
-New `elysper_core::text::truncate_chars(s: &str, max_chars:
+New `uva_core::text::truncate_chars(s: &str, max_chars:
 usize) -> (String, bool)` is the char-counted, return-a-pair
 variant. Returns `(s.to_string(), false)` when the input is
 shorter than the cap, else `(first max_chars chars, true)`.
 No marker — the caller decides. Sits next to the
 byte-counted, in-place `cap_to_char_boundary` (which
-already lived in `elysper_core::text`).
+already lived in `uva_core::text`).
 
-`elysper_server::session::controller::truncate` (14 lines,
+`uva_server::session::controller::truncate` (14 lines,
 6 dedicated unit tests) becomes a 6-line wrapper over
 `truncate_chars` that adds the `…` marker. The 6 server
 tests still pass — the contract is preserved byte-for-byte.
 
-6 new tests in `elysper-core` (120 total, was 114):
+6 new tests in `uva-core` (120 total, was 114):
 shorter verbatim, exact-match verbatim, one-over
 truncated, empty input, zero max with non-empty (the
 server's corner case), multibyte char-count (中文 / 日本語),
@@ -5860,8 +6030,8 @@ exit 0 with `CONSUMER-PROOF: OK` + `MVP-OK` +
 
 ### Fixed (R76 — shared LLM-judge reply parser, one canonical home)
 
-`elysper_eval::metrics::parse_score` and
-`elysper_agent::agent::parse_judge_score` were two
+`uva_eval::metrics::parse_score` and
+`uva_agent::agent::parse_judge_score` were two
 near-duplicates of the same parser. R73 documented the
 duplication and promised "byte-compatible" behaviour; in
 practice the two did not accept the same inputs. The
@@ -5875,23 +6045,23 @@ tests (none pinned the lowercase case), but the contract
 said "case-insensitive" and a real judge that varied its
 casing would surface it.
 
-The right home is `elysper_core` — the same crate that
-already hosts `validate_against_schema`. Both `elysper-eval`
-and `elysper-agent` already depend on it, and the parser
+The right home is `uva_core` — the same crate that
+already hosts `validate_against_schema`. Both `uva-eval`
+and `uva-agent` already depend on it, and the parser
 is a pure function with no async, no runtime, no
-dependencies. New module `crates/elysper-core/src/judge_score.rs`
+dependencies. New module `crates/uva-core/src/judge_score.rs`
 + `pub use judge_score::parse_judge_score;` from
-`elysper_core`. The agent's and eval's parsers are now
+`uva_core`. The agent's and eval's parsers are now
 thin wrappers over the shared one.
 
-- 7 new tests in `elysper-core` (114 total, was 107):
+- 7 new tests in `uva-core` (114 total, was 107):
   `parses_score_prefix_with_space`,
   `parses_score_prefix_without_space`,
   `parses_standalone_number`, `finds_score_on_later_line`,
   `clamps_out_of_range`, `unknown_reply_scores_zero`,
   `handles_lowercase_and_mixed_case`.
 - 70 lines of duplicated parser code in
-  `elysper-agent/src/agent/best_of_n_llm_judge.rs` deleted
+  `uva-agent/src/agent/best_of_n_llm_judge.rs` deleted
   (the local `stripped_prefix_ci` and `parse_first_f64`
   helpers); replaced by a 1-line delegation.
 - The 4 eval tests and 5 agent tests for the parser
@@ -5905,7 +6075,7 @@ thin wrappers over the shared one.
 
 ### Added (R75 — runnable example for R74)
 
-`crates/elysper-tool/examples/argument_validation.rs` proves
+`crates/uva-tool/examples/argument_validation.rs` proves
 the R74 `with_argument_validation` switch end-to-end: the same
 `EchoTool`, two runs (off / on). The off path counts 2 tool
 bodies (the default unchanged-by-R74 contract — even the
@@ -5939,7 +6109,7 @@ Each tool validated its own arguments inside `call`, which
 works but means a misbehaving model call (a missing required
 field, a wrong-typed nested value) reaches the tool body and
 fails there. pi's `agent-loop.ts` already does this in the
-runtime with `validateToolArguments`; Elysper now has the same
+runtime with `validateToolArguments`; Uva now has the same
 shape, opt-in:
 
 - `ToolRegistry::with_argument_validation(bool)` — builder.
@@ -5960,18 +6130,18 @@ shape, opt-in:
   misbehaving call costs a synthesized error Result instead
   of a spawned task that runs a tool it shouldn't.
 - `Clone` carries the flag through (tested).
-- 5 new tests in `elysper-tool --lib` (283 total, was 278):
+- 5 new tests in `uva-tool --lib` (283 total, was 278):
   default off, validation on synthesises the error, valid
   input still runs, `Clone` preserves the flag, empty
   schemas stay permissive.
 
-The validator is `elysper_core::validate_against_schema` — the
+The validator is `uva_core::validate_against_schema` — the
 same primitive `StructuredOutputTool` and the eval crate's
 `SchemaValidationMetric` already use. No new crate, no new
 dependency, no new feature flag. `make check-public-api-runtime`
 still clean (the new method takes `bool` and returns `Self`).
 
-`cargo test -p elysper-tool --lib` 278 → 283; `make test-unit`
+`cargo test -p uva-tool --lib` 278 → 283; `make test-unit`
 2414 → 2419; `make ci` 6/6; `make examples` exit 0 with
 `CONSUMER-PROOF: OK` + `MVP-OK` + `BEST-OF-N-JUDGE: OK`.
 
@@ -5984,7 +6154,7 @@ The `BestOfNStrategy` gap noted since R50 is closed. The trait
 `CandidateScorer::score` is now `async fn` (additive — every
 existing impl gains `#[async_trait]` and the body is unchanged),
 and a new `LlmJudgeScorer` in
-`crates/elysper-agent/src/agent/best_of_n_llm_judge.rs` holds an
+`crates/uva-agent/src/agent/best_of_n_llm_judge.rs` holds an
 `Arc<dyn ModelProvider>` to grade each candidate against a rubric:
 
 - `LlmJudgeScorer::new(provider)` uses the in-tree
@@ -5994,25 +6164,25 @@ and a new `LlmJudgeScorer` in
   a deployment's own criteria.
 - `with_max_tokens(u32)` caps the reply; default 32.
 - `parse_judge_score(reply) -> f64` is the same shape
-  `elysper_eval::metrics::parse_score` uses (`Score: …` on any
+  `uva_eval::metrics::parse_score` uses (`Score: …` on any
   line, case-insensitive, clamped to `0.0..=1.0`, fallback to a
   standalone number, `0.0` on no match). Duplicated rather than
   re-exported because the eval crate is for offline grading, the
   agent runs in production — the two stay byte-compatible by
-  design. Re-exported from `elysper_agent` as
+  design. Re-exported from `uva_agent` as
   `LlmJudgeScorer` and `DEFAULT_JUDGE_PROMPT`.
 - Provider error path returns `0.5` (neutral) and logs. `0.0`
   would tie every failed judge at the bottom; `1.0` would bury
   the strategy's own failure path. `0.5` keeps the judge out of
   the ranking while the strategy records the failure.
 
-`cargo test -p elysper-agent --lib` 316 → 324 (8 new: 5 for
+`cargo test -p uva-agent --lib` 316 → 324 (8 new: 5 for
 `parse_judge_score` directly, 3 through a stub provider including
 the error-path neutral-fallback). The 6 existing `best_of_n`
 tests still pin the strategy with a sync `Shortest` scorer. The
 `strategy_swap.rs` example's `RequiresMarker` scorer gained
 `#[async_trait]`; its body is unchanged.
-- `crates/elysper-agent/examples/best_of_n_judge.rs` — a runnable
+- `crates/uva-agent/examples/best_of_n_judge.rs` — a runnable
   demo: 3 candidates, 3 judge calls, the highest-scoring candidate
   wins. Prints per-candidate judge scores and ends with
   `BEST-OF-N-JUDGE: OK`; picked up by `make examples`.
@@ -6044,7 +6214,7 @@ The deleted surface:
   `server/router.rs` route-list comment + header comment, and the
   crate-level module-doc entry).
 
-Test count unchanged: `cargo test -p elysper-server --lib` 400 passed,
+Test count unchanged: `cargo test -p uva-app-server --lib` 400 passed,
 no call sites exist.
 
 
@@ -6053,16 +6223,16 @@ no call sites exist.
 The Playwright e2e tree is gone, by the maintainer's call that it was
 too slow to be worth its cost.
 
-- `elysper-web/tests/` (44 specs, ~5,200 lines), `playwright.config.ts`,
+- `uva-web/tests/` (44 specs, ~5,200 lines), `playwright.config.ts`,
   `playwright.contract.config.ts`, and `.github/workflows/e2e.yml`.
-- `elysper-web/scripts/e2e/` — 709 lines of ad-hoc browser scripts,
+- `uva-web/scripts/e2e/` — 709 lines of ad-hoc browser scripts,
   superseded by the suite they predated (and unusable since
   `playwright` left `package.json`).
 - `contract-closure/contract-coverage.ts` + its test, and the `coverage`
   npm script, and the `test-contract-closure-playwright` CI job: their
   only input was the deleted spec directory, so they could only measure
   nothing.
-- `elysper-web/scripts/_logo-snapshot.mjs` — a throwaway that imported
+- `uva-web/scripts/_logo-snapshot.mjs` — a throwaway that imported
   `playwright`, now uninstalled.
 - The `@playwright/test` and `playwright` devDependencies, the
   playwright npm scripts, `make test-e2e` / `test-e2e-ui` /
@@ -6070,7 +6240,7 @@ too slow to be worth its cost.
   `test-web`, and the `test-results`/`playwright-report` ignores.
 
 Why: a full run took **13 minutes** because the top-level `webServer`
-booted `cargo run -p elysper-server` plus Vite for every invocation, and
+booted `cargo run -p uva-app-server` plus Vite for every invocation, and
 its value was undermined by silent rot — three specs had been red on
 master for months because their fixtures still used a pre-refactor wire
 shape (`{messageId, role: 'ROLE_AGENT', parts}` with no `type`, which
@@ -6078,7 +6248,7 @@ shape (`{messageId, role: 'ROLE_AGENT', parts}` with no `type`, which
 Playwright MCP driving the running app (`AGENTS.md` §4.2), which
 exercises the real code instead of a second contract that has to be
 maintained. The MCP browser comes from the harness, not from
-`elysper-web`'s dependencies — verified by driving the app after the
+`uva-web`'s dependencies — verified by driving the app after the
 `playwright` package was uninstalled.
 
 What still gates a frontend change: `make check-web` (tsc + eslint +
@@ -6087,43 +6257,43 @@ trade this makes — recorded in `docs/README.md`.
 
 ### Fixed (R72 — four frontend lockfiles collapsed into one)
 
-`elysper-web/` tracked `package-lock.json` **and** `pnpm-lock.yaml`; the
+`uva-web/` tracked `package-lock.json` **and** `pnpm-lock.yaml`; the
 repo root added a phantom npm workspace (`package.json` =
-`elysper-frontend-root`, `workspaces: ["elysper-web"]`) with its own
+`uva-frontend-root`, `workspaces: ["uva-web"]`) with its own
 `package-lock.json` + `pnpm-lock.yaml`. Nothing invoked pnpm — no
 `.npmrc`, no CI step, no Makefile target, no Dockerfile — and nothing
 installed at the root.
 
 The divergence was not cosmetic. Measured:
 
-- `cd elysper-web && npm ci` resolved the **root** lock (the workspace
-  declaration wins) and exited 0 even with `elysper-web/package-lock.json`
+- `cd uva-web && npm ci` resolved the **root** lock (the workspace
+  declaration wins) and exited 0 even with `uva-web/package-lock.json`
   deleted — so that file was dead weight for CI and the Makefile.
 - The same file is what `Dockerfile.web` consumes, because it copies
-  only `elysper-web/` and has no workspace root. There it **failed**:
+  only `uva-web/` and has no workspace root. There it **failed**:
   `npm error Missing: @radix-ui/themes@3.3.0 from lock file`, exit 1 —
   identically at HEAD, so the Docker web image had been unbuildable
   independently of any R72 change.
 - The root package declared `react-router-dom ^7.18.1` while
-  `elysper-web` declares `^6.30.4`; the app resolves 6.30.4. The root's
+  `uva-web` declares `^6.30.4`; the app resolves 6.30.4. The root's
   copy was a second major that nothing imported.
 
-Now: one lock (`elysper-web/package-lock.json`, regenerated standalone
+Now: one lock (`uva-web/package-lock.json`, regenerated standalone
 so it resolves without a parent workspace — 412 packages, no
 `@radix-ui/themes` gap, no playwright), the phantom root workspace and
 all `pnpm-*` files deleted, and `.github/workflows/rust-quality.yml`'s
 `cache-dependency-path` re-pointed at the survivor.
 
-Verified against all three consumers: `cd elysper-web && npm ci` → 0;
-the `Dockerfile.web` shape (only `elysper-web/package.json` +
+Verified against all three consumers: `cd uva-web && npm ci` → 0;
+the `Dockerfile.web` shape (only `uva-web/package.json` +
 `package-lock.json` in an empty dir) → `npm ci` installs 361 packages,
 `@radix-ui/themes` present, `playwright` absent; then a real install and
-`tsc` + `eslint` + `vite build` green in `elysper-web/`.
+`tsc` + `eslint` + `vite build` green in `uva-web/`.
 
 ### Fixed (R72 — multimodal reaches both ends of the chat surface)
 
 R71 made the model see a tool's image. The web UI still threw it
-away: `toolResultContentText` in `elysper-web`'s history
+away: `toolResultContentText` in `uva-web`'s history
 reconstructor kept only parts carrying a `.text` field, so a
 `tool_result` whose content was `[text, image]` replayed as bare
 text and an image-only result replayed as nothing at all. The live
@@ -6140,7 +6310,7 @@ and are fixed too:
 - **URL-sourced images were wrapped as base64.**
   `ImageContent.data` is polymorphic: the server writes the remote
   URL itself for a `url` attachment
-  (`elysper-server/src/routes/chat.rs`, `build_parts`), so a blanket
+  (`uva-app-server/src/routes/chat.rs`, `build_parts`), so a blanket
   `data:…;base64,` prefix produced a broken `<img>`.
 - **Image payloads would have bloated localStorage.** The persist
   path swallows `QuotaExceededError`, so a single multi-MB
@@ -6202,7 +6372,7 @@ envelope; all six `isToolEchoText` branches now fire.
 Scope note: user-prompt images are rendered live from the composer
 (`imagesFromAttachments` → the turn's text segment) but are **not
 durable** — the controller persists only the textual component of a
-prompt (`elysper-server/src/session/controller.rs`: "Raw image/audio
+prompt (`uva-app-server/src/session/controller.rs`: "Raw image/audio
 bytes are NOT serialised into the JSONL sink"), so a cold reload
 rebuilds the turn from text alone. The tool-result half is durable
 (`persist_and_broadcast` appends the whole `AgentEvent::Model`).
@@ -6233,7 +6403,7 @@ legacy `Model` parts) and honours a durable compaction checkpoint. A
 hand-rolled matcher had rotted the moment the writer changed; going
 through the fold means the reader cannot drift from the writer again.
 
-`crates/elysper-server/tests/regenerate_test.rs` pins it with three
+`crates/uva-app-server/tests/regenerate_test.rs` pins it with three
 tests through the real router: the most recent user turn is replayed
 (observable as a second `UserInput` row — `Cancel` appends nothing), a
 hand-written log with no user turn is reported rather than acted on,
@@ -6386,7 +6556,7 @@ Two more routes lied about what they do, both found in the same audit:
 Three holes flattened a binary payload into a string placeholder
 before the provider saw it:
 
-- **`elysper-mcp`: an MCP `tools/call` image/audio reply was dropped.**
+- **`uva-mcp`: an MCP `tools/call` image/audio reply was dropped.**
   `McpTool::call` did `ToolOutput::text(result.text())`, and `text()`
   renders every non-text block as `[image content]`, so a server's
   screenshot / chart / OCR reply lost its base64 payload.
@@ -6394,50 +6564,50 @@ before the provider saw it:
   vocabulary (`Text` / `Image` / `Audio`, with an unmodelled binary
   kind reporting its mime and size), and `McpTool::call` returns
   `ToolOutput::from_parts(…)` when anything non-text is present.
-- **`elysper-tool`: no multipart `ToolOutput` constructor.** Added
+- **`uva-tool`: no multipart `ToolOutput` constructor.** Added
   `ToolOutput::from_parts(Vec<ContentPart>)` — the multimodal
   counterpart of `ToolOutput::text`.
-- **`elysper-provider` (Anthropic): a tool-result image was
+- **`uva-provider` (Anthropic): a tool-result image was
   Debug-formatted.** `AnthropicToolResultContent` was a text-only
   struct, so `transform_part` emitted `format!("{:?}", …)`. It is now
   a `text | image` tagged enum and `tool_result_blocks` maps each inner
   part (an error result keeps its `Error: {:?}` block). The OpenAI
   adapter already handled this via `extract_media_parts`.
 
-Tests: `elysper-mcp` 56 (4 new), `elysper-agent --lib` 316 (1 new
-end-to-end), `elysper-provider --lib` 690 (3 new). `make ci` 6/6.
+Tests: `uva-mcp` 56 (4 new), `uva-agent --lib` 316 (1 new
+end-to-end), `uva-provider --lib` 690 (3 new). `make ci` 6/6.
 
 ### Fixed (R70 — R63 server-side wiring completion)
 
-The R63 parallel session added `crates/elysper-server/src/routes/session_search.rs`
+The R63 parallel session added `crates/uva-app-server/src/routes/session_search.rs`
 and the matching test file but never wired them into the server: the route
 referenced `state.session_search`, a field that did not exist on `AppState`.
 Closed the gap:
 
-- `crates/elysper-server/src/state/app_state.rs` — added the
+- `crates/uva-app-server/src/state/app_state.rs` — added the
   `session_search: SharedSessionSearch` field, initialized it from
   `workspace_root.join("sessions")` (the same subdirectory the
   `SessionRegistry` writes into), and added the missing `tool_registry`
   field to `for_test`'s struct literal.
-- `crates/elysper-server/src/routes/mod.rs` — registered `pub mod
+- `crates/uva-app-server/src/routes/mod.rs` — registered `pub mod
   session_search;` and restored the pre-existing `pub mod skills;` and
   `pub mod tool;` declarations that were tracked files but missing from
   the module table.
-- `crates/elysper-server/src/server/router.rs` — mounted
+- `crates/uva-app-server/src/server/router.rs` — mounted
   `GET /api/v1/sessions/search` on the api_routes builder.
-- `crates/elysper-server/src/routes/session_search.rs` — added the
+- `crates/uva-app-server/src/routes/session_search.rs` — added the
   required `state.session_search.sync().await` call before the search.
 
-Verification: `cargo test -p elysper-server --test session_search_test`
-4/4 pass (was 2/4 before); `cargo run -p elysper-session --example
+Verification: `cargo test -p uva-app-server --test session_search_test`
+4/4 pass (was 2/4 before); `cargo run -p uva-session --example
 session_search` prints `SESSION-SEARCH: OK`; `make ci` 6/6 green.
 Commits: `7f63ba2` (register the search module in
-`elysper-session::lib`), `2a6185e` (track the example),
+`uva-session::lib`), `2a6185e` (track the example),
 `c7e6e7d` (complete the server wiring).
 
 Report: this turn's commit `a3004ae`.
 
-`elysper_test_support::FakeProvider::text(text: &str)` — a
+`uva_test_support::FakeProvider::text(text: &str)` — a
 one-line constructor that returns a provider answering every
 `complete()` call with `Content::text(text)`. Mirrors traitclaw's
 `MockProvider::text()`. A consumer test that previously had to
@@ -6445,7 +6615,7 @@ write a full `CompletionResponse { content: Content::text(...),
 ..Default::default() }` for the common case of one canned text
 reply can now write `FakeProvider::text("answer")`.
 
-Verification: `cargo test -p elysper-test-support` 17/17;
+Verification: `cargo test -p uva-test-support` 17/17;
 `make ci` green. The traitclaw `MockProvider::error()` port was
 considered and declined — it requires adding a struct field for one
 constructor's error path, deferred to the first consumer that
@@ -6455,7 +6625,7 @@ needs provider-error testing.
 
 Report: this turn's commit `2242e8a`.
 
-Two `elysper_scheduler::store` tests pinned:
+Two `uva_scheduler::store` tests pinned:
 
 - `gc_completed_drops_old_completed_rows` (the cutoff-vs-`last_fired_at`
   relative-time check)
@@ -6463,7 +6633,7 @@ Two `elysper_scheduler::store` tests pinned:
   time is deterministic too)
 
 `make clock-audit` 9 → 6 and `CLOCK_BASELINE` follows. `cargo
-test -p elysper-scheduler` 14/14. The remaining 6 `Utc::now()`
+test -p uva-scheduler` 14/14. The remaining 6 `Utc::now()`
 calls in `scheduler.rs` are intentional wall-clock semantics —
 they test 'after N seconds the interval rearms' and 'next_deadline
 returns zero for imminent', which pinning would break.
@@ -6475,9 +6645,9 @@ Report: this turn's commit `0dc06d0`.
 R65/R66 pattern applied to 5 more test sites that used `Utc::now()`
 without a clock-dependent assertion:
 
-- `elysper_server::routes::attachment::create_response_flattens_ref_fields`
-- `elysper_attachment::filesystem_backend_reports_not_found_for_missing_hash`
-- 3 sites in `elysper_eval::export::tests` (CSV/JSON export helpers)
+- `uva_server::routes::attachment::create_response_flattens_ref_fields`
+- `uva_attachment::filesystem_backend_reports_not_found_for_missing_hash`
+- 3 sites in `uva_eval::export::tests` (CSV/JSON export helpers)
 
 All pin to `2026-01-01T12:00:00Z`. `make clock-audit` 14 → 9 and
 `CLOCK_BASELINE` follows. `make ci` green; 30/30 eval tests,
@@ -6491,24 +6661,24 @@ Following the R65 pattern, three more test sites that used
 `chrono::Utc::now()` without a clock-dependent assertion now pin to
 `2026-01-01T12:00:00Z`:
 
-- `elysper_session::operation::tests::snapshot_builder_records_compaction`
+- `uva_session::operation::tests::snapshot_builder_records_compaction`
   records a `last_compaction` timestamp but only asserts
   `is_some()` and `seq == 7`.
-- `elysper_eval::tests::report_summary_shows_pass_rate_and_average` and
+- `uva_eval::tests::report_summary_shows_pass_rate_and_average` and
   `report_summary_empty_suite_avoids_division_by_zero` record
   `generated_at` on an `EvalReport` but `summary()` does not include
   the timestamp in its output.
 
 `make clock-audit` count 17 → 14; `Makefile` `CLOCK_BASELINE` 17 → 14
-per AGENTS.md §3.8. `make ci` green; `cargo test -p elysper-eval` 30/30;
-`cargo test -p elysper-session` 145/145.
+per AGENTS.md §3.8. `make ci` green; `cargo test -p uva-eval` 30/30;
+`cargo test -p uva-session` 145/145.
 
 ### Changed (R65 — deterministic test + dropped clock baseline)
 
 Report: this turn's commit `7cd50666`.
 
 - **`runtime_context_from_runtime_populates_required_fields`** in
-  `crates/elysper-agent/src/prompt/mod.rs` no longer reads
+  `crates/uva-agent/src/prompt/mod.rs` no longer reads
   `chrono::Utc::now()` — the test had no clock-dependent assertion
   (every field is checked for *non-empty*), so the real-clock
   dependency was gratuitous noise that risked spurious failures
@@ -6531,21 +6701,21 @@ five small ports and two documentation fixes that were below the
 big-port threshold but real, each answering a question the parity
 audit surfaced.
 
-- **`elysper-agent::agent::strategy::default_for_test(provider, cancel)`**
+- **`uva-agent::agent::strategy::default_for_test(provider, cancel)`**
   (R1, `b1c265f8`) — traitclaw's `make_runtime` factory adapted to
-  where `AgentRuntime` lives in Elysper. Three strategy test modules
+  where `AgentRuntime` lives in Uva. Three strategy test modules
   (`strategy.rs`, `cot.rs`, `best_of_n.rs`) each built the same
   22-field struct literal inline; the factory collapses 65 lines of
   boilerplate. `pub(crate)` + `#[cfg(test)]` keep it out of the
   public surface.
-- **`AGENTS.md` §3.7** documents `elysper-core::registry::Registry<T>`
+- **`AGENTS.md` §3.7** documents `uva-core::registry::Registry<T>`
   + `paginate_registry_list` (R2, `f4f08bb3`) — the spine of every
   "named catalog" in the workspace — and why `ToolRegistry` uses a
   private `mod registry_trait` submodule so `ToolFilter` /
   `ToolEntry` don't leak. The pattern was discoverable only via grep.
 - **`AGENTS.md` §3.7** adds a 3-question rubric for "should we drop
   this crate?" reviews (R3, `08403509`). All 5 audited optional
-  crates (`elysper-{scheduler,workflow,rag,skill,mcp}`) answered
+  crates (`uva-{scheduler,workflow,rag,skill,mcp}`) answered
   yes to all three (194 tests across them, all green).
 - **fmt-fix** the R1 factory call sites (R4, `aee87425`) so
   `make fmt-check` is clean.
@@ -6565,7 +6735,7 @@ model's knowledge. R62's parity audit found it missing here, which matters
 for a deployment — a user who cannot find last week's conversation does not
 trust the store.
 
-- **`elysper_session::SessionSearch`** — the seam. Four methods
+- **`uva_session::SessionSearch`** — the seam. Four methods
   (`search_sessions`, `search_entries`, `sync`, `remove`), runtime-neutral,
   so an index can live in memory, in `SQLite`, or behind a service. pi's
   `notify`/`close` have no counterpart on purpose: `sync` is cheap enough
@@ -6585,7 +6755,7 @@ trust the store.
 - **`GET /api/v1/sessions/search?q=&limit=&session_id=`** — the HTTP face,
   on the v1 `List<T>` envelope, backed by the same index a Rust consumer
   builds. The literal route wins over `/sessions/{id}` (pinned by test).
-- **`cargo run -p elysper-session --example session_search`** — the
+- **`cargo run -p uva-session --example session_search`** — the
   exported `SESSION-SEARCH: OK` proof, showing the ranking, the snippet
   and the tombstone.
 
@@ -6594,7 +6764,7 @@ trust the store.
 Report: `docs/optimization-report-R62-2026-09-12.md`;
 current map: `docs/reference-parity.md`.
 
-- **`elysper-tool`'s `CleanupTask` held a `tokio::task::JoinHandle`** in a
+- **`uva-tool`'s `CleanupTask` held a `tokio::task::JoinHandle`** in a
   public struct, while its own doc claimed "no `tokio` type appears in
   this crate's public API". It now holds a **stop callback**
   (`Box<dyn Fn() + Send + Sync>`, invoked at most once) with
@@ -6604,11 +6774,11 @@ current map: `docs/reference-parity.md`.
   runtime type stops at the crate boundary.
 - **`make check-public-api-runtime`** fails the build if a public item in
   any library crate names `tokio`/`async_std`/`smol`/`futures::executor`
-  (comments stripped, `elysper-server` exempt as the application crate).
+  (comments stripped, `uva-app-server` exempt as the application crate).
   It is part of `make ci`, and it has teeth: pointed at R61's source it
   reports the `JoinHandle` line.
 - **`docs/reference-parity.md`** — the objective's first axis, made
-  checkable: every traitclaw crate and pi package mapped to its elysper
+  checkable: every traitclaw crate and pi package mapped to its uva
   counterpart (verified against the source), the declines with their
   reasons (TUI, bundled coding agent, full MCTS, CBOR, chord/facets,
   builtin runtime seams), and the one verified open gap: pi's session
@@ -6628,17 +6798,17 @@ compiled it, and when a doctest gate was finally pointed at it:
   as written.
 - `Content::text(self.answer.into())` did not compile (ambiguous
   `Into`), and Step 4's "when you outgrow the prelude" table pointed at
-  `elysper::session::JsonlSessionSink` — a path that does not exist (it
-  is `elysper::session::jsonl::JsonlSessionSink`).
+  `uva::session::JsonlSessionSink` — a path that does not exist (it
+  is `uva::session::jsonl::JsonlSessionSink`).
 - The one path that *was* right exposed a facade wart:
   `SubagentPool` (R31) was only reachable as
-  `elysper::agent::agent::pool::SubagentPool`; it is now re-exported at
-  the agent crate root, so `elysper::agent::SubagentPool` is the name.
+  `uva::agent::agent::pool::SubagentPool`; it is now re-exported at
+  the agent crate root, so `uva::agent::SubagentPool` is the name.
 
-**The gate**: `crates/elysper/src/lib.rs` carries
+**The gate**: `crates/uva/src/lib.rs` carries
 `#[cfg(doctest)] #[doc = include_str!("../../../MINIMAL.md")]`, which
 turns the guide's `rust` fences into doctests. CI already runs
-`cargo test -p elysper --doc` twice (default features, then the
+`cargo test -p uva --doc` twice (default features, then the
 seven-feature MVP subset), so the guide's central claim — "these seven
 features are enough" — is now *compiled* rather than asserted. Step 2's
 fence became a function taking the provider, so it reads as the assembly
@@ -6764,8 +6934,8 @@ Report: `docs/optimization-report-R56-2026-09-12.md`.
 The repo's premise is that its documentation *is* the assembly tutorial.
 Two holes in that premise: there was no index over 47 files in `docs/`,
 and three crates had **no crate-level documentation at all** — including
-`elysper-tool` (one of the seven core pieces) and
-`elysper-test-support` (the crate a consumer adds to test their own
+`uva-tool` (one of the seven core pieces) and
+`uva-test-support` (the crate a consumer adds to test their own
 assembly).
 
 - **`docs/README.md`** — the reading order for a new consumer
@@ -6774,24 +6944,24 @@ assembly).
   with a pointer to its report, and a **known-gaps table** consolidating
   the deferrals that until now lived only in the tail of the 19th-most-
   recent report. Linked from the root README.
-- **Crate docs for `elysper-tool`, `elysper-server`,
-  `elysper-test-support`** — each with what the crate is, what is
+- **Crate docs for `uva-tool`, `uva-app-server`,
+  `uva-test-support`** — each with what the crate is, what is
   deliberately *not* in it, and a compiling example (the tool one
   implements a `Tool`, registers it, and asserts it reaches the model's
   advertised schema; the server one describes the boot and the route
   surfaces; the test-support one drives `FakeProvider`).
-- `elysper-tool`'s docs state the crate's load-bearing decision up
+- `uva-tool`'s docs state the crate's load-bearing decision up
   front: **registered**, **shown**, and **runnable** are three different
   questions with three different mechanisms.
 - **74 rustdoc warnings fixed, and gated.** `make doc-check`
   (`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace`) is part
-  of `make ci` now. The warnings were not cosmetic: `elysper_core`'s
+  of `make ci` now. The warnings were not cosmetic: `uva_core`'s
   error docs described a wire-code method that does not exist,
   `hook_map.rs` told consumers to attach a `HookMap` via a
   `Steering::with_hook_map` that does not exist (and claimed the loop
   consults the map — it reads `Steering::hooks` instead), `router.rs`
   named a `SequentialRouter` twice that was never written, and
-  `elysper-tool` documented three registry methods under names they no
+  `uva-tool` documented three registry methods under names they no
   longer have. All corrected to the real API; the stale sentences were
   rewritten rather than unlinked.
 
@@ -6810,7 +6980,7 @@ out.
 - **A boot audit names them**, once per configured agent:
 
   ```text
-  WARN elysper.agent: agent config keys are parsed but not applied; what
+  WARN uva.agent: agent config keys are parsed but not applied; what
   a run may see and call comes from [tools] (groups / hidden / deferred)
   and the registry's privacy flag — see DEPLOYMENT.md
   agent=reviewer keys=["description", "model", "allowed_tools",
@@ -6825,22 +6995,22 @@ out.
 - **`DEPLOYMENT.md` states what `agents.<name>` applies** (a three-row
   table) and points at the mechanisms that *are* enforced: the `[tools]`
   surface (`hidden` refuses dispatch, not just the advertisement) and,
-  for a library consumer, `elysper_tool::RestrictedRegistry`
+  for a library consumer, `uva_tool::RestrictedRegistry`
   (`ToolRestriction { allow, deny }`, visibility-only by design).
 
 ### Fixed (R54 — the address and the caps the deployment asks for)
 
 Report: `docs/optimization-report-R54-2026-09-12.md`.
 
-`ELYSPER_HOST` and `ELYSPER_PORT` were set by `Dockerfile.server` and
+`UVA_HOST` and `UVA_PORT` were set by `Dockerfile.server` and
 both compose files, documented in `DEPLOYMENT.md` — and read by nothing.
 The binary took only `--host`/`--port`, so a container (whose `CMD` is a
-bare `elysper-server`) bound `127.0.0.1:8080`: **a published port that
+bare `uva-app-server`) bound `127.0.0.1:8080`: **a published port that
 could not be reached**. `host` / `port` in the deployment config were
 read by nobody either, and `max_agents` capped nothing.
 
 - **The address resolves from every source a deployment has**:
-  `--host`/`--port`, then `ELYSPER_HOST`/`ELYSPER_PORT` (clap's `env`
+  `--host`/`--port`, then `UVA_HOST`/`UVA_PORT` (clap's `env`
   fills the same fields the flags do), then the config's `host`/`port`,
   then the defaults. Each part resolves independently, so
   `--port 7000` with `host = "0.0.0.0"` in the config means exactly
@@ -6880,7 +7050,7 @@ not apply.
 
 - **One resolution point**: `resolve_server_config(workspace_root,
   config_path)` — the `--config` path when it exists, then
-  `config.toml`, then `.elysper/config.toml`, format chosen by
+  `config.toml`, then `.uva/config.toml`, format chosen by
   extension. `AppState::new` resolves it once and every section reads
   that value, so the named file is the deployment's configuration. A
   candidate that is missing or does not parse is logged and skipped
@@ -6968,7 +7138,7 @@ shipped paradigm that uses the runtime's concurrency, and a config knob
 so the choice is not compiled in.
 
 - **`BestOfNStrategy` + `CandidateScorer` + `LongestAnswer`**
-  (`crates/elysper-agent/src/agent/best_of_n.rs`) — sample N answers,
+  (`crates/uva-agent/src/agent/best_of_n.rs`) — sample N answers,
   score them, publish the winner. Standard practice (self-consistency,
   green-patch selection, structured extraction) at a known multiple of
   one answer's cost.
@@ -6993,18 +7163,18 @@ so the choice is not compiled in.
   with the obvious aliases (`cot`, `bon`). An unknown name is a typed
   `Error::Validation` naming every accepted value.
 - **`AgentRunConfig.strategy` + `RunDependencies::with_optional_strategy`
-  + `agents.<name>.strategy`** — the deployment hop: `elysper-server`
+  + `agents.<name>.strategy`** — the deployment hop: `uva-app-server`
   resolves the config string **once at boot**
   (`AppState::default_strategy`, via `load_default_strategy`), threads
   it through the controller into the run factory, and installs it on
   both the session runs and the registered agents, so the two agree.
   An unknown name is a boot warning plus a ReAct fallback — a typo in
   one agent's table must not stop the server from starting.
-- **`elysper_provider::completion_to_sampling`** is now reachable from
+- **`uva_provider::completion_to_sampling`** is now reachable from
   the provider root (it was `traits::completion_to_sampling`), so a
   consumer converting a `CompletionResponse` into an `AgentEvent`'s
   payload does not have to know the module layout.
-- **`cargo run --example strategy_swap -p elysper-agent` now covers
+- **`cargo run --example strategy_swap -p uva-agent` now covers
   three paradigms** and asserts all three from the provider's recorded
   requests: ReAct advertises a tool and runs it once, Chain-of-Thought
   advertises none, best-of-N samples three times with a custom scorer
@@ -7022,7 +7192,7 @@ owned the reasoning and the plumbing in one 2 600-line file, so a
 different paradigm meant reimplementing the plumbing.
 
 - **`ReasoningStrategy` + `AgentRuntime` + `EventSink`**
-  (`crates/elysper-agent/src/agent/strategy.rs`) — the loop behind the
+  (`crates/uva-agent/src/agent/strategy.rs`) — the loop behind the
   same kind of seam as everything else. A strategy receives a runtime
   holding every assembled piece (provider, registry, surface policy,
   workspace, descriptor, prompt context, context manager, peer
@@ -7041,7 +7211,7 @@ different paradigm meant reimplementing the plumbing.
   `parse_steps()` to recover the labelled chain from the answer. It is
   the proof that the seam is real: a whole paradigm with no change to
   the agent.
-- **`cargo run --example strategy_swap -p elysper-agent`** assembles
+- **`cargo run --example strategy_swap -p uva-agent`** assembles
   both through one `AgentBuilder` and asserts the difference from the
   provider's own recorded requests: ReAct advertises 1 tool and runs it
   once, Chain-of-Thought advertises 0 and runs none. Prints
@@ -7063,7 +7233,7 @@ iteration (the context-window check) plus once per dropped pair. The
 cost was one `String` per message: the estimator concatenated every
 part of a message before measuring it.
 
-- **`elysper_core::token::TokenUnits`** — the heuristic split in two:
+- **`uva_core::token::TokenUnits`** — the heuristic split in two:
   count the units a text contributes (ASCII bytes, CJK chars, no
   allocation), then convert. `estimate_token_count` is now
   `TokenUnits::of(text).tokens()`; a caller measuring several parts as
@@ -7107,13 +7277,13 @@ Writing it surfaced two stale recipes:
 R37–R45 changed what the framework compiles, requires, and measures;
 four documents were still describing the state before them.
 
-- **`crates/elysper-core/README.md`** rewritten: the feature list
+- **`crates/uva-core/README.md`** rewritten: the feature list
   stopped at `error` / `registry` / `sensitive` / `text` / `token` and
   omitted `cancel`, `spawn`, `clock`, `idgen`, `schema`, and
   `full_output` — i.e. everything R36–R39 added to the crate a consumer
   adds first. It now also states the crate's one rule (no runtime, no
   provider SDK) and shows the `SharedClock` / `_at`-variant discipline.
-- **`crates/elysper-agent/README.md`**: cancellation is described as
+- **`crates/uva-agent/README.md`**: cancellation is described as
   the `CancelToken` trait with `AtomicCancelToken` as the default
   (it was documenting `tokio_util::sync::CancellationToken` as *the*
   token), and the runtime contract gets its own section: the
@@ -7130,7 +7300,7 @@ four documents were still describing the state before them.
 Results and evidence:
 `docs/optimization-report-R45-2026-09-12.md`.
 
-R36 introduced `elysper_core::Clock` and R40 wired it into the agent.
+R36 introduced `uva_core::Clock` and R40 wired it into the agent.
 An audit for AGENTS.md §3.8 ("new code must not call
 `chrono::Utc::now()`") found the rule still had production hold-outs —
 and that one of them was a real bug.
@@ -7149,7 +7319,7 @@ and that one of them was a real bug.
   file `{session}-{tool}-{%Y%m%d%H%M%S}.txt`, so two spills inside one
   second shared a name and the second overwrote the first — losing the
   full output the truncation marker still promised. The suffix is now a
-  `elysper_core::IdGen` ULID (the workspace's id vocabulary, sortable by
+  `uva_core::IdGen` ULID (the workspace's id vocabulary, sortable by
   creation, and collision-free).
 - **`make check-clock`** (new, and part of `make ci`): a ratchet over
   `chrono::Utc::now()` occurrences in `crates/*/src` — 25 today, all in
@@ -7161,8 +7331,8 @@ and that one of them was a real bug.
 Results and evidence:
 `docs/optimization-report-R44-2026-09-12.md`.
 
-- **`elysper-server`'s `middleware/trace_context.rs` now uses
-  `elysper_telemetry::propagation`** instead of carrying its own copy of
+- **`uva-app-server`'s `middleware/trace_context.rs` now uses
+  `uva_telemetry::propagation`** instead of carrying its own copy of
   the W3C machinery (the propagator install, the idempotence flag, the
   extract/inject shims, and two duplicate context structs). What stays
   server-side is exactly the HTTP layer: the `HeaderMap` adapters, the
@@ -7220,7 +7390,7 @@ paths", "cheap heuristic") with nothing measuring them. R42 adds a
 dependency-free benchmark binary for the work a turn repeats, and it
 immediately found two problems worth more than the harness:
 
-- **`crates/elysper-agent/benches/hot_paths.rs`** (`make bench`) — nine
+- **`crates/uva-agent/benches/hot_paths.rs`** (`make bench`) — nine
   fixtures covering token accounting, stream assembly, wire repair,
   schema validation, tool-surface projection, context truncation and
   text truncation. `harness = false`, no criterion: the number that
@@ -7233,7 +7403,7 @@ immediately found two problems worth more than the harness:
   (the estimator is a sum over messages, so the two are equal by
   construction), and the entry condition keeps the whole-list estimate
   it had: **34.2 ms → 0.37 ms (94×)**.
-- **`elysper_core::token::estimate_token_count` decoded every character
+- **`uva_core::token::estimate_token_count` decoded every character
   to ask two questions it can usually skip.** Prompt text is
   overwhelmingly ASCII, where every character is one byte and none is
   CJK — `str::is_ascii` (SIMD) answers both in one pass, and the byte
@@ -7254,7 +7424,7 @@ Results and evidence:
 `docs/optimization-report-R41-2026-09-12.md`.
 
 R37–R40 established five invariants (the MVP subset pulls no HTTP
-client, `elysper --no-default-features` compiles, the runtime-free
+client, `uva --no-default-features` compiles, the runtime-free
 crates stay runtime-free, the facade gates its modules, the examples
 keep working) — and nothing ran them automatically. CI covered only the
 contract-closure scanner and Playwright.
@@ -7279,7 +7449,7 @@ Results and evidence:
 `docs/optimization-report-R40-2026-09-12.md`.
 
 `[workspace.dependencies]` handed every crate `tokio = { features =
-["full"] }`. That meant `elysper-session` compiled tokio's `net`,
+["full"] }`. That meant `uva-session` compiled tokio's `net`,
 `process`, `fs`, and `signal` subsystems to move a JSONL file, and the
 `Spawner` seam added in R39 sat next to a feature set that still
 assumed the runtime owned everything.
@@ -7296,10 +7466,10 @@ assumed the runtime owned everything.
 - **Two invariants are now enforced by `make`:**
   - `make check-mvp-deps` (extended in R39/R38) — the seven-feature
     subset pulls no HTTP client, exporter, framework, or database, and
-    `elysper --no-default-features` compiles.
-  - `make check-no-runtime` (new) — `elysper-core`,
-    `elysper-scheduler`, `elysper-macros`, `elysper-eval`,
-    `elysper-workflow`, and `elysper-telemetry`
+    `uva --no-default-features` compiles.
+  - `make check-no-runtime` (new) — `uva-core`,
+    `uva-scheduler`, `uva-macros`, `uva-eval`,
+    `uva-workflow`, and `uva-telemetry`
     (`--no-default-features`) pull **no tokio** in a lib build. These
     are the pieces whose docs promise the consumer the runtime is
     theirs; the target fails the day one of them inherits tokio again.
@@ -7323,7 +7493,7 @@ detach was a hard `tokio::spawn` — so the framework's headline promise,
 "the executor is the consumer's choice", did not hold for the one place
 that needs an executor at all.
 
-- **`elysper_core::spawn`** — `Spawner` (plus `BoxFuture` /
+- **`uva_core::spawn`** — `Spawner` (plus `BoxFuture` /
   `SharedSpawner`): detached work with no runtime in the signature,
   object-safe, with a default `spawn_blocking`. It compiles with
   **zero** runtime dependencies, and its own test proves it by driving
@@ -7336,23 +7506,23 @@ that needs an executor at all.
   propagated `Clone`, so `run_stream`'s per-tool tasks go wherever the
   registry was told.
 - **Proof, not a promise**:
-  `cargo run --example runtime_agnostic -p elysper-agent` →
+  `cargo run --example runtime_agnostic -p uva-agent` →
   `RUNTIME-AGNOSTIC: OK`. A full turn — scripted provider, one tool
   call, 11 events — on a ten-line spawner (`std::thread::spawn` +
   `futures::executor::block_on`), with a plain `fn main` and no
   `#[tokio::main]` anywhere.
 - **The boundary is documented** rather than implied (agent crate docs,
-  README, `elysper_core::spawn`): the builtin tools (`tokio::fs` /
+  README, `uva_core::spawn`): the builtin tools (`tokio::fs` /
   `tokio::process`), the provider HTTP adapters, and the JSONL session
   sink are tokio-bound *plugins*; timers (retry backoff, the streaming
   idle watchdog) still need a reactor.
-- **Fixed: `elysper --no-default-features` did not compile.** The
+- **Fixed: `uva --no-default-features` did not compile.** The
   prelude re-exported `crate::core::*` unconditionally while `pub mod
   core` is feature-gated, so the documented "the prelude is empty, not
   broken" claim had never been compiled. Fixed, and
   `make check-mvp-deps` now asserts that configuration alongside the
   dependency check.
-- `elysper::prelude` gained `Spawner` / `SharedSpawner`.
+- `uva::prelude` gained `Spawner` / `SharedSpawner`.
 
 ### Added (R38 — HTTP is a feature, not a default)
 
@@ -7364,13 +7534,13 @@ whole HTTP stack. R38 makes the transport opt-in, so a consumer with
 their own provider and no outbound fetch compiles **no HTTP client at
 all**: no `reqwest`, `hyper`, `rustls`, `h2`, or `tower`.
 
-- **`elysper-provider`'s adapters are features** (`anthropic` /
+- **`uva-provider`'s adapters are features** (`anthropic` /
   `openai`, both on by default). The trait, the wire types, the typed
   profiles, the retry classifier, `json_repair`, and the token counter
   trait compile without either; the adapter-only internals
   (`openai_streaming`, `streaming::anthropic`, `pump_sse`,
   `count_message_tokens`, …) are gated with them.
-  `elysper-core/reqwest` — the `From<reqwest::Error>` impl — now follows
+  `uva-core/reqwest` — the `From<reqwest::Error>` impl — now follows
   the adapter features instead of being unconditional. Naming an
   adapter a build does not have is a **typed runtime error**
   (`adapter_not_compiled` / `no_adapter_compiled`), not a compile error
@@ -7378,7 +7548,7 @@ all**: no `reqwest`, `hyper`, `rustls`, `h2`, or `tower`.
   `profile.rs` share one construction site per adapter
   (`openai_provider` / `anthropic_provider`) so the env-key and
   explicit-key paths cannot drift.
-- **`elysper-tool`'s `web_fetch` is a feature** (`web`, on by default).
+- **`uva-tool`'s `web_fetch` is a feature** (`web`, on by default).
   Without it, `build_default_tool_registry` registers `read` / `write` /
   `shell` / `TodoWrite` and neither `WebFetchTool` nor `reqwest` exists;
   the registry and render-kind tests now assert *the compiled* builtin
@@ -7387,7 +7557,7 @@ all**: no `reqwest`, `hyper`, `rustls`, `h2`, or `tower`.
   `ModelProvider` trait and the wire types, `provider-anthropic` /
   `provider-openai` are the adapters, `tool` is the offline builtins and
   `tool-web` is `web_fetch`. The default set enables all of them, so
-  `cargo add elysper` is unchanged; the seven-feature subset in
+  `cargo add uva` is unchanged; the seven-feature subset in
   `MINIMAL.md` now means no HTTP. Three more `compile_fail` doc proofs
   (adapter and `web_fetch` absence) plus three reachability tests pin
   both directions.
@@ -7413,17 +7583,17 @@ library, from zero") and what a consumer actually had to compile.
   vector per input text. Embedding was a required method, so every test
   fake, the replay provider, the stub, and the Anthropic adapter each
   carried a three-line no-op or a hardcoded error for a capability most
-  providers do not have. `elysper-rag` is the only consumer and it goes
+  providers do not have. `uva-rag` is the only consumer and it goes
   through its own `Embedder` trait, so a provider that never drives RAG
   now writes nothing. **Twelve implementations lost their bodies**:
-  seven test fixtures in `elysper-agent` (five in
+  seven test fixtures in `uva-agent` (five in
   `agent/re_act/tests.rs`, two in `tests/test_support.rs`), the provider
   stub, the replay provider, the facade assembly example, the server's
   `ToolCapturingProvider`, and the Anthropic adapter's hardcoded error.
   The two fakes whose tests *pinned* the old error/no-op contract were
   re-pointed at the new one (deliberate decisions, not accidental).
 - **`docs/examples/minimal-consumer/`** — the smallest complete agent,
-  checked in and runnable: **one** dependency (`elysper` with
+  checked in and runnable: **one** dependency (`uva` with
   `default-features = false`), the seven-feature MVP subset from
   `MINIMAL.md`, a scripted provider that requests a tool, a hand-written
   `Tool`, and an assertion that the tool really ran (2 model calls, 1
@@ -7433,31 +7603,31 @@ library, from zero") and what a consumer actually had to compile.
   ever pulls `opentelemetry`, `opentelemetry-otlp`, `tonic`, `axum`,
   `rusqlite`, or `sqlx`. The gate was verified to fail when `telemetry`
   is added back to the subset.
-- **`elysper-telemetry` is now two switchable halves instead of an
+- **`uva-telemetry` is now two switchable halves instead of an
   all-or-nothing dependency**: console/file logging always compiles;
   `metrics` gates the Prometheus vectors; `otlp` gates the OTel
   exporter, W3C propagation, and every `opentelemetry*` + transport
   dependency. `default = ["metrics", "otlp"]` for direct consumers, while
-  in-tree members declare what they use — `elysper-tool` takes
+  in-tree members declare what they use — `uva-tool` takes
   `default-features = false, features = ["metrics"]`, so **an agent
   binary no longer links the OTel SDK, tonic, or the OTLP HTTP
-  transport**. `elysper-server` names `["metrics", "otlp"]` explicitly;
+  transport**. `uva-app-server` names `["metrics", "otlp"]` explicitly;
   the facade's `telemetry` feature turns on both. The MVP feature subset
   drops from **182 to 158** unique crates. `tracer.rs` was split:
   console/file tracing moved to `console.rs`, the OTLP half stayed in
   `tracer.rs`, and the init result was renamed `TracerInitResult` →
   `TracingInit` (its `Otlp` variant exists only with the feature).
-- **Removed dead weight**: `elysper-telemetry` declared `uuid` and
-  `tokio` that no line of the crate used; `elysper-core` — whose entire
+- **Removed dead weight**: `uva-telemetry` declared `uuid` and
+  `tokio` that no line of the crate used; `uva-core` — whose entire
   pitch is runtime neutrality — hard-depended on `reqwest` (for a single
   `From<reqwest::Error>` impl, now the opt-in `reqwest` feature enabled
-  only by `elysper-provider`) and on `tokio` (now a dev-dependency).
+  only by `uva-provider`) and on `tokio` (now a dev-dependency).
 - **Fixed: an OTLP-configured process lost every console log.** The OTLP
   registry composed the level filter and the OTel layer but no `fmt`
-  layer, so setting `ELYSPER_OTLP_ENDPOINT` sent spans to the collector
+  layer, so setting `UVA_OTLP_ENDPOINT` sent spans to the collector
   and nothing to stdout — a boot against an unreachable collector was
   silent. The console layer is now composed alongside them, verified by
-  booting the real server with `ELYSPER_OTLP_ENDPOINT` set and reading
+  booting the real server with `UVA_OTLP_ENDPOINT` set and reading
   the `OpenTelemetry OTLP tracing initialized … protocol=Http
   sampler=…` line back from its log.
 
@@ -7469,20 +7639,20 @@ The round's audit found a durable checkpoint one call short of
 working, a tool-surface seam reachable only from code, and no
 single-dependency entry point.
 
-- **The `elysper` facade crate** (new, 19th member) — one dependency
+- **The `uva` facade crate** (new, 19th member) — one dependency
   instead of nine. Every piece is a feature-gated re-export
-  (`elysper::agent`, `elysper::tool`, …) and `elysper::prelude` is a
+  (`uva::agent`, `uva::tool`, …) and `uva::prelude` is a
   27-name curated subset with each collision decided and documented:
-  `Result` is `elysper_core::Result`, `Tool` is the trait (the derive
-  macro stays at `elysper::macros::Tool`), `Context` is
-  `elysper_tool::Context`, and `SessionEndReason` — two genuinely
+  `Result` is `uva_core::Result`, `Tool` is the trait (the derive
+  macro stays at `uva::macros::Tool`), `Context` is
+  `uva_tool::Context`, and `SessionEndReason` — two genuinely
   different types — is deliberately excluded. Default features assemble
   a basic agent; `skill`/`attachment`/`mcp`/`rag`/`scheduler`/`eval`/
   `workflow`/`telemetry`/`sqlite`/`server`/`test-support` are opt-in.
   The crate docs are the assembly tutorial and 11 `compile_fail` doc
   tests plus a gating integration test pin the feature matrix. The
   crate holds **no logic**, so it cannot drift behaviourally.
-- **`ToolSurfacePolicy`** (`elysper-tool` + agent + server) — the R33
+- **`ToolSurfacePolicy`** (`uva-tool` + agent + server) — the R33
   tool surface, reachable from a deployment: `groups` with an
   `active_groups` set (a member of an inactive group is not advertised,
   and still executes), a deterministic `max_visible` cap, and deferred
@@ -7501,7 +7671,7 @@ single-dependency entry point.
   visible-name filter on top of the R33 projection; with no policy the
   definitions stay byte-identical (the R33 regression test was
   extended).
-- **Host-side candidate selection for `best_of`** (`elysper-workflow`) —
+- **Host-side candidate selection for `best_of`** (`uva-workflow`) —
   `WorkflowHost::select_candidate(&SelectionRequest)` with a default
   body returning `None` (keep R33's first-passing-gate rule), so no host
   breaks and the document format is unchanged. `SelectionRequest` /
@@ -7513,8 +7683,8 @@ single-dependency entry point.
   hiding a wrong judgement behind a plausible winner; and the `Arc<T>`
   host forwarder was extended so an `Arc<MyHost>` cannot silently fall
   back to the default.
-- **Durable compaction checkpoints, end to end** (`elysper-session`,
-  `elysper-context`, `elysper-agent`, `elysper-server`) — the emitters
+- **Durable compaction checkpoints, end to end** (`uva-session`,
+  `uva-context`, `uva-agent`, `uva-app-server`) — the emitters
   were never installed, so the log never recorded a compaction and a
   resume replayed (and re-paid for) the pre-compaction history. Now:
   `SurfaceLedger` resolves provenance **through the log** (the manager's
@@ -7544,10 +7714,10 @@ Results + evidence: `docs/optimization-report-R33-2026-09-12.md`.
 Reconnaissance found three mechanisms that existed as vocabulary but
 that nothing consumed; R33 wires each of them up.
 
-- **The tool surface, in one place** (`elysper-tool` + `elysper-agent` +
-  `elysper-server`) — `ToolEntry::with_exposure` / `exposure()` carry a
+- **The tool surface, in one place** (`uva-tool` + `uva-agent` +
+  `uva-app-server`) — `ToolEntry::with_exposure` / `exposure()` carry a
   `ToolExposure` onto `ToolDescriptor`, and
-  `elysper_tool::{project_tool_definitions, called_tool_names}` turn
+  `uva_tool::{project_tool_definitions, called_tool_names}` turn
   descriptors + an optional visible-name filter + the set of
   already-called names into the model-facing `Vec<ToolDefinition>`:
   `Direct` sends the full schema, `Deferred` sends name + description
@@ -7561,7 +7731,7 @@ that nothing consumed; R33 wires each of them up.
   schema-less projections with no caller. A registry with no
   `Deferred`/`Hidden` tools produces byte-identical definitions to
   before (pinned by test).
-- **Wire hygiene** (`elysper-provider`) — `json_repair::{repair_json,
+- **Wire hygiene** (`uva-provider`) — `json_repair::{repair_json,
   parse_tool_input_reported, parse_tool_input_logged, ToolArgsQuality}`
   salvages tool-call arguments that are not valid JSON (raw control
   characters inside strings, invalid escapes) and **reports** whether
@@ -7573,7 +7743,7 @@ that nothing consumed; R33 wires each of them up.
   every finalization site routes through the single shared function.
   Refusing a *truncated* argument stays the length-stop guard's job —
   a half-written argument is reported, never silently completed.
-- **Structured provider error signals** (`elysper-provider`) —
+- **Structured provider error signals** (`uva-provider`) —
   `error_body::{ProviderErrorBody, parse_provider_error_body}` parse the
   OpenAI-shaped and Anthropic-shaped error bodies (plus a bounded
   excerpt for anything else), and
@@ -7584,7 +7754,7 @@ that nothing consumed; R33 wires each of them up.
   recovers in-session) while a plain 429 stays `RateLimit`; text-only
   bodies keep their previous class. Both adapters' 429 paths now read
   the body they were previously discarding.
-- **`best_of` workflow selection** (`elysper-workflow`) — `Step::BestOf`
+- **`best_of` workflow selection** (`uva-workflow`) — `Step::BestOf`
   / `BestOfStep` (wire kind `best_of`) run one call per candidate under
   the existing caps and concurrency bound and keep the first candidate
   whose gate passes; `CallStatus::Superseded` records the losers without
@@ -7605,7 +7775,7 @@ Results + evidence: `docs/optimization-report-R32-2026-09-12.md`.
 R32 also completes R31's Wave 2 (its plan's item P) and repairs
 everything R31 left broken — see the R31 report.
 
-- **`elysper_tool::GroupedRegistry`** (traitclaw `GroupedRegistry`
+- **`uva_tool::GroupedRegistry`** (traitclaw `GroupedRegistry`
   parity) — named tool groups with independent activation. The
   read-side wrapper offers only the tools of **active** groups (plus
   tools no group claims) while dispatch is untouched, so a tool whose
@@ -7616,7 +7786,7 @@ everything R31 left broken — see the R31 report.
   one group, so visibility never depends on declaration order.
   `ToolRegistry::contains` is the new wiring-side lookup the
   validation needs (hidden tools included, same key dispatch uses).
-- **`elysper_context::memory::sqlite::SqliteMemory`** (feature
+- **`uva_context::memory::sqlite::SqliteMemory`** (feature
   `sqlite`, traitclaw-memory-sqlite parity) — single-file durable
   memory: `FTS5`/BM25 long-term recall (queries are sanitised into
   quoted terms, so `NEAR(` and `*` are text rather than syntax
@@ -7624,20 +7794,20 @@ everything R31 left broken — see the R31 report.
   working-memory table, a session registry, read-only opens that
   refuse every write, and typed errors that keep `SQLite`'s own
   message. The conversation tier deliberately delegates to the
-  sink-backed `Memory` (documented divergence: elysper's durable event
+  sink-backed `Memory` (documented divergence: uva's durable event
   log is already the conversation source of truth). New optional
   dependency: `rusqlite` with `bundled` (no system `libsqlite3`,
   `FTS5` compiled in); the default build is unchanged.
 - **Output transformers + full-output retrieval** (traitclaw
-  transformers parity) — `elysper_core::{FullOutputStore,
+  transformers parity) — `uva_core::{FullOutputStore,
   InMemoryFullOutputStore}` (bounded by entries **and** bytes, true
   LRU where a `get` refreshes recency, handles never reused),
-  `elysper_tool::__get_full_output` + `full_output_tool` (the
+  `uva_tool::__get_full_output` + `full_output_tool` (the
   model-facing retrieval path, `ToolOutput::error` for an unknown
-  handle), and `elysper_steering::{TransformerChain, JsonExtractor,
+  handle), and `uva_steering::{TransformerChain, JsonExtractor,
   BudgetAwareTruncator}` (chain order matters: extract, then budget).
   A large tool result is now *stashed and cited* instead of dropped.
-- **`elysper_agent::agent::team`** (traitclaw-team parity) —
+- **`uva_agent::agent::team`** (traitclaw-team parity) —
   `BoundAgent` (a name and one `prompt -> text` call: no session,
   provider or runtime), `FnAgent`, `Verifier`/`Verdict`,
   `VerificationChain`/`ChainOutcome` (generate → verify → retry, with
@@ -7646,7 +7816,7 @@ everything R31 left broken — see the R31 report.
   `RoundRobinGroupChat` with `TerminationCondition`,
   `MaxRoundsTermination`, `MarkerTermination`, per-turn attribution
   and an explicit `StopReason`.
-- **`elysper_agent::agent::route_rules::ConditionalRouter`
+- **`uva_agent::agent::route_rules::ConditionalRouter`
   (traitclaw conditional-router parity) — ordered regex rules,
   first match wins, default fallback, `RoutePatternError` for a bad
   pattern (never a panic). It implements the existing `Router` trait,
@@ -7659,12 +7829,12 @@ everything R31 left broken — see the R31 report.
   `run_inbox_steering`, `runtime_context`, `token_meter`,
   `delegation_gate`, `worktree_isolation`.
 - **Fixed — tests no longer need ambient credentials.** Four lib tests
-  in `elysper-server` (`routes::health` ×3, `server::tests`) and eight
+  in `uva-app-server` (`routes::health` ×3, `server::tests`) and eight
   integration tests (`boot_wiring_test`, `operation_endpoint_test`)
   booted the production path and therefore required
   `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` to be exported; they now use a
   hermetic state or a temp workspace whose provider reads a key the
-  test itself sets (`crates/elysper-server/tests/support/mod.rs`).
+  test itself sets (`crates/uva-app-server/tests/support/mod.rs`).
   The `assemble_with_provider_profile` example selected its default
   profile by insertion order (Anthropic) and so needed a credential to
   run despite documenting that it does not; it now selects the keyless
@@ -7681,14 +7851,14 @@ named but did not ship (they are in R32 below). Results and the
 repair record:
 `docs/optimization-report-R31-2026-09-12.md`.
 
-- **`elysper-context::memory::file`** (pi-subagents §memory) —
+- **`uva-context::memory::file`** (pi-subagents §memory) —
   `FileMemory`: scoped long-term memory (`local` / `project` / `user`
   directories), `MEMORY.md` index bounded to 200 lines plus one
   frontmatter file per ULID entry, deterministic keyword recall
   (name 3× / description 2× / body 1×, newest-id tie-break),
   read-only mode, and path defenses (agent-name whitelist, symlink and
   traversal refusal).
-- **`elysper-tool::sandbox`** (dsh §sandbox) — `ExecutionPolicy`
+- **`uva-tool::sandbox`** (dsh §sandbox) — `ExecutionPolicy`
   (`ReadOnly` / `WorkspaceWrite` / `DangerFullAccess`),
   `SandboxBackend::confine(policy, root) -> ConfinedCommand` with
   confinement as **argv construction** rather than a wrapper process,
@@ -7700,7 +7870,7 @@ repair record:
   and the `effective_policy` fold (`grant > session event >
   deployment default`). The `shell` tool consumes it end to end and
   renders `[sandbox: file access denied under <mode> mode]`.
-- **`elysper-agent::agent::pool`** (pi-subagents §agent-manager) —
+- **`uva-agent::agent::pool`** (pi-subagents §agent-manager) —
   `SubagentPool`: two independent lanes (bounded background with a
   FIFO queue, unbounded foreground), nested children uncharged so a
   parent awaiting a child can never deadlock behind a slot it holds,
@@ -7708,7 +7878,7 @@ repair record:
   discriminators so a stale ticket frees nothing, and
   `InvocationRecord` capturing requested-vs-effective model/tier plus
   usage and status.
-- **`elysper-workflow`** (new crate, pi-subagents §workflow) —
+- **`uva-workflow`** (new crate, pi-subagents §workflow) —
   `WorkflowSpec` (`agent` / `fan_out` / `pipeline` steps) executed by
   `WorkflowRuntime` through a single `WorkflowHost` effect seam
   (`spawn_agent` / `run_gate`), so caps, concurrency and abort are
@@ -7719,7 +7889,7 @@ repair record:
   the longest matching prefix and re-running the tail).
 - **Fixed (R32-opening repair):** R31 landed with a NUL-corrupted
   `tests/sandbox_smoke.rs`, an unformatted workspace, a
-  `elysper-workflow` crate that never compiled, a `Waker` moved out of
+  `uva-workflow` crate that never compiled, a `Waker` moved out of
   a shared reference, a `ModelTier` moved out of `&self` in
   `tier_substituted()`, four unused `delegation.rs` imports, and three
   tests asserting behaviour the code never had. All repaired; the
@@ -7735,7 +7905,7 @@ G–M, the rest of the same plan. Plan + the binding contract
 and
 `docs/optimization-report-R29-remaining-contract.md`.
 
-- **`elysper-scheduler`** (new crate, pi-subagents §3) — a
+- **`uva-scheduler`** (new crate, pi-subagents §3) — a
   runtime-neutral cron/interval/once dispatcher. Three modules:
   `Job` (typed `JobKind`, `JobStatus`, ULID ids),
   `Scheduler` (`tick(now) -> ScheduleTick` — the caller owns the
@@ -7745,7 +7915,7 @@ and
   reaping, `temp + rename` atomic writes). 14 tests cover due /
   paused / once / interval advance, lock release, reload
   round-trip, and the `gc_completed` sweep.
-- **`elysper_agent::MentionClone` + `LeaderRouter::mention_clone_mode`**
+- **`uva_agent::MentionClone` + `LeaderRouter::mention_clone_mode`**
   (pi-subagents §2) — route a `@agent: …` mention through a
   throwaway clone instead of the leader's own `task` tool call,
   so the dispatch leaves no reasoning or tool_use block in the
@@ -7769,14 +7939,14 @@ and
   fires `Start → Summary → End(Committed|Failed)` around the
   summariser call, so a crash mid-compaction is detectable as an
   unmatched `Start` rather than an ambiguous gap.
-  `elysper_session::compaction_outcomes` is the loader-side view:
+  `uva_session::compaction_outcomes` is the loader-side view:
   matched lifecycles report their outcome, orphans report
   `Interrupted`.
 - **`assistant_chunk` raw-delta preservation** (dsh §20) — every
   streamed provider delta is now written to the typed event log
   as `SessionEvent::AssistantChunk { chunk_seq, finish_reason,
   data.delta }`, alongside the assembled assistant turn.
-  `elysper_session::assemble_chunks` folds a chunk run back into
+  `uva_session::assemble_chunks` folds a chunk run back into
   the exact streamed text. Off unless a typed sink is wired, so
   the in-memory test path pays nothing.
 - **`ContextManager::set_compaction_details` + `CompactionDetails`**
@@ -7800,11 +7970,11 @@ and
 ### Changed
 
 - `test-support` moved into `crates/` and renamed to
-  **`elysper-test-support`** — the workspace now keeps every crate
-  under `crates/` with the uniform `elysper-` prefix (dir name =
+  **`uva-test-support`** — the workspace now keeps every crate
+  under `crates/` with the uniform `uva-` prefix (dir name =
   package name, matching all 14 siblings). Consumers
-  (`elysper-agent`, `elysper-server` `test-utils` feature +
-  dev-deps, `elysper-tool` dev-deps) follow the rename; no public
+  (`uva-agent`, `uva-app-server` `test-utils` feature +
+  dev-deps, `uva-tool` dev-deps) follow the rename; no public
   API changed — only the crate identity and paths.
 
 ### Internal / Verified (R29 (cont.))
@@ -7814,13 +7984,13 @@ and
   agent 213, **scheduler 14**, attachment 15, mcp 6, rag 38,
   server 387, test-support 1 → **1922 passing / 0 failing**
   (R29 phases A–F baseline: 1877; +45).
-- `elysper-server` integration suites: 387 lib + 4
+- `uva-app-server` integration suites: 387 lib + 4
   (`operation_endpoint_test`) + 2 + 2 + 10 + 4 + 5 + 4 doctests,
   all green.
 - `cargo +nightly fmt --all` exit 0; `cargo clippy --workspace
   --all-targets --all-features --tests -- -D warnings` exit 0.
-- All 8 examples exit 0 (6 under `elysper-agent`, 1 under
-  `elysper-mcp`, 1 under `elysper-rag`); `docs/examples/external-consumer`
+- All 8 examples exit 0 (6 under `uva-agent`, 1 under
+  `uva-mcp`, 1 under `uva-rag`); `docs/examples/external-consumer`
   prints `CONSUMER-PROOF: OK`.
 - Live boot smoke on a real binary: retrieval index built
   (`documents=1`), skills seeded, `/livez` · `/readyz` ·
@@ -7843,21 +8013,21 @@ and
 
 ### Deliberate divergences (R29 (cont.))
 
-| Area | Plan / reference | elysper | Why |
+| Area | Plan / reference | uva | Why |
 |---|---|---|---|
 | MentionClone tool set | one synthetic `agent` tool | empty registry | The peer-dispatch seam that would back it does not exist yet; emptiness is the honest state and the test pins that no builtin leaks in |
 | Compaction lifecycle → log | emitter bridge | loader-side `compaction_outcomes` view | The bridge would be unused plumbing until the loop installs it; a real consumer view is testable and useful today |
 | File-activity tracking | read / write / shell-with-mutation | read / write only | Inferring a shell command's file effects is a guess, and a wrong claim in the summariser prompt is worse than an absent one |
-| Operation endpoint path | `/v1/runs/{agent}/operation` | `/api/v1/chat/sessions/{id}/operation` | Matches elysper's actual route tree; the planned prefix does not exist |
+| Operation endpoint path | `/v1/runs/{agent}/operation` | `/api/v1/chat/sessions/{id}/operation` | Matches uva's actual route tree; the planned prefix does not exist |
 | Operation endpoint config | bare `enable_operation_endpoint: bool` | `[operations] enabled` | Every other subsystem uses a named config table (`cors`, `rate_limit`, `retrieval`); one convention, not two |
 
 ### Added (R29 — four-reference absorption: traitclaw + dsh + pi + pi-subagents)
 
-- **`elysper_tool::ToolRestriction` + `RestrictedRegistry`** (dsh `ToolRestriction` parity, §10) — per-scope allow / deny filter for tool visibility. Two restrictions compose by **intersection** (the dsh "intersect-and-shadow" rule): every ancestor scope contributes a filter, and a tool is visible only if every ancestor permits it. Own registrations stay exempt so a delegated child keeps the tools it answers through. Wire format: `{ "allow": ["read", "write"], "deny": ["shell"] }`; default `{}` means pass-through. `RestrictedRegistry` is a cheap-to-clone wrapper exposing `is_visible` and `visible_names` for the agent loop. 12 tests cover empty / deny / allow / own / intersect.
-- **`elysper_tool::ToolOutputDefinition::presentation_meta` + `finalize_content`** (dsh `ToolDefinition` parity, §8) — completes the R17 output contract. `presentation_meta(args, value)` is a pure projection for UI cards that lets a tool serve the LLM and a UI panel without leaking UI vocabulary into model-visible text. `finalize_content(output)` is the last-mile transform on every outcome (including pipeline failures) so tools can override the failure-path shape without touching the success path. 4 new tests pin the contract.
-- **`elysper_provider::credential::normalize_api_key`** (dsh `INVALID_CREDENTIAL` parity, §6) — pre-send credential classifier. Trims ASCII whitespace, rejects empty / illegal-character / unknown-source keys BEFORE they reach the transport. `WorkspaceConfig::resolve_api_key` and `ProviderProfile::resolve_api_key` now run the classifier at resolve time and return `Error::config` with a stable message; the server boundary maps these to `INVALID_CREDENTIAL` (deliberately NOT in the default retryable set). 9 unit tests.
+- **`uva_tool::ToolRestriction` + `RestrictedRegistry`** (dsh `ToolRestriction` parity, §10) — per-scope allow / deny filter for tool visibility. Two restrictions compose by **intersection** (the dsh "intersect-and-shadow" rule): every ancestor scope contributes a filter, and a tool is visible only if every ancestor permits it. Own registrations stay exempt so a delegated child keeps the tools it answers through. Wire format: `{ "allow": ["read", "write"], "deny": ["shell"] }`; default `{}` means pass-through. `RestrictedRegistry` is a cheap-to-clone wrapper exposing `is_visible` and `visible_names` for the agent loop. 12 tests cover empty / deny / allow / own / intersect.
+- **`uva_tool::ToolOutputDefinition::presentation_meta` + `finalize_content`** (dsh `ToolDefinition` parity, §8) — completes the R17 output contract. `presentation_meta(args, value)` is a pure projection for UI cards that lets a tool serve the LLM and a UI panel without leaking UI vocabulary into model-visible text. `finalize_content(output)` is the last-mile transform on every outcome (including pipeline failures) so tools can override the failure-path shape without touching the success path. 4 new tests pin the contract.
+- **`uva_provider::credential::normalize_api_key`** (dsh `INVALID_CREDENTIAL` parity, §6) — pre-send credential classifier. Trims ASCII whitespace, rejects empty / illegal-character / unknown-source keys BEFORE they reach the transport. `WorkspaceConfig::resolve_api_key` and `ProviderProfile::resolve_api_key` now run the classifier at resolve time and return `Error::config` with a stable message; the server boundary maps these to `INVALID_CREDENTIAL` (deliberately NOT in the default retryable set). 9 unit tests.
 - **`CompletionRequest::replay_state` + `CompletionResponse::replay_state`** (dsh `assistantProvenance.replayState` parity, §7) — opaque provider-native state the adapter can mint on response and the runtime can pass back on the next request (Anthropic prompt cache id, OpenAI response id, …). Threaded through `re_act.rs::step_2_sample_once`; the adapter validates and either consumes or drops. Forward-compat: `#[serde(default)]` on both fields. 3 round-trip tests.
-- **`elysper_tool::ToolSchemaBuilder` + `ToolFeatures`** (pi-subagents `invocation-config.ts:isolationParam` parity, §7) — small builder wrapping a JSON Schema with feature-gated field removal. `with_feature("worktree_isolation", &features, "isolation")` drops the property AND its `required` entry when the feature is off, so the LLM never sees a description for a refused capability. 9 tests cover empty / chain / merge / property add / drop / feature off / feature on / features default / features chain.
+- **`uva_tool::ToolSchemaBuilder` + `ToolFeatures`** (pi-subagents `invocation-config.ts:isolationParam` parity, §7) — small builder wrapping a JSON Schema with feature-gated field removal. `with_feature("worktree_isolation", &features, "isolation")` drops the property AND its `required` entry when the feature is off, so the LLM never sees a description for a refused capability. 9 tests cover empty / chain / merge / property add / drop / feature off / feature on / features default / features chain.
 - **`AgentMeta::requested_model` / `requested_thinking` / `effective_model` / `effective_thinking` / `overrides_applied`** (pi-subagents `invocation-config.ts:overridden` parity, §6) — when caller-supplied model / thinking is outranked by descriptor / frontmatter, the `AgentEvent::Agent` envelope carries both pairs plus an `overrides_applied: bool` so UIs can render "model · thinking: low (asked max)" instead of silently substituting. `AgentMeta::with_overrides(...)` is the builder. 3 round-trip tests.
 
 ### Internal / Verified
@@ -7866,23 +8036,23 @@ and
 - The 36 new R29 tests are: 12 ToolRestriction, 4 ToolOutputDefinition extension, 9 credential, 3 replay_state round-trip, 9 ToolSchemaBuilder, 3 AgentMeta overrides (sums: 40 — the report quote of 36 covers the lib-only test additions; the +4 is the agent_meta tests the per-crate count absorbed).
 - `cargo +nightly fmt --all` exit 0; `cargo clippy --workspace --all-targets --all-features --tests -- -D warnings` exit 0.
 - All 8 examples (`assemble_from_scratch`, `assemble_with_provider_profile`, `assemble_with_skills`, `assemble_with_tier_steering`, `assemble_with_builder`, `register_remote_tools`, `grounded_agent`, `fan_out_with_group_join`) exit 0; `docs/examples/external-consumer` still prints `CONSUMER-PROOF: OK`.
-- `elysper-server --directory <ws> --port 18080` boots; `/livez` 200, `/readyz` 200, `/api/v1/agents` 200, `/api/v1/tools` 200.
+- `uva-app-server --directory <ws> --port 18080` boots; `/livez` 200, `/readyz` 200, `/api/v1/agents` 200, `/api/v1/tools` 200.
 
 ### Added (R30 — correctness seams + production robustness + two DX/quality crates)
 
 Eight designs from the reference repos landed. Plan: `docs/optimization-report-R30-2026-09-12.md`. Verified: fmt clean, clippy `--all-targets -D warnings` 0, **per-crate tests green**, `docs/examples/external-consumer` `CONSUMER-PROOF: OK`.
 
-**Correctness / production** — `elysper-provider`: `RetryClass::{EmptyResponse, Quota}` (dsh llm-retry completion — empty completions become typed errors instead of silent success; quota exhaustion is its own class so it never re-cycles against a dead balance); shared `streaming::idle_watchdog` + `pump_sse` (per-read watchdog, defaults to 120s; SSE cancel-drain grace unified); `validation::is_empty_terminal_completion` shared between Anthropic + OpenAI parse seams (4 tests + 4 types/stream_chunk tests + 6 integration tests). `elysper-mcp`: `public_tool_name` + `NamingPolicy` (`mcp__<server>__<raw>`, sha-suffixed on lossy normalization — two servers with the same raw name now coexist via deterministic prefixing); `McpSupervisor` (tick(now) clock injection, per-outage reconnect budget, generation-swap re-sync on `tools/list_changed`, fail-soft per-server health surfaced through `AppState::mcp_health`); `StreamableHttpTransport` (reqwest-backed, full wiremock integration tests); `elysper-mcp/tests/{mcp_protocol,supervisor,http_transport}.rs` (52 passing). `elysper-session`: `token_meter::TokenMeter` pure fold (disjoint usage buckets, provider-usage anchoring, projected next-request tokens = `max(0, anchor + signed surface_delta)`); `SessionEvent::Usage.usage: Option<UsageBuckets>` (serde-default back-compat — old payloads still parse); `OperationSnapshot::usage_buckets + context_pressure` (serde default); `elysper-context::CompactionSettings::should_compact_anchored` opt-in (heuristic path unchanged). `elysper-agent`: `RunInbox` trait + `MpscInbox` (futures mpsc, runtime-neutral, default empty — byte-identical behavior for inbox-less callers); steering drained at iteration start + between tool commit and next sample + after compaction prep; follow-ups revive a stopping run; `SystemEvent::SteeringInjected` + `SteeringSource::{Steering, FollowUp}` (non-exhaustive match, observable in the event stream); **length-stop guard** — `stop_reason ∈ {length, max_tokens}` with tool calls fails the whole batch via model-facing error `ToolResult`s (no truncated JSON ever runs); `prompt::RuntimeContext` snapshot seam — volatile env facts leave the system prompt, render as an appended user-role snapshot only when the rendered body changed (chrono clock injected; dsh §`renderContextSnapshot` parity); `agent::gate` (verification command on the task tool — exactly-once verdict via injectable `CommandRunner`, killed gates report killed explicitly); `agent::worktree` (git-worktree isolation for delegated children — `elysper/agent-<ulid>` branch on dirty exit, removed on clean, fake git runner exercised by 6 tests; the `worktree_isolation` feature name `elysper-tool/schema_builder` R29 advertised is now real).
+**Correctness / production** — `uva-provider`: `RetryClass::{EmptyResponse, Quota}` (dsh llm-retry completion — empty completions become typed errors instead of silent success; quota exhaustion is its own class so it never re-cycles against a dead balance); shared `streaming::idle_watchdog` + `pump_sse` (per-read watchdog, defaults to 120s; SSE cancel-drain grace unified); `validation::is_empty_terminal_completion` shared between Anthropic + OpenAI parse seams (4 tests + 4 types/stream_chunk tests + 6 integration tests). `uva-mcp`: `public_tool_name` + `NamingPolicy` (`mcp__<server>__<raw>`, sha-suffixed on lossy normalization — two servers with the same raw name now coexist via deterministic prefixing); `McpSupervisor` (tick(now) clock injection, per-outage reconnect budget, generation-swap re-sync on `tools/list_changed`, fail-soft per-server health surfaced through `AppState::mcp_health`); `StreamableHttpTransport` (reqwest-backed, full wiremock integration tests); `uva-mcp/tests/{mcp_protocol,supervisor,http_transport}.rs` (52 passing). `uva-session`: `token_meter::TokenMeter` pure fold (disjoint usage buckets, provider-usage anchoring, projected next-request tokens = `max(0, anchor + signed surface_delta)`); `SessionEvent::Usage.usage: Option<UsageBuckets>` (serde-default back-compat — old payloads still parse); `OperationSnapshot::usage_buckets + context_pressure` (serde default); `uva-context::CompactionSettings::should_compact_anchored` opt-in (heuristic path unchanged). `uva-agent`: `RunInbox` trait + `MpscInbox` (futures mpsc, runtime-neutral, default empty — byte-identical behavior for inbox-less callers); steering drained at iteration start + between tool commit and next sample + after compaction prep; follow-ups revive a stopping run; `SystemEvent::SteeringInjected` + `SteeringSource::{Steering, FollowUp}` (non-exhaustive match, observable in the event stream); **length-stop guard** — `stop_reason ∈ {length, max_tokens}` with tool calls fails the whole batch via model-facing error `ToolResult`s (no truncated JSON ever runs); `prompt::RuntimeContext` snapshot seam — volatile env facts leave the system prompt, render as an appended user-role snapshot only when the rendered body changed (chrono clock injected; dsh §`renderContextSnapshot` parity); `agent::gate` (verification command on the task tool — exactly-once verdict via injectable `CommandRunner`, killed gates report killed explicitly); `agent::worktree` (git-worktree isolation for delegated children — `uva/agent-<ulid>` branch on dirty exit, removed on clean, fake git runner exercised by 6 tests; the `worktree_isolation` feature name `uva-tool/schema_builder` R29 advertised is now real).
 
-**DX / quality** — new crate `elysper-macros`: `#[derive(Tool)]` + helper `#[tool(name, description, mode)]` attribute; generates a full `impl elysper_tool::Tool` delegating to inherent `async fn execute(&self, &Context) -> ToolOutput`; schemars-derived `parameters()` (type-driven, per schemars 1.2 guidance — value-driven breaks for enums / `Option::None`); compile-error diagnostics for misuse (non-struct, generics, missing `execute`, missing description, bad attribute, bad mode); self-dev-dep integration suite, 30 tests. New crate `elysper-eval`: `EvalSuite` / `TestCase` / `Metric` (sync) / `AsyncMetric` / `EvalRunner` (case passes iff ALL metric scores ≥ threshold; no-metrics fallback = keyword); built-ins `KeywordMetric`, `LlmJudgeMetric` (local `JudgeProvider` seam + clamped score parse), `SchemaValidationMetric` (reuses `elysper_core::schema::validate_against_schema`); `EvalReport::summary() + to_json_string() + to_csv_string() + export_json + export_csv` (RFC4180 escaping); 30 tests. `elysper-test-support`: `ReplayProvider` implementing `elysper_provider::ModelProvider` from chunk scripts or session `events.jsonl`; per-run cursor, `assert_consumed` returning `Result<(), ReplayError>` (cancellation aborts undrained cursor; dsh `assertConsumed` parity); 17 tests.
+**DX / quality** — new crate `uva-macros`: `#[derive(Tool)]` + helper `#[tool(name, description, mode)]` attribute; generates a full `impl uva_tool::Tool` delegating to inherent `async fn execute(&self, &Context) -> ToolOutput`; schemars-derived `parameters()` (type-driven, per schemars 1.2 guidance — value-driven breaks for enums / `Option::None`); compile-error diagnostics for misuse (non-struct, generics, missing `execute`, missing description, bad attribute, bad mode); self-dev-dep integration suite, 30 tests. New crate `uva-eval`: `EvalSuite` / `TestCase` / `Metric` (sync) / `AsyncMetric` / `EvalRunner` (case passes iff ALL metric scores ≥ threshold; no-metrics fallback = keyword); built-ins `KeywordMetric`, `LlmJudgeMetric` (local `JudgeProvider` seam + clamped score parse), `SchemaValidationMetric` (reuses `uva_core::schema::validate_against_schema`); `EvalReport::summary() + to_json_string() + to_csv_string() + export_json + export_csv` (RFC4180 escaping); 30 tests. `uva-test-support`: `ReplayProvider` implementing `uva_provider::ModelProvider` from chunk scripts or session `events.jsonl`; per-run cursor, `assert_consumed` returning `Result<(), ReplayError>` (cancellation aborts undrained cursor; dsh `assertConsumed` parity); 17 tests.
 
 ### Deferred (R30-deferred → R31)
 
-- **SubagentWorkflow scripting + journal prefix-replay** (pi-subagents §1) — vm-isolated scripts + JSONL prefix replay. The scripted-VM part is JS-shaped; porting to Rust means a declarative `WorkflowSpec` + caps + journal + gate orchestration as a new `elysper-workflow` crate. Sized ~1500 LOC, deserves a focused round with its own design phase.
-- **OS-level sandbox seam + Landlock/bwrap backends** (dsh §sandbox) — argv construction + Landlock ABI ruleset builder + policy fold over `PersistedEvent`. New crate `elysper-sandbox` (or an `agent` module); kernel-ABI availability makes WSL2 the gating factor for tests.
+- **SubagentWorkflow scripting + journal prefix-replay** (pi-subagents §1) — vm-isolated scripts + JSONL prefix replay. The scripted-VM part is JS-shaped; porting to Rust means a declarative `WorkflowSpec` + caps + journal + gate orchestration as a new `uva-workflow` crate. Sized ~1500 LOC, deserves a focused round with its own design phase.
+- **OS-level sandbox seam + Landlock/bwrap backends** (dsh §sandbox) — argv construction + Landlock ABI ruleset builder + policy fold over `PersistedEvent`. New crate `uva-sandbox` (or an `agent` module); kernel-ABI availability makes WSL2 the gating factor for tests.
 - **SQLite durable sink + FTS5** (traitclaw memory-sqlite parity) — `SqliteSessionSink` implementing the `SessionSink` trait (rusqlite, bundled). New dev-dep `rusqlite` adds build cost; tracked separately.
 - **GroupedRegistry / dynamic tool groups** (traitclaw registries parity) — operator-chosen focus sets where `get_tools()` returns active groups and `find_tool()` searches ALL groups.
-- **File-backed scoped long-term memory** (pi-subagents memory parity) — `MemoryFile` impl of `elysper_context::Memory` long-term tier, with MEMORY.md index file + frontmatter entries + symlink defense.
+- **File-backed scoped long-term memory** (pi-subagents memory parity) — `MemoryFile` impl of `uva_context::Memory` long-term tier, with MEMORY.md index file + frontmatter entries + symlink defense.
 - **Two-pool subagent concurrency manager** (pi-subagents agent-manager parity) — background 10-queued / foreground unbounded / nested no-slot, tombstones, invocation records.
 - **Progressive numbered example ladder** (traitclaw `examples/` parity) — 15-25 micro-crates each demonstrating one seam. Currently the README's 8 example commands cover the main surface; a per-concept ladder is a docs/PR pass, not a code change.
 
@@ -7892,8 +8062,8 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 - **Compaction log-only events + `SurfaceOp.replace` checkpoint** (dsh §12) — the durability seam is identified but not yet wired into `SummarizingContextManager`.
 - **`assistant/chunk` raw-event preservation** (dsh §20) — every `StreamChunk` durably logged; doubles log size, enables live-resume.
 - **SessionEventMap extensibility** (dsh §1+§2) — Rust has no TypeScript `interface` declaration merging; the `inventory` crate gives us a mechanical substitute but a one-round port is too thin to commit.
-- **TUI widgets** (pi coding-agent) — elysper is HTTP, not TUI.
-- **Cross-extension RPC envelopes** (pi-subagents §5) — elysper is a single binary, no event bus; HTTP gateway already carries the equivalent reply envelope.
+- **TUI widgets** (pi coding-agent) — uva is HTTP, not TUI.
+- **Cross-extension RPC envelopes** (pi-subagents §5) — uva is a single binary, no event bus; HTTP gateway already carries the equivalent reply envelope.
 - **FsAdapter / ShellOutputUpdate** (pi §10) — bash tool already has truncation + sanitization; a `Result<T, FsError>` boundary on the FsAdapter is a follow-up.
 - **`shutdownChildSession` lifecycle event** (pi-subagents) — needs the `SessionController` refactor that R26's `GroupJoin` was the seed for.
 
@@ -7902,12 +8072,12 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 
 
 
-| Area | Reference | elysper R29 | Why |
+| Area | Reference | uva R29 | Why |
 |---|---|---|---|
 | Tool output `render` | blanket trait impl | default trait method on `Tool` | R17: a blanket impl makes a concrete override a coherence error |
-| Credential rejection | throw `INVALID_CREDENTIAL` directly | `Error::config("Invalid API key in <env>: …")` mapped at the server boundary | Elysper's `Error` taxonomy owns the variant; the transport layer is the only place that knows the HTTP code |
+| Credential rejection | throw `INVALID_CREDENTIAL` directly | `Error::config("Invalid API key in <env>: …")` mapped at the server boundary | Uva's `Error` taxonomy owns the variant; the transport layer is the only place that knows the HTTP code |
 | `presentation_meta` | UI card JSON | `Option<serde_json::Value>` on the definition | The same value can ride the wire verbatim — no extra wrapper |
-| `replay_state` | one field on `assistantProvenance` | one field on `CompletionRequest` + one on `CompletionResponse` | Elysper carries the state on the wire type, not on a separate `MessageSource` |
+| `replay_state` | one field on `assistantProvenance` | one field on `CompletionRequest` + one on `CompletionResponse` | Uva carries the state on the wire type, not on a separate `MessageSource` |
 
 ### Changed (R27 — `re_act.rs` split: 5896 → 2116 lines, no behaviour change)
 
@@ -7915,42 +8085,42 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
   - `agent/re_act.rs` — 2116 lines of production code (`ReActAgent`, `ReActLoop`, helpers) and the module map.
   - `agent/re_act/stream.rs` (402 lines) — **streaming chunk ingestion**: the buffers, the drain logic, the finalizer and their tests. Its interface to the loop is two items, `StreamSink` (typed event emitters) and `ChunkState` (the per-sampling-pass accumulator); everything else is `private`, which is what makes it a deep module: it is the only code that knows a provider's chunk shapes.
   - `agent/re_act/tests.rs` (3352 lines) — the test suite, moved out of the production file via the Rust 2018 child-module form (`mod tests;`), so the module path is unchanged and no test needed editing.
-- Extraction was mechanical and compiler-verified: visibility on exactly five methods plus two types, imports resolved from the compiler's own diagnostics, and `cargo test -p elysper-agent --lib` unchanged at 203 passing before and after.
+- Extraction was mechanical and compiler-verified: visibility on exactly five methods plus two types, imports resolved from the compiler's own diagnostics, and `cargo test -p uva-agent --lib` unchanged at 203 passing before and after.
 
 ### Added (R26 — `GroupJoin`: batched completion notification for background agents)
 
-- **`elysper_agent::GroupJoin`** — pi-subagents `group-join.ts` parity, and the last named reference gap. When an orchestrator fans out background subagents, notifying the main agent once per completion produces a burst of interruptions; `GroupJoin` holds those completions and emits **one** consolidated [`Delivery`] per group. Semantics: `Pass` for an ungrouped id (notify individually), `Held` while members are outstanding, an immediate `partial: false` delivery when the last member finishes, and on window expiry a `partial: true` delivery of the finished subset so a single slow straggler cannot stall the batch — the group then survives on a shorter straggler window (30 s / 15 s, pi's defaults), and a member is delivered **at most once** across partials.
+- **`uva_agent::GroupJoin`** — pi-subagents `group-join.ts` parity, and the last named reference gap. When an orchestrator fans out background subagents, notifying the main agent once per completion produces a burst of interruptions; `GroupJoin` holds those completions and emits **one** consolidated [`Delivery`] per group. Semantics: `Pass` for an ungrouped id (notify individually), `Held` while members are outstanding, an immediate `partial: false` delivery when the last member finishes, and on window expiry a `partial: true` delivery of the finished subset so a single slow straggler cannot stall the batch — the group then survives on a shorter straggler window (30 s / 15 s, pi's defaults), and a member is delivered **at most once** across partials.
 - **Runtime-neutral by construction**: a pure state machine with no clock and no timer. The caller passes `now` (`chrono::DateTime<Utc>`) and arms its own timer from `GroupJoin::next_deadline()`, so it works on any executor and its tests are fully deterministic (no fake timers, unlike the reference implementation).
-- Example `crates/elysper-agent/examples/fan_out_with_group_join.rs` — a 3-member panel delivering one notification, plus the timeout/straggler path; asserts nobody is delivered twice.
+- Example `crates/uva-agent/examples/fan_out_with_group_join.rs` — a 3-member panel delivering one notification, plus the timeout/straggler path; asserts nobody is delivered twice.
 - 10 tests covering the state machine: pass-through, single delivery on completion, deadline arming, deadline expiry (silent before, partial after), straggler re-batching on the shorter window, no double delivery, empty-window re-arm, `forget`, empty registration, re-registration replacing a group, and two independent groups. A test caught a real leak on the first run (a retired group left its members' id→group mappings behind, so `is_grouped` stayed `true`); `forget` now drops pending, finished **and** delivered ids.
 
 ### Added / Fixed (R25 — production boot E2E)
 
 - **MCP transports carry a `label`** (`StdioConfig::label`) and `StdioTransport` bounds its auto-generated description to 60 chars. Previously `server=stdio: sh -c <script>` dumped an entire multi-line script into every log line and never named the configured server; the server now passes `McpServerConfig::name`, so logs read `server=boot-e2e`.
-- **`crates/elysper-server/tests/boot_wiring_test.rs`** — drives the real `AppState::new` boot path and then the real router, so the R21/R22 wiring is protected end-to-end: config → MCP spawn → tool publication → `GET /api/v1/tools` contains the remote tool, `AppState::retrieval` is populated, builtins survive, and a config-less deployment boots with no remote tools. Unit tests on the individual helpers could not catch a wiring regression (e.g. registering MCP tools after the registry is wrapped in its lock).
+- **`crates/uva-app-server/tests/boot_wiring_test.rs`** — drives the real `AppState::new` boot path and then the real router, so the R21/R22 wiring is protected end-to-end: config → MCP spawn → tool publication → `GET /api/v1/tools` contains the remote tool, `AppState::retrieval` is populated, builtins survive, and a config-less deployment boots with no remote tools. Unit tests on the individual helpers could not catch a wiring regression (e.g. registering MCP tools after the registry is wrapped in its lock).
 
 ### Verified (R25 — real binary, not just tests)
 
-- `elysper-server --directory <ws> --port 18080` boots and logs `elysper.mcp: spawned MCP server server=boot-e2e` → `registered MCP server tools tools=1` → `elysper.rag: built retrieval index documents=2` (a `.png` in the indexed tree was correctly skipped).
+- `uva-app-server --directory <ws> --port 18080` boots and logs `uva.mcp: spawned MCP server server=boot-e2e` → `registered MCP server tools tools=1` → `uva.rag: built retrieval index documents=2` (a `.png` in the indexed tree was correctly skipped).
 - Live HTTP: `/livez` 200, `/readyz` 200, `/api/v1/agents` 200, `/api/v1/tools` 200 listing **7 tools** — the 6 builtins plus `e2e_remote_tool` served by the spawned MCP child (confirmed alive as a child of the server process).
 
 ### Changed (R24 — error-handling convention audit)
 
 - **The last three hand-rolled error enums now use `thiserror`** (AGENTS.md §3.1: library crates handle errors with `thiserror`), which also deletes their hand-written `Display` boilerplate:
-  - `elysper_session::SessionError` — messages preserved verbatim (`"session is closed"`, `"{0}"` passthrough for the payload variants), `Display` + `Error` impls deleted.
-  - `elysper_steering::AdmissionError` — messages preserved verbatim, impls deleted.
-  - `elysper_session::FoldError` — **had no `Display` and no `Error` impl at all**, so it could not be erased into a boxed error or `?`-propagated. It now has both, with messages naming the offending event/range, pinned by a test.
+  - `uva_session::SessionError` — messages preserved verbatim (`"session is closed"`, `"{0}"` passthrough for the payload variants), `Display` + `Error` impls deleted.
+  - `uva_steering::AdmissionError` — messages preserved verbatim, impls deleted.
+  - `uva_session::FoldError` — **had no `Display` and no `Error` impl at all**, so it could not be erased into a boxed error or `?`-propagated. It now has both, with messages naming the offending event/range, pinned by a test.
 
 ### Verified (R24 — convention audit on the current tree)
 
 - `SystemTime` appears exactly once (`bound_output.rs` mtime cutoff vs `metadata.modified()`) — the documented-correct use for filesystem timestamps; all wall-clock time is `chrono::DateTime<Utc>`.
-- Error choice per crate: every library crate uses `thiserror` (or re-exports `elysper_core::Error`, itself `thiserror`); only `elysper-server` — the binary/app crate — uses `anyhow`. No crate uses both.
+- Error choice per crate: every library crate uses `thiserror` (or re-exports `uva_core::Error`, itself `thiserror`); only `uva-app-server` — the binary/app crate — uses `anyhow`. No crate uses both.
 - Dependency versions are all `major.minor`; the only three-segment literal is `[workspace.package] version = "0.1.0"`, which is this workspace's own version, not a dependency.
-- Public-API `tokio` leaks: **0** across the 12 library crates (visibility-aware audit over public fns, public struct fields, enum variants, type aliases). The 13th crate under `crates/` — `elysper-server` — is the application crate and legitimately names `tokio` types (e.g. its broadcast `subscribe()`); the neutrality rule is a library guarantee, so it is stated for libraries only.
+- Public-API `tokio` leaks: **0** across the 12 library crates (visibility-aware audit over public fns, public struct fields, enum variants, type aliases). The 13th crate under `crates/` — `uva-app-server` — is the application crate and legitimately names `tokio` types (e.g. its broadcast `subscribe()`); the neutrality rule is a library guarantee, so it is stated for libraries only.
 
 ### Fixed (R23 — runtime-neutrality audit)
 
-- **`elysper-tool::start_cleanup_task` no longer returns `tokio::task::JoinHandle<()>`** — the last `tokio` type in any library crate's public signature, found by a visibility-aware audit over the 12 library crates (public fns, public struct fields, enum variants, type aliases). It now returns a runtime-neutral `CleanupTask` with `abort()` (also run on drop) and `detach()` (keep cleaning without the handle). R6 established the principle that lib crates expose only std / `futures` / workspace-own types in public signatures, with `tokio` as an implementation detail; this closes the one remaining violation. The audit now reports **0 leaks**; re-run it before claiming neutrality for a new crate.
+- **`uva-tool::start_cleanup_task` no longer returns `tokio::task::JoinHandle<()>`** — the last `tokio` type in any library crate's public signature, found by a visibility-aware audit over the 12 library crates (public fns, public struct fields, enum variants, type aliases). It now returns a runtime-neutral `CleanupTask` with `abort()` (also run on drop) and `detach()` (keep cleaning without the handle). R6 established the principle that lib crates expose only std / `futures` / workspace-own types in public signatures, with `tokio` as an implementation detail; this closes the one remaining violation. The audit now reports **0 leaks**; re-run it before claiming neutrality for a new crate.
 - 2 behavioural tests: the cleanup loop really deletes stale managed files; dropping the handle aborts the loop; `detach` keeps it running.
 
 ### Verified (R23 — end-to-end audit on the current tree)
@@ -7962,43 +8132,43 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 ### Added / Changed (R22 — config-driven RAG grounding; one generic context-manager seam)
 
 - **Retrieval grounding from config** (R22, completes the "every capability is reachable from deployment config" story alongside R16 compaction and R21 MCP): `ServerConfig.retrieval` (`enabled` / `paths` / `chunk_chars` / `top_k` / `char_budget`). At boot the server walks the configured paths, chunks every text-ish file (`.md`, `.txt`, `.rst`, `.toml`, `.json`, `.yaml`, `.yml`; `.git`/`target`/`node_modules` skipped), and builds a BM25 index — dependency-free, deterministic, **no network call**, so grounding turns on with config alone. Unreadable paths log `warn` and are skipped; an empty index is skipped rather than failing boot.
-- **`AgentRunConfig.context_manager`, replacing R16's capability-specific `compaction` field.** The caller composes whatever manager it wants and hands it in; the loop factory just installs it (`None` keeps the loop default). One generic seam beats one field per capability — and it keeps `elysper-agent` free of any dependency on the compaction or retrieval crates. The run factory got simpler: it no longer clones a provider handle for compaction.
+- **`AgentRunConfig.context_manager`, replacing R16's capability-specific `compaction` field.** The caller composes whatever manager it wants and hands it in; the loop factory just installs it (`None` keeps the loop default). One generic seam beats one field per capability — and it keeps `uva-agent` free of any dependency on the compaction or retrieval crates. The run factory got simpler: it no longer clones a provider handle for compaction.
 - **`ground_with_retrieval(retriever, inner)`** — public composition helper with the ordering contract pinned by test: the grounder injects retrieved context and *then* delegates inward, so compaction/truncation still trims to the window. Grounding never escapes the budget. With both capabilities configured the server composes exactly this chain.
 - **`RunDependencies::{retrieval, with_retrieval, with_optional_retrieval, compose_context_manager}`** + `AppState::retrieval`.
 - 6 tests: retrieval config round-trip, boot index build (nested dirs walked, non-text extensions ignored, retrieved content ranks for its own query), opt-in semantics (no config / disabled / nothing-indexable → no index), grounding-before-inner ordering (spy inner manager observes the injected block), and composed-manager opt-in.
 
 ### Added (R21 — config-driven MCP servers at boot)
 
-- **`mcp_servers` in the server config** (R21, completes R19's production story): `ServerConfig.mcp_servers: Vec<McpServerConfig>` (`name` / `command` / `args` / `env` / `enabled`) with `to_stdio_config()` bridging to `elysper_mcp::StdioConfig`. At boot `register_configured_mcp_servers` spawns each enabled server, runs the MCP handshake, and publishes its tools into the local registry — so remote tools flow through the same guard pipeline, dispatch, metrics, and `output_definition` seam as builtins, exactly like `/api/v1/agents`-registered or builtin tools. Deployments add MCP capability with config alone.
+- **`mcp_servers` in the server config** (R21, completes R19's production story): `ServerConfig.mcp_servers: Vec<McpServerConfig>` (`name` / `command` / `args` / `env` / `enabled`) with `to_stdio_config()` bridging to `uva_mcp::StdioConfig`. At boot `register_configured_mcp_servers` spawns each enabled server, runs the MCP handshake, and publishes its tools into the local registry — so remote tools flow through the same guard pipeline, dispatch, metrics, and `output_definition` seam as builtins, exactly like `/api/v1/agents`-registered or builtin tools. Deployments add MCP capability with config alone.
 - **Fail-soft boot**: a server that cannot spawn, handshake, or list is logged at `warn` and skipped; a broken optional integration never blocks startup (pinned by test — the builtin surface survives intact).
 - **`AppState::mcp_clients`**: the live clients are retained for the process lifetime, because dropping a `StdioTransport` kills its child process (`kill_on_drop`). Consumers can address servers by name.
 - 3 tests: config round-trip (incl. the MCP list), boot registration against a scripted `sh` MCP responder (tools visible in the registry + catalog, disabled servers skipped), and broken-server tolerance.
 
 ### Added (R20 — RAG: retrieval-augmented grounding)
 
-- **New crate `elysper-rag`** (R20, traitclaw `crates/traitclaw-rag` parity with documented improvements):
+- **New crate `uva-rag`** (R20, traitclaw `crates/traitclaw-rag` parity with documented improvements):
   - **`Retriever`** seam + [`Document`]/`ScoredDocument` (score separated from the document — a score belongs to a *(document, query)* pair). Deterministic ranking: descending score, **id tie-break**, so the grounding prompt is reproducible for provider-side prompt caching.
   - **Chunkers** — `FixedSizeChunker` (character-counted so multi-byte text never splits mid-codepoint, optional overlap), `SentenceChunker` (ASCII + CJK terminators), `RecursiveChunker` (paragraph → line → sentence → hard-cut hierarchy). All deterministic.
   - **`KeywordRetriever`** — **real BM25** (`k1 = 1.2`, `b = 0.75`, probabilistic IDF with `+0.5` smoothing, length normalisation) with dependency-free tokenisation (lowercase, punctuation split, per-character CJK). traitclaw's version is `Σ tf/(tf+1)` with no IDF; a rare term must outrank a common one (pinned by test).
-  - **`EmbeddingRetriever`** + **`Embedder`** trait, with `ModelProviderEmbedder` adapting any `elysper_provider::ModelProvider` (index-time batch embed, query-time single embed, cosine similarity). A retrieval failure logs at `warn` and degrades to "no grounding" — never breaks a turn, never silent.
+  - **`EmbeddingRetriever`** + **`Embedder`** trait, with `ModelProviderEmbedder` adapting any `uva_provider::ModelProvider` (index-time batch embed, query-time single embed, cosine similarity). A retrieval failure logs at `warn` and degrades to "no grounding" — never breaks a turn, never silent.
   - **`HybridRetriever`** with two merge strategies: `CitationStrategy::ReciprocalRankFusion { k }` (**default**, `k = 60` — scale-robust: BM25 is unbounded, cosine is bounded) and `CitationStrategy::Weighted { keyword_weight }` (min-max normalised). Over-fetch factor `3`.
-  - **`RagContextManager`** — implements `elysper_context::ContextManager`, so grounding composes with compaction / tier steering for free. Retrieves against the newest user turn, renders a delimited `<retrieved_context>` block with numbered citations, **replaces** its own previous injection instead of stacking, skips retrieval for very short queries, and delegates to an inner manager so grounding still fits the window.
-- **Example** `crates/elysper-rag/examples/grounded_agent.rs` — chunk two sources → BM25 index → ranking → grounding prompt (printed) → RRF hybrid merge. No network, no embedder needed.
+  - **`RagContextManager`** — implements `uva_context::ContextManager`, so grounding composes with compaction / tier steering for free. Retrieves against the newest user turn, renders a delimited `<retrieved_context>` block with numbered citations, **replaces** its own previous injection instead of stacking, skips retrieval for very short queries, and delegates to an inner manager so grounding still fits the window.
+- **Example** `crates/uva-rag/examples/grounded_agent.rs` — chunk two sources → BM25 index → ranking → grounding prompt (printed) → RRF hybrid merge. No network, no embedder needed.
 - 38 tests: chunker boundaries (incl. CJK + hard-cut fallback), BM25 ranking + IDF + CJK query, embedder contract violations, cosine edge cases, RRF/weighted merge, budget selection, grounding rendering, and the context-manager injection/replacement/trim behaviour.
 
 ### Added (R19 — MCP client: remote tools as local lego)
 
-- **New crate `elysper-mcp`** (R19, traitclaw `crates/traitclaw-mcp` parity, reshaped for elysper's seams): a Model Context Protocol client.
+- **New crate `uva-mcp`** (R19, traitclaw `crates/traitclaw-mcp` parity, reshaped for uva's seams): a Model Context Protocol client.
   - **`McpTransport`** — the I/O seam (one JSON-RPC 2.0 request → one result). `StdioTransport` spawns a child process over newline-delimited JSON-RPC with a per-transport pair lock, stderr inherited, `kill_on_drop(true)`, and an id-matching read loop that skips server notifications. `InMemoryTransport` (public, not `#[cfg(test)]`) scripts responses so consumers test their own MCP wiring with **no process spawn**.
   - **`McpClient`** — `initialize` (protocolVersion `2025-06-18`, clientInfo, then the mandatory `notifications/initialized`), `tools_list`, `tools_call`.
-  - **`McpTool`** — a remote tool adapted to `elysper_tool::Tool` (name/description/`inputSchema` from the spec; `RenderKind::Json` + `mcp_server` presentation hint; `isError` → error output; transport failure → error output).
+  - **`McpTool`** — a remote tool adapted to `uva_tool::Tool` (name/description/`inputSchema` from the spec; `RenderKind::Json` + `mcp_server` presentation hint; `isError` → error output; transport failure → error output).
   - **`register_mcp_tools`** — publish every advertised tool into a `ToolRegistry`, after which they flow through the same guard pipeline, dispatch, metrics, and `output_definition` seam as builtins.
-- **Example** `crates/elysper-mcp/examples/register_remote_tools.rs` — spawns a POSIX `sh` responder over stdio, handshakes, registers `sum`, and calls it (success + `isError` paths). Runs with no network and no external MCP server.
+- **Example** `crates/uva-mcp/examples/register_remote_tools.rs` — spawns a POSIX `sh` responder over stdio, handshakes, registers `sum`, and calls it (success + `isError` paths). Runs with no network and no external MCP server.
 - 16 tests: 10 protocol/adapter/registry integration (incl. a **real stdio round-trip** against a scripted `sh` child with 4 sequential id-matched calls) + 6 in-crate unit tests.
 
 ### Added (R18 — external-consumer proof, checked in)
 
-- **`docs/examples/external-consumer/`** — a standalone crate that is deliberately NOT a workspace member (empty `[workspace]` table) and depends on the elysper crates by relative path. It assembles a complete agent in one `AgentBuilder` chain (provider + tier steering + `.output_schema` auto-tool + `.compaction_settings` + typed sink), round-trips an image through the `AttachmentStore`, drives a turn with a std-only `AtomicCancelToken`, and asserts the result. Run: `cd docs/examples/external-consumer && cargo run` → `CONSUMER-PROOF: OK`. This is direct evidence for the goal's "use this repo as a lib from zero" claim: an out-of-tree consumer builds and runs against the published surfaces with no tokio type in any elysper call. README gained the "Consume elysper from your own crate" recipe.
+- **`docs/examples/external-consumer/`** — a standalone crate that is deliberately NOT a workspace member (empty `[workspace]` table) and depends on the uva crates by relative path. It assembles a complete agent in one `AgentBuilder` chain (provider + tier steering + `.output_schema` auto-tool + `.compaction_settings` + typed sink), round-trips an image through the `AttachmentStore`, drives a turn with a std-only `AtomicCancelToken`, and asserts the result. Run: `cd docs/examples/external-consumer && cargo run` → `CONSUMER-PROOF: OK`. This is direct evidence for the goal's "use this repo as a lib from zero" claim: an out-of-tree consumer builds and runs against the published surfaces with no tokio type in any uva call. README gained the "Consume uva from your own crate" recipe.
 
 ### Added (R17 — ToolOutputDefinition made real)
 
@@ -8009,7 +8179,7 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 
 ### Added (R16 — server-config compaction surface)
 
-- **`agents.<name>.compaction` server config** (R16, completes the R13/R15 production story): `AgentConfig` gains an optional `compaction` table (`enabled` / `reserve_tokens` / `keep_recent_tokens` / `min_messages_between_compaction`) deserialised straight into `CompactionSettings`. `AppState::default_compaction` is resolved at boot via `load_default_compaction` and threaded through `RunDependencies.with_optional_compaction` → `AgentRunConfig.compaction` → the run factory, which installs the provider-backed `SummarizingContextManager` via the new public `elysper_agent::context_manager_for_compaction(provider, settings)`. Deployments can now turn on LLM compaction with config alone. 3 tests (config-table parse with defaults filling the omitted throttle / loader read + unknown-agent + no-name → None / `AgentConfig` 8-field serde contract).
+- **`agents.<name>.compaction` server config** (R16, completes the R13/R15 production story): `AgentConfig` gains an optional `compaction` table (`enabled` / `reserve_tokens` / `keep_recent_tokens` / `min_messages_between_compaction`) deserialised straight into `CompactionSettings`. `AppState::default_compaction` is resolved at boot via `load_default_compaction` and threaded through `RunDependencies.with_optional_compaction` → `AgentRunConfig.compaction` → the run factory, which installs the provider-backed `SummarizingContextManager` via the new public `uva_agent::context_manager_for_compaction(provider, settings)`. Deployments can now turn on LLM compaction with config alone. 3 tests (config-table parse with defaults filling the omitted throttle / loader read + unknown-agent + no-name → None / `AgentConfig` 8-field serde contract).
 - **Fixed: flaky `mutation_queue::same_path_runs_sequentially`**: the test asserted the spawn order `[1, 2]`, but `tokio::spawn` gives no scheduling guarantee — the queue's real contract is mutual exclusion, not FIFO. Rewritten to observe the maximum number of mutations inside the critical section at once (`MUST be 1`) plus "both ran", which is deterministic under any scheduler interleaving.
 
 ### Added (R15 — CompactionSettings drives the SummarizingContextManager trigger)
@@ -8024,55 +8194,55 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 - **`AgentBuilder::compaction_settings` + `resolve_context_manager`** (R13-3, pi `harness/compaction` parity): when the policy is present + enabled + valid, `build()` upgrades the context manager from the truncating default to `SummarizingContextManager` whose summariser forks the agent's own provider (no second model wiring). Invalid settings warn + keep the default; disabled keeps the default. The pure decision core (`resolve_context_manager`) is directly tested across the full table (None/disabled/invalid/valid) including a behavioural prepare smoke on the replaced manager. 1 test.
  ### Added (R12 — AgentBuilder + schema validation + structured output + /status route)
 
-- **`elysper_agent::builder::AgentBuilder`** (R12-1, traitclaw `examples/24-agent-factory` parity): fluent factory hiding the orchestrator wiring. `AgentBuilder::new(provider)` + chained `.workspace() / .tool_registry() / .steering() / .context_manager() / .typed_event_sink() / .peer_registry() / .max_iterations() / .name() / .instructions() / .model_hint()` → `.build()` produces a fully wired `ReActAgent`. Defaults: `/tmp` workspace, empty `ToolRegistry`, `Steering::noop()`, `TruncatingContextManager`, descriptor named `"agent"`. `Clone` for cheap branching. Closes the goal's "乐高式从零组装" axis. 4 tests.
-- **`elysper_core::schema::{validate_against_schema, SchemaViolation}`** (R12-3a): minimal JSON-Schema-subset validator (type / required / properties / items; unknown keywords permissive per spec). Returns **all** violations at once with dotted paths (`"opts.depth"`, `"[2]"`) so the model can fix every field in one retry. 10 tests.
-- **`elysper_tool::structured_output::{StructuredOutputTool, structured_output_tool, STRUCTURED_OUTPUT_TOOL_NAME}`** (R12-3b, pi-subagents `src/structured-output.ts` parity): synthetic tool whose `parameters()` IS the caller's schema — the provider fills the fields as tool-call arguments, `call()` re-validates via `validate_against_schema`, and either captures the canonical JSON payload or returns an `is_error` result enumerating the violations. The structured-output capture pattern without response_format machinery. 5 tests.
+- **`uva_agent::builder::AgentBuilder`** (R12-1, traitclaw `examples/24-agent-factory` parity): fluent factory hiding the orchestrator wiring. `AgentBuilder::new(provider)` + chained `.workspace() / .tool_registry() / .steering() / .context_manager() / .typed_event_sink() / .peer_registry() / .max_iterations() / .name() / .instructions() / .model_hint()` → `.build()` produces a fully wired `ReActAgent`. Defaults: `/tmp` workspace, empty `ToolRegistry`, `Steering::noop()`, `TruncatingContextManager`, descriptor named `"agent"`. `Clone` for cheap branching. Closes the goal's "乐高式从零组装" axis. 4 tests.
+- **`uva_core::schema::{validate_against_schema, SchemaViolation}`** (R12-3a): minimal JSON-Schema-subset validator (type / required / properties / items; unknown keywords permissive per spec). Returns **all** violations at once with dotted paths (`"opts.depth"`, `"[2]"`) so the model can fix every field in one retry. 10 tests.
+- **`uva_tool::structured_output::{StructuredOutputTool, structured_output_tool, STRUCTURED_OUTPUT_TOOL_NAME}`** (R12-3b, pi-subagents `src/structured-output.ts` parity): synthetic tool whose `parameters()` IS the caller's schema — the provider fills the fields as tool-call arguments, `call()` re-validates via `validate_against_schema`, and either captures the canonical JSON payload or returns an `is_error` result enumerating the violations. The structured-output capture pattern without response_format machinery. 5 tests.
 - **`WireAttachment.attachment_hash`** (R12-2): new optional wire field on the chat request — `kind = "attachment_ref"` + `attachment_hash` references a previously-uploaded attachment (from R11's `/api/v1/attachments`) by content hash. `WireAttachment` now derives `Default` + `Serialize` so the hash round-trips through serde. 1 round-trip test. (The agent-runtime resolve-through-store step is the R13 follow-on.)
 - **`GET /api/v1/sessions/{id}/status`** (R12-4, closes the R10-14 deferral): returns the latest `OperationSnapshot` from the controller's snapshot bus (typed `state` / `iteration` / `usage` / `last_error`), or 404 when the session is unknown or has never run. Complements the string-label `infer_status` on `GET /sessions/{id}`. 1 bus-latest test pinning the late-subscriber contract the route depends on.
 ### Added (R11 — multimodal attachments + router/delegation bridge + snapshot emit)
 
-- **New crate `elysper-attachment`** (R11, dsh `packages/attachment/attachment/src/index.ts` parity): content-addressed multimodal attachment store. `ImageAttachmentRef { hash, mime_type, byte_len, saved_at }` carries the SHA-256 identity through the LLM context instead of inline base64; `attachment_to_content_part()` renders the ref into `ContentPart::Image` for the provider wire format. `AttachmentStore` fronts a pluggable `AttachmentBackend` (`FilesystemBackend` sharded `root/{hash[0:2]}/{hash}.{ext}` with dedup-on-write, `InMemoryBackend` for tests) plus a bounded hot-read cache (256 entries) with `evict()`; `read_image` re-verifies the hash on every backend fetch and surfaces `AttachmentError::HashMismatch` on corruption. Validators: `SUPPORTED_IMAGE_MIME` (jpeg/png/gif/webp/bmp) + `DEFAULT_MAX_BYTES` (8 MiB). `read_base64_raw(hash)` serves hash-only lookups. 15 tests.
+- **New crate `uva-attachment`** (R11, dsh `packages/attachment/attachment/src/index.ts` parity): content-addressed multimodal attachment store. `ImageAttachmentRef { hash, mime_type, byte_len, saved_at }` carries the SHA-256 identity through the LLM context instead of inline base64; `attachment_to_content_part()` renders the ref into `ContentPart::Image` for the provider wire format. `AttachmentStore` fronts a pluggable `AttachmentBackend` (`FilesystemBackend` sharded `root/{hash[0:2]}/{hash}.{ext}` with dedup-on-write, `InMemoryBackend` for tests) plus a bounded hot-read cache (256 entries) with `evict()`; `read_image` re-verifies the hash on every backend fetch and surfaces `AttachmentError::HashMismatch` on corruption. Validators: `SUPPORTED_IMAGE_MIME` (jpeg/png/gif/webp/bmp) + `DEFAULT_MAX_BYTES` (8 MiB). `read_base64_raw(hash)` serves hash-only lookups. 15 tests.
 - **`POST/GET/DELETE /api/v1/attachments`** (R11): server surface for the attachment store. `AppState::attachment_store` (filesystem-backed at `<workspace>/.attachments`, in-memory fallback) is shared across handlers; the route validates MIME via a `validator` custom rule, decodes base64, saves through the store, and maps `AttachmentError` onto the unified envelope (`unsupported_mime` 400 / `attachment_too_large` 413 / `attachment_not_found` 404 / corruption 500). 6 route tests.
-- **`mentions_to_task_specs`** (R11, closes the R10-4 loop-interception deferral): converts a `RoutingDecision` from `LeaderRouter::route(text)` into `Vec<TaskSpec>`s the existing delegation seam (`delegation::run_subagent`) understands — `@agent: prompt` text mentions become `task` tool calls without the model emitting a tool_use block. Re-exported from `elysper_agent`. 2 tests.
+- **`mentions_to_task_specs`** (R11, closes the R10-4 loop-interception deferral): converts a `RoutingDecision` from `LeaderRouter::route(text)` into `Vec<TaskSpec>`s the existing delegation seam (`delegation::run_subagent`) understands — `@agent: prompt` text mentions become `task` tool calls without the model emitting a tool_use block. Re-exported from `uva_agent`. 2 tests.
 - **`SessionController::subscribe_snapshots` + snapshot publishing** (R11, closes the R10-5 controller-emit deferral): the controller now publishes `OperationSnapshot`s on the shared `SnapshotBus` at every run-state transition — `Running` in `maybe_start_run` (with resolved agent name + iteration cap), `Completing` when the factory stream ends, `Cancelled { reason }` in the Cancel op handler. `subscribe_snapshots()` on the public handle returns the receiver plus the latest snapshot for late subscribers. 1 controller test pinning the Running→Completing sequence.
  
 ### Added (R10 — tier-aware steering + tool render contract + Router + snapshot bus)
 
-- **`elysper_provider::ModelTier` + `TierLimits`** (R10-6, traitclaw `types/model_info.rs` parity): 3-bucket coarse model-capacity enum (`Small` ≤32K, `Medium` 32K–100K, `Large` >100K context) with `Override(Box<ModelTier>)` for testing escape hatches. `from_model_config` heuristic + `effective()` flattener. `TierLimits::for_tier` exposes 5 per-tier knobs (`max_visible_tools`, `loop_detection_window`, `tool_budget`, `max_concurrency`, `context_budget_threshold`). `ModelProvider::tier()` returns the cheap sync tier; default derives from `model_config()`. 10 tests.
-- **`elysper_steering::tier::for_tier` + `tier::auto`** (R10-2, traitclaw `Steering::for_tier()` parity): one-line tier-tuned bundle factory. Per-tier preset scales guard budget (50/100/250), tracker concurrency cap (1/3/8), and context-budget hint threshold (0.50/0.75/0.80) in lock-step. `auto(provider.tier(), workspace_root)` is the recommended one-liner. 3 tests.
-- **`elysper_tool::AdaptiveRegistry`** (R10-3, traitclaw `AdaptiveRegistry` parity): tier-aware read-side wrapper over `Arc<ToolRegistry>`. Caps the LLM-visible tool list at `max_visible_tools` per tier; hidden tools filtered out by the underlying `snapshot()`. Cheap to clone; `with_tier()` swaps the tier without rebuilding the inner registry. 5 tests.
-- **`elysper_tool::{ToolOutputDefinition, RenderKind, HasOutputDefinition}`** (R10-1, dsh `tools/src/index.ts` ToolOutputDefinition parity): tool-owned canonical rendering contract. `present_call(args, ctx)` projects the tool call for the LLM-facing surface; `present_result(args, output, ctx)` projects the tool result for both LLM and UI surfaces. `RenderKind` enum (`Text` / `Shell` / `Read` / `Write` / `WebFetch` / `Todo` / `Json`) is a hint for UI renderers. `HasOutputDefinition` blanket impl gives every `Tool` a passthrough definition; builtins opt in by overriding. 8 tests.
-- **`elysper_agent::agent::router::{Router, LeaderRouter, PassThroughRouter, Mention, RoutingDecision}`** (R10-4, traitclaw `LeaderRouter` parity): text-routed delegation. `LeaderRouter::route(text)` parses `@<agent_name>: <prompt>` mentions and dispatches each to a known peer. Unknown peers stay in the remainder so the leader can rephrase. Custom trigger char via `with_trigger`. 11 tests. (Note: re_act loop interception is R11+; the trait is a usable building block today.)
-- **`elysper_session::{SnapshotBus, SnapshotReceiver, DEFAULT_BUS_CAPACITY}`** (R10-5, closes the R9-6 deferred wire-up): runtime-neutral subscribe / publish channel for `OperationSnapshot`. `subscribe()` returns a receiver plus the latest snapshot so late subscribers don't have to wait. `publish(snap)` returns the seq number and drops dead subscribers. Bounded by `DEFAULT_BUS_CAPACITY` (64). 4 tests.
+- **`uva_provider::ModelTier` + `TierLimits`** (R10-6, traitclaw `types/model_info.rs` parity): 3-bucket coarse model-capacity enum (`Small` ≤32K, `Medium` 32K–100K, `Large` >100K context) with `Override(Box<ModelTier>)` for testing escape hatches. `from_model_config` heuristic + `effective()` flattener. `TierLimits::for_tier` exposes 5 per-tier knobs (`max_visible_tools`, `loop_detection_window`, `tool_budget`, `max_concurrency`, `context_budget_threshold`). `ModelProvider::tier()` returns the cheap sync tier; default derives from `model_config()`. 10 tests.
+- **`uva_steering::tier::for_tier` + `tier::auto`** (R10-2, traitclaw `Steering::for_tier()` parity): one-line tier-tuned bundle factory. Per-tier preset scales guard budget (50/100/250), tracker concurrency cap (1/3/8), and context-budget hint threshold (0.50/0.75/0.80) in lock-step. `auto(provider.tier(), workspace_root)` is the recommended one-liner. 3 tests.
+- **`uva_tool::AdaptiveRegistry`** (R10-3, traitclaw `AdaptiveRegistry` parity): tier-aware read-side wrapper over `Arc<ToolRegistry>`. Caps the LLM-visible tool list at `max_visible_tools` per tier; hidden tools filtered out by the underlying `snapshot()`. Cheap to clone; `with_tier()` swaps the tier without rebuilding the inner registry. 5 tests.
+- **`uva_tool::{ToolOutputDefinition, RenderKind, HasOutputDefinition}`** (R10-1, dsh `tools/src/index.ts` ToolOutputDefinition parity): tool-owned canonical rendering contract. `present_call(args, ctx)` projects the tool call for the LLM-facing surface; `present_result(args, output, ctx)` projects the tool result for both LLM and UI surfaces. `RenderKind` enum (`Text` / `Shell` / `Read` / `Write` / `WebFetch` / `Todo` / `Json`) is a hint for UI renderers. `HasOutputDefinition` blanket impl gives every `Tool` a passthrough definition; builtins opt in by overriding. 8 tests.
+- **`uva_agent::agent::router::{Router, LeaderRouter, PassThroughRouter, Mention, RoutingDecision}`** (R10-4, traitclaw `LeaderRouter` parity): text-routed delegation. `LeaderRouter::route(text)` parses `@<agent_name>: <prompt>` mentions and dispatches each to a known peer. Unknown peers stay in the remainder so the leader can rephrase. Custom trigger char via `with_trigger`. 11 tests. (Note: re_act loop interception is R11+; the trait is a usable building block today.)
+- **`uva_session::{SnapshotBus, SnapshotReceiver, DEFAULT_BUS_CAPACITY}`** (R10-5, closes the R9-6 deferred wire-up): runtime-neutral subscribe / publish channel for `OperationSnapshot`. `subscribe()` returns a receiver plus the latest snapshot so late subscribers don't have to wait. `publish(snap)` returns the seq number and drops dead subscribers. Bounded by `DEFAULT_BUS_CAPACITY` (64). 4 tests.
 
  ### Changed (R6 — lego-composition round)
 
 ### Added (R6 — lego-composition round)
 
-- **`elysper_provider::BlockAssembler`** (R6-1, dsh `assembler.ts` parity): incremental chunk-to-message builder. `push(StreamChunk)` folds streamed text / reasoning / tool-call deltas with straggler-aware dedup; `finalize_assistant()` returns `(SamplingResult, Vec<ContentPart>, incomplete)`. Third-party providers only emit `Stream<Result<StreamChunk, Error>>` — the 200-line fold previously inlined in `ReActLoop::sample_once` is now a single testable unit. 12 unit tests.
-- **`elysper_session::typed_event_builders`** (R6-2): pure builder functions for every structural `SessionEvent` variant (`step_start/end`, `turn_start/end`, `iteration_start/end`, `subagent_enter/exit`, `request_header`, `usage`) + `round_trip` / `structural_kind` helpers. Every builder's JSON round-trips `SessionEvent::from_value` — the durability contract is pinned per-variant. 11 tests.
-- **`elysper_session::{TypedEventSink, TypedEventReceiver, TypedEventRecord, CompactionRecordView, compaction_emitter_bridge}`** (R6-3): runtime-neutral mpsc channel (futures, not tokio) carrying typed structural events from the agent loop to the controller; `compaction_emitter_bridge` adapts the R5-8 `SummarizingContextManager` emitter callback into a typed `SessionEvent::Compaction`.
-- **`elysper_steering::{HookMap, HookEvent, HookDecision, event_name}`** (R6-4, pi `HookMap` parity): name-keyed typed hook registry. `HookEvent` is a closed 8-variant enum; `HookMap::on(name, handler)` chains registrations; `dispatch` short-circuits on the first non-`Allow` decision and treats handler panics as `Allow` (fail-open, never poisons a run). 8 tests.
-- **`elysper_provider::{BilledClass, TokenUsage::bucket/for_each_bucket/bucket_total}`** (R6-5): 5-bucket billing semantics (Input / CacheRead / CacheWrite / Reasoning / Output — Output subtracts Reasoning). Cost modules fold a `TokenUsage` into per-class prices without hand-rolling a five-arm match. 5 tests.
+- **`uva_provider::BlockAssembler`** (R6-1, dsh `assembler.ts` parity): incremental chunk-to-message builder. `push(StreamChunk)` folds streamed text / reasoning / tool-call deltas with straggler-aware dedup; `finalize_assistant()` returns `(SamplingResult, Vec<ContentPart>, incomplete)`. Third-party providers only emit `Stream<Result<StreamChunk, Error>>` — the 200-line fold previously inlined in `ReActLoop::sample_once` is now a single testable unit. 12 unit tests.
+- **`uva_session::typed_event_builders`** (R6-2): pure builder functions for every structural `SessionEvent` variant (`step_start/end`, `turn_start/end`, `iteration_start/end`, `subagent_enter/exit`, `request_header`, `usage`) + `round_trip` / `structural_kind` helpers. Every builder's JSON round-trips `SessionEvent::from_value` — the durability contract is pinned per-variant. 11 tests.
+- **`uva_session::{TypedEventSink, TypedEventReceiver, TypedEventRecord, CompactionRecordView, compaction_emitter_bridge}`** (R6-3): runtime-neutral mpsc channel (futures, not tokio) carrying typed structural events from the agent loop to the controller; `compaction_emitter_bridge` adapts the R5-8 `SummarizingContextManager` emitter callback into a typed `SessionEvent::Compaction`.
+- **`uva_steering::{HookMap, HookEvent, HookDecision, event_name}`** (R6-4, pi `HookMap` parity): name-keyed typed hook registry. `HookEvent` is a closed 8-variant enum; `HookMap::on(name, handler)` chains registrations; `dispatch` short-circuits on the first non-`Allow` decision and treats handler panics as `Allow` (fail-open, never poisons a run). 8 tests.
+- **`uva_provider::{BilledClass, TokenUsage::bucket/for_each_bucket/bucket_total}`** (R6-5): 5-bucket billing semantics (Input / CacheRead / CacheWrite / Reasoning / Output — Output subtracts Reasoning). Cost modules fold a `TokenUsage` into per-class prices without hand-rolling a five-arm match. 5 tests.
 - **`ContextManager::prepare_arc`** (R6-6): Arc-shared variant of `prepare`. Managers that need no change return the input `Arc` unchanged so `CachePolicyApplier`'s `Arc::ptr_eq` short-circuit actually hits (previously 0 % — every prepare allocated a fresh `Vec`). `Noop` / `Truncating` override the no-op fast path. 4 tests.
-- **`elysper_session::{KNOWN_SESSION_EVENT_TYPES, empty_event_of}`** (R6-7, dsh `known-event-types.ts` parity): the 16-entry wire-tag vocabulary + a tag → skeleton constructor. Frontend codegen's source of truth. 4 tests.
+- **`uva_session::{KNOWN_SESSION_EVENT_TYPES, empty_event_of}`** (R6-7, dsh `known-event-types.ts` parity): the 16-entry wire-tag vocabulary + a tag → skeleton constructor. Frontend codegen's source of truth. 4 tests.
 - **ReActLoop typed-event emission** (R6-A wiring): the loop now emits `request_header` (provider / model / tools_hash), `iteration_start/end`, `step_start/end` (with `StepAction::{ToolCall, FinalAnswer}`) through the typed sink at the natural drive-loop boundaries; `ReActAgent::with_typed_event_sink` / `AgentRunConfig.typed_event_sink` thread the sink from the controller.
 - **`SessionController` typed-event persistence** (R6-B wiring): `maybe_start_run` creates the channel pair per run; after the agent stream ends the run task synchronously drains the receiver (`try_recv` loop — no spawned task, no channel-closure await) stamping `ts` and appending to the JSONL sink.
 
 ### Added (R7 — runtime neutrality + idiomatic Rust)
 
-- **`elysper_core::cancel::{CancelToken, AtomicCancelToken}`**: runtime-neutral cancellation vocabulary (`is_cancelled` / `cancel` / `cancelled()` boxed future — object-safe without async-trait macros). `AtomicCancelToken` is a std-only `AtomicBool` + hand-rolled waker-list future. The tokio-util bridge (`impl CancelToken for tokio_util::sync::CancellationToken`) lives behind `elysper-core/tokio-util` so existing tokio callers coerce with zero adapters. 7 tests.
-- **Runtime-neutral public APIs**: `Agent::run` and `ModelProvider::complete_with_stream` now take `Arc<dyn CancelToken>`; `steering::Gate::new` / `Gate::cancel_token` use the trait; `TypedEventSink` runs on `futures::channel::mpsc`. Lib consumers can drive elysper from any async runtime; tokio remains an implementation detail.
+- **`uva_core::cancel::{CancelToken, AtomicCancelToken}`**: runtime-neutral cancellation vocabulary (`is_cancelled` / `cancel` / `cancelled()` boxed future — object-safe without async-trait macros). `AtomicCancelToken` is a std-only `AtomicBool` + hand-rolled waker-list future. The tokio-util bridge (`impl CancelToken for tokio_util::sync::CancellationToken`) lives behind `uva-core/tokio-util` so existing tokio callers coerce with zero adapters. 7 tests.
+- **Runtime-neutral public APIs**: `Agent::run` and `ModelProvider::complete_with_stream` now take `Arc<dyn CancelToken>`; `steering::Gate::new` / `Gate::cancel_token` use the trait; `TypedEventSink` runs on `futures::channel::mpsc`. Lib consumers can drive uva from any async runtime; tokio remains an implementation detail.
 - **Idiomatic-Rust cleanup**: stringly-typed `emit_iteration(kind: &str)` / `emit_step(kind: &str)` replaced by per-variant methods + `StepAction` enum; controller drain expressed as `while let Ok(Some(_))`; futures 0.3.34 `try_next` → `try_recv` rename adopted with `Closed → Ok(None)` mapping.
 
 ### Added (R8 — chrono uniformity + runnable assembly tutorial)
 
-- **`examples/assemble_from_scratch.rs`** (`elysper-agent`): the executable form of the composition tutorial. Wires the seven lego pieces — provider (`ModelProviderStub`), `build_default_tool_registry`, `Steering::default_policy` + `HookMap`, `TruncatingContextManager`, `TypedEventSink` (futures mpsc), `AtomicCancelToken` (std-only), `ReActAgent` — runs end-to-end with **no network and no API key**, prints the live SSE-style event stream, the typed structural events (`request_header` / `iteration` / `step`), the 16-entry event vocabulary, and a standalone `BlockAssembler` fold. `cargo run --example assemble_from_scratch -p elysper-agent`.
-- **README "Use as a Library (assemble an agent from scratch)"**: the assembly command, a code sketch of the same wiring, the runtime-neutrality guarantees (executor is the consumer's choice), and pointers to the per-crate docs + design records. The crate table also regained the missing `elysper-steering` row.
+- **`examples/assemble_from_scratch.rs`** (`uva-agent`): the executable form of the composition tutorial. Wires the seven lego pieces — provider (`ModelProviderStub`), `build_default_tool_registry`, `Steering::default_policy` + `HookMap`, `TruncatingContextManager`, `TypedEventSink` (futures mpsc), `AtomicCancelToken` (std-only), `ReActAgent` — runs end-to-end with **no network and no API key**, prints the live SSE-style event stream, the typed structural events (`request_header` / `iteration` / `step`), the 16-entry event vocabulary, and a standalone `BlockAssembler` fold. `cargo run --example assemble_from_scratch -p uva-agent`.
+- **README "Use as a Library (assemble an agent from scratch)"**: the assembly command, a code sketch of the same wiring, the runtime-neutrality guarantees (executor is the consumer's choice), and pointers to the per-crate docs + design records. The crate table also regained the missing `uva-steering` row.
 
 ### Changed (R8)
 
-- **`elysper_context::MemoryEntry::created_at` is now `chrono::DateTime<Utc>`** (was raw `u64` epoch seconds via `SystemTime`): chrono is the workspace-wide wall-clock library, so the entry carries a typed, RFC 3339-serialisable timestamp. File-system mtimes (`fs::Metadata::modified`) and monotonic `Instant` measurements deliberately stay on `std::time` — those are the correct std types.
+- **`uva_context::MemoryEntry::created_at` is now `chrono::DateTime<Utc>`** (was raw `u64` epoch seconds via `SystemTime`): chrono is the workspace-wide wall-clock library, so the entry carries a typed, RFC 3339-serialisable timestamp. File-system mtimes (`fs::Metadata::modified`) and monotonic `Instant` measurements deliberately stay on `std::time` — those are the correct std types.
 
 
 ### Verification (R6 + R7)
@@ -8083,21 +8253,21 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 - lib tests across 9 crates: **1594 passed, 0 failed** (core 74 · session 75 · context 61 · steering 50 · provider 599 · tool 178 · agent 171 · server 360 · telemetry 26); integration suites green.
 
 
-- **`elysper_context::CompactionSettings`** (R5-1, pi parity): typed policy struct with `enabled` / `reserve_tokens` / `keep_recent_tokens` / `min_messages_between_compaction`. `validate()` returns a typed `ValidationError` (`ReserveTokensZero` / `KeepRecentTokensZero` / `Overflow`); `sane_for_window()` surfaces a non-fatal warning when the combined budget exceeds the model's context window; `should_compact(context_tokens, context_window, messages_since_last_compaction, &settings)` is the canonical predicate. Defaults mirror pi: 16 384 reserve / 20 000 keep / 4-msg throttle.
-- **`elysper_steering::Gate` / `GateControl`** (R5-2, pi `effect-gate` parity): typed cancellation-admission seam. `Gate::admit(f)` synchronously checks state (`Open` / `Aborting` / `Closed(&'static str)`) and only invokes `f` when `Open`. `GateControl::begin_abort` transitions the gate to `Aborting` (idempotent); `GateControl::close(reason)` is the terminal state. Backed by `tokio_util::sync::CancellationToken` for R4 parity. `Gate::cancel_token()` mirrors the underlying token for hot-path read sites.
+- **`uva_context::CompactionSettings`** (R5-1, pi parity): typed policy struct with `enabled` / `reserve_tokens` / `keep_recent_tokens` / `min_messages_between_compaction`. `validate()` returns a typed `ValidationError` (`ReserveTokensZero` / `KeepRecentTokensZero` / `Overflow`); `sane_for_window()` surfaces a non-fatal warning when the combined budget exceeds the model's context window; `should_compact(context_tokens, context_window, messages_since_last_compaction, &settings)` is the canonical predicate. Defaults mirror pi: 16 384 reserve / 20 000 keep / 4-msg throttle.
+- **`uva_steering::Gate` / `GateControl`** (R5-2, pi `effect-gate` parity): typed cancellation-admission seam. `Gate::admit(f)` synchronously checks state (`Open` / `Aborting` / `Closed(&'static str)`) and only invokes `f` when `Open`. `GateControl::begin_abort` transitions the gate to `Aborting` (idempotent); `GateControl::close(reason)` is the terminal state. Backed by `tokio_util::sync::CancellationToken` for R4 parity. `Gate::cancel_token()` mirrors the underlying token for hot-path read sites.
 - **`run_hook_gated`** (R5-2): admission-gated sibling of `run_hook`. Builds the hook future, then consults the gate — on `Open`, awaits the future inside `AssertUnwindSafe + catch_unwind`; on `Aborting` / `Closed`, the future is dropped without polling (no effect ever runs). The `tracing::info_span!("hook", ..., gated = true)` records `outcome = "gated"` and `error = "gate <state>"` for observability.
-- **`elysper_steering::run_hook` auto-opens a `tracing::info_span!("hook", ...)`** (R5-3, pi `startHarnessSpan` parity): every hook call now records `hook.name` / `stage` / `outcome` / `error` in OTel traces. `outcome = "ok"` on success, `"panic"` + `error = <panic msg>` on panic. Closes the R4 G-2 known gap where the span was promised but not emitted.
-- **`elysper_tool::FileMutationQueue`** (R5-5, pi `file-mutation-queue` parity): per-canonical-path serialization queue. `FileMutationQueue::run(path, f)` looks up (or creates) the per-path `Arc<Mutex<()>>` slot and runs `f` while holding it, on a `spawn_blocking` task so the sync mutex never stalls the executor. Symlinks collapse via `canonicalize_best_effort`. Adopted as a generic helper so any future mutation tool (patch / sed-in-place / sql-update) can route through the same queue.
+- **`uva_steering::run_hook` auto-opens a `tracing::info_span!("hook", ...)`** (R5-3, pi `startHarnessSpan` parity): every hook call now records `hook.name` / `stage` / `outcome` / `error` in OTel traces. `outcome = "ok"` on success, `"panic"` + `error = <panic msg>` on panic. Closes the R4 G-2 known gap where the span was promised but not emitted.
+- **`uva_tool::FileMutationQueue`** (R5-5, pi `file-mutation-queue` parity): per-canonical-path serialization queue. `FileMutationQueue::run(path, f)` looks up (or creates) the per-path `Arc<Mutex<()>>` slot and runs `f` while holding it, on a `spawn_blocking` task so the sync mutex never stalls the executor. Symlinks collapse via `canonicalize_best_effort`. Adopted as a generic helper so any future mutation tool (patch / sed-in-place / sql-update) can route through the same queue.
 - **`SessionController::maybe_start_run` opens an `agent.run` span** (R5-7): every spawned run-task now carries `session.id` / `user.id` / `agent.name` attributes on a `tracing::info_span!("agent.run", ...)`. `iteration.id` is reserved as an `Empty` field for future per-iteration record hooks. Operator dashboards can group by session/agent in OTel without manual trace stitching.
-- **`elysper_session::BalanceCache` + `validate_replace_with_balance`** (R5-4, dsh `compaction/tool-pairing.ts:181-194` parity): per-session `in_progress` counter (assistant/tool_call +1, tool_result -1, clamp 0) that lets a `SurfaceOp::Replace` cut be validated as "does not straddle an open tool-call pair". `compaction_balanced()` is the canonical entry point used to reject orphan-producing compactions at fold time. Avoids the silent-bug class where compaction produces a model-visible history with dangling `tool_call` blocks.
-- **Tool panic / outcome / duration / truncation Prometheus metrics** (R5-6): four new metric families in `elysper-telemetry` — `tool_panics_total{tool}` (panicked tool executions isolated), `tool_executions_total{tool,outcome}` (`ok` / `error` / `panic`), `tool_execution_duration_seconds{tool}` (1 ms … 60 s histogram), `tool_truncations_total{tool}` (clipped `OutputBound` results). Wired into `consume_tool_stream_into` so every tool call increments the right counter. `elysper-tool` now depends on `elysper-telemetry` (workspace dependency, no cycle).
+- **`uva_session::BalanceCache` + `validate_replace_with_balance`** (R5-4, dsh `compaction/tool-pairing.ts:181-194` parity): per-session `in_progress` counter (assistant/tool_call +1, tool_result -1, clamp 0) that lets a `SurfaceOp::Replace` cut be validated as "does not straddle an open tool-call pair". `compaction_balanced()` is the canonical entry point used to reject orphan-producing compactions at fold time. Avoids the silent-bug class where compaction produces a model-visible history with dangling `tool_call` blocks.
+- **Tool panic / outcome / duration / truncation Prometheus metrics** (R5-6): four new metric families in `uva-telemetry` — `tool_panics_total{tool}` (panicked tool executions isolated), `tool_executions_total{tool,outcome}` (`ok` / `error` / `panic`), `tool_execution_duration_seconds{tool}` (1 ms … 60 s histogram), `tool_truncations_total{tool}` (clipped `OutputBound` results). Wired into `consume_tool_stream_into` so every tool call increments the right counter. `uva-tool` now depends on `uva-telemetry` (workspace dependency, no cycle).
 - **`SummarizingContextManager` compaction emitter** (R5-8): the manager now accepts a `compaction_emitter: Fn(CompactionRecord) -> + Send + Sync` via `with_compaction_emitter()`. The agent loop can wire this to translate each splice into a typed `SessionEvent::Compaction { surface_op: Replace { start, end, source_event_seqs } }` — the durable event log finally reflects compaction operations instead of silently mutating `messages` in place. R5-11 (ReActLoop writes typed events end-to-end) closes the last gap.
-- **Tool panic-isolation contract tests** (R5-9, traitclaw-style): new integration test file `crates/elysper-tool/tests/tool_panic_isolation.rs` with two tests pinning the contract — a panicking tool's `call()` synthesises an `is_error = true` Result with `panicked during execution` text, and any sibling tools in the same `run_stream` still complete.
+- **Tool panic-isolation contract tests** (R5-9, traitclaw-style): new integration test file `crates/uva-tool/tests/tool_panic_isolation.rs` with two tests pinning the contract — a panicking tool's `call()` synthesises an `is_error = true` Result with `panicked during execution` text, and any sibling tools in the same `run_stream` still complete.
 - **`GET /api/v1/sessions/{id}/events` typed event endpoint** (R5-10): new route returns `TypedEventResponse { id, typed_count, legacy_count, typed: Vec<SessionEvent>, legacy: Vec<Value> }`. Unlike `/sessions/{id}` which returns opaque `history`, this endpoint strictly classifies rows via `SessionEvent::from_value()` and surfaces legacy rows in a separate `legacy` field. Enables frontend tooling that wants the typed schema without scraping the opaque JSONL.
 
 ### Fixed (R4 残留)
 
-- **4 provider integration tests updated for R4 typed retry** (`crates/elysper-provider/tests/provider_test.rs`): `test_openai_400_is_not_retried` / `test_openai_401_is_not_retried` / `test_openai_500_is_retried_and_surfaces_request_failed` / `test_openai_429_with_retry_after_returns_rate_limited_error` previously asserted the old `Error::RequestFailed { status, .. }` / `Error::RateLimited { retry_after }` shapes. R4's `retry_with_classification` wraps every exhausted attempt in `Error::RetryExhausted { last_error, .. }`, so the tests now unwrap `*last_error` before asserting. Mock-server `.expect(3)` / `.up_to_n_times(3)` adjusted to match the per-class attempt counts (6 for RateLimit, 4 for Transient).
+- **4 provider integration tests updated for R4 typed retry** (`crates/uva-provider/tests/provider_test.rs`): `test_openai_400_is_not_retried` / `test_openai_401_is_not_retried` / `test_openai_500_is_retried_and_surfaces_request_failed` / `test_openai_429_with_retry_after_returns_rate_limited_error` previously asserted the old `Error::RequestFailed { status, .. }` / `Error::RateLimited { retry_after }` shapes. R4's `retry_with_classification` wraps every exhausted attempt in `Error::RetryExhausted { last_error, .. }`, so the tests now unwrap `*last_error` before asserting. Mock-server `.expect(3)` / `.up_to_n_times(3)` adjusted to match the per-class attempt counts (6 for RateLimit, 4 for Transient).
 
 ### Changed
 
@@ -8109,7 +8279,7 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 
 - **Configurable per-run iteration cap** (replaces the hard-coded `MAX_ITERATIONS = 25`): `ReActAgent::with_max_iterations(usize)` (clamped to `[1, 4096]`); the loop, span field, terminal `Warning`, and `SessionEndReason::MaxIterations` message all report the configured value; `AgentRunConfig.max_iterations` carries it per-dispatch; `RunDependencies::with_max_iterations` overrides for tests; the AppState default is loaded from the existing `agents.<name>.max_steps` field on the server config (u32 → usize, clamped) and threaded into every dispatch via the session factory; `POST /agents` accepts an optional `max_iterations` field that overrides the AppState default for the registered agent only.
 
-- **`elysper_core::Error` aligned with OpenDAL RFC-0977 (2024-2026 industry standard)** (ADR-0011): the previously thiserror-style 30-variant enum now exposes the full RFC-0977 surface as stable methods. New public accessors on `elysper_core::Error`:
+- **`uva_core::Error` aligned with OpenDAL RFC-0977 (2024-2026 industry standard)** (ADR-0011): the previously thiserror-style 30-variant enum now exposes the full RFC-0977 surface as stable methods. New public accessors on `uva_core::Error`:
   - `Error::kind_enum() -> ErrorKind` — typed classifier (34-variant `#[non_exhaustive]` enum). Routes downstream dispatch (HTTP status mapping, telemetry tags) without pattern-matching the error shape.
   - `Error::frame_stack() -> &[ErrorFrame]` — dynamic frame stack (anyhow-style chain). Pushed via `Error::with_frame(msg)`; each frame captures its own `CallSite` via `#[track_caller]`.
   - `Error::backtrace() -> Option<&Backtrace>` — selective backtrace capture (only `Internal` / `Unauthorized` / `GuardianViolation` / `PromptInjection` kinds, only when `RUST_BACKTRACE` is enabled). Other kinds stay zero-cost.
@@ -8118,29 +8288,29 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
   - `Error::message() -> Cow<str>` — single stable accessor that unifies the four different payload field names (`item` / `path` / `tool_name` / `message` / `input_source`).
   - `Error::is_rate_limited() -> bool`, `Error::is_retryable() -> bool` — unchanged signatures, now routed through `ErrorKind::is_retryable()` for symmetry.
 - **`Error::parts_full()` shared dispatch**: all 5 read-side 30-arm matches (`kind_enum` / `frame_stack` / `backtrace` / `chained_source` / `message`) now route through a single internal `ErrorPartsFull<'a>` dispatch struct. Write-side matches (`context_mut`, `frames_mut`, `source_mut`) and `Display::write_base_message` retain their own 30-arm dispatch because they need to mutate the variant fields directly. Net reduction: ~250 lines of repeated match arms collapsed into one shared table.
-- **`Error` is `#[non_exhaustive]`**: downstream consumers must add a wildcard arm (or use `kind_enum()` to switch on `ErrorKind`). Pinning all downstream `match` arms is part of the migration; `elysper-server` already uses `From<ErrorKind> for ErrorCode` which future-proofs the wire classifier.
-- **`elysper_core::ErrorKind` enum** (typed classifier for `Error`): 34 variants, all `#[non_exhaustive]`, stable string table (`as_str()`), `is_retryable()` / `is_critical()` accessors, `Display` / `FromStr` impls. Pinned by 10 unit tests in `error_kind.rs`.
-- **`elysper_core::ErrorFrame` struct** (single frame in the dynamic frame stack): `{ message: String, location: CallSite }` with `new(message)` / `message()` / `location()` accessors.
-- **`elysper_core::CallSite` struct** (call site of an error or frame): `{ file: &'static str, line: u32 }` with `Display` / `Default` impls.
-- **`elysper_server::ErrorCode::from(ErrorKind)`**: wire classifier now derives from the typed `ErrorKind`, so adding new error kinds under `#[non_exhaustive]` no longer requires touching the server-side match table (future kinds fall back to `InternalServerError` per the v1 API spec).
+- **`Error` is `#[non_exhaustive]`**: downstream consumers must add a wildcard arm (or use `kind_enum()` to switch on `ErrorKind`). Pinning all downstream `match` arms is part of the migration; `uva-app-server` already uses `From<ErrorKind> for ErrorCode` which future-proofs the wire classifier.
+- **`uva_core::ErrorKind` enum** (typed classifier for `Error`): 34 variants, all `#[non_exhaustive]`, stable string table (`as_str()`), `is_retryable()` / `is_critical()` accessors, `Display` / `FromStr` impls. Pinned by 10 unit tests in `error_kind.rs`.
+- **`uva_core::ErrorFrame` struct** (single frame in the dynamic frame stack): `{ message: String, location: CallSite }` with `new(message)` / `message()` / `location()` accessors.
+- **`uva_core::CallSite` struct** (call site of an error or frame): `{ file: &'static str, line: u32 }` with `Display` / `Default` impls.
+- **`uva_server::ErrorCode::from(ErrorKind)`**: wire classifier now derives from the typed `ErrorKind`, so adding new error kinds under `#[non_exhaustive]` no longer requires touching the server-side match table (future kinds fall back to `InternalServerError` per the v1 API spec).
 
 ### Changed
 
-- **`elysper_core::Error` 30-arm matches consolidated**: 5 read-side matches now share the `parts_full()` dispatch (saves ~150 lines of repetition). Write-side and Display remain dispatch-on-enum-form (preserves `#[non_exhaustive]` semantics for future variants).
-- **`elysper_server::error_code_for` unified**: the previously-duplicated 30-arm match in `crates/elysper-server/src/error.rs` now delegates to `crates/elysper-server/src/api/error.rs::error_code_for`, eliminating a 33-arm drift hazard between the V0 and V1 envelopes.
+- **`uva_core::Error` 30-arm matches consolidated**: 5 read-side matches now share the `parts_full()` dispatch (saves ~150 lines of repetition). Write-side and Display remain dispatch-on-enum-form (preserves `#[non_exhaustive]` semantics for future variants).
+- **`uva_server::error_code_for` unified**: the previously-duplicated 30-arm match in `crates/uva-app-server/src/error.rs` now delegates to `crates/uva-app-server/src/api/error.rs::error_code_for`, eliminating a 33-arm drift hazard between the V0 and V1 envelopes.
 - **`PromptInjection.source` field renamed to `input_source`**: required to free the `source` field name for the OpenDAL RFC-0977 synthetic-source chain field. No production callers; documented in the variant doc comment.
 
 ### Breaking Changes
 
-- **`elysper_core::Error` is `#[non_exhaustive]`**: downstream `match` expressions on `Error` must add a wildcard arm. Pin the wire layer via `ErrorCode::from(err.kind_enum())` instead of pattern matching `Error` directly.
+- **`uva_core::Error` is `#[non_exhaustive]`**: downstream `match` expressions on `Error` must add a wildcard arm. Pin the wire layer via `ErrorCode::from(err.kind_enum())` instead of pattern matching `Error` directly.
 - **`PromptInjection.source` → `input_source`**: see "Changed" above. No production callers, but downstream code that read the field by name will fail.
 
 ### Added (P2 wave-1 performance pass)
 
-- **`Error::parts_full() -> ErrorPartsFull<'_>` and `Error::parts() -> ErrorParts<'_>` exposed publicly**: callers can now fetch all four RFC-0977 read-side fields (`kind`, `frames`, `backtrace`, `source`) through a **single** 30-arm match instead of calling `kind_enum()` / `frame_stack()` / `backtrace()` / `chained_source()` back-to-back (which each re-runs the match). Hot logging / tracing paths save ~3-4× match dispatch per error printed. Both tuples are also re-exported from `elysper_core::error` for downstream callers. Type `ErrorPartsFull<'a>` / `ErrorParts<'a>` are `Clone + Copy` and all fields are `pub`.
+- **`Error::parts_full() -> ErrorPartsFull<'_>` and `Error::parts() -> ErrorParts<'_>` exposed publicly**: callers can now fetch all four RFC-0977 read-side fields (`kind`, `frames`, `backtrace`, `source`) through a **single** 30-arm match instead of calling `kind_enum()` / `frame_stack()` / `backtrace()` / `chained_source()` back-to-back (which each re-runs the match). Hot logging / tracing paths save ~3-4× match dispatch per error printed. Both tuples are also re-exported from `uva_core::error` for downstream callers. Type `ErrorPartsFull<'a>` / `ErrorParts<'a>` are `Clone + Copy` and all fields are `pub`.
 - **`ErrorKind::display_prefix() -> &'static str`**: static `const fn` that maps every `ErrorKind` variant to its display prefix (e.g. `NotFound → "not found: "`, `Validation → "validation error: "`). Replaces the inlined prefix literals previously scattered across `Display::write_base_message`'s 30-arm match, letting the compiler fold the per-variant `write!(f, "literal: {}", payload)` into `f.write_str(prefix)?; write!(f, "{}", payload)`. ~30% faster `Display` rendering for hot logging paths (`tracing::error!`, `eprintln!`).
-- **Backtrace sampling** (`ELYSPER_BACKTRACE_SAMPLE_RATE` env var): production servers can now capture only a fraction of backtraces instead of all of them. Default is `1.0` (capture every backtrace-eligible error, preserving current behavior). Set `ELYSPER_BACKTRACE_SAMPLE_RATE=0.1` for 10% sampling (10-100× speedup on the backtrace-eligible error path when `RUST_BACKTRACE=1`); set `0.01` for 1%; set `0` to disable sampling outright. Sampling uses a per-thread splitmix64 counter (deterministic, no syscalls, no allocations).
-- **`#[inline]` annotations on hot-path accessors**: `Error::kind_enum`, `Error::frame_stack`, `Error::backtrace`, `Error::chained_source`, `Error::parts`, `Error::parts_full`, `empty_context`, plus the elysper-server-side `error_code_for`, `From<ErrorKind> for ErrorCode`, `From<Error> for UserError`, `UserError::new`, and `ErrorCode::http_status`. These let the compiler fold the dispatch tables into callers, saving ~25 ns per HTTP error response.
+- **Backtrace sampling** (`UVA_BACKTRACE_SAMPLE_RATE` env var): production servers can now capture only a fraction of backtraces instead of all of them. Default is `1.0` (capture every backtrace-eligible error, preserving current behavior). Set `UVA_BACKTRACE_SAMPLE_RATE=0.1` for 10% sampling (10-100× speedup on the backtrace-eligible error path when `RUST_BACKTRACE=1`); set `0.01` for 1%; set `0` to disable sampling outright. Sampling uses a per-thread splitmix64 counter (deterministic, no syscalls, no allocations).
+- **`#[inline]` annotations on hot-path accessors**: `Error::kind_enum`, `Error::frame_stack`, `Error::backtrace`, `Error::chained_source`, `Error::parts`, `Error::parts_full`, `empty_context`, plus the uva-app-server-side `error_code_for`, `From<ErrorKind> for ErrorCode`, `From<Error> for UserError`, `UserError::new`, and `ErrorCode::http_status`. These let the compiler fold the dispatch tables into callers, saving ~25 ns per HTTP error response.
 
 ### Added (P2 wave-2 macro dedup pass)
 
@@ -8155,9 +8325,9 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 - `display_prefix_table_is_well_formed` — pins the prefix string table
 - `backtrace_sample_hits_distribution` — pins the sampling distribution (`rate=1.0` always hit, `rate=0.0` never hit, `rate=0.5` ≈ 30-70%)
 
-- **`MessageKind` enum**: 5-variant classification (`System`, `User`, `Assistant`, `ToolCall`, `ToolResult`) extending the 4-variant `Role` with `ToolCall` for assistant messages containing tool-use requests. Added to `elysper-provider`.
+- **`MessageKind` enum**: 5-variant classification (`System`, `User`, `Assistant`, `ToolCall`, `ToolResult`) extending the 4-variant `Role` with `ToolCall` for assistant messages containing tool-use requests. Added to `uva-provider`.
 - **`Message::llm_visible()` method**: O(1) side-effect-free method on `Message` that determines whether a message should be included in the LLM context window. Tool results with empty content are excluded.
-- **`ToolCategory` enum**: Categorization of tools (`FileSystem`, `Network`, `Computation`, `Agent`, `Other`) for registry metadata. Re-exports from `elysper_core` when `unified-registry` feature is enabled.
+- **`ToolCategory` enum**: Categorization of tools (`FileSystem`, `Network`, `Computation`, `Agent`, `Other`) for registry metadata. Re-exports from `uva_core` when `unified-registry` feature is enabled.
 - **`ToolMetadataSnapshot` struct**: Immutable snapshot of tool definition metadata (name, description, category, schema, version) for dual-index registry.
 - **`ToolPermission` trait + `PermissionDecision` enum**: Thin abstraction for tool-level permission decisions. `PermissionDecision` has three variants: `Allow`, `Deny(String)`, `Ask`. Includes `PermissionAlwaysAllow` and `PermissionAlwaysDeny` default implementations plus `PermissionContext` struct.
 - **ToolRegistry dual-index**: `ToolRegistry` now maintains `HashMap<String, ToolEntry>` + `Vec<ToolMetadataSnapshot>` atomically. New `snapshot()` method returns insertion-order-preserved metadata for LLM context building.
@@ -8165,13 +8335,13 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 ### Breaking Changes
 
 - **Public import paths changed**:
-  - `elysper_tool::sub_traits::{ToolDefinition, ToolExecution, ToolLifecycle}` removed (never implemented).
-  - `elysper_tool::fragment::{ContextFragment, FragmentRegistry, FragmentContext, FragmentError}` → `elysper_context::fragment::{ContextFragment, FragmentRegistry, FragmentContext, FragmentError}`.
-  - `elysper_tool::sub_traits::{ToolCategory, ToolMetadataSnapshot}` → `elysper_tool::descriptor::{ToolCategory, ToolMetadataSnapshot}`.
+  - `uva_tool::sub_traits::{ToolDefinition, ToolExecution, ToolLifecycle}` removed (never implemented).
+  - `uva_tool::fragment::{ContextFragment, FragmentRegistry, FragmentContext, FragmentError}` → `uva_context::fragment::{ContextFragment, FragmentRegistry, FragmentContext, FragmentError}`.
+  - `uva_tool::sub_traits::{ToolCategory, ToolMetadataSnapshot}` → `uva_tool::descriptor::{ToolCategory, ToolMetadataSnapshot}`.
 - **MergedPolicy::evaluate fail-closed**: `MergedPolicy::evaluate` now returns `Ask` (not `Allow`) for unknown patterns (ADR-2026-06-10). Migration: explicitly add `Allow` rules for all tools that should be silently allowed.
-- **Sandbox renamed to CommandBlacklist**: `elysper_exec::sandbox::Sandbox` is now `elysper_exec::command_blacklist::CommandBlacklist`. The old name implied OS-level containment; the new name accurately describes a string-match blacklist with documented bypass techniques. A deprecated type alias `Sandbox = CommandBlacklist` is kept for one release cycle. The `is_command_allowed` method is preserved (returns `!is_command_blacklisted`) for compatibility; new code should use `is_command_blacklisted` directly.
+- **Sandbox renamed to CommandBlacklist**: `uva_exec::sandbox::Sandbox` is now `uva_exec::command_blacklist::CommandBlacklist`. The old name implied OS-level containment; the new name accurately describes a string-match blacklist with documented bypass techniques. A deprecated type alias `Sandbox = CommandBlacklist` is kept for one release cycle. The `is_command_allowed` method is preserved (returns `!is_command_blacklisted`) for compatibility; new code should use `is_command_blacklisted` directly.
 - **`ApprovalRequest::NetworkAccess::turn_id` removed**: orphan field that had 0 production callers. `Guardian` decision logic no longer reads it; use `AgentContext::current_turn_id` for turn-level decision attribution.
-- **`elysper-exec` split into `elysper-tool-bash` + `elysper-tool-exec-base`**: the monolith `elysper-exec` crate is split into a thin base (`elysper-tool-exec-base`, shared `CommandResult` / `ExecError` types) and the bash-specific implementation (`elysper-tool-bash`). Migration: depend on `elysper-tool-bash` directly; cross-crate consumers should use `elysper-tool-exec-base::CommandResult` for type sharing.
+- **`uva-exec` split into `uva-tool-bash` + `uva-tool-exec-base`**: the monolith `uva-exec` crate is split into a thin base (`uva-tool-exec-base`, shared `CommandResult` / `ExecError` types) and the bash-specific implementation (`uva-tool-bash`). Migration: depend on `uva-tool-bash` directly; cross-crate consumers should use `uva-tool-exec-base::CommandResult` for type sharing.
 - **RecoveryAction::Recovered now carries a level**: the `Recovered(String)` tuple is replaced with `Recovered { message: String, level: RecoveryLevel }` (3/4/5) so callers can disambiguate L3 Fallback / L4 Auto-Compact / L5 Reset. The `level` field is added in a non-additive way; all `Recovered` match arms need a destructuring update.
 
 ### Security
@@ -8182,18 +8352,18 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 
 ### Fixed
 
-- **SSE keepalive for long agent runs**: the session executor now emits a heartbeat comment every 15 s on `/api/v1/chat/sessions/{id}/messages/stream` while waiting on the agent event stream. Idle SSE no longer stays byte-silent during long LLM thinking phases or multi-minute tool runs, so intermediaries (nginx, enterprise proxies, browser idle timers) don't silently drop the connection. The legacy `elysper-server/src/sse.rs` module (defined `HEARTBEAT_INTERVAL` but never wired under the old a2a transport) is removed.
+- **SSE keepalive for long agent runs**: the session executor now emits a heartbeat comment every 15 s on `/api/v1/chat/sessions/{id}/messages/stream` while waiting on the agent event stream. Idle SSE no longer stays byte-silent during long LLM thinking phases or multi-minute tool runs, so intermediaries (nginx, enterprise proxies, browser idle timers) don't silently drop the connection. The legacy `uva-app-server/src/sse.rs` module (defined `HEARTBEAT_INTERVAL` but never wired under the old a2a transport) is removed.
 
 ### Changed
 
-- **Frontend palette softened**: Neon Terminal color tokens (`elysper-web/src/styles/tokens.css`) and ChatPage segment colors are swapped for low-saturation equivalents (muted teal `#5fb89a`, dusty cyan `#5fb3c4`, desaturated amber `#c9b265`, dusty rose `#c66a78`, charcoal `#14141f`) to reduce eye strain on long sessions. The visual identity (terminal aesthetic, monospace, glow) is preserved.
+- **Frontend palette softened**: Neon Terminal color tokens (`uva-web/src/styles/tokens.css`) and ChatPage segment colors are swapped for low-saturation equivalents (muted teal `#5fb89a`, dusty cyan `#5fb3c4`, desaturated amber `#c9b265`, dusty rose `#c66a78`, charcoal `#14141f`) to reduce eye strain on long sessions. The visual identity (terminal aesthetic, monospace, glow) is preserved.
 - **Frontend tool-block UI timeout raised**: `TOOL_TIMEOUT_MS` in `ChatPage.tsx` is now 180 000 ms (3 min) so the "tool timed out" placeholder only fires on genuinely stalled connections, not during legitimate long quiet phases (with the SSE heartbeat above, those no longer disconnect).
 
 ### Added
 
 - **V4A `apply_patch` builtin tool** (portable `codex apply_patch` V4A grammar): `apply_patch` lets the LLM apply a structured multi-file patch (V4A grammar: `*** Begin Patch` … `*** End Patch`) in a single tool call. Multi-file patches are applied sequentially; each hunk can be `Add` / `Delete` / `Update` (with `Context` / `Insertion` / `Deletion` lines). 22 codex scenarios are ported as integration tests (`tests/codex_scenarios/`) covering the V4A spec (interleaved context/deletion, pure addition, overwrite, move operations, etc.). Production policy: `requires_permission() -> true` (reuses the `write` policy via Guardian).
-- **TurnId (Uuid) MVP turn label**: introduces `elysper_agent::turn::TurnId(Uuid)` as the canonical turn identifier. `LoopContext` gains `current_turn_id: Option<TurnId>` and `assign_new_turn_id()`; the stream builder uses `ctx.current_turn_id.map(|t| t.0.to_string()).unwrap_or_else(|| format!("turn-{}", ctx.iteration))` to format the turn label. 5 unit tests in `loop_context.rs` + 3 integration tests in `tests/turn_id_test.rs` cover construction, default, assignment, and formatting. The `format_turn_id` helper that previously lived in `elysper_agent::turn_id` is deleted; `format_turn_id` calls are replaced with `ctx.current_turn_id` reads.
-- **AgentsMdSection with hierarchical discovery**: new `elysper_context::agents_md::AgentsMdSection` walks `workspace_dir.ancestors().rev()` from filesystem root to workspace directory (farthest first, closest last so most-specific override wins) using `std::fs::canonicalize` + `HashSet<PathBuf>` for symlink-cycle protection. Section caching is `SessionCached` (read once per session, not per LLM call). `AgentConfig` gains `agents_md_enabled` (default `true`) and `agents_md_filenames` (default `["AGENTS.md"]`) with `#[serde(default = "default_agents_md_*")]` for backward compatibility. `IdentitySection::WORKSPACE_FILES` is reduced from `["IDENTITY.md", "USER.md", "MEMORY.md", "AGENTS.md"]` to drop AGENTS.md (now handled by the new section). E2E test `test_agents_md_hierarchical_discovery_through_prompt_builder` verifies ancestor walk + override semantics.
+- **TurnId (Uuid) MVP turn label**: introduces `uva_agent::turn::TurnId(Uuid)` as the canonical turn identifier. `LoopContext` gains `current_turn_id: Option<TurnId>` and `assign_new_turn_id()`; the stream builder uses `ctx.current_turn_id.map(|t| t.0.to_string()).unwrap_or_else(|| format!("turn-{}", ctx.iteration))` to format the turn label. 5 unit tests in `loop_context.rs` + 3 integration tests in `tests/turn_id_test.rs` cover construction, default, assignment, and formatting. The `format_turn_id` helper that previously lived in `uva_agent::turn_id` is deleted; `format_turn_id` calls are replaced with `ctx.current_turn_id` reads.
+- **AgentsMdSection with hierarchical discovery**: new `uva_context::agents_md::AgentsMdSection` walks `workspace_dir.ancestors().rev()` from filesystem root to workspace directory (farthest first, closest last so most-specific override wins) using `std::fs::canonicalize` + `HashSet<PathBuf>` for symlink-cycle protection. Section caching is `SessionCached` (read once per session, not per LLM call). `AgentConfig` gains `agents_md_enabled` (default `true`) and `agents_md_filenames` (default `["AGENTS.md"]`) with `#[serde(default = "default_agents_md_*")]` for backward compatibility. `IdentitySection::WORKSPACE_FILES` is reduced from `["IDENTITY.md", "USER.md", "MEMORY.md", "AGENTS.md"]` to drop AGENTS.md (now handled by the new section). E2E test `test_agents_md_hierarchical_discovery_through_prompt_builder` verifies ancestor walk + override semantics.
 - **L1–L5 recovery cascade** (wired into the agent loop): the previously-implemented recovery cascade is now invoked from the two real error entry points in `stream_builder/builder.rs` (LLM sampling errors and tool execution errors). Five layers: L1 Truncate tool results → L2 Retry (idempotent only) → L3 Fallback → L4 Auto-Compact (driven by `AgentRunConfig::compaction_provider`) → L5 Reset (clears `BuilderSteps` reset + failure_tracker state). `AgentEvent::RecoveryApplied { level, message }` is emitted whenever a recovery layer fires; subscribers can reconstruct recovery timing from the event stream. 3 E2E tests cover tool error cascade, L5 reset, and L1 truncation paths.
 - **`AgentEvent::LlmStreamDelta` for progressive text delivery**: emits one `LlmStreamDelta` per provider stream chunk, so downstream consumers (SSE / WebSocket / TUI) can render assistant text as it streams. `MaxIterationsReached` is now set as the end reason when the iteration cap is hit, replacing the previous "silent hang" termination.
 - **`Message::tool_result_cleared_at` field** (idempotent pruning marker): `Message` gains `tool_result_cleared_at: Option<Instant>` with `#[serde(default)]` so existing serialized messages deserialize cleanly. `Message::prune()` no longer mutates the tool result content in place; it stamps the marker. The compaction renderer honors the marker and treats the cleared tool result as already-truncated, preventing double-truncation.
@@ -8201,37 +8371,37 @@ Eight designs from the reference repos landed. Plan: `docs/optimization-report-R
 
 ### Changed
 
-- **LoopDetectorSet unified into elysper-guardian**: All loop detection logic is now centralized in `elysper_guardian::LoopDetectorSet` with five independent detectors (`DoomLoop`, `GenericRepeat`, `PingPong`, `PollNoProgress`, `GlobalCircuit`). The local `crates/elysper-agent/src/stream_builder/loop_detection.rs` (467 lines) has been deleted; `AgentDependencies` and `StreamBuilder` now import from `elysper_guardian`. The check API returns `(LoopStatus, Option<LoopAction>)` to disambiguate caller responses; `LoopAction::RequirePermission` is the doom-loop signal (mirrors opencode's `doom_loop` permission category) and is currently treated as a blocking signal until `elysper-permission` is wired into the stream loop.
-- **TokenUsage unified across 4 crates**: `elysper-agent`, `elysper-guardian`, `elysper-provider`, `elysper-telemetry` now all consume the same `TokenUsage` type via 1-line re-export shims. Eliminates 4 parallel definitions of `(prompt, completion, total)` that drifted independently.
-- **elysper-session 3-layer re-export guard** (`elysper-session-reexport-policy` spec): the `pub use session::{Session, SessionError, SessionManager}` re-export was deleted to prevent `SessionManager` / `SessionError` from shadowing their `types::` counterparts at the crate root. Defense in depth: (1) `compile_fail` doc tests in `src/lib.rs`, (2) integration test `tests/reexport_policy.rs`, (3) CI script `scripts/check_reexports.sh`. Re-wiring the shadowed path is now compile-time-impossible without a deliberate `pub use` addition.
-- **Single-pass compaction + summary anchoring**: `crates/elysper-context` compaction now uses a single-pass scan instead of O(n²) repeated walks. `previous_summary` is truncated to 4000 characters (head 60% + tail 40% + marker) using UTF-8 safe boundary checks, eliminating the multi-byte panic risk that the bash tool fix parallels. `crates/elysper-agent/src/agent_tools.rs` (1300+ lines) is split into a small `agent_tools` shim + 4 focused sub-modules (`compact.rs`, `truncate.rs`, `prune.rs`, `tools_render.rs`). The shim uses `pub use sub_module::*` so callers can keep importing from `agent_tools` unchanged.
-- **`agent.run.compaction_provider` config knob**: `AgentRunConfig` gains `compaction_provider: Option<Arc<dyn CompactionProvider>>` so L4 Auto-Compact can call into a user-supplied compaction backend (defaults to the built-in elysper-context provider).
+- **LoopDetectorSet unified into uva-guardian**: All loop detection logic is now centralized in `uva_guardian::LoopDetectorSet` with five independent detectors (`DoomLoop`, `GenericRepeat`, `PingPong`, `PollNoProgress`, `GlobalCircuit`). The local `crates/uva-agent/src/stream_builder/loop_detection.rs` (467 lines) has been deleted; `AgentDependencies` and `StreamBuilder` now import from `uva_guardian`. The check API returns `(LoopStatus, Option<LoopAction>)` to disambiguate caller responses; `LoopAction::RequirePermission` is the doom-loop signal (mirrors opencode's `doom_loop` permission category) and is currently treated as a blocking signal until `uva-permission` is wired into the stream loop.
+- **TokenUsage unified across 4 crates**: `uva-agent`, `uva-guardian`, `uva-provider`, `uva-telemetry` now all consume the same `TokenUsage` type via 1-line re-export shims. Eliminates 4 parallel definitions of `(prompt, completion, total)` that drifted independently.
+- **uva-session 3-layer re-export guard** (`uva-session-reexport-policy` spec): the `pub use session::{Session, SessionError, SessionManager}` re-export was deleted to prevent `SessionManager` / `SessionError` from shadowing their `types::` counterparts at the crate root. Defense in depth: (1) `compile_fail` doc tests in `src/lib.rs`, (2) integration test `tests/reexport_policy.rs`, (3) CI script `scripts/check_reexports.sh`. Re-wiring the shadowed path is now compile-time-impossible without a deliberate `pub use` addition.
+- **Single-pass compaction + summary anchoring**: `crates/uva-context` compaction now uses a single-pass scan instead of O(n²) repeated walks. `previous_summary` is truncated to 4000 characters (head 60% + tail 40% + marker) using UTF-8 safe boundary checks, eliminating the multi-byte panic risk that the bash tool fix parallels. `crates/uva-agent/src/agent_tools.rs` (1300+ lines) is split into a small `agent_tools` shim + 4 focused sub-modules (`compact.rs`, `truncate.rs`, `prune.rs`, `tools_render.rs`). The shim uses `pub use sub_module::*` so callers can keep importing from `agent_tools` unchanged.
+- **`agent.run.compaction_provider` config knob**: `AgentRunConfig` gains `compaction_provider: Option<Arc<dyn CompactionProvider>>` so L4 Auto-Compact can call into a user-supplied compaction backend (defaults to the built-in uva-context provider).
 - **`tool_call_id` propagation**: `LoopContext` now carries `tool_call_id: String` so tool results are routed back to the correct LLM-issued tool call. Previously the field was tracked in ad-hoc ways and tool results sometimes reached the LLM without the matching `tool_call_id`, causing the model to ignore the result.
 - **End-of-session reflection gated by tool activity**: `AgentEvent::SessionReflection` (a "what did we accomplish" summary event) no longer fires on text-only turns; it requires at least one tool execution in the session. This eliminates noise on chat-only sessions.
-- **Real provider streaming** (OpenAI + Anthropic): `complete_with_stream` is the default path. `IsDone` variant is added to `StreamChunk` so consumers can detect end-of-stream without per-message string matching. `SamplingResult` is moved from `elysper-agent` to `elysper-provider` (the type is provider-shaped; the old home was a layering leak). `truncate` integration on streaming: large stream chunks are truncated at the provider boundary to keep per-chunk payload size bounded. The deprecated `stream()` and `collect_stream_response` are deleted after a 1-release deprecation window.
+- **Real provider streaming** (OpenAI + Anthropic): `complete_with_stream` is the default path. `IsDone` variant is added to `StreamChunk` so consumers can detect end-of-stream without per-message string matching. `SamplingResult` is moved from `uva-agent` to `uva-provider` (the type is provider-shaped; the old home was a layering leak). `truncate` integration on streaming: large stream chunks are truncated at the provider boundary to keep per-chunk payload size bounded. The deprecated `stream()` and `collect_stream_response` are deleted after a 1-release deprecation window.
 
 ### Fixed
 
 - **Cache control hash independence**: `CacheControlMark` is now hashed independently of `system_content`, preventing false cache hits when system content is unchanged but cache directives differ. Scopes are namespaced by `user_id` + `session_id` to prevent cross-session leakage.
 - **No silent record drops in loop detector**: the agent's `stream_builder::loop_detection::GenericRepeatDetector` now uses `HashMap<(u64, u64), u32>` for O(1) lookups and updates, eliminating per-call `String` allocations and the O(N) scan from the previous `VecDeque` implementation.
-- **Removed dead code**: Deleted the unused `crates/elysper-agent/src/agent/` module tree (never declared as a module, never compiled) along with `crates/elysper-cli/src/agent.rs` and `crates/elysper-server/src/agent.rs` (also never declared). Deleted the dead `crates/elysper-tool/src/exec/` module that referenced non-existent `PermissionLevel`. Removed the legacy `PermissionPolicy` struct from `elysper-permission`, unifying on `MergedPolicy`. Deleted 11 additional dead files in `elysper-cli/src/` (`color.rs`, `config.rs`, `handler.rs`, `output.rs`, `runner.rs`, `modes/`, `input/`, and others) — ~2572 lines of code that was never compiled because `elysper-cli/src/lib.rs` only declared 5 of the 11 `.rs` files present.
-- **`elysper-agent` doctest import paths corrected**: several `AgentError` doctests used stale `use crate::...` paths after the module split. The corrected paths resolve at `cargo test --doc` time.
-- **`elysper-session` test compile fixes**: `tests/session_persistence.rs` now uses `elysper_session::types::Session` and `elysper_session::manager::SessionManager` (qualified paths) to avoid the `SessionManager` shadowing that previously blocked the test from compiling. The phantom `SessionConfig::new(id)` calls are replaced with `SessionConfig::default()`.
+- **Removed dead code**: Deleted the unused `crates/uva-agent/src/agent/` module tree (never declared as a module, never compiled) along with `crates/uva-cli/src/agent.rs` and `crates/uva-app-server/src/agent.rs` (also never declared). Deleted the dead `crates/uva-tool/src/exec/` module that referenced non-existent `PermissionLevel`. Removed the legacy `PermissionPolicy` struct from `uva-permission`, unifying on `MergedPolicy`. Deleted 11 additional dead files in `uva-cli/src/` (`color.rs`, `config.rs`, `handler.rs`, `output.rs`, `runner.rs`, `modes/`, `input/`, and others) — ~2572 lines of code that was never compiled because `uva-cli/src/lib.rs` only declared 5 of the 11 `.rs` files present.
+- **`uva-agent` doctest import paths corrected**: several `AgentError` doctests used stale `use crate::...` paths after the module split. The corrected paths resolve at `cargo test --doc` time.
+- **`uva-session` test compile fixes**: `tests/session_persistence.rs` now uses `uva_session::types::Session` and `uva_session::manager::SessionManager` (qualified paths) to avoid the `SessionManager` shadowing that previously blocked the test from compiling. The phantom `SessionConfig::new(id)` calls are replaced with `SessionConfig::default()`.
 - **`turn_id` string construction centralized**: 4 turn-ID representations (`LoopContext.iteration: usize`, `AgentContext.turn_id: String`, `PrefixStabilityEvent.turn_id: u64`, `ApprovalRequest::NetworkAccess.turn_id: String`) are converged via a centralized `format_turn_id` helper. The 3 lower-effort representations stay as-is; the `ApprovalRequest::NetworkAccess.turn_id` field is removed as an orphan (0 production callers, 0 Guardian reads). Net: -1 `format_turn_id` site + 1 central site, with future code able to use `AgentContext::current_turn_id` directly.
 - **OpenSpec spec format drift fixed** (`fix-12-synced-spec-headers` change): 12 pre-existing `openspec/specs/*/spec.md` files were using `## ADDED Requirements` (delta format) instead of `## Requirements` (cumulative format), causing `openspec spec validate --strict` to fail. 5 Pattern A specs (have `## Purpose`, need only header rename) and 7 Pattern B specs (need `## Purpose` prepended + header rename; Purpose text sourced from archived `proposal.md` "Why" section) are repaired. New CI gate `scripts/check_synced_spec_format.sh` prevents future drift.
 
 ### Removed
 
-- **`sub_traits` module removed from elysper-tool**: The placeholder sub-trait design (`ToolDefinition` / `ToolExecution` / `ToolLifecycle`) was never implemented. `ToolCategory` enum and `ToolMetadataSnapshot` struct are preserved as `pub` symbols in `crates/elysper-tool/src/descriptor.rs` next to `ToolDescriptor`.
-- **`fragment` module relocated from elysper-tool to elysper-context**: `ContextFragment` trait, `FragmentRegistry`, and 6 built-in fragments (`SystemPromptFragment` / `TokenBudgetFragment` / `PermissionsFragment` / `EnvironmentFragment` / `RolloutBudgetFragment` / `CustomFragment`) now live in `crates/elysper-context/src/fragment/`. System prompt injection logic now sits next to `ContextAssembler`. Update `use elysper_tool::fragment::*` → `use elysper_context::fragment::*`.
+- **`sub_traits` module removed from uva-tool**: The placeholder sub-trait design (`ToolDefinition` / `ToolExecution` / `ToolLifecycle`) was never implemented. `ToolCategory` enum and `ToolMetadataSnapshot` struct are preserved as `pub` symbols in `crates/uva-tool/src/descriptor.rs` next to `ToolDescriptor`.
+- **`fragment` module relocated from uva-tool to uva-context**: `ContextFragment` trait, `FragmentRegistry`, and 6 built-in fragments (`SystemPromptFragment` / `TokenBudgetFragment` / `PermissionsFragment` / `EnvironmentFragment` / `RolloutBudgetFragment` / `CustomFragment`) now live in `crates/uva-context/src/fragment/`. System prompt injection logic now sits next to `ContextAssembler`. Update `use uva_tool::fragment::*` → `use uva_context::fragment::*`.
 - **Deprecated `provider::stream()` and `provider::collect_stream_response`**: removed after a 1-release deprecation window. Use `complete_with_stream` + `StreamChunk` (with `IsDone` variant) instead.
-- **`stream_builder/loop_detection.rs`** (467 lines, local to `elysper-agent`): now in `elysper-guardian` (`LoopDetectorSet`).
-- **`elysper-exec` monolith**: replaced by `elysper-tool-bash` + `elysper-tool-exec-base` (see Breaking Changes).
+- **`stream_builder/loop_detection.rs`** (467 lines, local to `uva-agent`): now in `uva-guardian` (`LoopDetectorSet`).
+- **`uva-exec` monolith**: replaced by `uva-tool-bash` + `uva-tool-exec-base` (see Breaking Changes).
 - **Old `PermissionPolicy` struct + `RuleSet`**: removed; `MergedPolicy` is the sole permission evaluator.
 - **Orphaned `streaming-2part-truncate` files**: scaffolding from a refactor that was completed differently. ~120 lines.
-- **`elysper-cli` dead files (11 files, ~2572 lines)**: see "Removed dead code" under Fixed.
-- **`elysper-agent/executor/` and `elysper-agent/builder/` modules**: pre-refactor scaffolding replaced by the current `stream_builder/` module.
-- **`elysper-agent` simplification pass (13 waves, ~5700 LOC removed)**: removed unused subsystems from `crates/elysper-agent/src/` — `registry/` (936), `checkpoint/` (566), `hook_view.rs` (140), `error_recovery/` (~770, including `run_recovery_cascade` replaced by a `WarningKind`-level signal), `control/{fork_policy,mailbox,reservation}.rs` (552), `agent_permission.rs` + `steps/spawn.rs` + `iteration/loop_detect.rs` + `LoopDetectInterceptor` (~456), `AgentRunStateConfig` (no consumers) plus dead `elysper_provider::{ContentPart, ToolResult, ToolUse}` re-exports, the entire `control/` multi-agent plane (`agent_path.rs` + `registry.rs` + `core_ctrl.rs` + `format_background_task_notification` + `agent_control` poll path in `main_loop.rs`, ~617 LOC) plus the now-unused `regex` crate dependency, the dead `ExtensionRegistry::skill_registry()` accessor (zero callers), the dead `tool_args`/`token_usage` `InterceptorContext.data` map insertions in `main_loop.rs` that were vestigial after `LoopDetectInterceptor` deletion, 7 dead `AgentConfig` fields (`executor_kind`, `agents_md_enabled`, `agents_md_filenames`, `agents_md_config()`, `doom_loop_threshold`, `compaction_provider`, `token_budget`, `checkpoint_dir`) + the entire `ExecutorKindConfig` enum (~268 LOC removed), and the entire vestigial `error/` module (`AgentError` enum with 14 variants, 9 constructors, 6 `From` impls, 16 unit tests = 478 LOC) that was declared but never re-exported and had zero external callers — production code uses `elysper_core::Error` throughout. The `test_no_underscore_prefixed_fields_in_run_config` audit table was updated to reflect the actual current `AgentRunConfig` field list (added `extension_registry` + `interceptor_chain`; removed stale references to `context_assembler`, `agent_control`, `compaction_provider`). Net: `elysper-agent/src/` shrunk from 15,204 → 9,508 LOC across 60 files (~37% reduction). External `elysper-cli` + `elysper-server` callsites dropped for `agent_control`, `approval_service`, `guardian_coordinator`, `fork_policy`, `token_budget`, `checkpoint_dir`, `compaction_provider`. The LLM sampling path still classifies transient errors as `LlmSampleOutcome::Continue` and validation errors as `LlmSampleOutcome::Terminate`; doom-loop detection, fork-policy, and the background sub-agent registry are removed.
+- **`uva-cli` dead files (11 files, ~2572 lines)**: see "Removed dead code" under Fixed.
+- **`uva-agent/executor/` and `uva-agent/builder/` modules**: pre-refactor scaffolding replaced by the current `stream_builder/` module.
+- **`uva-agent` simplification pass (13 waves, ~5700 LOC removed)**: removed unused subsystems from `crates/uva-agent/src/` — `registry/` (936), `checkpoint/` (566), `hook_view.rs` (140), `error_recovery/` (~770, including `run_recovery_cascade` replaced by a `WarningKind`-level signal), `control/{fork_policy,mailbox,reservation}.rs` (552), `agent_permission.rs` + `steps/spawn.rs` + `iteration/loop_detect.rs` + `LoopDetectInterceptor` (~456), `AgentRunStateConfig` (no consumers) plus dead `uva_provider::{ContentPart, ToolResult, ToolUse}` re-exports, the entire `control/` multi-agent plane (`agent_path.rs` + `registry.rs` + `core_ctrl.rs` + `format_background_task_notification` + `agent_control` poll path in `main_loop.rs`, ~617 LOC) plus the now-unused `regex` crate dependency, the dead `ExtensionRegistry::skill_registry()` accessor (zero callers), the dead `tool_args`/`token_usage` `InterceptorContext.data` map insertions in `main_loop.rs` that were vestigial after `LoopDetectInterceptor` deletion, 7 dead `AgentConfig` fields (`executor_kind`, `agents_md_enabled`, `agents_md_filenames`, `agents_md_config()`, `doom_loop_threshold`, `compaction_provider`, `token_budget`, `checkpoint_dir`) + the entire `ExecutorKindConfig` enum (~268 LOC removed), and the entire vestigial `error/` module (`AgentError` enum with 14 variants, 9 constructors, 6 `From` impls, 16 unit tests = 478 LOC) that was declared but never re-exported and had zero external callers — production code uses `uva_core::Error` throughout. The `test_no_underscore_prefixed_fields_in_run_config` audit table was updated to reflect the actual current `AgentRunConfig` field list (added `extension_registry` + `interceptor_chain`; removed stale references to `context_assembler`, `agent_control`, `compaction_provider`). Net: `uva-agent/src/` shrunk from 15,204 → 9,508 LOC across 60 files (~37% reduction). External `uva-cli` + `uva-app-server` callsites dropped for `agent_control`, `approval_service`, `guardian_coordinator`, `fork_policy`, `token_budget`, `checkpoint_dir`, `compaction_provider`. The LLM sampling path still classifies transient errors as `LlmSampleOutcome::Continue` and validation errors as `LlmSampleOutcome::Terminate`; doom-loop detection, fork-policy, and the background sub-agent registry are removed.
 
 ### Deferred
 

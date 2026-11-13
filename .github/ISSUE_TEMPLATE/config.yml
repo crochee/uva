@@ -2,8 +2,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Discussions
-    url: https://github.com/crochee/elysper/discussions
+    url: https://github.com/crochee/uva/discussions
     about: 用例 / 设计 / 选型讨论。
   - name: Security advisories
-    url: https://github.com/crochee/elysper/security/advisories/new
+    url: https://github.com/crochee/uva/security/advisories/new
     about: 私下报告安全问题（详见 SECURITY.md）。

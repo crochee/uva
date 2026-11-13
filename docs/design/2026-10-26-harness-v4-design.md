@@ -12,14 +12,14 @@
 
 ## 1. 意图与为什么
 
-`elysper` 要成为**社区基座库**：第三方 crate 装进来加 tool / 插件，不改 harness 一行；外围库用这个
+`uva` 要成为**社区基座库**：第三方 crate 装进来加 tool / 插件，不改 harness 一行；外围库用这个
 harness + 外部插件集成为一个完整的 ai agent 应用。
 
 今天离这个目标最近的差距有三条，每条都是**可验证的**，不是观感问题：
 
-1. **"无运行时依赖"只做到公开 API 层。** `elysper-harness` 自己的 `[dependencies]` 没有 tokio，
-   但 `cargo tree -p elysper-harness -e normal` 仍列出 7 个 tokio 相关条目。第三方
-   `cargo add elysper-harness` 会把 tokio 编进产物 —— 这与 pi / dsh 的"核心包不带运行时"不是同一
+1. **"无运行时依赖"只做到公开 API 层。** `uva-harness` 自己的 `[dependencies]` 没有 tokio，
+   但 `cargo tree -p uva-harness -e normal` 仍列出 7 个 tokio 相关条目。第三方
+   `cargo add uva-harness` 会把 tokio 编进产物 —— 这与 pi / dsh 的"核心包不带运行时"不是同一
    个量级的事。
 2. **插件只有编译期一条通道。** `Host` / `Plugin` / `Registration` 已经做得很完整（撤销语义、
    安装顺序、fail-closed 仲裁），但 `grep PluginRegistry` 零命中、`PluginEvent` 零命中。第三方插件
@@ -43,11 +43,11 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 | 动态插件权力 | **B：默认降权** —— 可观察 + 供工具 + 改写工具结果；**否决权（block / ask）留在进程内**；config 可对单个插件显式提权到完全平权 |
 | 本轮范围 | **W1 + W2 + W3 全部**（harness 零运行时依赖 + 插件双通道 + server 无状态化） |
 | 破坏性 | 允许。facade feature 表收缩是生态可见的破坏性改动，本轮一次切干净，不留 shim / 别名 |
-| 依赖方向 | `elysper` → `elysper-*` → `elysper-core`，单向，不回指 |
+| 依赖方向 | `uva` → `uva-*` → `uva-core`，单向，不回指 |
 | harness 自身 | 零 cargo feature、零运行时依赖、公开 API 不出现具体运行时类型 |
 | `prompt_section` | **本轮链接上** —— prompt 组装器读 host 的 sections，让插件的 prompt 片段真的到达 system prompt（今天注册了但只有测试读） |
 | facade feature | **按方向收窄**（详见 §5.10）—— 每条 feature 只表达一个 crate 依赖；组合意图全部搬到运行时组合层 |
-| `InputQueue` | **挪进 `elysper-server`** —— session 不保留多余的语义与作用 |
+| `InputQueue` | **挪进 `uva-app-server`** —— session 不保留多余的语义与作用 |
 
 ---
 
@@ -55,7 +55,7 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 
 ### 目标
 
-1. `cargo tree -p elysper-harness -e normal` 不含任何 tokio 条目；第三方只依赖 harness 时，
+1. `cargo tree -p uva-harness -e normal` 不含任何 tokio 条目；第三方只依赖 harness 时，
    **产物里没有 tokio**。
 2. 静态插件通道保持现有语义（`Plugin::install` → `PluginHandle`，drop 即撤销），并新增
    `PluginEvent` 逃生舱，让插件能发自己的领域事件（durable / live 两路）。
@@ -69,7 +69,7 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 ### 非目标
 
 1. 运行时热重载（插件进程内换代码）—— 与 ABI 稳定性目标冲突。
-2. 让 `elysper-harness` 自己变成"什么都有"的大 crate —— 保持薄。
+2. 让 `uva-harness` 自己变成"什么都有"的大 crate —— 保持薄。
 3. provider 层的新模型 / 新协议。
 4. 前端视觉重设计 —— 本轮前端只跟着接口走。
 5. 为兼容旧签名保留 shim。
@@ -90,12 +90,12 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 
 继承 `AGENTS.md`：
 
-- 库 crate 只用 `thiserror`；`elysper-server` 是 app crate，用 `anyhow`。
+- 库 crate 只用 `thiserror`；`uva-app-server` 是 app crate，用 `anyhow`。
 - 依赖版本一律 `major.minor`；新依赖只能来自根 `Cargo.toml` 的 `[workspace.dependencies]`。
-- `max_width = 80`；禁通配符导入；`elysper-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
-- 墙钟走 `elysper_core::Clock`，ID 走 `elysper_core::IdGen`；新代码禁直接 `chrono::Utc::now()`。
+- `max_width = 80`；禁通配符导入；`uva-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
+- 墙钟走 `uva_core::Clock`，ID 走 `uva_core::IdGen`；新代码禁直接 `chrono::Utc::now()`。
 - 库 crate 的公开 API 不得出现具体运行时类型。
-- `elysper-harness` 不得有 `[features]` 表，不得依赖 tokio。
+- `uva-harness` 不得有 `[features]` 表，不得依赖 tokio。
 - 测试按 crate 分批执行，禁止 `cargo test --workspace`。
 - 破坏性 API 一次切干净。
 - 注释预算只许降不许升（`scripts/harness-docs/baseline`）。
@@ -109,8 +109,8 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 ```text
 ┌───────────────────────────────────────────────────────────────────┐
 │ 消费方 / 部署方                                                     │
-│   cargo add elysper-harness     （产物零 tokio）                    │
-│   cargo add elysper-plugin-host （要跑远端插件时才加）              │
+│   cargo add uva-harness     （产物零 tokio）                    │
+│   cargo add uva-plugin-host （要跑远端插件时才加）              │
 └────────────────┬──────────────────────────────────┬───────────────┘
                  │                                  │
       ┌──────────▼───────────┐          ┌───────────▼────────────┐
@@ -121,19 +121,19 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
                  │  Host::install                     │ wire
                  │  → PluginHandle                    ▼
                  │                        ┌────────────────────────┐
-                 │                        │ elysper-plugin-protocol │
+                 │                        │ uva-plugin-protocol │
                  │                        │  serde-only · 零运行时   │
                  │                        │  · 不依赖 harness       │
                  │                        └───────────┬────────────┘
                  │                                    ▼
                  │                        ┌────────────────────────┐
-                 │                        │ elysper-plugin-host     │
+                 │                        │ uva-plugin-host     │
                  │                        │  远程能力 → Host 注册    │
                  │                        └───────────┬────────────┘
                  └────────────┬───────────────────────┘
                               ▼
               ┌───────────────────────────────────┐
-              │  elysper-harness                  │
+              │  uva-harness                  │
               │  Host · Plugin · Registration     │
               │  Agent · ReasoningStrategy        │
               │  DelegatingTool · ApprovalPolicy  │
@@ -141,7 +141,7 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
               └────────────┬──────────────────────┘
                            ▼
               ┌───────────────────────────────────┐
-              │  elysper-server（app crate）       │
+              │  uva-app-server（app crate）       │
               │  运行时组合层：config → profile    │
               │  → 静态插件 + 动态插件 → Host      │
               │  无状态计算节点                    │
@@ -149,7 +149,7 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 ```
 
 **关键结构决策：动态通道对 harness 完全不可见。** harness 只认 `Host` / `Plugin` /
-`Registration`；远端能力由 `elysper-plugin-host` 在宿主侧翻译成同一种注册。harness 一行不改，
+`Registration`；远端能力由 `uva-plugin-host` 在宿主侧翻译成同一种注册。harness 一行不改，
 也不需要知道"远端"这个概念存在。这同时解开了 v3 §5.2 里"插件 crate 依赖 harness 类型、harness 又
 依赖插件 crate"的环 —— 环只存在于旧解法里。
 
@@ -157,10 +157,10 @@ harness + 外部插件集成为一个完整的 ai agent 应用。
 
 | crate | 依赖 | 职责 | 运行时 |
 |---|---|---|---|
-| `elysper-plugin-protocol` | `serde` + `serde_json`（**仅此两个**） | wire 类型：方法名常量、请求/响应结构、能力协商、错误码 | 零 |
-| `elysper-plugin-host` | `elysper-plugin-protocol` + `elysper-harness` + `elysper-core` | 进程管理、JSON-RPC 客户端、把远端能力装进 `Host` | 需要 spawn（tokio 可选） |
+| `uva-plugin-protocol` | `serde` + `serde_json`（**仅此两个**） | wire 类型：方法名常量、请求/响应结构、能力协商、错误码 | 零 |
+| `uva-plugin-host` | `uva-plugin-protocol` + `uva-harness` + `uva-core` | 进程管理、JSON-RPC 客户端、把远端能力装进 `Host` | 需要 spawn（tokio 可选） |
 
-`elysper-plugin-protocol` **不依赖 harness**，因此不构成环。第三方作者只需要它（或者是它生成的
+`uva-plugin-protocol` **不依赖 harness**，因此不构成环。第三方作者只需要它（或者是它生成的
 JSON schema）就知道协议长什么样。
 
 facade 上按 `AGENTS.md`「新增 crate 必须同步加 feature」加两条：`plugin-protocol` /
@@ -168,53 +168,53 @@ facade 上按 `AGENTS.md`「新增 crate 必须同步加 feature」加两条：`
 
 ### 5.3 W1-a：依赖闭包 tokio 清零
 
-现状（`cargo tree -p elysper-harness -e normal` 的 7 个 tokio 条目：`tokio-util` ×3、`tokio` ×3、
+现状（`cargo tree -p uva-harness -e normal` 的 7 个 tokio 条目：`tokio-util` ×3、`tokio` ×3、
 `tokio-macros` ×1）与修法。**关键区分**：把 *代码* gate 掉不等于把 *依赖边* 去掉 —— 依赖边由
 `Cargo.toml` 决定，必须逐条动 manifest。
 
 | # | 来源 | 现状证据 | 修法 |
 |---|---|---|---|
-| 1 | `elysper-steering` → `tokio-util` | `tokio-util` 在 `[dependencies]`（`Cargo.toml:32`），但本 crate 内唯一用处是 `effect_gate.rs:190` 的 `#[cfg(test)]` | 移到 `[dev-dependencies]` |
-| 2 | `elysper-steering` → `elysper-core/tokio-util` | `Cargo.toml:20` 在 **normal** 侧开了 core 的 `tokio-util` feature —— 这是把 `tokio-util` 拉进 harness 闭包的两条边之一 | normal 侧不开；只在 dev 侧开 |
-| 3 | `elysper-provider` → `elysper-core/tokio-util` | `Cargo.toml:15` 同样在 normal 侧开；本 crate 内唯一用处是 `idle_watchdog.rs:221` 的 `#[cfg(all(test, any(anthropic, openai)))]`（另有 `tests/provider_test.rs` 9 处，那已经是 dev 侧） | normal 侧不开；只在 dev 侧开 |
-| 4 | `elysper-provider` → **`tokio` 本身** | `Cargo.toml:30` `tokio = { features = ["macros","time"] }` 是 **normal 无条件依赖**，与 `anthropic` / `openai` 无关。而 harness 的树里这两个 feature 是关的（workspace dep `default-features = false`，根 `Cargo.toml:58`）—— **代码被 gate 掉，依赖边还在** | `tokio` 改 `optional = true`；`anthropic = ["dep:tokio", …]`、`openai = ["dep:tokio", …]` |
-| 5 | `elysper-provider/retry.rs` | `tokio::time::sleep` × 6 处。其中 `retry_with_classification` 被两个 adapter 调用（4 处）；**`retry_with_backoff`（`retry.rs:97`）与 `retry_with_retry_after`（`:145`）全仓零调用点**，只有 `lib.rs:101,103` 的无条件 re-export | 前者 gate 到 `any(anthropic, openai)`；后两者是**死公开 API**，按 §5.7 直接删（注意 `elysper-resilience/src/provider.rs:374` 有一个同名但无关的 `retry_with_backoff`，别误伤） |
-| 6 | `elysper-provider/streaming/idle_watchdog.rs` | `tokio::select!` / `spawn` / `sync::mpsc` / `time` —— SSE 泵 + 空闲看门狗。**运行时那半已经逐项 gate 过**（`idle_watchdog.rs:16,62,69,135,178`），只有四个 tokio-free 导出（`DEFAULT_STREAM_IDLE_TIMEOUT` / `IDLE_TIMEOUT_MARKER` / `idle_timeout_error` / `is_idle_timeout`）是无条件的 | **不要 gate 整个模块** —— 那会删掉四个与 adapter 无关的公开导出。只把剩下的无条件项与 adapter feature 对齐 |
-| 7 | `elysper-session` | `jsonl.rs`：`tokio::sync::Mutex` + `tokio::task::spawn_blocking`；`manager.rs`：`tokio::sync::Mutex`；`compaction.rs`：`tokio::select!` + `tokio::time::timeout`；`search/backend.rs`：`spawn_blocking`；`in_memory.rs:224` 的 `tokio::spawn` 在 `#[cfg(test)]` 内 | 见 §5.4 |
+| 1 | `uva-steering` → `tokio-util` | `tokio-util` 在 `[dependencies]`（`Cargo.toml:32`），但本 crate 内唯一用处是 `effect_gate.rs:190` 的 `#[cfg(test)]` | 移到 `[dev-dependencies]` |
+| 2 | `uva-steering` → `uva-core/tokio-util` | `Cargo.toml:20` 在 **normal** 侧开了 core 的 `tokio-util` feature —— 这是把 `tokio-util` 拉进 harness 闭包的两条边之一 | normal 侧不开；只在 dev 侧开 |
+| 3 | `uva-provider` → `uva-core/tokio-util` | `Cargo.toml:15` 同样在 normal 侧开；本 crate 内唯一用处是 `idle_watchdog.rs:221` 的 `#[cfg(all(test, any(anthropic, openai)))]`（另有 `tests/provider_test.rs` 9 处，那已经是 dev 侧） | normal 侧不开；只在 dev 侧开 |
+| 4 | `uva-provider` → **`tokio` 本身** | `Cargo.toml:30` `tokio = { features = ["macros","time"] }` 是 **normal 无条件依赖**，与 `anthropic` / `openai` 无关。而 harness 的树里这两个 feature 是关的（workspace dep `default-features = false`，根 `Cargo.toml:58`）—— **代码被 gate 掉，依赖边还在** | `tokio` 改 `optional = true`；`anthropic = ["dep:tokio", …]`、`openai = ["dep:tokio", …]` |
+| 5 | `uva-provider/retry.rs` | `tokio::time::sleep` × 6 处。其中 `retry_with_classification` 被两个 adapter 调用（4 处）；**`retry_with_backoff`（`retry.rs:97`）与 `retry_with_retry_after`（`:145`）全仓零调用点**，只有 `lib.rs:101,103` 的无条件 re-export | 前者 gate 到 `any(anthropic, openai)`；后两者是**死公开 API**，按 §5.7 直接删（注意 `uva-resilience/src/provider.rs:374` 有一个同名但无关的 `retry_with_backoff`，别误伤） |
+| 6 | `uva-provider/streaming/idle_watchdog.rs` | `tokio::select!` / `spawn` / `sync::mpsc` / `time` —— SSE 泵 + 空闲看门狗。**运行时那半已经逐项 gate 过**（`idle_watchdog.rs:16,62,69,135,178`），只有四个 tokio-free 导出（`DEFAULT_STREAM_IDLE_TIMEOUT` / `IDLE_TIMEOUT_MARKER` / `idle_timeout_error` / `is_idle_timeout`）是无条件的 | **不要 gate 整个模块** —— 那会删掉四个与 adapter 无关的公开导出。只把剩下的无条件项与 adapter feature 对齐 |
+| 7 | `uva-session` | `jsonl.rs`：`tokio::sync::Mutex` + `tokio::task::spawn_blocking`；`manager.rs`：`tokio::sync::Mutex`；`compaction.rs`：`tokio::select!` + `tokio::time::timeout`；`search/backend.rs`：`spawn_blocking`；`in_memory.rs:224` 的 `tokio::spawn` 在 `#[cfg(test)]` 内 | 见 §5.4 |
 
-修完 1–7 之后，剩下的唯一来源是 `elysper-session`。**session 是 harness 的依赖**（`LogWriter` /
+修完 1–7 之后，剩下的唯一来源是 `uva-session`。**session 是 harness 的依赖**（`LogWriter` /
 `SessionEvent` / `derive_history` 都在那里），所以 session 必须整体变 runtime-free，或者拆 crate。
 
-**顺带的 server 影响**：去掉 2、3 两条 normal 侧的 `elysper-core/tokio-util` 后，server 会失去这个
+**顺带的 server 影响**：去掉 2、3 两条 normal 侧的 `uva-core/tokio-util` 后，server 会失去这个
 feature —— 但 server 的 `run_stream.rs:24` 生产代码要 `Arc<tokio_util::sync::CancellationToken>`
 （`agent.run` 收 `Arc<dyn CancelToken>`）。server 自己从不请求这个 feature，它今天是**搭
 provider / steering 的便车**拿到的。修法：server 显式请求（facade 上加一条 feature），或改用
 runtime-free 的 `AtomicCancelToken`（`workflow_host.rs:80` 已经这么用）。这是 W1 里一个会**编译
 中断**的隐藏依赖，排在 §7 的第 4 步之前处理。
 
-### 5.4 W1-b：`elysper-session` 的 runtime-free 化
+### 5.4 W1-b：`uva-session` 的 runtime-free 化
 
 session 现在的 tokio 用法分三类，各有不同归宿：
 
 **(a) 摘要超时 —— 设计漂移，必须改。**
 `compaction.rs` 用 `tokio::time::timeout` 武装摘要调用。v3 设计 §7.2 自己写的是"harness 运行时无关，
-不自己武装定时器；`elysper-server` 在手动压缩上安装 `DEFAULT_SUMMARY_TIMEOUT`"。代码与设计不一致。
+不自己武装定时器；`uva-app-server` 在手动压缩上安装 `DEFAULT_SUMMARY_TIMEOUT`"。代码与设计不一致。
 
-修法：新增 `elysper_core::sleeper::Sleeper` 接缝 ——
+修法：新增 `uva_core::sleeper::Sleeper` 接缝 ——
 ```rust
 pub trait Sleeper: Send + Sync {
     fn sleep(&self, duration: Duration) -> BoxFuture<'static, ()>;
 }
 ```
 `session` 用它实现超时（`futures::select!` + `sleeper.sleep(d)`，两个 future 竞速，runtime-free）。
-tokio 实现（`tokio::time::sleep`）放进兄弟 crate `elysper-harness-tokio` 的
+tokio 实现（`tokio::time::sleep`）放进兄弟 crate `uva-harness-tokio` 的
 `TokioSleeper`，与 `TokioSpawner` 同款先例；`session` 自带一个 `ThreadSleeper`
 （std thread + oneshot，测试与无 runtime 消费者可用）。
 
 **(b) 阻塞 IO —— 需要 blocking 接缝。**
 `jsonl.rs` 与 `search/backend.rs` 用 `tokio::task::spawn_blocking` 把 fs 写与 fs 读挪出工作线程。
 
-修法：新增 `elysper_core::blocking::Blocking` 接缝 ——
+修法：新增 `uva_core::blocking::Blocking` 接缝 ——
 ```rust
 pub trait Blocking: Send + Sync {
     fn run(
@@ -228,32 +228,32 @@ pub trait Blocking: Send + Sync {
 `Arc<dyn Blocking>` —— 一个运行期装进来的 trait 对象。所以闭包的返回值不经过 `run`，由调用方
 自己的 oneshot 携带（`let (tx, rx) = oneshot::channel(); blocking.run(Box::new(move || tx.send(f())));`
 取 `rx` 就是 `T`）。默认实现 `ThreadBlocking`（`std::thread::spawn` + oneshot），tokio 实现
-`TokioBlocking`（`tokio::task::spawn_blocking`）进 `elysper-harness-tokio`。
+`TokioBlocking`（`tokio::task::spawn_blocking`）进 `uva-harness-tokio`。
 
 **注意**：`jsonl.rs` 的 `tokio::sync::Mutex` 也要换 —— 它保护的是文件句柄，跨 `.await` 持有；
 换成 `futures::lock::Mutex`（session 里 `writer/mod.rs` 已经这么用了）即可 runtime-free。
 
 **(c) `manager.rs` 的 `InputQueue` 与 `in_memory.rs` 的 `tokio::spawn` —— 归位（已决定）。**
 `InputQueue` 是 server 用来桥接 submit 与 run loop 的小队列，本质是 server 的东西，不该在
-session 的核心里 —— session 不保留多余的语义与作用。**本轮挪进 `elysper-server`。**
+session 的核心里 —— session 不保留多余的语义与作用。**本轮挪进 `uva-app-server`。**
 `tokio::spawn` 那处只在 `#[cfg(test)]` 里（并发 append 测试），移到 dev 侧即可。
 
-**这是本轮的一个生态可见破坏**：`InputQueue` 今天在 `elysper-session`（`manager.rs:252`），
-经 facade 的 glob 导出为 `elysper::session::manager::InputQueue`，server 自己也把它当公开 API
+**这是本轮的一个生态可见破坏**：`InputQueue` 今天在 `uva-session`（`manager.rs:252`），
+经 facade 的 glob 导出为 `uva::session::manager::InputQueue`，server 自己也把它当公开 API
 用（`session/controller/ops.rs:11` 的注释就写着这个路径）。挪走后**这个名字从 facade 的公开面上
 消失** —— 按本轮的规矩不留别名、不留 shim。
 
 连带要处理的：
-- `scripts/check-pub-surface-strict.sh` 里 `elysper-session` 的 pub-use 基线要更新。
-- facade 的 `session` 模块（`crates/elysper/src/session.rs`）是 `pub use elysper_session::*;`
+- `scripts/check-pub-surface-strict.sh` 里 `uva-session` 的 pub-use 基线要更新。
+- facade 的 `session` 模块（`crates/uva/src/session.rs`）是 `pub use uva_session::*;`
   的 glob —— glob 会自动跟着 crate 的公开面走，不需要单独改；但要确认删掉后没有别的东西
-  顺手消失（`elysper_session` 的其他导出不受影响）。
-- `elysper-session` 里 `manager.rs` 剩下的部分（`SessionManager` 等）仍在 session，只搬
+  顺手消失（`uva_session` 的其他导出不受影响）。
+- `uva-session` 里 `manager.rs` 剩下的部分（`SessionManager` 等）仍在 session，只搬
   `InputQueue` 与它的 `PendingEntry`。
 
 **session 的最终形态**：核心里不再有 tokio。具体是"一个 crate，runtime-free 部分无条件、runtime-bound
-部分 gate 到 feature"还是"拆成 `elysper-session`（核）+ `elysper-session-fs`（jsonl/search）"，
-由实现者按 §5.3 的余量决定 —— 但**验收标准不变**：`cargo tree -p elysper-harness -e normal` 无 tokio。
+部分 gate 到 feature"还是"拆成 `uva-session`（核）+ `uva-session-fs`（jsonl/search）"，
+由实现者按 §5.3 的余量决定 —— 但**验收标准不变**：`cargo tree -p uva-harness -e normal` 无 tokio。
 
 ### 5.5 W1-c：泛型核心 + `dyn` 外壳 —— 复核结论：`dyn` 全部保留
 
@@ -277,7 +277,7 @@ session 的核心里 —— session 不保留多余的语义与作用。**本轮
 |`Arc<dyn ModelProvider>`|25|runtime-installed by the consumer; genericising propagates as above|
 |`Arc<dyn DelegatingTool>`|14|heterogeneous, name-keyed table in the loop|
 |`Arc<dyn CancelToken>`|10 + 5 `Option`|per-run value handed in by the caller|
-|`Arc<dyn Tool>`|7 (+12 in `elysper-tool`)|heterogeneous registry; count unknown at compile time|
+|`Arc<dyn Tool>`|7 (+12 in `uva-tool`)|heterogeneous registry; count unknown at compile time|
 |`Arc<dyn ReasoningStrategy>`|7 + 3 `Option`|resolved from `StrategyRegistry` by name|
 |`Arc<dyn Compactor>`|7 + 3 `Option`|optionally installed at construction|
 |`Arc<dyn Checkpointer>`|6 + 1 `Option`|optional accelerator|
@@ -285,7 +285,7 @@ session 的核心里 —— session 不保留多余的语义与作用。**本轮
 |`Arc<dyn Agent>`|4|`AgentRegistry` holds heterogeneous agents|
 |`Arc<dyn ResultTransformer>` / `RequestTransformer` / `Hook` / `Gate`|3 each|`Vec<Entry<Arc<dyn …>>>` in `Host` — heterogeneous, runtime-registered|
 |`Arc<dyn Spawner>` / `SubagentWriters`|1 each|installed at construction|
-|`Arc<dyn FullOutputStore>`|**0 here** (5 in `elysper-tool`'s `full_output.rs`)|the store is the tool crate's dependency, not the harness's|
+|`Arc<dyn FullOutputStore>`|**0 here** (5 in `uva-tool`'s `full_output.rs`)|the store is the tool crate's dependency, not the harness's|
 |`Box<dyn Tool>`|1|**not production** — a `Send + Sync` assertion in `tool_test.rs:104`|
 
 **结论：没有代码改动。** 判据是**两条**，不是三问全 yes：该站点由下游在运行期装上（构造期、
@@ -299,7 +299,7 @@ vtable 静态分派是这些泛型容器内部的实现细节，不需要把类�
 
 ### 5.6 W1-d：热路径 —— 实测与结论
 
-基准（`cargo bench -p elysper-harness --bench hot_paths`，本机实测）。原稿的 "386.9 µs" 与
+基准（`cargo bench -p uva-harness --bench hot_paths`，本机实测）。原稿的 "386.9 µs" 与
 "3 次 clone" 两个说法都已被本分支的实测推翻；下面是要点。
 
 **基准自己错了，两处：**
@@ -329,10 +329,10 @@ vtable 静态分派是这些泛型容器内部的实现细节，不需要把类�
 
 **超窗数字里剩下的成本没有单独测过。** 现有 bench 行无法推出它：381.9 − 57.8（拷贝）− 19.1
 （快路径）≈ 305 µs，但这个减法把三种不同的工作混在一起，不能当归因。读代码能确定的是超窗路径
-的形状 —— `elysper-context` 的 `TruncatingContextManager` 在**整表**上做三次 token 估计
+的形状 —— `uva-context` 的 `TruncatingContextManager` 在**整表**上做三次 token 估计
 （`prepare_arc` 入口一次、`prepare` 入口一次、丢弃后再一次），丢弃循环里再对**每条被丢消息**
 单独估一次，并用 O(n) 的 `Vec::remove` 搬移（`context_manager.rs:527`、`:536`）——
-都在 `elysper-context`，本轮没碰。**未测量，成因候选就是这些**，下一轮先加一行能隔离它们的
+都在 `uva-context`，本轮没碰。**未测量，成因候选就是这些**，下一轮先加一行能隔离它们的
 bench 再谈降本。
 
 **bench 门禁的边界**：`--check` 只把优化路径与同一份工作的内联参考实现做比值，所以
@@ -342,56 +342,56 @@ bench 再谈降本。
 
 - 逐个复验后删除零外部引用的 `pub`。已确认的候选（本轮必须逐个复验，每个在全仓恰好只有
   自身定义一处引用）：
-  `elysper_session::as_value`（`typed_event_sink.rs:57`）、
-  `elysper_session::with_prune_threshold`（`compaction.rs:244`）、
-  `elysper_provider::create_default_provider`（`config.rs:299`）、
-  `elysper_provider::openai_compat`（`profile/openai.rs:69`）、
-  `elysper_context::with_archive`（`summarizing/manager.rs:97`）。
+  `uva_session::as_value`（`typed_event_sink.rs:57`）、
+  `uva_session::with_prune_threshold`（`compaction.rs:244`）、
+  `uva_provider::create_default_provider`（`config.rs:299`）、
+  `uva_provider::openai_compat`（`profile/openai.rs:69`）、
+  `uva_context::with_archive`（`summarizing/manager.rs:97`）。
   例外：`hash_to_u64` 的 10 处引用**全部在本模块的测试里**，删除会逼四条断言各自重推哈希 ——
   改成 `#[cfg(test)]` 的私有函数（收窄而非删除），`ahash` 随之降到 dev-dependencies。
-- `elysper-provider` 里另有两处**死公开 async API**：`retry_with_backoff`（`retry.rs:97`）与
+- `uva-provider` 里另有两处**死公开 async API**：`retry_with_backoff`（`retry.rs:97`）与
   `retry_with_retry_after`（`:145`）全仓零调用点，只剩 `lib.rs:101,103` 的无条件 re-export。
-  一并删除（注意 `elysper-resilience` 有个同名但无关的函数）。
-- **只有 `elysper-server` 标 `publish = false`**：它是应用 crate，40k+ 行不该发到 crates.io。
-  **facade `elysper` 必须保持可发布** —— 它是文档化的消费入口（README 与 crate 文档里的
-  `cargo add elysper`），标成不可发布就等于砍掉项目的主分发路径。全仓 39 个 crate 目前无一标
+  一并删除（注意 `uva-resilience` 有个同名但无关的函数）。
+- **只有 `uva-app-server` 标 `publish = false`**：它是应用 crate，40k+ 行不该发到 crates.io。
+  **facade `uva` 必须保持可发布** —— 它是文档化的消费入口（README 与 crate 文档里的
+  `cargo add uva`），标成不可发布就等于砍掉项目的主分发路径。全仓 39 个 crate 目前无一标
   `publish = false`，只有两个 example consumer 标了。
-- `elysper-server` 那 374 个 `pub` **不**做批量降级（原计划的清理已撤销）：`tests/` 下 14 个
-  integration test 是独立 crate，直接 `use elysper_server::…`；`main.rs` 也用
+- `uva-app-server` 那 374 个 `pub` **不**做批量降级（原计划的清理已撤销）：`tests/` 下 14 个
+  integration test 是独立 crate，直接 `use uva_server::…`；`main.rs` 也用
   `build_info` / `config::server::BindOverrides` / `server::boot_server`。这些路径触达的模块必须
   保持 `pub`。server 既已不可发布，它的 `pub` 面就不再是出厂契约，为没有外部消费者的模块逐个降级
   是纯 churn。只在碰到"既无测试/`main` 引用、其模块也无人 import"的条目时才顺手降。
-- 删 `crates/elysper-server/src/config/server.rs.tmp` —— 已入 git 的 **0 字节占位文件**
+- 删 `crates/uva-app-server/src/config/server.rs.tmp` —— 已入 git 的 **0 字节占位文件**
   （blob `e69de29b…`），不是配置文件的旧副本。
-- `crates/elysper-harness/src/agent/re_act/loop/tools/mod.rs` 等处的注释漂移随改动一并修正。
+- `crates/uva-harness/src/agent/re_act/loop/tools/mod.rs` 等处的注释漂移随改动一并修正。
 - `check-harness-docs` 的注释预算基线只许降不许升。
 
 ### 5.8 W2-a：动态插件协议
 
-**传输**：JSON-RPC 2.0 over stdio 或 HTTP，复用 `elysper-mcp` 已有的 `McpTransport`
+**传输**：JSON-RPC 2.0 over stdio 或 HTTP，复用 `uva-mcp` 已有的 `McpTransport`
 抽象（`request` / `notify` / `describe`）。不另立传输栈。可复用的实现是 `StdioTransport`
 （`stdio.rs:135`）、`StreamableHttpTransport`（`http.rs:154`），测试用 `LoopbackTransport` /
 `InMemoryTransport`。**注意**：`McpSupervisor`（`supervisor.rs:232`）本身**不实现** `McpTransport`
 —— 它是通过 `TransportFactory` **创建**传输的上层生命周期/重连管理器（`supervisor.rs:107-111`）。
-所以 supervisor 只能在新传输也走 `TransportFactory` 时复用；否则 `elysper-plugin-host` 自己管进程
+所以 supervisor 只能在新传输也走 `TransportFactory` 时复用；否则 `uva-plugin-host` 自己管进程
 生命周期。
 
 **方法集**（B 权限下的最终形态）：
 
 | 方法 | 方向 | 语义 |
 |---|---|---|
-| `elysper/initialize` | host → plugin | 能力协商。plugin 声明 `tools` / `observe` / `transform` / `gate` 四项支持与否 |
-| `elysper/tools/list` | host → plugin | 工具描述符：`name` / `description` / `inputSchema`（沿用 MCP 形状） |
-| `elysper/tools/call` | host → plugin | 调用远端工具，参数与结果都是 JSON |
-| `elysper/transform` | host → plugin | 交还改写后的工具结果；host 应用它 |
-| `elysper/event` | host → plugin（notification） | 观察事件，无返回值 |
-| `elysper/gate` | host → plugin | **默认不存在**。仅当 config 把该插件提权到 `authority: full` **且**它在握手时声明了 `gate` 才启用；返回 `Block` / `Ask` |
+| `uva/initialize` | host → plugin | 能力协商。plugin 声明 `tools` / `observe` / `transform` / `gate` 四项支持与否 |
+| `uva/tools/list` | host → plugin | 工具描述符：`name` / `description` / `inputSchema`（沿用 MCP 形状） |
+| `uva/tools/call` | host → plugin | 调用远端工具，参数与结果都是 JSON |
+| `uva/transform` | host → plugin | 交还改写后的工具结果；host 应用它 |
+| `uva/event` | host → plugin（notification） | 观察事件，无返回值 |
+| `uva/gate` | host → plugin | **默认不存在**。仅当 config 把该插件提权到 `authority: full` **且**它在握手时声明了 `gate` 才启用；返回 `Block` / `Ask` |
 
 `authority: full` 与 `gate` 是**两个条件**，不是一个：authority 是 operator 的授权，`gate` 是插件声明的实现。
-只满足其一就说话，等于让一个不实现 `elysper/gate` 的插件装成功、然后每次工具调用都 fail-closed ——
+只满足其一就说话，等于让一个不实现 `uva/gate` 的插件装成功、然后每次工具调用都 fail-closed ——
 那是从一个配置词换来的整机停摆。所以 `install` 拒绝 `full` 而插件未声明 `gate` 的组合，并给出修法。
 
-**协议 crate 的内容**（`elysper-plugin-protocol`，serde-only）：
+**协议 crate 的内容**（`uva-plugin-protocol`，serde-only）：
 - 方法名常量（避免各处硬编码字符串）。
 - 请求/响应结构体，全部 `serde` 派生。
 - 能力协商结构：`PluginCapabilities { tools: bool, observe: bool, transform: bool, gate: bool }`
@@ -400,15 +400,15 @@ bench 再谈降本。
 - 一份 JSON Schema 或等价文档，供非 Rust 作者对照。
 
 **关键类型问题**：内部事件词表目前**没有 serde 派生** —— `HookEvent`
-（`elysper-steering/src/hook_map.rs:26`，`Debug, Clone`）、`HookDecision`（同文件 `:174`，
+（`uva-steering/src/hook_map.rs:26`，`Debug, Clone`）、`HookDecision`（同文件 `:174`，
 `Debug, Clone, Default, PartialEq`）、`RequestParams`（**在 `request_params.rs:28`，不在
-`hook_map.rs`**，`Debug, Clone, PartialEq`）。`elysper-steering` 目前只依赖 `serde_json`、
+`hook_map.rs`**，`Debug, Clone, PartialEq`）。`uva-steering` 目前只依赖 `serde_json`、
 **不依赖 `serde`**，所以给它们加派生要先按 AGENTS.md §3.1 把 `serde` 引进根
 `[workspace.dependencies]`。
 
 决策：**wire 上不直接复用 Rust 的 `HookEvent`**。理由 —— Rust 枚举的变体形状会随内部实现演进而变，
-把它当 wire 契约等于把内部重构变成协议破坏。改为在 `elysper-plugin-protocol` 里定义**独立的、
-稳定的 wire 事件与决策类型**（`PluginEvent` / `PluginDecision`），由 `elysper-plugin-host` 做
+把它当 wire 契约等于把内部重构变成协议破坏。改为在 `uva-plugin-protocol` 里定义**独立的、
+稳定的 wire 事件与决策类型**（`PluginEvent` / `PluginDecision`），由 `uva-plugin-host` 做
 双向映射。代价是多一层映射代码，收益是协议与内部类型解耦 —— 这是"基座"必须有的分寸。
 
 **wire 词表的覆盖范围**（builder 提出、实现者定）：内部 `HookEvent` 有 11 个变体。远端插件在
@@ -485,9 +485,9 @@ bench 再谈降本。
    一个插件可以把 `destructive_hint: false` 写进 `tools/list` 来躲审批 —— 那正是降权要堵的洞。
    宿主侧对远端工具一律按 `Risk::Unknown` 或 config 指定值判定审批。
    **落点**：`Tool::risk()` 今天默认是 `Risk::from_annotations(self.annotations())`
-   （`elysper-tool/src/traits.rs:154-157`），而 `Risk` 恰好只有 `Low` / `High` / `Unknown`
+   （`uva-tool/src/traits.rs:154-157`），而 `Risk` 恰好只有 `Low` / `High` / `Unknown`
    三个变体、`Unknown` 是 `#[default]`（同文件 `:38-49`）—— 所以 `Risk::Unknown` 现成可用。
-   `elysper-plugin-host` 的远端 `Tool` 实现**覆写 `fn risk()`** 返回宿主配置的值即可，
+   `uva-plugin-host` 的远端 `Tool` 实现**覆写 `fn risk()`** 返回宿主配置的值即可，
    **不需要 harness 或 tool crate 改动**（§5.9 的"harness 一行不改"成立）。
 2. **transformer 的改写必须落审计行。** 宿主在 session log 里追加
    `tool_result_transformed`（transformer 名 + 改写前后摘要）。
@@ -527,7 +527,7 @@ plugins:
     kind: static
   - name: eraser         # 动态插件（独立进程）
     kind: remote
-    command: ["python", "-m", "elysper_eraser"]
+    command: ["python", "-m", "uva_eraser"]
     transport: stdio
     capabilities: [tools, observe]
   - name: strict-gate    # 提权到完全平权
@@ -548,15 +548,15 @@ plugins:
 早先本节断言 `checkpoint` / `transcript` 是"指向不存在目标的空转发 feature"，应删除。
 **这是错的，已实测推翻：**
 
-- `checkpoint = ["harness"]` 门控 `crates/elysper/src/checkpoint.rs`（34 行）—— 它把
-  `elysper_harness` 的 `Checkpointer` / `InMemoryCheckpointer` / `CheckpointSnapshot` 收在
+- `checkpoint = ["harness"]` 门控 `crates/uva/src/checkpoint.rs`（34 行）—— 它把
+  `uva_harness` 的 `Checkpointer` / `InMemoryCheckpointer` / `CheckpointSnapshot` 收在
   一个入口下，模块文档明说 "a consumer writing a resumable agent does not need to import
   from two paths"。
-- `transcript = ["eval"]` 门控 `crates/elysper/src/transcript.rs`（38 行）—— 同理，是
-  `elysper_eval` 的便捷入口。
+- `transcript = ["eval"]` 门控 `crates/uva/src/transcript.rs`（38 行）—— 同理，是
+  `uva_eval` 的便捷入口。
 
 它们"不拉新 crate"是因为门控的是 **facade 自己的模块**，不是转发下层 feature。按
-"是否门控某个模块"做全表审计（`grep -rc 'feature = "<name>"' crates/elysper/src/`），
+"是否门控某个模块"做全表审计（`grep -rc 'feature = "<name>"' crates/uva/src/`），
 **只有 `cron` 一条门控不到任何模块** —— 而它正是 AGENTS.md 明确记载的跨 crate 能力开关
 （"facade 的 `cron` feature 把这条路径**两半一起**打开"）。
 
@@ -569,11 +569,11 @@ module never leaves a type from a sibling module unnameable"。`harness` 拉 `pr
 
 **所以本轮的 feature 工作只有两件，都不改现有语义：**
 
-1. **`default` 保持现状**（16 条）。它的职责由 AGENTS.md 与 README 定义：`cargo add elysper`
+1. **`default` 保持现状**（16 条）。它的职责由 AGENTS.md 与 README 定义：`cargo add uva`
    就得到一个能跑的 agent。工具插件留在 default 里是**库的便利性**，不是部署组合 —— 后者是
    server config 的事。把工具移出 default 会破坏文档承诺的 5 分钟 hello-world，收益为零。
-2. **加一条 `plugin-host`**（`plugin-host = ["dep:elysper-plugin-host"]`，单 crate 轴），
-   随 W2 的 `elysper-plugin-host` 落地；`plugin-protocol` 已在 Task 10 加了同样形状的一条。
+2. **加一条 `plugin-host`**（`plugin-host = ["dep:uva-plugin-host"]`，单 crate 轴），
+   随 W2 的 `uva-plugin-host` 落地；`plugin-protocol` 已在 Task 10 加了同样形状的一条。
    两条都是"模块 + 它的类型所引用的 crate"规则的正常应用。
 
 **"组合在运行时"这句话的落点不在 feature 表，在 server。** 一个部署想开哪些插件、按什么顺序、
@@ -581,7 +581,7 @@ module never leaves a type from a sibling module unnameable"。`harness` 拉 `pr
 本来不冲突 —— 早先的草案把它们对立起来是误判。
 
 **唯一值得补的验证**：46 条 feature 里没有任何一条被单独验证过能否独立编译。做一次
-`for f in <每条 feature>; do cargo check -p elysper --no-default-features --features "$f"; done`
+`for f in <每条 feature>; do cargo check -p uva --no-default-features --features "$f"; done`
 的矩阵作为回归基线；这条矩阵在加 `plugin-host` 时一起跑。
 
 ### 5.11 W3：server 无状态化
@@ -604,7 +604,7 @@ module never leaves a type from a sibling module unnameable"。`harness` 拉 `pr
 注释写得很清楚："whatever this process remembers. That is what lets a restarted server report the
 same state."。`inner.awaiting_approval()`（`inner.rs:316`）也是从 `open_interrupts()` 派生的。
 durable 词表也已存在：`SessionEvent::{ApprovalAsked, ApprovalDecided, ApprovalGranted,
-ToolDispatch, RequestSnapshot}`（`elysper-session/src/events.rs:381,401,420,441,459`）。
+ToolDispatch, RequestSnapshot}`（`uva-session/src/events.rs:381,401,420,441,459`）。
 
 真正缺的是 `PendingResume` **本身**的重建 —— 它是客户端 POST 进来的
 `{ token, decisions, allow_drift }`（`dispatch.rs:496-500`），不是服务端推导出来的。所以节点在
@@ -643,7 +643,7 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
 
 `FOLLOW_WINDOW = 200`（`routes/follow.rs:87`）只限制**基线携带多少行**，不限制**读多少**。
 实际读取是 `sink.read()` → `JsonlSessionSink::read()` → `read_filtered(0, false)` → 对整个
-`events.jsonl` 做 **`fs::read`**（`elysper-session/src/jsonl.rs:395-397, 435-436`），
+`events.jsonl` 做 **`fs::read`**（`uva-session/src/jsonl.rs:395-397, 435-436`），
 200 行的截断是**读完之后在内存里切的**（`follow.rs:210-214`）。
 
 这对 W3 有直接后果：
@@ -657,7 +657,7 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
 
 ### 5.12 与 pi / dsh 的位置对照
 
-| 维度 | pi | dsh | Elysper 目标 |
+| 维度 | pi | dsh | Uva 目标 |
 |---|---|---|---|
 | 扩展单元 | 进程内 TS 扩展 | Cordis 插件（服务 + typed events + effect） | **两条通道**：Rust 静态插件 + 任意语言动态插件 |
 | 事件词表 | 固定枚举 | 固定核心 + declaration merging | 封闭核心 + `PluginEvent` 逃生舱（wire 层独立类型） |
@@ -676,12 +676,12 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
 
 ### 6.1 机械验收（可脚本化）
 
-1. `cargo tree -p elysper-harness -e normal | grep -c tokio` == **0**。
-2. `cargo tree -p elysper-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"` == 0（保持）。
-3. `cargo tree -p elysper-plugin-protocol -e normal` 只含 `serde` / `serde_json` / `proc-macro2` 之类，
+1. `cargo tree -p uva-harness -e normal | grep -c tokio` == **0**。
+2. `cargo tree -p uva-harness -e normal | grep -cE "reqwest|hyper|rustls|h2|tower"` == 0（保持）。
+3. `cargo tree -p uva-plugin-protocol -e normal` 只含 `serde` / `serde_json` / `proc-macro2` 之类，
    **不含 tokio**。
-4. `make check-harness-features` 绿；`make check-no-runtime` 绿（且把 `elysper-harness`、
-   `elysper-session` 加入断言名单）。
+4. `make check-harness-features` 绿；`make check-no-runtime` 绿（且把 `uva-harness`、
+   `uva-session` 加入断言名单）。
 5. `make check-harness-shape` / `check-harness-docs` / `check-plugin-shape` / `check-pub-surface*`
    / `check-clock` / `check-mvp-deps` 全绿。
 6. `cargo +nightly fmt --all --check` 绿；`cargo clippy --all-targets --all-features --tests --all
@@ -692,11 +692,11 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
 
 **W1**
 - **零 tokio 的验收 fixture 必须是"只依赖 harness"的消费方**。现有的两个 example 都不合格：
-  `docs/examples/minimal-consumer` 依赖的是 **`elysper` facade**（7 个 feature）且**自己声明了
+  `docs/examples/minimal-consumer` 依赖的是 **`uva` facade**（7 个 feature）且**自己声明了
   `tokio`**（`Cargo.toml:32`，为了跑 `#[tokio::main]`）；`docs/examples/external-consumer`
-  直接依赖 `elysper-harness`，但同时依赖另外 12 个 elysper crate 且也声明了 `tokio`（`:38`）。
-  → **新增一个最小 fixture**：只依赖 `elysper-harness` + `futures` + `serde_json`，
-  用 `futures::executor` 跑（照 `cargo run --example runtime_agnostic -p elysper-harness`
+  直接依赖 `uva-harness`，但同时依赖另外 12 个 uva crate 且也声明了 `tokio`（`:38`）。
+  → **新增一个最小 fixture**：只依赖 `uva-harness` + `futures` + `serde_json`，
+  用 `futures::executor` 跑（照 `cargo run --example runtime_agnostic -p uva-harness`
   的既有形状），**不声明 tokio**。它的 `cargo tree` 必须零 tokio —— 这才是 §10 第 4 条的证据。
 - **基准已修（本轮做掉了）**：`TruncatingContextManager` 的 fixture 克隆移出计时闭包、
   规模写实（401 条）。基线：无驱逐 **19.1 µs**、超窗 **381.9 µs**（相对旧的 386.7 µs 在噪声
@@ -705,9 +705,9 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
 - **`call.input` 不作验收标准**：`guard.rs` 的 clone 已在惰性闭包里（无 hook / 无 host 注册时
   不执行），默认路径零成本；`route.rs` 剩的一处是"按值收、被消费、上游是借用"的结构性拷贝。
   小入参 `Value::clone` = 81 ns，对 254 µs 的 turn 是 0.03%。超窗行里剩下的成本**未测量**：
-  候选是 `elysper-context` 的整表三次估计 + 逐条重估 + O(n) 搬移（§5.6），下一轮先加隔离
+  候选是 `uva-context` 的整表三次估计 + 逐条重估 + O(n) 搬移（§5.6），下一轮先加隔离
   bench 再谈降本。
-- `elysper-context` 与 `elysper-steering` 也加入零 tokio 断言名单（它们是 harness 的依赖，
+- `uva-context` 与 `uva-steering` 也加入零 tokio 断言名单（它们是 harness 的依赖，
   闭包断言要覆盖到，否则 feature 统一化会把 tokio 悄悄带回来）。
 - **`prompt_section` 真的到达 system prompt**：一个静态插件注册一段 section 后，跑一轮，
   断言该 section 的文本出现在模型收到的 system prompt 里（不是只断言 `host.prompt_sections()`
@@ -715,10 +715,10 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
   另外两条：多个 section 按**注册顺序**渲染（不依赖哈希或并发）；section 出现在身份段**之后**。
 
 **W2**
-- 一个用 Rust 写的静态插件 crate：不改 harness 一行，`cargo add elysper-harness` 即可 `install`。
+- 一个用 Rust 写的静态插件 crate：不改 harness 一行，`cargo add uva-harness` 即可 `install`。
 - 一个用**非 Rust** 写的动态插件进程：按协议实现 3 个方法，宿主按名从 config 装上，
   工具可被模型调用，事件可被观察，工具结果可被改写并留下审计行。
-- 降权验证：远端插件**无法** block 一次工具调用（宿主侧拒绝其 `elysper/gate`）。
+- 降权验证：远端插件**无法** block 一次工具调用（宿主侧拒绝其 `uva/gate`）。
 - 提权验证：config 里 `authority: full` 的远端插件**可以** block。
 - 远端插件自报 `destructive_hint: false` 的工具，仍按宿主的 risk 策略走审批。
 - 远端 transformer 超时：turn 不卡死，保留原结果 + 记诊断。
@@ -745,16 +745,16 @@ cluster bus 上的租约。节点崩了，另一个节点接手时，从日志�
 
 | 步 | 内容 | 破坏性 | 依赖 |
 |---|---|---|---|
-| 1 | `elysper-plugin-protocol` 骨架：方法名常量、能力协商、错误码、wire 类型、serde 派生 | 无（新增 crate） | — |
-| 2 | `elysper-core` 新增 `Sleeper` + `Blocking` 接缝 + 默认实现；`elysper-harness-tokio` 加 tokio 实现 | 中（新增 trait） | — |
-| 3 | session runtime-free 化：摘要超时换 `Sleeper`；fs IO 换 `Blocking`；**`InputQueue` 挪进 server**（公开面移除 `elysper::session::manager::InputQueue`，更新 `check-pub-surface-strict` 基线） | 中 | 2 |
-| 4 | provider / steering 的 tokio 依赖下沉或 gate 到 adapter feature；**`provider` 的 `tokio` 改 `optional`**；server 显式取得 `elysper-core/tokio-util`（或改用 `AtomicCancelToken`） | 中 | — |
+| 1 | `uva-plugin-protocol` 骨架：方法名常量、能力协商、错误码、wire 类型、serde 派生 | 无（新增 crate） | — |
+| 2 | `uva-core` 新增 `Sleeper` + `Blocking` 接缝 + 默认实现；`uva-harness-tokio` 加 tokio 实现 | 中（新增 trait） | — |
+| 3 | session runtime-free 化：摘要超时换 `Sleeper`；fs IO 换 `Blocking`；**`InputQueue` 挪进 server**（公开面移除 `uva::session::manager::InputQueue`，更新 `check-pub-surface-strict` 基线） | 中 | 2 |
+| 4 | provider / steering 的 tokio 依赖下沉或 gate 到 adapter feature；**`provider` 的 `tokio` 改 `optional`**；server 显式取得 `uva-core/tokio-util`（或改用 `AtomicCancelToken`） | 中 | — |
 | 5 | **tokio 闭包清零**（`cargo tree` 断言 0） | 无（内部） | 3, 4 |
 | 6 | `dyn` 逐站点复核（§5.5）——**结论：不泛型化**，无代码改动 | 无 | 5 |
 | 7 | 热路径：基准先修（fixture 移出计时区、规模写实）再取基线；`call.input` 复核后**不改**（§5.6） | 无 | 6 |
 | 8 | 公开面收窄：零引用 `pub` 删除、`hash_to_u64` 收窄到测试内部、`publish = false`（仅 server）、删 `.tmp`。**server 降 `pub(crate)` 的全量 sweep 已撤销** —— 14 个集成测试是独立 crate，且 server 已不可发布，其 `pub` 不再是契约（见 §5.7） | 中 | 7 |
 | 8b | **`prompt_section` 链接上**：prompt 组装器读 host 的 sections（注册顺序、插在身份段之后 / hint 之前） | 中（harness 行为改动） | 5 |
-| 9 | `elysper-plugin-host`：进程管理、JSON-RPC 客户端、能力协商、远端工具 → `Host` 注册 | 无（新增 crate） | 1, 2 |
+| 9 | `uva-plugin-host`：进程管理、JSON-RPC 客户端、能力协商、远端工具 → `Host` 注册 | 无（新增 crate） | 1, 2 |
 | 10 | wire 双向映射：Rust `HookEvent` ↔ wire 事件；审计行 `tool_result_transformed` | 中 | 9 |
 | 11 | 远端权限矩阵落地：默认降权 + `authority: full` 提权位 + 远端 risk 由宿主判定 | 中 | 10 |
 | 12 | `PluginEvent` 逃生舱：`SessionEvent::Plugin` + live 事件扩展 | 中 | 9 |
@@ -786,18 +786,18 @@ durable 化与旧的内存队列同一次切换。第 15 步里的**尾读**与 
 | 摘要超时改走 `Sleeper` 接缝 | v3 设计已声明 harness 不武装定时器；代码是漂移 |
 | `SessionEvent::Plugin` 用 `kind: String` + JSON payload | 插件的 kind 是运行期值，`'static` 不可满足（除非泄漏）；泛型事件词表会污染全链路签名 |
 | `live` 投影保留在进程内 | 它本来就是"live 可丢"的瞬时投影；durable 行才是真源 |
-| `publish = false` 只加到 server | 应用 crate 不该发到 crates.io；facade 是 `cargo add elysper` 的消费入口，必须可发布 |
+| `publish = false` 只加到 server | 应用 crate 不该发到 crates.io；facade 是 `cargo add uva` 的消费入口，必须可发布 |
 | 泛型化不落地：`dyn` 站点一个不收敛 | 逐站点复核（§5.5）全部过三问；`AgentCaps` 按值进 `ReasoningStrategy::run` 会传染整条签名链，收益是每 step 一跳 vtable |
 | `prompt_section` 本轮链接上（对话已定） | 这一格若永远为空，插件就不是一等能力；改动面小，且不违反"动态通道对 harness 不可见" |
 | facade feature 按"每条只表达一个 crate 依赖"收窄（对话已定） | feature 是编译期轴，组合意图放不进它；dsh 的 profile/bundle 就是为此 |
-| `checkpoint` / `transcript` 两条 feature 直接删 | 它们指向**不存在的目标**（`elysper-harness` 与 `elysper-eval` 都没有 `[features]` 表）—— 空转发，真死代码 |
-| `InputQueue` 挪进 `elysper-server`（对话已定） | session 不保留多余的语义与作用；它本质是 server 桥接 submit 与 run loop 的东西 |
+| `checkpoint` / `transcript` 两条 feature 直接删 | 它们指向**不存在的目标**（`uva-harness` 与 `uva-eval` 都没有 `[features]` 表）—— 空转发，真死代码 |
+| `InputQueue` 挪进 `uva-app-server`（对话已定） | session 不保留多余的语义与作用；它本质是 server 桥接 submit 与 run loop 的东西 |
 
 ---
 
 ## 9. 留给实现者的部分
 
-- `elysper-session` 是"一个 crate 内 gate"还是"拆 `elysper-session` + `elysper-session-fs`"。
+- `uva-session` 是"一个 crate 内 gate"还是"拆 `uva-session` + `uva-session-fs`"。
 - `Sleeper` 的实现取舍（`BoxFuture` vs `impl Future` in trait，默认实现里 `ThreadSleeper`
   的取舍）—— **已结**：形状由 §5.4 定，`Blocking::run` 的对象安全形状由 §5.4(b) 定
   （泛型方法不是对象安全的，所以闭包结果由调用方携带）。`ThreadSleeper` 只是默认实现，
@@ -805,7 +805,7 @@ durable 化与旧的内存队列同一次切换。第 15 步里的**尾读**与 
 - `ReActAgent` 泛型参数 —— **已结**：不加（§5.5 的逐站点复核，结论是没有代码改动）。
 - `TruncatingContextManager` 超窗成本 —— **未结**：现有 bench 行不隔离它，成因候选是整表三次
   估计 + 逐条重估 + O(n) 搬移（§5.6）。下一轮先补一行能隔离它们的 bench。
-- wire 事件的粒度（一次 `elysper/event` 携带多个事件，还是一事件一消息）。
+- wire 事件的粒度（一次 `uva/event` 携带多个事件，还是一事件一消息）。
 - 组合层的 config schema 细节与 profile 的继承/覆盖规则。
 - `pending_multimodal` 落盘后与"prompt 在 run 开始时持久化"这一现有约定的交互。
   **注意**：`dispatch.rs:229-237` 的注释说 prompt 是"persisted at run completion"，**这是错的** ——
@@ -825,11 +825,11 @@ durable 化与旧的内存队列同一次切换。第 15 步里的**尾读**与 
 
 1. §6.1 的 7 条机械验收全绿。
 2. §6.2 的 7 条行为验收有可复现的观察记录。
-3. §6.3 的 A–I 剧本在真实 `elysper-server` + `elysper-web` 上跑通。
-4. §6.2 W1 里新增的那个**只依赖 `elysper-harness` 的最小消费方**（不声明 tokio、用
+3. §6.3 的 A–I 剧本在真实 `uva-app-server` + `uva-web` 上跑通。
+4. §6.2 W1 里新增的那个**只依赖 `uva-harness` 的最小消费方**（不声明 tokio、用
    `futures::executor` 跑）能装一个自有插件并跑通一轮，且 `cargo tree` 零 tokio ——
    证明基座不是 server 专用。（现有的 `minimal-consumer` / `external-consumer` 都不作为这个
-   证据：前者依赖 facade 且自带 tokio，后者依赖 13 个 elysper crate 且自带 tokio。）
+   证据：前者依赖 facade 且自带 tokio，后者依赖 13 个 uva crate 且自带 tokio。）
 5. 一个**非 Rust** 的动态插件能按协议装上并被模型调用 —— 证明动态通道真的语言无关。
 6. `docs/tutorial/` 有"写一个静态插件"与"写一个动态插件"两章，从空环境照做，不需要读源码。
 
@@ -847,6 +847,6 @@ durable 化与旧的内存队列同一次切换。第 15 步里的**尾读**与 
 **② facade feature 按"每条只表达一个 crate 依赖"收窄**（§5.10）。具体清单与四条判定规则见
 §5.10；其中 `checkpoint` 与 `transcript` 两条**指向不存在目标的空转发 feature 直接删除**。
 
-**③ `InputQueue` 挪进 `elysper-server`**（§5.4(c)）。session 不保留多余的语义与作用。
-连带后果：`elysper::session::manager::InputQueue` 从 facade 公开面上消失（本轮唯一的
+**③ `InputQueue` 挪进 `uva-app-server`**（§5.4(c)）。session 不保留多余的语义与作用。
+连带后果：`uva::session::manager::InputQueue` 从 facade 公开面上消失（本轮唯一的
 公开面移除，不留别名），`check-pub-surface-strict` 的 session 基线要更新。

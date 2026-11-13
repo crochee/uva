@@ -1,6 +1,6 @@
-# 从空仓库到完整对话：elysper-app-server + elysper-web 教程
+# 从空仓库到完整对话：uva-app-server + uva-web 教程
 
-本教程从一个新 clone 开始，启动 `elysper-app-server` 与 `elysper-web`，配置 provider，
+本教程从一个新 clone 开始，启动 `uva-app-server` 与 `uva-web`，配置 provider，
 然后按 A–G 剧本走完一次完整的 agent 对话，并用**日志**核对每一步真的发生了。
 文末的「验收记录」是这条路径的实测表。
 
@@ -8,7 +8,7 @@
 > 会话日志、附件、skills 都落在它下面，不污染仓库。
 
 ```bash
-export DIR=/tmp/elysper-tutorial
+export DIR=/tmp/uva-tutorial
 mkdir -p "$DIR"
 ```
 
@@ -34,7 +34,7 @@ mkdir -p "$DIR"
 
 先确认前后端接线。`demo` 是一个回显 provider：它把最后一条用户消息
 原样回显，不调用工具，也不需要网络或 API key。它由
-`crates/elysper-app-server/src/state/app_state/demo_provider.rs` 提供，
+`crates/uva-app-server/src/state/app_state/demo_provider.rs` 提供，
 编译期门控在 `test-utils` feature 后，所以启动时必须带该 feature：
 
 ```bash
@@ -61,7 +61,7 @@ agents:
       Keyless demo agent.
 YAML
 
-cargo run -p elysper-app-server --features test-utils -- serve \
+cargo run -p uva-app-server --features test-utils -- serve \
   --directory "$DIR/demo" --config "$DIR/demo/config.yaml"
 ```
 
@@ -69,7 +69,7 @@ cargo run -p elysper-app-server --features test-utils -- serve \
 另开终端：
 
 ```bash
-cd elysper-web
+cd uva-web
 npm ci
 npm run dev -- --port 5173
 ```
@@ -122,7 +122,7 @@ YAML
 - 未写 `default_provider` 时，`openai` 优先，否则取第一个 provider 名。
   `.agents/config.toml` 是 TOML 的 `ProviderEntry` 形状；把旧
   `config.yaml` 的 legacy 形状（`api_key` / `models[]`）迁移过来时跑
-  `elysper-app-server translate --config config.yaml --out profile.toml`，
+  `uva-app-server translate --config config.yaml --out profile.toml`，
   或手动改写成上面的形状。
 - 旧的 `config.yaml` `providers` / `cache` / `resilience` / `budget` 段
   已不再读取（启动会警告并提示 `translate`）。
@@ -136,12 +136,12 @@ YAML
 
 ```bash
 export ANTHROPIC_API_KEY=sk-...
-cargo run -p elysper-app-server -- serve \
+cargo run -p uva-app-server -- serve \
   --directory "$DIR/real" --config "$DIR/real/config.yaml"
 ```
 
 > 也可以直接用 `make dev-server` / `make dev`：它们跑
-> `cargo run -p elysper-app-server -- serve --config config.yaml`，workspace root
+> `cargo run -p uva-app-server -- serve --config config.yaml`，workspace root
 > 是仓库根目录，会话日志落在 `./sessions/`。本教程用 `--directory`
 > 是为了让日志路径稳定、可清理。
 
@@ -196,7 +196,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 
 **动作**
 
-1. 准备一个可读文件：`printf 'elysper tutorial\n' > "$DIR/real/notes.txt"`。
+1. 准备一个可读文件：`printf 'uva tutorial\n' > "$DIR/real/notes.txt"`。
 2. 打开 <http://localhost:5173/chat>，URL 会自动变成 `/chat/<uuid>`。
 3. 发送：
 
@@ -214,7 +214,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 - 若模型返回 reasoning，消息里有可折叠的 thinking 段。
 - 两个工具卡片按调用顺序出现，运行中显示“运行中/调用中”，结束后
   显示参数与结果（`notes.txt` 内容、目录列表）。
-- 最终文本引用 `elysper tutorial` 和目录列表。
+- 最终文本引用 `uva tutorial` 和目录列表。
 - 刷新后同一会话从 `follow` 基线**整窗重建**：恰好一条 assistant 回复、
   两个工具块，正文中的同一句话只出现一次，没有“前半段重复”。
 
@@ -280,7 +280,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 
    ```text
    Use the shell tool to run exactly:
-   echo elysper-approval-probe > /tmp/elysper-approval.txt
+   echo uva-approval-probe > /tmp/uva-approval.txt
    then report the command's output and exit status.
    ```
 
@@ -338,7 +338,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 2. 杀掉 server（模拟崩溃，不是 Ctrl+C 的优雅退出）：
 
    ```bash
-   pkill -9 -f 'elysper-app-server.*(serve|core).*--directory'
+   pkill -9 -f 'uva-app-server.*(serve|core).*--directory'
    ```
 
 3. 用 2.2 的同一条命令重启 server，刷新同一个会话页。
@@ -396,7 +396,7 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 要在一次短会话里亲手看到压缩，**临时**把 `context_window` 调到
 12,000（高于固定提示成本，又能被几轮长回答跨过 11,200 的触发线）；
 不要用 3,000 这类低于固定提示成本的窗口——它会让每一轮都压缩，
-3,000 只作为 `elysper-context` 的回归测试值保留。
+3,000 只作为 `uva-context` 的回归测试值保留。
 
 **动作**
 
@@ -530,16 +530,16 @@ drop 或 `uninstall()` 就撤销**（只影响后续 dispatch，不打断在途�
 
 ```toml
 [dependencies]
-elysper = { version = "0.1", features = ["provider", "tool", "harness"] }
+uva = { version = "0.1", features = ["provider", "tool", "harness"] }
 serde_json = "1"
 ```
 
 ```rust,ignore
 use std::sync::Arc;
 
-use elysper::async_trait;
-use elysper::harness::{Host, Plugin, PluginHandle, ReActAgent};
-use elysper::tool::{
+use uva::async_trait;
+use uva::harness::{Host, Plugin, PluginHandle, ReActAgent};
+use uva::tool::{
     Context, ExecutionMode, Risk, Tool, ToolAnnotations, ToolOutput,
     ToolRegistry,
 };
@@ -605,7 +605,7 @@ impl Plugin for LookupPlugin {
 }
 
 fn assemble(
-    provider: Arc<dyn elysper::provider::ModelProvider>,
+    provider: Arc<dyn uva::provider::ModelProvider>,
 ) -> (ReActAgent, PluginHandle) {
     let mut host = Host::new();
     // 绑定到 agent 时，host 里已经注册的工具进入同一个 registry；
@@ -625,10 +625,9 @@ fn assemble(
   全部返回可撤销的 `Registration`；`install` 把它们打成一个 `PluginHandle`。
 - 名字与核心工具冲突的工具会被拒绝并记一条 `DiagnosticKind::ToolNameConflict`，
   不会覆盖核心工具。
-- **进程内动态加载（`.so` / WASM）不在本仓范围**：静态插件是编译期依赖，
+- **进程内动态加载（`.so` / WASM）不在本仓范围**：自写的插件是编译期依赖，
   宿主（例如你自己的服务）在组装 agent 时安装它。需要不重编就能上线的第三方
-  插件，走 §7 的**进程**通道（`elysper-plugin-runtime` 的 `protocol` + `host`），
-  那不是加载 `.so`，而是起一个进程说 JSON。
+  工具，走 §7 的 **MCP** 通道——那不是加载 `.so`，而是起一个进程说 MCP。
 - 同一个 crate 也可以只做宿主侧的观察：`host.observe(...)` 拿到
   `BeforeTool` / `AfterTool` / `BeforeRequest` 等事件，看到的是只读视图；
   审批由循环内的 `ApprovalPolicy` 强制执行，插件不能把 `Ask` 降级为 `Allow`。
@@ -638,11 +637,11 @@ fn assemble(
 ## 6. 写一个静态插件（编译进宿主）
 
 §5 讲的是宿主侧的接缝：`Host` 收注册，`PluginHandle` 拥有它们。本节从
-**空目录**写一个真正的插件 crate，然后把它装进 `elysper-app-server`。
+**空目录**写一个真正的插件 crate，然后把它装进 `uva-app-server`。
 
-静态插件是编译期依赖：换插件要重编宿主。换来的是零 IPC、零握手——工具的
+自写插件是编译期依赖：换插件要重编宿主。换来的是零 IPC、零握手——工具的
 每次调用都是进程内直调，插件与宿主共享同一个 registry 与同一个错误类型。
-需要"不重编就能上线"的第三方插件，看 §7 的动态通道。
+需要"不重编就能上线"的第三方工具，看 §7 的 MCP 通道。
 
 ### 6.1 从空目录开始
 
@@ -662,9 +661,9 @@ edition = "2021"
 
 [dependencies]
 # 本仓尚未发布到 crates.io。指向本仓的一份 checkout：
-elysper = { path = "/path/to/elysper/crates/elysper" }
+uva = { path = "/path/to/uva/crates/uva" }
 # 发布后写成：
-# elysper = { version = "0.1", features = ["provider", "tool", "harness"] }
+# uva = { version = "0.1", features = ["provider", "tool", "harness"] }
 serde_json = "1"
 ```
 
@@ -673,9 +672,9 @@ serde_json = "1"
 ```rust,ignore
 use std::sync::Arc;
 
-use elysper::async_trait;
-use elysper::harness::{Host, Plugin, PluginHandle};
-use elysper::tool::{Context, Risk, Tool, ToolAnnotations, ToolOutput};
+use uva::async_trait;
+use uva::harness::{Host, Plugin, PluginHandle};
+use uva::tool::{Context, Risk, Tool, ToolAnnotations, ToolOutput};
 
 /// 一个只读工具：按 id 查一条记录。
 pub struct LookupTool;
@@ -732,7 +731,7 @@ impl Plugin for LookupPlugin {
     }
 }
 
-/// 插件 crate 对外只暴露一个工厂函数，宿主的静态表注册它。
+/// 插件 crate 对外只暴露一个工厂函数，宿主（app-server）的内核原生工厂用它。
 pub fn factory() -> Arc<dyn Plugin> {
     Arc::new(LookupPlugin)
 }
@@ -741,8 +740,9 @@ pub fn factory() -> Arc<dyn Plugin> {
 三个约束决定这段代码的形状：
 
 - `Plugin` 只有两个方法：`name()` 与 `install(&self, host) -> PluginHandle`。
-  `install` 不返回 `Result`——装不上不是"插件坏了"，而是部署侧的选择，
-  由调用方（`Composition`）记录成 skipped。
+  `install` 不返回 `Result`——装不上不是"插件坏了"，而是部署侧的选择：
+  装进 app-server 时由内核原生工厂的 `build` 承担，失败会报成
+  `ProfileError::BuildFailed`（点名那个 id），不是一次静默跳过。
 - 每个 `host.tool(...)` / `host.observe(...)` 返回一个 `Registration`，
   `PluginHandle` 把它们打包。**handle 就是插件的生命周期**：drop 掉它，
   注册全部撤销（只影响后续 dispatch，不打断在途调用）。
@@ -755,7 +755,7 @@ pub fn factory() -> Arc<dyn Plugin> {
 
 ```rust,ignore
 use lookup_plugin::factory;
-use elysper::harness::Host;
+use uva::harness::Host;
 
 fn main() {
     let mut host = Host::new();
@@ -785,312 +785,94 @@ cargo run -q
 （`Cargo.toml` 里加 `[[bin]] name = "lookup-demo", path = "src/main.rs"`。
 上面的输出是在本仓当前 checkout 上实跑的。）
 
-### 6.3 部署侧：把工厂注册进 elysper-app-server
+### 6.3 部署侧：写一个内核原生行
 
-`elysper-app-server` 的静态表在 `crates/elysper-app-server/src/state/app_state/boot.rs`，
-出厂是空的：
+自写的工具进 `uva-app-server` 的路径是**内核原生行**：一个 `PluginFactory`
+实现，加 profile 里的一行 `[core]` 条目。
 
-```rust,ignore
-let static_plugins = crate::composition::StaticPlugins::new();
-```
-
-一个 fork 要做两件事：
-
-1. 把插件 crate 加进 `crates/elysper-app-server/Cargo.toml` 的依赖；
-2. 在那一行上注册工厂，`one line per plugin`：
+工厂是"profile 行 → 具体插件"那一段知识所在，住在
+`crates/uva-app-server/src/composition/kernel/mod.rs`，注册进工厂目录
+（按 id 查）：
 
 ```rust,ignore
-let static_plugins = crate::composition::StaticPlugins::new()
-    .register("lookup", lookup_plugin::factory);
+use crate::profile::{PluginFactories, PluginFactory};
+
+let mut factories = PluginFactories::new();
+factories
+    .register(Arc::new(lookup_plugin::LookupFactory)) // 它的 id() 是 "lookup"
+    .expect("the factory ids are unique");
 ```
 
-`register` 的签名是 `fn(&str, fn() -> Arc<dyn Plugin>) -> Self`，并且**同名会
-panic**：表是按名字查的，第二个工厂永远不会被调用，静默覆盖比启动失败更糟。
+同名注册**不会覆盖**：`register` 返回 `ProfileError::DuplicateFactoryId`，
+第二个工厂不被接受——静默覆盖比启动失败更糟。
 
-配置文件（`config.yaml`，与 §2 同一个文件）加一节：
+profile 文件（工作区根的 `profile.toml`，与 §2 同一个部署目录）写一行：
 
-```yaml
-plugins:
-  - name: lookup
-    kind: static
+```toml
+[core]
+entries = [
+  { id = "lookup", runtime = "native", config = {} },
+]
 ```
 
-静态条目**只接受 `name` 和 `kind`**。`PluginEntry` 是
-`#[serde(tag = "kind", deny_unknown_fields)]`，所以：
+- `runtime` 只有 `native` 与 `ui-bundle` 两种，工具插件是 `native`；
+- 行里的 `config` 是这个插件自己的配置对象，schema 由工厂的 manifest 声明，
+  解析期就被校验；
+- boot 走 `build_plugins` → `mount_all`：按依赖序挂载这些行，工厂的
+  `manifest()` 决定它提供什么、注入什么。
 
-- 多写一个字段（哪怕看着合理，比如 `command`）会在解析期直接报错，
-  不会静默忽略；
-- 少写 `name`、或 `kind` 不是 `static` / `remote`，同样在解析期报错。
-
-装了之后能观察到三件事：
-
-- 启动日志里没有 `plugin skipped; boot continues`；
-- `rpc plugins/list` 的 `resolved` 里有它，`kind: "static"`，
-  `authority: "full"`（进程内代码本来就是全权），`risk` 是它注册的工具
-  声明的上界（§6.1 的 `read_only_hint` → `"low"`）；
-- 插件的工具出现在 `rpc tools/list`，模型可以调用。
-
-三种"配置了但没装上"的情形都会进 `skipped`，并带原因：
-
-| 情形 | `reason` 的形态 |
-|---|---|
-| 表里没有这个 `name` | `no static plugin factory is registered under this name` |
-| `install` 一个注册都没做 | `the plugin's install made no registration this host can use` |
-| 工具名与核心工具冲突 | `tool ... is refused: a core tool already owns the name; the install is withdrawn` |
+装了之后能观察到：插件的工具出现在 `rpc tools/list`，模型可以调用。
 
 > **未实跑的部分**：6.1/6.2 的代码与输出是在本机实跑的；6.3 的 fork 编译
-> 与启动没跑（需要一个改了 `boot.rs` 的 binary）。`StaticPlugins::register`
-> 到 `Composition` 的这条线由 `elysper-app-server` 的回归测试覆盖
-> （`src/routes/plugins/tests.rs` 用同一张表装了一个静态插件）。
+> 与启动没跑（需要一个改了 `composition/kernel/mod.rs` 的 binary）。
 
-## 7. 写一个动态插件（任意语言的一个进程）
+## 7. 第三方工具：走 MCP
 
-动态通道把插件放在**进程边界之外**：宿主用 stdio 起它、和它握手、
-按名字调它的工具。插件可以用任何语言写，因为它只看见 JSON。
+第三方工具不进 agent 的 crate，它们是**进程**：宿主用 stdio 把它起起来、
+跑 MCP 握手，把它广告的工具注册进 agent 用的同一个 `ToolRegistry`。
 
-### 7.1 契约
+旧的"进程插件通道"（`protocol` + `host` 那套 JSON-RPC 词汇）与 Wasm 组件
+通道都已删除——第三方脚本 / 工具一律走 MCP。
 
-五条，先记住再写代码：
+### 7.1 声明
 
-1. **一行一个 JSON-RPC 2.0 对象**。stdout 只放协议帧；日志一律走 stderr
-   （宿主原样继承 stderr）。往 stdout 打进一行日志就是破帧，安装会以
-   `BadRequest` 失败。
-2. **每条消息有 deadline**（默认 30 秒，覆盖发送与应答）。超时按"卡死"
-   处理：**整个插件被杀**，不只是那一条消息，因为只有杀掉进程才能解开
-   阻塞在它 stdin 上的写。慢工具要自己控时长，宿主管不了。
-3. **握手只报能力，不报身份**。名字来自配置，不来自插件。
-4. **能力是交集**。config 的 `capabilities` 是上限，握手声明的是它愿意做的；
-   两者都有才启用。
-5. **`gate` 是提权**。只有 `authority: full` **且**握手声明 `gate` 时才启用；
-   声明了 `gate` 但配置没提权，插件看不到任何 gate 请求。
-
-方法集合（来自 `elysper-plugin-runtime::protocol::methods`，字符串不要手写）：
-
-| 方法 | 宿主发 | 插件回 |
-|---|---|---|
-| `elysper/initialize` | 初始化请求 | `PluginCapabilities`：`{"tools":bool,"observe":bool,"transform":bool,"gate":bool}`，缺省键按 `false` |
-| `elysper/tools/list` | 列表请求 | `ToolSpec` 数组：`{"name","description","input_schema"}`（`input_schema` 是 JSON Schema 对象） |
-| `elysper/tools/call` | `{"name":…,"arguments":{…}}` | 工具结果：字符串就原样作为文本，其他 JSON 就序列化成文本给模型 |
-| `elysper/transform` | 要改写的工具结果 | 改写后的 JSON（`transform` 能力，reduced 也有） |
-| `elysper/event` | `PluginEvent` | 不回（notification，没有 `id`） |
-| `elysper/gate` | 待裁决的调用 | `PluginDecision`（只有 full 权限才出现） |
-
-### 7.2 一个 Python 插件（只用标准库）
-
-空目录里建 `records_plugin.py`：
-
-```python
-#!/usr/bin/env python3
-"""records plugin: elysper-plugin-runtime protocol over stdio."""
-
-import json
-import sys
-
-TOOLS = [
-    {
-        "name": "records_lookup",
-        "description": "Look up one record by its id.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"id": {"type": "string"}},
-            "required": ["id"],
-        },
-    }
-]
-
-
-def capabilities():
-    return {"tools": True, "observe": False, "transform": False, "gate": False}
-
-
-def call_tool(name, arguments):
-    if name != "records_lookup":
-        raise ValueError(f"unknown tool {name}")
-    return {"record": arguments.get("id"), "body": "(your data here)"}
-
-
-def handle(request):
-    method = request.get("method")
-    if method == "elysper/initialize":
-        return capabilities()
-    if method == "elysper/tools/list":
-        return TOOLS
-    if method == "elysper/tools/call":
-        params = request.get("params") or {}
-        return call_tool(params.get("name"), params.get("arguments") or {})
-    raise ValueError(f"unknown method {method}")
-
-
-def main():
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        request = json.loads(line)
-        # `elysper/event` 是 notification：没有 id，不回。
-        if "id" not in request:
-            continue
-        try:
-            reply = {
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "result": handle(request),
-            }
-        except Exception as exc:  # 一个坏帧也不能让进程退出
-            reply = {
-                "jsonrpc": "2.0",
-                "id": request["id"],
-                "error": {"code": -32601, "message": str(exc)},
-            }
-        sys.stdout.write(json.dumps(reply) + "\n")
-        sys.stdout.flush()
-
-
-if __name__ == "__main__":
-    main()
-```
-
-不用宿主也能先验协议——把三帧喂进 stdin：
-
-```bash
-chmod +x records_plugin.py
-printf '%s\n%s\n%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"elysper/initialize","params":{}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"elysper/tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"elysper/tools/call","params":{"name":"records_lookup","arguments":{"id":"r-1"}}}' \
-  | python3 records_plugin.py
-```
-
-实测输出（三行，顺序与请求一致）：
-
-```text
-{"jsonrpc": "2.0", "id": 1, "result": {"tools": true, "observe": false, "transform": false, "gate": false}}
-{"jsonrpc": "2.0", "id": 2, "result": [{"name": "records_lookup", "description": "Look up one record by its id.", "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}}]}
-{"jsonrpc": "2.0", "id": 3, "result": {"record": "r-1", "body": "(your data here)"}}
-```
-
-再用真实宿主装一遍（一个临时 crate：依赖 `elysper-harness` +
-`elysper-plugin-runtime` + `elysper-tool` + `futures`，
-`futures::executor::block_on` 驱动，无需 tokio）：
-
-```rust,ignore
-use futures::executor::block_on;
-use elysper_harness::Host;
-use elysper_plugin_runtime::host::{Authority, RemotePlugin, RemotePluginConfig, TransportKind};
-use elysper_plugin_runtime::protocol::PluginCapabilities;
-use elysper_tool::{Context, Risk};
-
-let config = RemotePluginConfig {
-    name: "records".to_string(),
-    command: vec!["python3".into(), "/tmp/records_plugin.py".into()],
-    transport: TransportKind::Stdio,
-    capabilities: PluginCapabilities {
-        tools: true,
-        observe: false,
-        transform: false,
-        gate: false,
-    },
-    authority: Authority::Reduced,
-    risk: Risk::Unknown,
-};
-
-let mut host = Host::new();
-let handle = block_on(RemotePlugin::new(config).install(&mut host))
-    .expect("the plugin installs");
-```
-
-实测输出（`tools/call` 的返回值）：
-
-```text
-installed tools : ["records_lookup"]
-call result     : {"content":[{"type":"text","text":"{\"record\":\"r-1\",\"body\":\"(your data here)\"}"}],"is_error":null,"metadata":{}}
-tools after drop: 0
-```
-
-注意 `call result`：插件返回的是**对象**，所以宿主把它序列化成文本交给模型
-（返回字符串则原样作为文本）。drop 掉 handle 之后工具消失——动态插件也一样，
-handle 是它唯一的生命线，同时它也是杀掉插件进程的开关。
-
-### 7.3 装进部署
-
-```yaml
-plugins:
-  - name: records
-    kind: remote
-    command: ["python3", "/srv/plugins/records_plugin.py"]
-    transport: stdio
-    capabilities: [tools]
-    authority: reduced
-    risk: unknown
-```
-
-字段规则（解析期校验，不是运行期猜）：
-
-- `command` 是 **argv 数组**，不是 shell 字符串：没有任何一步经过 shell，
-  所以要环境变量就显式用 `env` 或包装脚本。
-- `name`、`kind`、`command` 必填；其余可省，默认
-  `transport: stdio`、`capabilities: []`、`authority: reduced`、`risk: unknown`。
-- 未知字段、以及不在可接受集合里的取值，都在解析期报错，错误信息会列出该字段
-  的全部可接受值（`stdio`/`http`、`tools`/`observe`/`transform`/`gate`、
-  `reduced`/`full`、`low`/`high`/`unknown`）。
-- `transport: http` 在配置里合法，但当前 host 没有实现这个 transport：
-  安装会以 `UnsupportedTransport` 失败，条目进 `skipped`。
-- `call_timeout_ms` 是**每个插件各自**的单次调用上限（毫秒，可省）：省略
-  就是宿主自己的默认值。写它是因为一个插件的慢不该拖垮另一个——每个插件
-  单独计时。超时的**那一次调用**失败，插件本身继续活着：只有插件连自己的
-  输入都不再读（真正卡死）时，宿主才会杀掉进程、关掉这条通道。
-- `risk: unknown`（默认）按**失败关闭**解读：宿主把这个插件的工具按
-  `high` 判风险，所以调用会先被挂起等审批。写明 `low` 或 `high` 才按你
-  写的来。
-
-### 7.4 观察它
-
-插件装没装上是部署事实，不是日志考古。`plugins/list` 直接给出两组
-（`resolved` / `skipped`），外加布局发现的 `bundles`：
-
-```bash
-rpc plugins/list | jq .
-```
+声明面是部署布局里的 `mcp.json`：两层 `~/.agents` 布局
+（`<workspace>/.agents/mcp.json`、`~/.agents/mcp.json`），插件包里的
+`mcp.json` 按 `<plugin>/<server>` 命名空间落地。
 
 ```json
 {
-  "resolved": [
-    {
-      "name": "records",
-      "kind": "remote",
-      "authority": "reduced",
-      "risk": "unknown",
-      "tools": ["records_lookup"]
+  "mcpServers": {
+    "records": {
+      "command": "python3",
+      "args": ["/srv/mcp/records_server.py"]
     }
-  ],
-  "skipped": []
+  }
 }
 ```
 
-（形状来自 `elysper-app-server` 的路由回归测试 `routes/plugins/tests.rs`；
-在真机上跑就是同一份 JSON，只是内容取决于你的部署。）
+字段规则：
 
-`skipped` 里最常见的一条是"进程起不来"：
+- `command` 是要起的程序，`args` 是它的参数（可省）；
+- `env` 是环境变量覆盖；`enabled: false` 让条目留在文件里但不启动；
+- 传输只有 **stdio**：MCP server 读写自己的 stdin / stdout；
+- 声明文件写坏了不会连累别的 server——那一个被跳过并记一条告警。
 
-```json
-{
-  "name": "records",
-  "reason": "cannot start `python3`: No such file or directory (os error 2)"
-}
-```
+### 7.2 它是怎么起来的
 
-原因是逐字的（spawn 失败、握手失败、提权无法兑现、注册名被占），
-所以照着原因修插件进程或它的路径，别改 `plugins` 节——它已经是对的。
+boot 走 `register_configured_mcp_servers`
+（`crates/uva-app-server/src/state/app_state/boot.rs`）：每个启用的条目被
+`StdioTransportFactory` 拉起，supervisor 跑握手与工具清单，它广告的工具
+注册进**同一个** `ToolRegistry`（名字带命名空间：`mcp__<server>__<tool>`），
+所以模型侧与内置工具没有区别。
 
-### 7.5 静态还是动态
+起不来的 server 不阻塞 boot：它被跳过并带原因，别的 server 照常上线。
 
-| | 静态（§6） | 动态（§7） |
-|---|---|---|
-| 形态 | 编译进宿主的 crate | 一个进程，任意语言 |
-| 上线 | 重编宿主 | 改配置 + 重启（插件本身可独立发版） |
-| 调用成本 | 进程内直调 | 一次 IPC，有 deadline |
-| 可用的接缝 | 工具、观察者、gate、transformer、prompt section、delegator | 工具、观察者、transformer、gate（需 full 权限）；prompt section 未接通 |
-| 崩溃影响 | 宿主进程 | 只有插件进程；调用以错误返回 |
+### 7.3 MCP 不承载什么
+
+MCP 是**工具**通道，不是权限通道：它不承载结果改写（transformer）、不承载
+gate 裁决、不承载 authority 分级——那些是宿主侧 `Host` 注册的能力。想要一个
+观察者或一个 gate，写自写插件（§5 / §6）。
 
 ---
 
@@ -1174,7 +956,7 @@ host 的工具 schema、system prompt、采样参数与审批策略再算一次�
 `Never` 全放行；策略可按工具覆盖：
 
 ```rust,ignore
-use elysper::harness::{ApprovalMode, ApprovalPolicy, ReActAgent};
+use uva::harness::{ApprovalMode, ApprovalPolicy, ReActAgent};
 use std::collections::BTreeMap;
 
 let mut overrides = BTreeMap::new();
@@ -1216,7 +998,7 @@ Playwright MCP 验收），所以真实观察记录在下一节。
 
 ## 11. 只依赖 harness 的消费方（不跑 server）
 
-只想用 harness 这个循环、不跑 server：依赖不是只有 `elysper-harness`
+只想用 harness 这个循环、不跑 server：依赖不是只有 `uva-harness`
 一个 crate。harness 把 `Spawner` / `ModelProvider` / `Tool` 这些 trait
 **不** re-export 出来 —— re-export 会把不属于 harness 的名字放进它承诺
 的公开面，也会把 harness 的零运行时承诺绑到别的 crate 的 feature 上 ——
@@ -1224,27 +1006,27 @@ Playwright MCP 验收），所以真实观察记录在下一节。
 
 | crate | 消费方拿它做什么 |
 |---|---|
-| `elysper-harness` | 循环、接缝、事件流 |
-| `elysper-core` | `CancelToken`、`Spawner`、`Clock` |
-| `elysper-provider` | `ModelProvider` trait 与消息类型 |
-| `elysper-tool` | `Tool` trait 与 `ToolRegistry` |
+| `uva-harness` | 循环、接缝、事件流 |
+| `uva-core` | `CancelToken`、`Spawner`、`Clock` |
+| `uva-provider` | `ModelProvider` trait 与消息类型 |
+| `uva-tool` | `Tool` trait 与 `ToolRegistry` |
 
 外加 `async-trait`（这些 trait 声明时用的 proc macro）。上面那三个 trait
 crate 本来就在 harness 自己的依赖闭包里（harness 的签名里就写着它们），
 写进自己的 `Cargo.toml` 说明的是“你实现哪些 trait”，不会让依赖树变大。
 
-这句话有一个前提，就落在 `elysper-provider` 上：它的默认 feature 集
+这句话有一个前提，就落在 `uva-provider` 上：它的默认 feature 集
 （`default = ["anthropic", "openai"]`）会打开两个出厂的 HTTP adapter，
 每个 adapter 都带着 `reqwest`、`tokio` 和 `tokio-util`。消费方如果照
-crates.io 的默认写法写 `elysper-provider = "0.1"`，这三样全都进树。
+crates.io 的默认写法写 `uva-provider = "0.1"`，这三样全都进树。
 harness 自己就是关着默认 feature 取 provider 的，消费方想要同一棵树就写
 同一行：
 
 ```toml
-elysper-provider = { version = "0.1", default-features = false }
+uva-provider = { version = "0.1", default-features = false }
 ```
 
-`elysper-tool` 根本没有 feature 表，这个 flag 对它是空操作 —— 前提只落在
+`uva-tool` 根本没有 feature 表，这个 flag 对它是空操作 —— 前提只落在
 provider 上。
 
 参考消费方 `docs/examples/harness-only-consumer` 的 `Cargo.toml` 里有
@@ -1262,11 +1044,11 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 
 - **精选面**：crate 根上 re-export 出来的 64 个名字 —— 这是承诺过的稳定面，
   依赖它就不会被下一次发布挪走。
-- **深路径**：`elysper_harness::agent::…` 与 `elysper_harness::events::…`
+- **深路径**：`uva_harness::agent::…` 与 `uva_harness::events::…`
   底下只能走深路径才够得到的 57 项。rustdoc 在那两个模块下记录了 109 条
   公开路径，其中 53 条是门面名字在它们定义处的路径（例如
-  `AgentDescriptor` 定义在 `elysper-core`），剩下 56 项；再加上从
-  `elysper-tool` 转出来的 `Risk`（它在 harness 里没有自己的路径），共 57 项。
+  `AgentDescriptor` 定义在 `uva-core`），剩下 56 项；再加上从
+  `uva-tool` 转出来的 `Risk`（它在 harness 里没有自己的路径），共 57 项。
   深路径上的名字不在承诺内，将来可动。
 
 ---
@@ -1299,7 +1081,7 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 | E 断线重连 | 流式中 F5 | 基线整窗替换，无重复/缺失，live 继续 | 刷新后窗口整窗替换；最终段落只一次；Task 10 的重连测试 0 重叠样本 | 通过 |
 | F 压缩 | 长会话后点 Compact | `committed: true`，时间线标记 + 摘要/范围，四类日志行齐全 | Task 10 round 2 观察到已提交的压缩标记（范围 `#2–#3`）与摘要；手动 Compact 按钮未单独点 | 部分（自动已观察） |
 | G fork | `/sessions` 点 Fork | 子会话可续聊，父会话不变 | API `POST /sessions/{id}/fork` 返回 `rows: 60`；子会话 `66802f3c-831f-4cf2-9475-3506f04333f8` 的 `events.jsonl` 存在 | 通过（API） |
-| G 导出 | 下载 `.jsonl` | byte-faithful，`seq` 连续 | `GET /sessions/{id}/export` 返回 `elysper_session_meta` + 按序行；未做崩溃前后逐字节 diff | 通过（NDJSON 结构） |
+| G 导出 | 下载 `.jsonl` | byte-faithful，`seq` 连续 | `GET /sessions/{id}/export` 返回 `uva_session_meta` + 按序行；未做崩溃前后逐字节 diff | 通过（NDJSON 结构） |
 | G 用量 | footer + `/usage` | 会话级 token/turn 与接口一致 | 验收配置（128k）下 `context_used: 1040 / 128000`；`input/output/turns` 为 0 是因为该 provider 的 `usage` 行报告 0，不是聚合缺失 | 通过（附注） |
 
 > 首次 Playwright 验证时注意两件事：
@@ -1307,7 +1089,7 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 >    那是正确行为但测不到注入路径；
 > 2. 想在一次短会话里复现 F 步的压缩，需要临时调小 `context_window`
 >    （建议 12,000）；3,000 这类低于固定提示成本的窗口会让每一轮都压缩，
->    只作为 `elysper-context` 的回归测试值保留。
+>    只作为 `uva-context` 的回归测试值保留。
 >
 > 未走路径（B stop、D 挂起跨重启、C 浏览器拒绝、F 手动按钮）由
 > harness/server 回归测试覆盖，但没有浏览器实测；上表按实际观察标注，

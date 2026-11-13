@@ -31,7 +31,7 @@ cd "$(dirname "$0")/.."
 
 MATRIX="${MATRIX:-docs/host-capabilities.md}"
 BASELINE_FILE="scripts/host-capabilities/baseline"
-METHODS_GLOB="crates/elysper-app-server/src/rpc/methods/*.rs"
+METHODS_GLOB="crates/uva-app-server/src/rpc/methods/*.rs"
 
 if [[ ! -f "$MATRIX" ]]; then
   echo "the capability matrix is missing: $MATRIX" >&2

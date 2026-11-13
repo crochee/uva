@@ -1,0 +1,47 @@
+[package]
+name = "uva-runtime"
+description = "Config-driven assembly for uva: the fat plugin factories behind the built-in native plugins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+
+[dependencies]
+
+uva-context.workspace = true
+uva-core.workspace = true
+uva-harness.workspace = true
+uva-kernel.workspace = true
+
+uva-search.workspace = true
+
+uva-session.workspace = true
+uva-tool.workspace = true
+# The delegation backend's service key. The `agent-loop` row consumes
+# the `subagents` service the `subagent-backend` row publishes, so the
+# loop needs the key its owner crate defines — the key never moves
+# into this crate (see the design's "service keys live with their
+# owner" rule).
+uva-tool-plugins = { workspace = true, features = ["task"] }
+uva-policy-plugins = { workspace = true, features = ["budget", "resilience", "cache"] }
+uva-provider = { workspace = true, features = ["anthropic", "openai"] }
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+# Test-only runtime: `#[tokio::test]` for the tier-1 behavior tests
+# and `TokioSleeper` for the injected-sleeper backoff proof.
+async-trait.workspace = true
+uva-core-tokio.workspace = true
+uva-test-support.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }

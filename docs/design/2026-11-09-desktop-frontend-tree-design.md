@@ -9,7 +9,7 @@ TUI 保留终端原生 UI，但传输并轨到网关）
 - DeepSeek Harness 的对应做法（**行 = 插件 + 配置**、层序、变更结果四态、装配回滚）：
   - <https://dshplugin.app/guides/dsh-plugins-bundles-profiles>（Plugin / Bundle / Profile 与层序）
   - <https://dshx.dev/en/docs/internals/architecture>（插件树按层装配、失败回滚、`application` 四态）
-- 迁移设计（`docs/superpowers/specs/2026-11-08-elysper-plugin-spine-design.md`，**本地规划层，不入库**）
+- 迁移设计（`docs/superpowers/specs/2026-11-08-uva-plugin-spine-design.md`，**本地规划层，不入库**）
   §7 裁定记录、§8 分阶段落地
 
 > 本篇是**入库**的设计文档（`docs/design/` 是本仓被跟踪的设计文档目录）。
@@ -18,7 +18,7 @@ TUI 保留终端原生 UI，但传输并轨到网关）
 
 ## 1. 意图与动机
 
-Axiom 终态图有三种投影。elysper 今天的状态：
+Axiom 终态图有三种投影。uva 今天的状态：
 
 | 形态 | 核心树 | 投影树 | 状态 |
 |---|---|---|---|
@@ -30,7 +30,7 @@ Axiom 终态图有三种投影。elysper 今天的状态：
 三件事因此欠着：
 
 1. **宿主路径不统一**。今天 TUI 自己 spawn `core`、自己实现 Content-Length stdio 传输、
-   自己管 1s→5s 退避与重发 `sessions/follow`（`crates/elysper-tui/src/transport.rs`，726 行），
+   自己管 1s→5s 退避与重发 `sessions/follow`（`crates/uva-tui/src/transport.rs`，726 行），
    而 web / 桌面走的是网关。同一份协议契约被两套传输实现各写一遍，core 的监管者有两个。
    本轮把 TUI 并轨到网关：**三个宿主，一个协议面，一个 core 监管者**。
 2. **Desktop 入口**（Axiom §7.4 / 阶段六）——迁移设计 N2 把它排除为"独立后续项目"，本轮做掉。
@@ -41,8 +41,8 @@ Axiom 终态图有三种投影。elysper 今天的状态：
    并把同源 JS 执行作为**显式开关**后的第二级能力。
 
 第四件事是收脏活：本地 openspec 层里 `openspec/specs/web-projection/spec.md` 仍写着
-"MUST NOT 新增 TUI 或 Desktop 入口"与"`elysper-app-server` 与 `elysper-web` 之外不得出现
-表现层 crate"，而 `crates/elysper-tui` 已经在仓库里——**两条**禁令都已被违反，
+"MUST NOT 新增 TUI 或 Desktop 入口"与"`uva-app-server` 与 `uva-web` 之外不得出现
+表现层 crate"，而 `crates/uva-tui` 已经在仓库里——**两条**禁令都已被违反，
 本方案还会再违反一次。刀 0 把它们收干净。
 
 第五件事是用户追加的硬要求：**三个宿主做等价实现**。并轨只统一了"怎么到达 core"，
@@ -63,8 +63,8 @@ Axiom 终态图有三种投影。elysper 今天的状态：
 **目标**
 
 - **G1 宿主路径统一**：TUI / 浏览器 / 桌面 WebView 三个宿主全部经**同一个网关**
-  （`elysper-app-server serve`）到达**同一个 core**，协议面只有一份 JSON-RPC。
-- **G2 一套前端**：浏览器标签页与桌面 WebView 跑**同一份** `elysper-web` 构建产物，
+  （`uva-app-server serve`）到达**同一个 core**，协议面只有一份 JSON-RPC。
+- **G2 一套前端**：浏览器标签页与桌面 WebView 跑**同一份** `uva-web` 构建产物，
   同一套 JS，不存在"桌面专用前端"。
 - **G3 Desktop 入口**：一个 Tauri 2 桌面应用，内含窗口 + WebView。
 - **G4 真插槽系统**：前端的 `slot` 从字符串升级为声明式插槽（基数 `one` / `many`、作用域、
@@ -119,7 +119,7 @@ Axiom 终态图有三种投影。elysper 今天的状态：
   `check-harness-shape` / `check-harness-docs` / `check-plugin-shape` / `check-claim-language` /
   `check-deny` / `check-publishable` / `check-single-writer` / `check-public-api-runtime` /
   `check-frozen-api`。
-- `elysper-kernel` 依赖图不得出现任何 agent / UI / 传输层 crate。
+- `uva-kernel` 依赖图不得出现任何 agent / UI / 传输层 crate。
 - AGENTS.md §4.2：**本项目不保留任何前端自动化测试套件**，验证一律用 Playwright MCP
   驱动浏览器；纯函数按 §4.2 的写法在页面内 `await import('/src/lib/foo.ts')` 断言。
 
@@ -141,7 +141,7 @@ Axiom 终态图有三种投影。elysper 今天的状态：
   `cargo clippy --all-targets --all-features --tests --all`。只要 Tauri 依赖待在 root
   workspace 成员里，**任何没装 `webkit2gtk-4.1` 的机器**跑 `make ci` 必红（本机已装，见 C1；
   但 CI 的 `ubuntu-latest` 与其他贡献者的机器未必有）。
-- **C3 前端 WS 硬连同源**：`elysper-web/src/api/rpc.ts:269` 直接
+- **C3 前端 WS 硬连同源**：`uva-web/src/api/rpc.ts:269` 直接
   `ws(s)://${window.location.host}/rpc`，没有可插拔 transport 层。
 - **C4 前端无测试框架，且 CI 的 web job 固定 Node 20**：`package.json` 只有 vite / react /
   typescript / eslint / prettier；`.github/workflows/rust-quality.yml:177` 是 `node-version: 20`
@@ -150,7 +150,7 @@ Axiom 终态图有三种投影。elysper 今天的状态：
   **这三条合起来直接否掉"前端单测"这条路**（D7）。
 - **C5 网关已是完整投影面**：`serve` 提供 `/rpc`（WS）、`/livez`、`/readyz`（core 宣布
   `ready` 后才 200）、`/version`、`/metrics`，其余路径 fallback 到 SPA 静态文件
-  （`crates/elysper-app-server/src/gateway.rs:594`），并以 1s→5s 退避重启 core。
+  （`crates/uva-app-server/src/gateway.rs:594`），并以 1s→5s 退避重启 core。
   网关的 WS 对帧是**透明中继**：浏览器发什么文本，就原样转给 core 的 stdin，按 id 回帧
   （`gateway.rs` 的 `forward_upstream`）。⇒ **任何 JSON-RPC 客户端（浏览器、Rust TUI）都能
   用同一套方法名与信封**，这正是 TUI 并轨的技术前提。
@@ -158,9 +158,9 @@ Axiom 终态图有三种投影。elysper 今天的状态：
   入库产物落 `docs/design/`、`AGENTS.md`、`SEAMS.md`、`CHANGELOG.md`、`crates/*/README.md`、
   `scripts/`、`Cargo.toml`、CI。
 - **C7 公开面 runtime-free 门禁扫全部 crate**：`scripts/check-public-api-runtime.sh` 的扫描式是
-  `find crates -name '*.rs' -path '*/src/*'`，豁免只有 `elysper-app-server` 与
-  `elysper-mcp-server`。新 crate 的 `pub` 面出现 `tokio::…` 路径 → `make ci` 红。
-  （`elysper-tui` 是正例：它的 lib 面刻意不带 tokio 类型，`CoreWriter` / `CoreReader` 是
+  `find crates -name '*.rs' -path '*/src/*'`，豁免只有 `uva-app-server` 与
+  `uva-mcp-server`。新 crate 的 `pub` 面出现 `tokio::…` 路径 → `make ci` 红。
+  （`uva-tui` 是正例：它的 lib 面刻意不带 tokio 类型，`CoreWriter` / `CoreReader` 是
   `pub(crate)`。）
 - **C8 `make ci` 不含 `check-web`**：前端门禁是独立 CI job（`rust-quality.yml` 的 web job）。
 - **C9 前端已有动态 import**：`App.tsx:20-61` 有 19 处 `React.lazy(() => import(...))`
@@ -170,8 +170,8 @@ Axiom 终态图有三种投影。elysper 今天的状态：
 - **C11 WS 客户端依赖已在 lockfile 里**：`tokio-tungstenite 0.29.0` 已随 `axum` 的 `ws` feature
   进入 `Cargo.lock`（`Cargo.lock:4462`）⇒ 直接依赖它**不引入新下载、不产生版本冲突**，
   且与 `Cargo.toml:170` 的 `axum = { version = "0.8", features = ["ws"] }` 同源。
-- **C12 TUI 今天的传输是自建的一整套**：`crates/elysper-tui/src/transport.rs`（726 行）
-  自己 spawn `core`、自己分帧（消费 `elysper_app_server::rpc::framing`）、自己做 id 关联、
+- **C12 TUI 今天的传输是自建的一整套**：`crates/uva-tui/src/transport.rs`（726 行）
+  自己 spawn `core`、自己分帧（消费 `uva_app_server::rpc::framing`）、自己做 id 关联、
   自己管 1s→5s 退避与"新一代 `ready` 后重发 `sessions/follow`"；
   `app.rs`（884 行 reducer）与 `render.rs`（ratatui 绘制）与传输无关，**不需要动**。
 
@@ -186,13 +186,13 @@ Axiom 终态图有三种投影。elysper 今天的状态：
   （SPA 有会话列表、工具、技能、计划、Agent、任务、工作流、评测等页面）。
 - 它 spawn 的是 `core`（stdio），**不经过网关**；因此 core 的监管者有两个（TUI 一个、网关一个），
   协议契约有两份实现（TUI 的 stdio 分帧一份、网关的 WS 中继一份）。
-- `crates/elysper-tui` 是 workspace 成员、`publish = false`、bin + lib；
+- `crates/uva-tui` 是 workspace 成员、`publish = false`、bin + lib；
   `transport::Driver::connect` 是 `pub(crate)` 的可注入 spawn 缝（生产 `spawn_process`，
   测试用 `tokio::io::duplex` 假装 core）。
 
 **协议词表（三个宿主共用，本轮"等价"的度量单位）**
 
-- 服务器的方法注册表是**唯一真源**：`crates/elysper-app-server/src/rpc/methods/**`
+- 服务器的方法注册表是**唯一真源**：`crates/uva-app-server/src/rpc/methods/**`
   逐个 `router.register("<域>/<动作>", …)`。SPA 的 `api/client.ts` 把 REST 形状的路径映射到
   这些方法（`client.ts:222` 一行一个），**54 个方法、13 个域**：
   `sessions`(10) / `workflows`(6) / `schedules`(6) / `skills`(5) / `evals`(5) / `chat`(5) /
@@ -200,20 +200,20 @@ Axiom 终态图有三种投影。elysper 今天的状态：
 - 命名高度规整：`<域>/list` / `<域>/get` / `<域>/create` / `<域>/delete` + 少量动词
   （`sessions/fork`、`chat/regenerate`、`schedules/tick`、`workflows/run`、`evals/run`…）。
 - **列表响应是统一信封**：`List<T> { data: Vec<T>, next_cursor: Option<String>, total: Option<u64> }`
-  （`crates/elysper-app-server/src/api/v1/list.rs:27`），所有 v1 列表端点共用
-  （cursor 编解码走 `elysper::core::cursor`）。
+  （`crates/uva-app-server/src/api/v1/list.rs:27`），所有 v1 列表端点共用
+  （cursor 编解码走 `uva::core::cursor`）。
   ⇒ **一个通用列表渲染器 + 一张每域列配置**就能吃掉全部目录域，不必逐页移植（见 D16）。
 
 **Desktop 侧**
 
 - `serve` 的 CLI：`--bind`（默认 127.0.0.1）、`--port`（默认 8080）、`--web-dir`，
   以及全局的 `--directory` / `--profile` / `--bundle` / `--patch`
-  （`crates/elysper-app-server/src/main.rs:126` 起、`:190-201` 组装 `ServeOptions`）。
+  （`crates/uva-app-server/src/main.rs:126` 起、`:190-201` 组装 `ServeOptions`）。
 - **没有**任何 `/api/v1/*` HTTP 面：`ui/schema` 是 WebSocket 上的 JSON-RPC 方法
   （`src/rpc/methods/misc.rs:40`），前端的 `api/client.ts:222` 把 `'GET /api/v1/ui/schema'`
   映射到该方法。`src/routes/**` 与 `src/api/**` 是方法体，不是 HTTP 路由。
 - `serve` 是同一个二进制的**子命令**，不是独立可执行文件（`main.rs:112`）。
-- 仓库里**没有** Tauri / wry / tao 的任何痕迹（`grep -E '\btauri\b|\bwry\b|\btao\b' crates/ elysper-web/ Cargo.toml` 无命中）。
+- 仓库里**没有** Tauri / wry / tao 的任何痕迹（`grep -E '\btauri\b|\bwry\b|\btao\b' crates/ uva-web/ Cargo.toml` 无命中）。
 
 **浏览器插件树侧**
 
@@ -239,8 +239,8 @@ Axiom 终态图有三种投影。elysper 今天的状态：
   `plugin-runtime` / `capability-plugins` / `builtin-plugin-set` / `agent-loop-plugin` /
   `profile-assembly` / `headless-rpc` / `wasm-plugin-runtime` / `performance-budget`）。
 - `web-projection/spec.md` 的《Requirement: 不引入 TUI 与 Desktop》有**两条**禁令：
-  (a) "本变更 MUST NOT 新增 TUI 或 Desktop 入口"；(b) "`elysper-app-server` 与
-  `elysper-web` 之外不得出现表现层 crate"。两条都已被 `crates/elysper-tui` 违反。
+  (a) "本变更 MUST NOT 新增 TUI 或 Desktop 入口"；(b) "`uva-app-server` 与
+  `uva-web` 之外不得出现表现层 crate"。两条都已被 `crates/uva-tui` 违反。
 - **入库文档没有同类矛盾**：`AGENTS.md` / `SEAMS.md` / `README.md` / `MINIMAL.md` 里
   没有"无 TUI / 无 Desktop"的陈述（`README.md:527` 只把 "a TUI / desktop shell" 列为
   可能的宿主）。所以刀 0 的入库部分只是把新形态写进去，不需要"纠错"。
@@ -282,8 +282,8 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 ```
 ┌────────────────────────────────────────────────────────────────────┐
 │ 三个宿主（各自独立编译、独立部署）                                 │
-│  crates/elysper-tui   ratatui + crossterm（终端原生 UI 保留）       │
-│  elysper-web + 浏览器  React SPA（桌面与浏览器同一份 dist）        │
+│  crates/uva-tui   ratatui + crossterm（终端原生 UI 保留）       │
+│  uva-web + 浏览器  React SPA（桌面与浏览器同一份 dist）        │
 │  desktop/             Tauri 2 壳 + WebView（同一份 dist）           │
 └───────────────┬────────────────────────────────────────────────────┘
                 │ 同一个协议面：JSON-RPC 2.0 信封
@@ -300,10 +300,10 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 └────────────────────────────────────────────────────────────────────┘
 
 共享 crate（root workspace 成员，publish = false）
-  crates/elysper-gateway
+  crates/uva-gateway
     ├─ supervisor.rs  拉起 / 附着网关、等 /readyz、退避重启、退出回收
     └─ client.rs      网关 WS 上的 JSON-RPC 客户端（请求 / 通知 / 重连）
-        ↑ 被 crates/elysper-tui 与 desktop/ 壳共用
+        ↑ 被 crates/uva-tui 与 desktop/ 壳共用
 
 能力矩阵（tracked，CI 棘轮）——"三个等价"的度量与守门
   docs/host-capabilities.yaml
@@ -313,8 +313,8 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
         缺口数只降不升 · 引用的方法名必须在服务器注册表里存在
 
 三个宿主的界面
-  crates/elysper-tui   通用列表 / 通用详情 / 对话 / 审批（+ 每域列配置表）
-  elysper-web + 浏览器  React SPA（19 页）+ microkernel（纯 TS）
+  crates/uva-tui   通用列表 / 通用详情 / 对话 / 审批（+ 每域列配置表）
+  uva-web + 浏览器  React SPA（19 页）+ microkernel（纯 TS）
   desktop/             Tauri 2 壳 + WebView（同一份 dist ⇒ 与浏览器天然等价）
     microkernel/：slots.ts · registry.ts · container.ts
     SlotRegion（React 纯投影，useSyncExternalStore 订阅不可变快照）
@@ -325,7 +325,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 三个宿主是**同一套界面**的两种渲染：web 与 desktop 是同一份 SPA，终端是它在终端里的渲染。
 下面是这套界面的骨架（原型：`docs/prototypes/shared-interface.prototype.html`，
-由 `crates/elysper-tui/examples/tui-layouts-prototype.rs` 生成，终端那半是真 ratatui 输出）。
+由 `crates/uva-tui/examples/tui-layouts-prototype.rs` 生成，终端那半是真 ratatui 输出）。
 
 **外壳（两个宿主一致）**
 
@@ -399,24 +399,24 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 ## 7. 关键决策（我的裁量，可推翻）
 
 - **D1 桌面链路 = `serve` sidecar。** Tauri 壳 spawn
-  `elysper-app-server serve --bind 127.0.0.1 --port <port> --web-dir <dist>`，
+  `uva-app-server serve --bind 127.0.0.1 --port <port> --web-dir <dist>`，
   等 `/readyz` 200（该 200 的语义就是"core 已宣布 ready"）后让 WebView 打开
   `http://127.0.0.1:<port>/`。壳**不**讲 JSON-RPC——协议由网关讲，壳只管生命周期。
 - **D2 一套前端，两个宿主，且刀 3 完全不碰前端。** 生产：WebView 与浏览器都加载 sidecar
   提供的同一份 `dist`，页面 origin 与 WS origin 同源；开发：Tauri dev 的 WebView 指向
   `http://localhost:5173`，Vite 已经代理 `/rpc`（ws）与 `/readyz`
-  （`elysper-web/vite.config.ts:16-30`），前端**零改动**即可连通。
-  因此**不需要**运行时端点覆盖缝（`window.__ELYSPER_RPC_URL__` 一类）——那是多余的第二条真源。
+  （`uva-web/vite.config.ts:16-30`），前端**零改动**即可连通。
+  因此**不需要**运行时端点覆盖缝（`window.__UVA_RPC_URL__` 一类）——那是多余的第二条真源。
 - **D3 代码位置三段。**
-  - `crates/elysper-gateway/`：**共享 crate**，root workspace 成员、`publish = false`、
+  - `crates/uva-gateway/`：**共享 crate**，root workspace 成员、`publish = false`、
     零 GUI 依赖，只装"拉起 / 附着网关 + 等就绪 + 退避重启 + 回收"与"网关 WS 上的
     JSON-RPC 客户端"。TUI 与桌面壳共用它（R4）。
-  - `crates/elysper-tui/`：既有成员，**传输层换掉**（D13），reducer 与渲染层不动。
+  - `crates/uva-tui/`：既有成员，**传输层换掉**（D13），reducer 与渲染层不动。
   - `desktop/`：Tauri 壳，**自带 `[workspace]`、不进 root workspace**，配独立 CI job 装
     webkit 依赖后跑 fmt / clippy / test。理由是 C2：留在 root workspace 里，
     `--all-features` 会把 GUI 目标编进 `make ci` ⇒ **每个**跑 `make ci` 的人都要先装
     webkit 系统库（本机已装，见 C1；但这是贡献者的普遍负担，不该由架构买单）。
-    `desktop/` 以 path 依赖 `../crates/elysper-gateway`（跨 workspace 的 path 依赖：两份
+    `desktop/` 以 path 依赖 `../crates/uva-gateway`（跨 workspace 的 path 依赖：两份
     lockfile，两套 feature 解析——已知代价，见 §10 R-6）。
 - **D4 端口由宿主选。** 用 `TcpListener::bind("127.0.0.1:0")` 取一个空闲端口再传给
   `serve`（bind → 读端口 → 关闭 → 使用，竞态窗口极小）；`serve` 的 `--port` 语义不变。
@@ -451,8 +451,8 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   不为此新建一套）。
 - **D10 桌面壳的二进制定位与生命周期参数。**
   - 二进制：优先用 Tauri 打包的 sidecar 资源（`externalBin`，文件名带 target triple）；
-    其次 `--app-server` / `ELYSPER_APP_SERVER` / PATH（照 TUI 先例
-    `crates/elysper-tui/src/main.rs:113`）；最后 `current_exe()` 同目录兜底。
+    其次 `--app-server` / `UVA_APP_SERVER` / PATH（照 TUI 先例
+    `crates/uva-tui/src/main.rs:113`）；最后 `current_exe()` 同目录兜底。
   - 默认工作区：进程的当前目录（与 TUI 一致）；profile / bundle / patch 从命令行透传给
     `serve`。
   - 就绪超时：30s 内 `/readyz` 未 200 → 判定启动失败并报错（不再无限等）。
@@ -461,18 +461,18 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   - 端口策略：重启时**优先复用原端口**；bind 失败（端口被占）则重选并让 WebView 重新导航。
     判据是子进程快速退出 + stderr 里的 bind 失败信息；判定不了就当作"启动失败"重试一次。
 - **D11 CSP 不在本轮。** **〔已作废，见 D33：不再加载远端 JS〕** 仓库今天**没有任何 CSP**（`grep Content-Security-Policy` 在
-  `crates/elysper-app-server/src` 与 `elysper-web/index.html` 均零命中），所以 D2 的
+  `crates/uva-app-server/src` 与 `uva-web/index.html` 均零命中），所以 D2 的
   "不需要 `unsafe-eval`"是"没有 CSP 可放宽"，不是"有 CSP 且不需放宽"。
   本轮不引入 CSP（会动静态响应面、可能影响现有前端），**记录为已知缺口**：
   2b 打开后没有 CSP 背书，靠逐行开关 + 同源约束兜底。补 CSP 另立一轮。
-- **D12 `crates/elysper-gateway` 的形态。** **lib**（不是 bin）：公开面 futures-based
+- **D12 `crates/uva-gateway` 的形态。** **lib**（不是 bin）：公开面 futures-based
   （`futures::future::BoxFuture`、`futures::channel::mpsc`），**不带任何 `tokio::` 路径**
-  （C7），内部用 tokio（照 `elysper-tui` 的分层：内部 tokio、公开面干净）。
+  （C7），内部用 tokio（照 `uva-tui` 的分层：内部 tokio、公开面干净）。
   它必须同时进 root `Cargo.toml` 的 `members` 与 `scripts/check-publishable.sh` 的 `ORDER`
   （后者要求与成员集合**完全一致**）。
-- **D13 TUI 并轨到网关。** `crates/elysper-tui` 的 `transport` 层换成
-  `crates/elysper-gateway` 的 client：
-  - **默认**：TUI 自己 spawn `elysper-app-server serve`（保持"一条命令"的体验），
+- **D13 TUI 并轨到网关。** `crates/uva-tui` 的 `transport` 层换成
+  `crates/uva-gateway` 的 client：
+  - **默认**：TUI 自己 spawn `uva-app-server serve`（保持"一条命令"的体验），
     连 `ws://127.0.0.1:<port>/rpc`；
   - **`--attach <url>`**：附着到已在跑的网关（浏览器与终端同服），不 spawn、不监管进程。
   - 协议面不变：TUI 今天用的方法名（`chat/session/create`、`sessions/follow`、
@@ -485,12 +485,12 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
     （`gateway.rs` 的 `drop_subscriptions` / `broadcast`），客户端必须自己重建订阅。
     这条从"我重启了我的子进程"变成"网关换了代"，触发源变了，行为不变。
   - **依赖变化**：`tokio-tungstenite 0.29`（已在 lockfile，C11）；对
-    `elysper-app-server` 的**库**依赖可以摘掉（不再消费 `rpc::framing`）——TUI 需要的是
+    `uva-app-server` 的**库**依赖可以摘掉（不再消费 `rpc::framing`）——TUI 需要的是
     server **二进制**，按今天 README 的方式提供（先构建 / PATH 查找）。
   - **测试形态**：传输测试从"duplex 假装 core"改成"进程内 axum WS 服务器说 JSON-RPC 信封"
     （axum 已在 workspace，C11）+ supervisor 的可注入 spawn 缝（假 spawn，不起真进程）。
     reducer 与渲染测试不动。
-- **D14 共享 crate 的边界。** `crates/elysper-gateway` 提供两件东西：
+- **D14 共享 crate 的边界。** `crates/uva-gateway` 提供两件东西：
   `supervisor`（进程）与 `client`（协议）。桌面壳只需要 `supervisor` 的
   `base_url()`，TUI 两者都要。壳**不**用 `client`（它不碰协议）——但 crate 里留着，
   因为"下一个宿主"多半需要它；不用就不引依赖（Tauri 壳不引 `tokio-tungstenite`）。
@@ -506,7 +506,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   - 门禁规则：①每行三列都有值（不许留空）；②`planned` 必须带锚点；
     ③`full` / `adapted` 必须指向**磁盘上存在**的证据文件（测试或文档）；
     ④缺口数（`planned` + `n-a` 的格子）不得超过基线；⑤矩阵里引用的方法名必须在
-    服务器的方法注册表里存在（`grep 'router.register("' crates/elysper-app-server/src/rpc/methods/`）。
+    服务器的方法注册表里存在（`grep 'router.register("' crates/uva-app-server/src/rpc/methods/`）。
   - 配套的「新增 `scripts/*.sh` 门禁要同步 `make lint-sh` 与 shellcheck workflow」
     （AGENTS.md §3.6）在本轮**不触发**——本轮没有新增门禁脚本。
 - **D16 TUI 补齐走通用渲染器，不逐页移植。** TUI 侧新增：
@@ -528,8 +528,8 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   - 共享的止于三样：**JSON-RPC 方法词表**、**`List<T>` 统一信封**、**能力矩阵**。
   - 每个宿主用**自己的语言与渲染栈**实现同一份契约：SPA 是 DOM/React，TUI 是 ratatui，
     桌面是 WebView 里的同一份 SPA。
-  - **接受的代价（明写）**：会话行词汇的解释会有两份——`elysper-web/src/lib/session-to-messages.ts`
-    （TS，1244 行）与 TUI 的 Rust reducer（`crates/elysper-tui/src/app.rs`，884 行）。
+  - **接受的代价（明写）**：会话行词汇的解释会有两份——`uva-web/src/lib/session-to-messages.ts`
+    （TS，1244 行）与 TUI 的 Rust reducer（`crates/uva-tui/src/app.rs`，884 行）。
     这是**有意的重复**：换来的是每个宿主对自己的呈现完全自主（终端不需要为了复用去迁就
     DOM 抽象），且**架构保持简洁**——共享层只有协议与矩阵，没有共享呈现层这个新概念。
   - 字段级漂移（服务器改了某域的字段、某个宿主没跟上）**不被机制拦住**，只靠 wave 的
@@ -545,7 +545,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
     DSH 的同一做法：settings 是一个**插件提供的服务**，不是一个文件概念；
   - **插件按约定自己读 plugin 排布**：skill 插件读 `skills/`（怎么读由它自己实现），
     mcp 插件读 `mcp.json`，依此类推——**profile 不复制这些数据**。
-  **elysper 现有的 `{ id, runtime, config }` 行已经是这个形状**，本轮改的是语义而非格式。
+  **uva 现有的 `{ id, runtime, config }` 行已经是这个形状**，本轮改的是语义而非格式。
 - **D20 没有 settings 一说。** 启用与参数**没有独立的设置面**：每行自带启用位与该插件的
   **小配置**；**大配置与细粒度启用归插件自己管**——
   例如"哪些 skill 启用"由 **skill 插件自己实现并标识**（它自己的数据/状态），
@@ -553,7 +553,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   profile 的**粗粒度**启用位（这一行插件装不装）**直接决定插件树按需装载什么**：
   关掉的行不进 Fiber 树 ⇒ **能力与界面同时消失**（D32）。
   `settings.yaml` 这个文件**作废**（原 D20 / D28 一并作废）。
-- **D21 动态变更走 MCP 通道，且是事务性的。** 内置 MCP（暂名 `elysper-settings`）暴露
+- **D21 动态变更走 MCP 通道，且是事务性的。** 内置 MCP（暂名 `uva-settings`）暴露
   `profile/list` · `profile/get` · `profile/set`（以及创建/删除能力行的动作）：
   1. 先按新 profile **试装**（`mount_all` 本来就是全组前置校验 + 失败全组回滚）；
   2. **装得起来** ⇒ 提交（写 profile、刷新界面），并广播"目录变了"；
@@ -607,14 +607,14 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   semantics (activation is service-availability driven)"。族靠两件事表达：
   **包 + 子路径**（`name: '@deepseek-ai/dsh-plugin-manager/tools'`）与**服务契约**
   （`inject: ['tools']`，未声明的服务访问被 context 的 Proxy 拒绝 ⇒ 能力安全）。
-  ⇒ elysper 同款：**tool 插件提供工具注册表服务**，skill 插件 `inject` 它并注册自己的 skill；
+  ⇒ uva 同款：**tool 插件提供工具注册表服务**，skill 插件 `inject` 它并注册自己的 skill；
   **不需要** kernel 新增"父插件挂子树"，**核心一行不动**成立。
 - **D39 启用位可以由插件判定（照 DSH 的 `disabled: !!js …`）。** 行上的启用位不只是
   `true` / `false`，还可以指向**插件提供的判定**（例如
   `enabled = { service = "skill-registry", check = "is_enabled", arg = "foo" }`）。
   这让"哪些 skill 启用由 skill 插件自己实现和标识"**不必把每个 skill 写成 profile 行**。
 - **D40 skill 先当"数据"，要成为插件时再显式加行。** DSH 的 skill 是 `SKILL.md` 数据，
-  由一个 `dsh-skill-filesystem` 插件扫描目录并注册成 tool。elysper 同款：
+  由一个 `dsh-skill-filesystem` 插件扫描目录并注册成 tool。uva 同款：
   skill 插件按约定读 `skills/`、自己判定启用、注册成工具；哪天某个 skill 需要自己的服务与
   生命周期，再**显式加一行**升级成插件（profile 行 = 一个插件 + 小配置）。
 - **D35 默认工作区常驻。** 对话的主界面若不设定工作区，会话放在一个**常打开的默认栏**
@@ -645,8 +645,8 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 - `web-projection` 的《Requirement: 不引入 TUI 与 Desktop》两条禁令都改：
   (a) 改为现状陈述（TUI 已落地且本轮并轨到网关；Desktop 是本轮新增的第三个宿主）；
-  (b) 表现层 crate 白名单扩为 `elysper-app-server` / `elysper-web` / `elysper-tui` /
-  `crates/elysper-gateway` / `desktop`。
+  (b) 表现层 crate 白名单扩为 `uva-app-server` / `uva-web` / `uva-tui` /
+  `crates/uva-gateway` / `desktop`。
 - 新增 `desktop-projection` spec：sidecar 契约、生命周期、单一前端、崩溃隔离。
 - 新增 `frontend-plugin-tree` spec：插槽系统、dispose 级联、代码执行开关的默认与边界。
 - 新增（或并入）一段 TUI 并轨的 Requirement：三个宿主共用网关与协议面、core 监管单一归属。
@@ -654,16 +654,16 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 **入库文档**
 
 - 本篇 `docs/design/2026-11-09-desktop-frontend-tree-design.md`。
-- `AGENTS.md` §1（环境段：三个宿主的关系、新增 `crates/elysper-gateway`、桌面壳）、
+- `AGENTS.md` §1（环境段：三个宿主的关系、新增 `crates/uva-gateway`、桌面壳）、
   §3.6（若新增门禁目标，按该节规则同步表格）、§4.2（补一句"纯 TS 微内核同样按页面内
   `import()` 断言验证"，避免下一轮又来一遍同样的争论）。
 - `CHANGELOG.md` 的 `[Unreleased]`。
-- `crates/elysper-gateway/README.md`、`crates/elysper-tui/README.md`（改写传输层说明）、
-  `crates/elysper-desktop/README.md`（若保留该目录）。
+- `crates/uva-gateway/README.md`、`crates/uva-tui/README.md`（改写传输层说明）、
+  `crates/uva-desktop/README.md`（若保留该目录）。
 
 **验收**：本地 openspec 层不再有任何一条与代码矛盾的禁令；入库文档说清三个宿主的关系。
 
-### 刀 1 · 共享 crate `crates/elysper-gateway`
+### 刀 1 · 共享 crate `crates/uva-gateway`
 
 **范围**
 
@@ -681,7 +681,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 **验收**
 
-- `cargo test -p elysper-gateway` 绿，且**不起真进程**：假 spawn 覆盖
+- `cargo test -p uva-gateway` 绿，且**不起真进程**：假 spawn 覆盖
   "ready 后 resolve" / "网关死亡后按退避重启" / "Drop 回收子进程" / "端口被占时重选"；
   client 侧覆盖"请求按 id 关联" / "通知扇出" / "断线后重连"。
 - `make ci` 绿（新成员进 `members` 与 `check-publishable.sh` 的 `ORDER`）。
@@ -690,7 +690,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 **范围**
 
-- `crates/elysper-tui/src/transport.rs` 瘦身：换成 `elysper-gateway` 的 client +
+- `crates/uva-tui/src/transport.rs` 瘦身：换成 `uva-gateway` 的 client +
   supervisor，TUI 只保留自己的领域层（`RequestKind` → 方法名、"收到 `ready` 重发 follow"、
   断线后的 UI 提示）。
 - 传输并轨**不动** reducer 与渲染的**既有语义**（C12：今天 `app.rs` / `render.rs` 与传输无关）；
@@ -705,11 +705,11 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 **验收**
 
-- `cargo test -p elysper-tui` 绿。
-- 手工冒烟：`cargo build -p elysper-app-server && ELYSPER_APP_SERVER=target/debug/elysper-app-server
-  cargo run -p elysper-tui -- --directory .` → 起一轮对话、审批用 `y`/`n` 应答；
+- `cargo test -p uva-tui` 绿。
+- 手工冒烟：`cargo build -p uva-app-server && UVA_APP_SERVER=target/debug/uva-app-server
+  cargo run -p uva-tui -- --directory .` → 起一轮对话、审批用 `y`/`n` 应答；
   再用 `--attach ws://127.0.0.1:8080/rpc` 挂到已在跑的 `serve` 上，行为一致。
-- 回归：core 的 stdio 契约仍由 `crates/elysper-app-server/tests/stdio_roundtrip.rs` 覆盖
+- 回归：core 的 stdio 契约仍由 `crates/uva-app-server/tests/stdio_roundtrip.rs` 覆盖
   （它 spawn 二进制并逐帧驱动，不受 TUI 改动影响）。
 
 ### 刀 3 · Desktop 入口
@@ -718,15 +718,15 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 1. `desktop/`（新，独立 workspace）：Tauri 2 壳。职责只有四件——拉起 sidecar、等 ready、
    开窗（`WebviewUrl::External(base_url)`）、sidecar 死亡则重启并重定向窗口、窗口关闭则
-   回收 sidecar。`tauri.conf.json` 的 `frontendDist` 指向 `elysper-web/dist` 的副本
+   回收 sidecar。`tauri.conf.json` 的 `frontendDist` 指向 `uva-web/dist` 的副本
    （作为 Tauri resource，同时作为 `--web-dir` 的输入）。
-   壳的公开依赖只有 `tauri` + `elysper-gateway`（path）+ `tokio` + `serde_json` + `anyhow`；
+   壳的公开依赖只有 `tauri` + `uva-gateway`（path）+ `tokio` + `serde_json` + `anyhow`；
    **不引 `tokio-tungstenite`**（D14）。
 2. CI：新增 `.github/workflows/desktop.yml`（ubuntu-latest，apt 装
    `libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libgtk-3-dev
    librsvg2-dev patchelf`），跑该 workspace 的 fmt / clippy(`-D warnings`) / test，
    **并跑一次 `cargo deny check licenses bans sources`**（补 C10 的缺口）。
-3. 仓库同步：`crates/elysper-gateway/README.md`、AGENTS.md §1 / §3.6、CHANGELOG。
+3. 仓库同步：`crates/uva-gateway/README.md`、AGENTS.md §1 / §3.6、CHANGELOG。
 
 **验收**
 
@@ -758,7 +758,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 **范围**
 
-- `crates/elysper-tui/src/views/list.rs`（**通用列表**：吃 `List<T>` 信封，按列配置渲染，
+- `crates/uva-tui/src/views/list.rs`（**通用列表**：吃 `List<T>` 信封，按列配置渲染，
   支持 cursor 翻页）、`views/detail.rs`（**通用详情**：单对象 → 键值表）、
   `domains.rs`（**每域一张列配置表**：域 → list 方法、item 字段路径、显示列、detail 方法）。
 - wave 1 覆盖 `sessions`（list / get / status / usage / export / fork / resume / compact /
@@ -767,7 +767,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 **验收**
 
-- `cargo test -p elysper-tui` 绿；通用列表 / 详情渲染器用 `TestBackend` 断言缓冲文本。
+- `cargo test -p uva-tui` 绿；通用列表 / 详情渲染器用 `TestBackend` 断言缓冲文本。
 - 手工：TUI 能列出会话、打开一个会话、看用量、fork / resume / compact / 删除。
 - 矩阵的 `sessions` / `chat` 两行在 tui 列从 `planned` 变为 `full` / `adapted`，缺口数下降。
 
@@ -796,7 +796,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
    启用位**可以由插件判定**（D39）：`enabled = { service = "...", check = "...", arg = "..." }`
    ⇒ skill 插件自己回答"这个 skill 启用吗"，**不必把每个 skill 写成 profile 行**。
    **不引入 `group` 字段**（DSH 同款）：族靠服务契约 + 行表达（D38）。
-2. **事务性变更**（D21）：内置 MCP（暂名 `elysper-settings`）暴露
+2. **事务性变更**（D21）：内置 MCP（暂名 `uva-settings`）暴露
    `profile/list` · `profile/get` · `profile/set` + 能力行的创建 / 删除动作。流程：
    写临时文件 → **试装**（`mount_all` 全组校验 + 失败全组回滚）→ 成功才**替换正式文件**
    并广播"目录变了"；失败则**报错并保持变更前的状态**（文件不换、树不动）。
@@ -865,7 +865,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 - Tauri 2 的窗口创建与 `WebviewUrl::External` 的具体写法、`tauri.conf.json` 的
   `frontendDist` / `externalBin` / resource 布局细节。
-- `crates/elysper-gateway` 的公开面切分（哪些 `pub`、哪些 `pub(crate)`）——
+- `crates/uva-gateway` 的公开面切分（哪些 `pub`、哪些 `pub(crate)`）——
   判据是"crate 外真的被用"，由 builder 按 AGENTS.md §3.7 实测 grep 决定；
   硬约束是公开面不带 `tokio::` 路径（C7）。
 - TUI 的 `RequestKind` → 方法名映射是否保留在 TUI 里、还是下沉到共享 crate 的 client
@@ -879,7 +879,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   哪些 `n-a`、哪些 `planned`）——这是一份**判断**，由 builder 按当天代码事实填，
   但必须与 D17 的规则一致（`n-a` 要写理由，`planned` 要带锚点）。
 - TUI 通用列表 / 详情渲染器的**终端交互约定**：翻页键、光标移动、进入详情与返回、
-  写操作的确认提示——沿用 `crates/elysper-tui/src/render.rs` 已有的键位风格，不另造一套。
+  写操作的确认提示——沿用 `crates/uva-tui/src/render.rs` 已有的键位风格，不另造一套。
 - 每域列配置表的字段名（哪些字段当列、哪些当详情键）——以服务器实际响应为准，
   不新增服务器字段。
 
@@ -887,9 +887,9 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 
 - **R-1 桌面壳的构建依赖**：本机已装 `webkit2gtk-4.1`（C1），GUI 目标实测可编可跑；
   但**其他机器 / 贡献者**若要在本地跑桌面壳，同样需要它。缓解：壳的逻辑全部落在
-  `crates/elysper-gateway`（root workspace 内，无 GUI 依赖，任何机器都能测）；
+  `crates/uva-gateway`（root workspace 内，无 GUI 依赖，任何机器都能测）；
   Tauri 壳保持薄，编译与运行由独立的 desktop CI job 覆盖。
-- **R-2 脱离 root workspace 的门禁缺口**：`crates/elysper-gateway` 与 `crates/elysper-tui`
+- **R-2 脱离 root workspace 的门禁缺口**：`crates/uva-gateway` 与 `crates/uva-tui`
   在 root workspace 内（root 门禁全覆盖）；`desktop/` 在外（自带 job 覆盖
   fmt / clippy / test / cargo-deny）。缓解：desktop job 与 rust-quality 并列，缺它则 CI 红。
 - **R-3 前端出现第二个"真源"**：界面自己维护一份"能力清单"会与 profile 漂移。
@@ -899,7 +899,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   缓解：默认关 + 逐行开关 + 同源路径 + 禁 eval + 装配期拒绝（不静默忽略）。
 - **R-5 没有 CSP 背书**（D11）：2b 打开后，页面里能跑的 JS 只受"同源 + 开关"约束，
   没有响应头的第二道防线。已知缺口，本轮不补。
-- **R-6 跨 workspace 的 path 依赖**（D3）：`desktop/` → `../crates/elysper-gateway`
+- **R-6 跨 workspace 的 path 依赖**（D3）：`desktop/` → `../crates/uva-gateway`
   意味着两份 lockfile、两套 feature 解析。缓解：该 crate 依赖面小
   （tokio / futures / serde_json / tokio-tungstenite）。
 - **R-7 TUI 并轨的行为差异**：TUI 今天的 core 监管是自己做的，并轨后由网关做——
@@ -969,7 +969,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 |---|---|
 | `docs/prototypes/host-capabilities-model.prototype.html` | 能力矩阵与对等模型（逻辑原型；五条规则的可执行版） |
 | `docs/prototypes/shared-interface.prototype.html` | 共享界面契约：web 形态 + 终端渲染并排（两边共用状态） |
-| `crates/elysper-tui/examples/tui-layouts-prototype.rs` | 生成上面那个页面的源；终端那半是**真 ratatui 输出** |
+| `crates/uva-tui/examples/tui-layouts-prototype.rs` | 生成上面那个页面的源；终端那半是**真 ratatui 输出** |
 | `docs/prototypes/*.png` | 各状态截图 |
 
 原型的**结论**已折进本篇（§6.1 界面契约、D15–D25）；原型本身只留在分支上。
@@ -987,13 +987,13 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 | Q5 | 前端已有 19 处动态 import | §4 补 C9；刀 8 的 grep 验收改成"清单为空 ⇒ 加载器未被调用" |
 | Q6 | `web-projection` 有**两条**禁令 | 刀 0 两条都改 |
 | Q7 | `[ui]` 段没有放标量的地方（且无 `deny_unknown_fields`） | D6 改为行级 `config.allow_code`，不动 `Profile` 结构体 |
-| Q8 | `check-public-api-runtime` 扫全部 crate | D12 要求新 crate 公开面 runtime-free（照 `elysper-tui`） |
+| Q8 | `check-public-api-runtime` 扫全部 crate | D12 要求新 crate 公开面 runtime-free（照 `uva-tui`） |
 | Q9 | 没有 `/api/v1/*` HTTP 面，`ui/schema` 是 JSON-RPC 方法 | §4 澄清；刀 8 的 boot 清单定为 JSON-RPC 方法 |
 | Q10 | `UiSchemaPanel` 已有 slot 过滤，但每实例各取一次 | 刀 7 §3 补"store 是唯一取数方"的重构 |
 | Q11 | 桌面壳逃过 `cargo deny` | 刀 3 的 CI job 加一次 `cargo deny`（C10） |
 | Q12 | 插件模块放哪、"同源"相对谁 | D2 / 刀 8 §2：相对页面 origin 的路径 + 页面同源的静态服务（生产 web-dir，dev Vite public/）；CSP 缺口记入 D11 |
 | Q13 | 微内核生命周期、两类条目共存、keyed 的键、命名撞名 | D5（基数 `one`/`many`、v1 无 keyed）+ D9（单例、两类共存、`console.warn`） |
-| Q14 | 壳从哪找 `elysper-app-server` | D10：sidecar 资源 → flag/env/PATH → `current_exe()` 同目录 |
+| Q14 | 壳从哪找 `uva-app-server` | D10：sidecar 资源 → flag/env/PATH → `current_exe()` 同目录 |
 | Q15 | 共享 crate 的形态 | D12：lib（futures 公开面 / 内部 tokio）；members 与 `ORDER` 同步 |
 | Q16 | Vite 已代理 `/rpc`，覆盖缝不必要 | D2 删除覆盖缝；刀 3 完全不碰前端 |
 | Q17 | 桌面壳的生命周期参数 | D10：默认工作区 = cwd、就绪超时 30s、1s→5s 退避、端口优先复用 |
@@ -1009,12 +1009,12 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
 | 刀 | 落点 | 证据 |
 |---|---|---|
 | 0 spec 收口 | 本地 openspec 三层（`web-projection` 白名单 / `desktop-projection` / `shared-interface`） | 本地层不入库（`.gitignore:41`） |
-| 1 网关 crate | `crates/elysper-gateway`（supervisor + client，公开面 futures-only） | 16 测试；`make check-public-api-runtime` 免豁免 |
-| 2 TUI 并轨 | `crates/elysper-tui/src/transport.rs` 重写 + `views/` + Vim 键位 | 104 测试；真 provider 一轮对话；杀网关 5s 内报 `offline`；退出零孤儿 |
+| 1 网关 crate | `crates/uva-gateway`（supervisor + client，公开面 futures-only） | 16 测试；`make check-public-api-runtime` 免豁免 |
+| 2 TUI 并轨 | `crates/uva-tui/src/transport.rs` 重写 + `views/` + Vim 键位 | 104 测试；真 provider 一轮对话；杀网关 5s 内报 `offline`；退出零孤儿 |
 | 3 桌面入口 | `desktop/`（独立 workspace，Tauri 2 壳）+ `.github/workflows/desktop.yml` | 杀 sidecar 自愈；关壳零孤儿；actionlint 过；含 `cargo deny` |
 | 4 能力矩阵 | `docs/host-capabilities.md`（15 域四要素 + 24 行双向对账） | 方法名对照 66 个注册方法全中；4 条漂移如实记录 |
 | 5+6 TUI 补齐 | `domains.rs` + `views/{list,detail,catalog}.rs`（12 域） | 矩阵 §6 的 tui 列达 `adapted`/`full` |
-| 7 profile 生命周期 | `Entry.enabled` 三态 + `apply_resolved` 事务四态 + 内置 MCP `profile` 工具 + `profile/*` | `crates/elysper-kernel/src` **零改动**；WS 冒烟 `profile/set → profile/changed` |
+| 7 profile 生命周期 | `Entry.enabled` 三态 + `apply_resolved` 事务四态 + 内置 MCP `profile` 工具 + `profile/*` | `crates/uva-kernel/src` **零改动**；WS 冒烟 `profile/set → profile/changed` |
 | 8 UI 树与插槽 | `ui/tree.rs` 装载器 + `ui/schema` 顶层 `slots` + 浏览器 `SlotRegion` + 终端 ratatui | 双宿主真冒烟（页面断言 + 终端缓冲文本） |
 | 9 SPA 重排 | 对话优先路由 + 设置九分区 + 删 17 旧页 + Vim 层 | `check-web` 绿；真页面验证四态回执 |
 

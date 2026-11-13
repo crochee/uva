@@ -1,4 +1,4 @@
-# Stale bot — Elysper
+# Stale bot — Uva
 #
 # 自动关闭停滞的 issue / PR。
 # 规则: CNCF / Kubernetes / Rust-Bridge 通用配置（GitHub 官方 stale action）。
@@ -8,8 +8,11 @@
 #   - 锁定 + discussions label 的永远不 stale（discuss 不是 issue 池）
 #   - 任何 maintainer 标 `keep-open` / `pinned` / `roadmap` 的豁免。
 #
-# 触发周期: 每天 UTC 02:00（在 dependabot / security-audit cron 之前）,
+# 触发周期: 每周 UTC 02:00（在 markdown-lint / shellcheck 的 cron 之前）,
 # 让无人维护的 issue 在 dev 早晨合 PR 前先被回收。
+# 这里只写 `interval` / `time` / `timezone` —— 这三个键是本文件原本就在用的,
+# 不引入没验证过的新键（原生 stale 配置的 `schedule` 语义随 GitHub 变动）;
+# 真正决定"周几"的是 `.github/workflows/stale.yml` 的 cron。
 
 name: "Stale"
 version: "2"
@@ -19,7 +22,7 @@ permissions:
   pull-requests: write
 
 schedule:
-  - interval: "daily"
+  - interval: "weekly"
     time: "02:00"
     timezone: "UTC"
 
@@ -56,7 +59,7 @@ exempt_assignees: []
   close_comment: |
     这条 issue 已 **60** 天无活动。
     短问题用 `Question` 模板即可；**设计讨论**走
-    [Discussions](https://github.com/crochee/elysper/discussions) 而不是
+    [Discussions](https://github.com/crochee/uva/discussions) 而不是
     issue tracker。**7** 天后仍无活动将被自动关闭。
 
 # ── enhancement / 90 天 ────────────────────────────────────
@@ -67,7 +70,7 @@ exempt_assignees: []
   close_comment: |
     这条 enhancement 已 **90** 天无活动。
     提议实现前请先在
-    [Discussions](https://github.com/crochee/elysper/discussions) 收敛到
+    [Discussions](https://github.com/crochee/uva/discussions) 收敛到
     「改这个 trait / 加这个 crate / 加这个 feature flag」。**14** 天后仍无
     活动将被自动关闭。
 

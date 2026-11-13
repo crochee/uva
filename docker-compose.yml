@@ -1,7 +1,7 @@
-# Docker Compose for elysper development.
+# Docker Compose for uva development.
 #
 # Spins up:
-#   - app-server: elysper-app-server (Rust) in `serve` mode on :8080
+#   - app-server: uva-app-server (Rust) in `serve` mode on :8080
 #
 # The gateway spawns one headless core subprocess and serves it over
 # a WebSocket at `/rpc`; the web front-end talks to that socket. The
@@ -12,14 +12,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.server
-    image: elysper-app-server:dev
-    container_name: elysper-app-server-dev
+    image: uva-app-server:dev
+    container_name: uva-app-server-dev
     ports:
       - "8080:8080"
     environment:
       - RUST_LOG=info
-      - ELYSPER_HOST=0.0.0.0
-      - ELYSPER_PORT=8080
+      - UVA_HOST=0.0.0.0
+      - UVA_PORT=8080
     volumes:
       # Mount source for live cargo rebuild
       - ./crates:/app/crates:ro

@@ -1,6 +1,6 @@
-# k8s deployment manifest — elysper-server
+# k8s deployment manifest — uva-server
 #
-# Reference deployment for the elysper-server binary. Mirrors the
+# Reference deployment for the uva-app-server binary. Mirrors the
 # design points in `docs/COMMERCIAL.md` and `DEPLOYMENT.md`: a single
 # Stateless Deployment fronted by ClusterIP Service, with security
 # context aligned to the container image's runtime user.
@@ -28,15 +28,15 @@
 #      exposure unless behind an ingress.
 #
 # Image tag is replaced by CI at deploy time, e.g. via `kustomize
-# edit set image elysper/server=docker.io/crochee/elysper-server:0.1.0`.
+# edit set image uva/server=docker.io/crochee/uva-server:0.1.0`.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: elysper-server
+  name: uva-server
   labels:
-    app.kubernetes.io/name: elysper-server
+    app.kubernetes.io/name: uva-server
     app.kubernetes.io/component: api
-    app.kubernetes.io/part-of: elysper
+    app.kubernetes.io/part-of: uva
 spec:
   replicas: 1
   revisionHistoryLimit: 3
@@ -49,13 +49,13 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: elysper-server
+      app.kubernetes.io/name: uva-server
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: elysper-server
+        app.kubernetes.io/name: uva-server
         app.kubernetes.io/component: api
-        app.kubernetes.io/part-of: elysper
+        app.kubernetes.io/part-of: uva
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -72,13 +72,13 @@ spec:
           type: RuntimeDefault
       containers:
         - name: server
-          image: docker.io/crochee/elysper-server:0.1.0
+          image: docker.io/crochee/uva-server:0.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
               protocol: TCP
-          # STOPSIGNAL SIGINT triggers elysper-server's
+          # STOPSIGNAL SIGINT triggers uva-app-server's
           # graceful shutdown (the `tokio::signal::ctrl_c()` handler
           # in main.rs); 30 s is the documented shutdown budget.
           terminationGracePeriodSeconds: 30
@@ -101,25 +101,25 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 3
           env:
-            - name: ELYSPER_HOST
+            - name: UVA_HOST
               value: "0.0.0.0"
-            - name: ELYSPER_PORT
+            - name: UVA_PORT
               value: "8080"
             - name: RUST_LOG
               value: "info"
             # Identity env passed through from the OCI image
             # labels; useful for `kubectl exec ... printenv` when an
             # operator wants to confirm the running build without curl.
-            - name: ELYSPER_VERSION
+            - name: UVA_VERSION
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['app.kubernetes.io/version']
           # Non-secret config mounted read-only; API keys come from
           # a Secret. Replace the Secret name after `kubectl create
-          # secret generic elysper-secrets ...`.
+          # secret generic uva-secrets ...`.
           envFrom:
             - secretRef:
-                name: elysper-secrets
+                name: uva-secrets
                 optional: false
           volumeMounts:
             - name: data
@@ -148,13 +148,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: elysper-server
+  name: uva-server
   labels:
-    app.kubernetes.io/name: elysper-server
+    app.kubernetes.io/name: uva-server
 spec:
   type: ClusterIP
   selector:
-    app.kubernetes.io/name: elysper-server
+    app.kubernetes.io/name: uva-server
   ports:
     - name: http
       port: 80
@@ -166,9 +166,9 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: elysper-server
+  name: uva-server
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: elysper-server
+      app.kubernetes.io/name: uva-server

@@ -2,7 +2,7 @@
 //!
 //! Four jobs and nothing else (design knife 3):
 //!
-//! 1. start the sidecar (`elysper-app-server serve`) via the shared
+//! 1. start the sidecar (`uva-app-server serve`) via the shared
 //!    gateway supervisor and wait for `/readyz`;
 //! 2. open one window at the gateway's `base_url` (external URL, so
 //!    the page origin and the WebSocket origin are the same);
@@ -11,7 +11,7 @@
 //! 4. when the window closes, reap the sidecar (no orphans).
 //!
 //! The shell speaks no protocol: JSON-RPC belongs to the gateway and
-//! the SPA. The webview shows the same `elysper-web/dist` the
+//! the SPA. The webview shows the same `uva-web/dist` the
 //! browser does.
 
 #![forbid(unsafe_code)]
@@ -24,7 +24,7 @@ pub mod window_nav;
 use std::{path::Path, time::Duration};
 
 use anyhow::Context as _;
-use elysper_gateway::{GatewayOptions, GatewayState};
+use uva_gateway::{GatewayOptions, GatewayState};
 use tauri::Manager as _;
 
 /// How often the state watcher checks the supervisor's narration
@@ -43,13 +43,13 @@ const DEV_URL: &str = "http://localhost:5173";
 /// Tauri managed state: lets the `RunEvent::Exit` handler reach the
 /// supervisor. `Gateway` also shuts the child down on drop — the
 /// explicit call is the belt to that braces.
-struct GatewayHandle(elysper_gateway::Gateway);
+struct GatewayHandle(uva_gateway::Gateway);
 
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let env = options::Env {
-        app_server: std::env::var("ELYSPER_APP_SERVER").ok(),
-        backend_port: std::env::var("ELYSPER_BACKEND_PORT").ok(),
+        app_server: std::env::var("UVA_APP_SERVER").ok(),
+        backend_port: std::env::var("UVA_BACKEND_PORT").ok(),
     };
     let options =
         options::Options::parse_from(&args, &env).unwrap_or_else(|usage| {
@@ -73,8 +73,8 @@ pub fn run() {
             )
             .cloned()
             .context(
-                "no elysper-app-server found: pass --app-server, set \
-                 ELYSPER_APP_SERVER, or add it to PATH",
+                "no uva-app-server found: pass --app-server, set \
+                 UVA_APP_SERVER, or add it to PATH",
             )?;
             let resource_dist =
                 app.path().resource_dir().ok().map(|dir| dir.join("dist"));
@@ -110,7 +110,7 @@ pub fn run() {
                 web_dir: Some(web_dir),
             };
             let gateway = tauri::async_runtime::block_on(
-                elysper_gateway::Gateway::start(gateway_options),
+                uva_gateway::Gateway::start(gateway_options),
             )
             .map_err(|error| {
                 anyhow::anyhow!("failed to start the gateway sidecar: {error}")
@@ -133,7 +133,7 @@ pub fn run() {
                     initial.parse().context("window url")?,
                 ),
             )
-            .title("Elysper")
+            .title("Uva")
             .build()
             .context("failed to open the window")?;
 

@@ -134,7 +134,7 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────
   # 跨平台 smoke —— Linux musl + Windows GNU 两处都能编译, 提前抓
   # "我以为 cfg(unix) 兜住了" 这种事。两路都走 `docker buildx build --target
-  # artifact` 直接落地 dist/elysper-app-server{,exe}, Dockerfile.{server,server.windows}
+  # artifact` 直接落地 dist/uva-app-server{,exe}, Dockerfile.{server,server.windows}
   # 内置 cargo-chef 缓存层; 不在 host 上装 musl-tools / mingw-w64, 也避开
   # cc-rs 找不到链接器这一类 msrv/独立工具链漂移。
   # ────────────────────────────────────────────────────────────────────────
@@ -147,22 +147,22 @@ jobs:
         uses: actions/checkout@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Build elysper-app-server (musl target via Dockerfile.server)
+      - name: Build uva-app-server (musl target via Dockerfile.server)
         run: |
           docker buildx build --target artifact \
-            --build-arg ELYSPER_GIT_SHA=${GITHUB_SHA} \
-            --build-arg ELYSPER_BUILD_TIME=$(date -u +%FT%TZ) \
+            --build-arg UVA_GIT_SHA=${GITHUB_SHA} \
+            --build-arg UVA_BUILD_TIME=$(date -u +%FT%TZ) \
             --output type=local,dest=dist \
             -f Dockerfile.server .
       - name: Smoke (binary answers version flag)
         run: |
-          test -x dist/elysper-app-server
-          ./dist/elysper-app-server --version
+          test -x dist/uva-app-server
+          ./dist/uva-app-server --version
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: elysper-app-server-musl
-          path: dist/elysper-app-server
+          name: uva-app-server-musl
+          path: dist/uva-app-server
           if-no-files-found: error
 
   cross-windows:
@@ -174,20 +174,20 @@ jobs:
         uses: actions/checkout@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-      - name: Build elysper-app-server (windows gnu via Dockerfile.server.windows)
+      - name: Build uva-app-server (windows gnu via Dockerfile.server.windows)
         run: |
           docker buildx build --target artifact \
-            --build-arg ELYSPER_GIT_SHA=${GITHUB_SHA} \
-            --build-arg ELYSPER_BUILD_TIME=$(date -u +%FT%TZ) \
+            --build-arg UVA_GIT_SHA=${GITHUB_SHA} \
+            --build-arg UVA_BUILD_TIME=$(date -u +%FT%TZ) \
             --output type=local,dest=dist \
             -f Dockerfile.server.windows .
       - name: Smoke (file is PE)
         run: |
-          test -f dist/elysper-app-server.exe
-          file dist/elysper-app-server.exe
+          test -f dist/uva-app-server.exe
+          file dist/uva-app-server.exe
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: elysper-app-server-windows
-          path: dist/elysper-app-server.exe
+          name: uva-app-server-windows
+          path: dist/uva-app-server.exe
           if-no-files-found: error

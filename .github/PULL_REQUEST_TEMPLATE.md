@@ -46,7 +46,7 @@ PR 标题用 Conventional Commits: `feat(scope): summary` / `fix(scope): summary
 - [ ] Conventional Commits 标题
 - [ ] 没有未解的 TODO / FIXME / 占位实现（"Scaffold" / "MVP" / "v1" /
       "follow-up" 都是反模式 —— 见 `AGENTS.md` <completeness>）
-- [ ] 没有引入 `pub use <非 elysper_*>::*;`（`make check-pub-surface`）
+- [ ] 没有引入 `pub use <非 uva_*>::*;`（`make check-pub-surface`）
 - [ ] 没有引入运行时 crate 别名泄漏（`make check-public-api-runtime`）
 - [ ] 没有引入 `chrono::Utc::now()` 到生产代码（`make check-clock`）
 - [ ] 离线 tool crate 仍然零 HTTP 依赖（`make check-mvp-deps`）
@@ -55,13 +55,13 @@ PR 标题用 Conventional Commits: `feat(scope): summary` / `fix(scope): summary
 
 ## 接口契约同步（双侧闭合）
 
-<!-- 若改 elysper-app-server 的 RPC 方法或 elysper-web api 调用时填；其它 PR 删本段。 -->
+<!-- 若改 uva-app-server 的 RPC 方法或 uva-web api 调用时填；其它 PR 删本段。 -->
 
 - [ ] `make contract-scan` 已跑（产出 `docs/interface-contract/contract.{md,yaml,json}`）
 - [ ] `make contract-check` 全绿（exit 0，无 frontend-only endpoint）
 - [ ] 改了契约 → `openspec/specs/<capability>/spec.md` 按 ADDED/MODIFIED 流程补 Requirement
-- [ ] commit message 或本描述里写明仲裁源（`Elysper chat wire contract` /
-      `Elysper stable spec §X.Y`）
+- [ ] commit message 或本描述里写明仲裁源（`Uva chat wire contract` /
+      `Uva stable spec §X.Y`）
 
 ## 关联
 

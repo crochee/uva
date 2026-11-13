@@ -115,7 +115,7 @@
         <div class="arrow">↓ 同一个协议面：<b>JSON-RPC 2.0 over WebSocket</b>（<code>/rpc</code>）</div>
 
         <div class="band">
-          <div class="bt">网关 · elysper-app-server serve</div>
+          <div class="bt">网关 · uva-app-server serve</div>
           <div class="row">
             <div class="box"><b>转帧</b><span>浏览器帧原样转给 core，按 id 回帧</span></div>
             <div class="box"><b>监管 core</b><span>core 死了按 1s→5s 退避重启，广播 ready</span></div>
@@ -184,7 +184,7 @@
         <div class="band">
           <div class="bt">本轮不动 / 要做</div>
           <ul class="tight">
-            <li>不动：<b>核心一行不动</b>——kernel 语义、seam 链、wasm 通道、profile 层序本身</li>
+            <li>不动：<b>核心一行不动</b>——kernel 语义、seam 链、profile 层序本身</li>
             <li>要做：<b>UI 树（两个宿主）</b>、<b>profile 启用位</b>、<b>事务性变更</b>、<b>对话优先 IA</b></li>
             <li>要做：<b>删掉旧 19 页</b>（以新原型为准）</li>
           </ul>
@@ -316,7 +316,7 @@
     </div>
 
     <h2 style="font-size:15px;margin:20px 0 8px">输入框（bash 式提示符，不做 prompt 建议条）</h2>
-    <div class="prompt"><span class="p">❯</span> <span class="c">~/workspace/elysper</span> 描述你要做的事，<span class="c">/调用指令，@文件或对话</span><span class="p">▏</span></div>
+    <div class="prompt"><span class="p">❯</span> <span class="c">~/workspace/uva</span> 描述你要做的事，<span class="c">/调用指令，@文件或对话</span><span class="p">▏</span></div>
     <div class="kv">提示符带<b>工作区路径</b>（bash 的 <span class="term2">❯</span> 形态）；上下文标记（如"工作区内修改"、模型）放在框内底行。**"输入框上方的 prompt 建议"本轮不做**。</div>
 
     <h2 style="font-size:15px;margin:22px 0 8px">交互清单（Vim 优先，VSCode 次之）</h2>

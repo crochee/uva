@@ -2,7 +2,7 @@
 #
 # `actions/labeler` 是事实标准: 按 glob 匹配 + Conventional Commits 标题
 # 前缀, 给 PR 加标签. 维护者拿到 PR 时按标签路由: dependencies → 看
-# dependabot 周一开 PR; feat(elysper-tool-*) → 路由给 tool 维护者 (见
+# dependabot 每 2 个月开 PR; feat(uva-tool-*) → 路由给 tool 维护者 (见
 # CODEOWNERS); docs → 任何 reviewer 都可合.
 name: labeler
 

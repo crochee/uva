@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 `elysper-web` 的信息架构从"九个并列目录页"重排成设计文档 §6.1 的**对话优先**骨架：主界面只剩会话 / 对话，能力目录搬进设置分区，侧栏换成"品牌 → 新会话 → 工作区树 → 用户"，对话流与输入区按新原型（`docs/prototypes/shared-interface.prototype.html`）重排，旧页面全部删除（D34）。
+**Goal:** 把 `uva-web` 的信息架构从"九个并列目录页"重排成设计文档 §6.1 的**对话优先**骨架：主界面只剩会话 / 对话，能力目录搬进设置分区，侧栏换成"品牌 → 新会话 → 工作区树 → 用户"，对话流与输入区按新原型（`docs/prototypes/shared-interface.prototype.html`）重排，旧页面全部删除（D34）。
 
 **Architecture:** 路由收成三条：`/chat`（含 `/chat/:sessionId`、`/chat/:sessionId/agent/:agentName`）、`/settings/:section`、兜底重定向 `/chat`。侧栏（`Sidebar.tsx`）变成双模式组件——chat 模式渲染工作区树、settings 模式整根替换为设置导航（用户卡 → `Ctrl+F` 搜索 → 分区列表）。设置面**不建数据模型**：八个分区的行来自既有目录方法（`plugins/list` / `models/list` / `agents/list` / `skills/list` / `schedules/list` / `workflows/list` / `tasks/list` / `evals/list`），启用位的读写集中在一个 profile 缝（`src/api/settings-profile.ts`，对接刀 7 的 `profile/list` / `profile/get` / `profile/set`，wire 名待核）；**没有 settings 文件**（D20）。对话流与输入区的改动都在既有 `ChatPage.tsx` / `ChatMessageView.tsx` 内：用户消息加右对齐气泡、思考块加"输出中展开 / 完成自动折叠"两态、输入框上方加待办进度条（复用既有 `deriveTodos`）、输入框加 bash 风格 `❯` 修饰。**传输层一行不动**（C3：`api/rpc.ts` 的同源 WS）。
 
@@ -12,17 +12,17 @@
 
 ## Global Constraints
 
-- **不写任何前端自动化测试**（AGENTS.md §4.2）：不新增 `*.test.ts`、不建 `elysper-web/tests/`、不建 `playwright*.config.ts`、不装 playwright 依赖。验证 = `make check-web` + `cd elysper-web && npm run build` + Playwright MCP 驱动真实页面（Task 8 给出逐条 URL / 点击 / DOM 断言）。
+- **不写任何前端自动化测试**（AGENTS.md §4.2）：不新增 `*.test.ts`、不建 `uva-web/tests/`、不建 `playwright*.config.ts`、不装 playwright 依赖。验证 = `make check-web` + `cd uva-web && npm run build` + Playwright MCP 驱动真实页面（Task 8 给出逐条 URL / 点击 / DOM 断言）。
 - **前端没有 Node 类型**（C4）：`src/` 下不得出现 `import 'node:*'`、`process.*`（`vite.config.ts` 是仓库既有例外）。
 - **WS 传输不动**（C3）：`src/api/rpc.ts` 一行不改。新数据调用一律在 `src/api/client.ts` 的 `ROUTES` 映射表加行（REST 形状 → RPC 方法名），或者像 `pluginsApi` 一样包在 `src/api/` 下的模块里。
 - **无新依赖、无新 icon 库**：图形符号沿用仓库现状（emoji 字形 + 文本，见 `Sidebar.tsx:10-13` 的既有注释立场）。
-- **刀 7 是数据源**：启用位 / MCP / Hooks / 模板的行数据来自刀 7 的 profile 面。wire 方法名（设计文档 D21 写的是 `profile/list` / `profile/get` / `profile/set`，经内置 MCP `elysper-settings`）**待核**——所有调用集中写在 `src/api/settings-profile.ts` 一个文件里，刀 7 定名后只改这一处。
+- **刀 7 是数据源**：启用位 / MCP / Hooks / 模板的行数据来自刀 7 的 profile 面。wire 方法名（设计文档 D21 写的是 `profile/list` / `profile/get` / `profile/set`，经内置 MCP `uva-settings`）**待核**——所有调用集中写在 `src/api/settings-profile.ts` 一个文件里，刀 7 定名后只改这一处。
 - **没有 settings 文件**（D20）：设置面只改**启用与参数**；创建 / 删除能力走 MCP 通道（D28），界面不直接写文件。
 - **不做** prompt 建议条（D31 推迟）：原型里的 `.chips`（"总结这段代码 / 写个测试 / …"）**不搬**。
 - **不做**「规则与记忆」分区（D24）；Hooks 分区不从别处导入配置。
 - **默认 agent 不可停用**（D22）：`AgentDetail.protected === true` 的行开关渲染为锁定态。
 - 每个任务收口时：`make check-web` 必须 0 错误 0 警告（tsc + eslint + prettier --check）。
-- 提交前 `make check-web` + `cd elysper-web && npm run build` 双绿；Rust 侧零改动（本刀不碰 `crates/`）。
+- 提交前 `make check-web` + `cd uva-web && npm run build` 双绿；Rust 侧零改动（本刀不碰 `crates/`）。
 - 不 push 远程仓库。
 
 ## Review Focus
@@ -41,13 +41,13 @@
 ### Task 1: 设置面骨架——`/settings` 路由 + 分区注册表 + 分区壳
 
 **Files:**
-- Create: `elysper-web/src/pages/SettingsPage.tsx`
-- Create: `elysper-web/src/pages/SettingsPage.css`
-- Create: `elysper-web/src/settings/sections.ts`
-- Create: `elysper-web/src/settings/RowCard.tsx`
-- Create: `elysper-web/src/settings/EnableToggle.tsx`
-- Modify: `elysper-web/src/App.tsx`（加两条路由）
-- Modify: `elysper-web/src/components/layout/Header.tsx`（`PAGE_LABEL` 加 `settings`）
+- Create: `uva-web/src/pages/SettingsPage.tsx`
+- Create: `uva-web/src/pages/SettingsPage.css`
+- Create: `uva-web/src/settings/sections.ts`
+- Create: `uva-web/src/settings/RowCard.tsx`
+- Create: `uva-web/src/settings/EnableToggle.tsx`
+- Modify: `uva-web/src/App.tsx`（加两条路由）
+- Modify: `uva-web/src/components/layout/Header.tsx`（`PAGE_LABEL` 加 `settings`）
 
 **Interfaces:**
 - Consumes: react-router-dom 的 `useParams` / `Navigate`；`@radix-ui/themes`（既有依赖）。
@@ -105,19 +105,19 @@ Expected: `tsc --noEmit` 无输出、`eslint .` 无输出、`prettier --check .`
 ### Task 2: 八个分区接真数据 + profile 缝
 
 **Files:**
-- Create: `elysper-web/src/api/settings-profile.ts`
-- Create: `elysper-web/src/settings/sections/GeneralSection.tsx`
-- Create: `elysper-web/src/settings/sections/PluginsSection.tsx`
-- Create: `elysper-web/src/settings/sections/ModelsSection.tsx`
-- Create: `elysper-web/src/settings/sections/AgentsSection.tsx`
-- Create: `elysper-web/src/settings/sections/SkillsSection.tsx`
-- Create: `elysper-web/src/settings/sections/McpSection.tsx`
-- Create: `elysper-web/src/settings/sections/HooksSection.tsx`
-- Create: `elysper-web/src/settings/sections/AutomationSection.tsx`
-- Create: `elysper-web/src/settings/sections/AccountSection.tsx`
-- Delete: `elysper-web/src/components/plugins/DeploymentPlugins.tsx`
-- Delete: `elysper-web/src/components/plugins/DeploymentPlugins.css`
-- Modify: `elysper-web/src/settings/sections.ts`（每分区挂组件引用）
+- Create: `uva-web/src/api/settings-profile.ts`
+- Create: `uva-web/src/settings/sections/GeneralSection.tsx`
+- Create: `uva-web/src/settings/sections/PluginsSection.tsx`
+- Create: `uva-web/src/settings/sections/ModelsSection.tsx`
+- Create: `uva-web/src/settings/sections/AgentsSection.tsx`
+- Create: `uva-web/src/settings/sections/SkillsSection.tsx`
+- Create: `uva-web/src/settings/sections/McpSection.tsx`
+- Create: `uva-web/src/settings/sections/HooksSection.tsx`
+- Create: `uva-web/src/settings/sections/AutomationSection.tsx`
+- Create: `uva-web/src/settings/sections/AccountSection.tsx`
+- Delete: `uva-web/src/components/plugins/DeploymentPlugins.tsx`
+- Delete: `uva-web/src/components/plugins/DeploymentPlugins.css`
+- Modify: `uva-web/src/settings/sections.ts`（每分区挂组件引用）
 
 **Interfaces:**
 - Consumes（既有，全部核对过）:
@@ -178,7 +178,7 @@ wire 调用写**待核**占位：按 D21 预期是 `profile/list` / `profile/set
 
 - [ ] **Step 8: 通用分区 + 账户分区**
 
-`GeneralSection`：主题（三段选择 `light|dark|system`，直接调既有 `useTheme().setTheme`）、密度（`紧凑|舒适`）、字号（数字档位）——密度/字号写 `localStorage` 键 `elysper.density` / `elysper.fontSize`（照 `elysper.theme` 的既有模式，`src/hooks/useTheme.ts:5`），生效方式是给 `<html>` 设 `data-density` 与 `--font-size`（`index.css` 加两行变量消费）；快捷键行 = "18 个"只读计数 + 按钮打开 Task 7 的快捷键帮助。源真归属是 profile 壳行的 config（D26）——在组件注释里标 `// TODO(knife-7): 换到壳行 config`。
+`GeneralSection`：主题（三段选择 `light|dark|system`，直接调既有 `useTheme().setTheme`）、密度（`紧凑|舒适`）、字号（数字档位）——密度/字号写 `localStorage` 键 `uva.density` / `uva.fontSize`（照 `uva.theme` 的既有模式，`src/hooks/useTheme.ts:5`），生效方式是给 `<html>` 设 `data-density` 与 `--font-size`（`index.css` 加两行变量消费）；快捷键行 = "18 个"只读计数 + 按钮打开 Task 7 的快捷键帮助。源真归属是 profile 壳行的 config（D26）——在组件注释里标 `// TODO(knife-7): 换到壳行 config`。
 `AccountSection`：本机用户卡（"本机 · 无订阅 · 凭据只存在本机"——仓库没有账户体系，不造登录面）+ 凭据卡 = `listModels()` 按 provider 聚合的只读行（provider 名 + "N 个模型可用"）。凭据的**写**界面不做（没有面）。
 
 - [ ] **Step 9: 注册 + 清占位**
@@ -189,7 +189,7 @@ wire 调用写**待核**占位：按 D21 预期是 `profile/list` / `profile/set
 
 Run: `make check-web`
 Expected: exit 0（tsc / eslint / prettier 全绿）。
-Run: `cd elysper-web && npm run build`
+Run: `cd uva-web && npm run build`
 Expected: `tsc --noEmit` 通过后 `vite build` 产出 `dist/`，无 chunk 报错。
 
 ---
@@ -197,14 +197,14 @@ Expected: `tsc --noEmit` 通过后 `vite build` 产出 `dist/`，无 chunk 报�
 ### Task 3: 新侧栏——工作区树 + 新会话 + 跨域搜索 + 用户入口 + 折叠 rail
 
 **Files:**
-- Modify: `elysper-web/src/components/layout/Sidebar.tsx`（整根重写，`NAV_ITEMS` 删除）
-- Modify: `elysper-web/src/components/layout/Sidebar.css`
-- Create: `elysper-web/src/hooks/useWorkspaceTree.ts`
-- Create: `elysper-web/src/components/layout/WorkspaceSearch.tsx`
-- Modify: `elysper-web/src/components/layout/Header.tsx`（移除 `ThemeToggle`——主题入口已搬进设置·通用）
+- Modify: `uva-web/src/components/layout/Sidebar.tsx`（整根重写，`NAV_ITEMS` 删除）
+- Modify: `uva-web/src/components/layout/Sidebar.css`
+- Create: `uva-web/src/hooks/useWorkspaceTree.ts`
+- Create: `uva-web/src/components/layout/WorkspaceSearch.tsx`
+- Modify: `uva-web/src/components/layout/Header.tsx`（移除 `ThemeToggle`——主题入口已搬进设置·通用）
 
 **Interfaces:**
-- Consumes: `useSidebarCollapse()`（`Ctrl/Cmd+B` 折叠，`elysper.sidebarCollapsed` 持久化——**不动**）；`useCursorList<T>('/api/v1/sessions')`（`sessions/list`，`List<SessionSummary>` 信封，`refresh()` 可用）；`api.get('/api/v1/search?q=&limit=')` → `search/all`（`SearchHit { domain, id, title, score, preview? }`，`SEARCH_DOMAINS` 六域）。
+- Consumes: `useSidebarCollapse()`（`Ctrl/Cmd+B` 折叠，`uva.sidebarCollapsed` 持久化——**不动**）；`useCursorList<T>('/api/v1/sessions')`（`sessions/list`，`List<SessionSummary>` 信封，`refresh()` 可用）；`api.get('/api/v1/search?q=&limit=')` → `search/all`（`SearchHit { domain, id, title, score, preview? }`，`SEARCH_DOMAINS` 六域）。
 - Produces: 双模式 `Sidebar`（`mode: 'workspace' | 'settings'` 由当前路径推导）；`useWorkspaceTree()` → `{ root, sessions, loading, refresh }`；`WorkspaceSearch`（🔍 弹层）。
 
 - [ ] **Step 1: 写 `useWorkspaceTree.ts`**
@@ -214,7 +214,7 @@ Expected: `tsc --noEmit` 通过后 `vite build` 产出 `dist/`，无 chunk 报�
 - [ ] **Step 2: 重写 `Sidebar.tsx` 的 workspace 模式**
 
 照原型 `sidebar()`（`shared-interface.prototype.html:198-224`）自上而下：
-1. 品牌行：`◐` logo + `elysper` + `HARNESS` 徽标 + 折叠按钮（沿用 `data-testid="sidebar-toggle"`、`aria-expanded` / `aria-controls` / `aria-label` 既有约定）。
+1. 品牌行：`◐` logo + `uva` + `HARNESS` 徽标 + 折叠按钮（沿用 `data-testid="sidebar-toggle"`、`aria-expanded` / `aria-controls` / `aria-label` 既有约定）。
 2. `新会话` 按钮（`data-testid="new-session"`）→ `<NavLink to="/chat">`——`/chat` 无会话 id，`ChatPage` 首条消息时经 `createChatSession()` 铸 id（`ChatPage.tsx:783-788`），无需新逻辑。
 3. `工作区` 组标题 + 右侧动作区 `🔍 ⇅ 📁`：🔍 = `WorkspaceSearch` 触发钮；⇅ / 📁 渲染为 disabled + `title="多工作区面随后续刀次提供"`（单工作区是现状事实，不做假下拉）。
 4. 树：根节点（🗂 + 默认工作区，caret ▾/▸）→ 会话子节点（缩进）。会话节点 `NavLink to={/chat/${id}}`，`active` 态高亮；`data-testid={session-node-${id}}`。
@@ -244,10 +244,10 @@ Expected: exit 0。
 ### Task 4: 对话流——右对齐气泡 + 思考块两态 + 标题栏
 
 **Files:**
-- Create: `elysper-web/src/lib/thinking-state.ts`
-- Modify: `elysper-web/src/components/chat/ChatMessageView.tsx`
-- Modify: `elysper-web/src/pages/ChatPage.css`
-- Modify: `elysper-web/src/pages/ChatPage.tsx`（标题栏）
+- Create: `uva-web/src/lib/thinking-state.ts`
+- Modify: `uva-web/src/components/chat/ChatMessageView.tsx`
+- Modify: `uva-web/src/pages/ChatPage.css`
+- Modify: `uva-web/src/pages/ChatPage.tsx`（标题栏）
 
 **Interfaces:**
 - Consumes: `ChatMessageViewItem { role, segments, status?, isStreaming? }`（`ChatMessageView.tsx:714-723`）；`MessageSegment.type === 'thinking'`（`src/api/chat-message.ts:272` 起）。
@@ -293,10 +293,10 @@ Expected: exit 0。
 ### Task 5: 输入区——待办进度 + bash 风格 prompt + 底部一行
 
 **Files:**
-- Create: `elysper-web/src/components/chat/TodoProgress.tsx`
-- Create: `elysper-web/src/components/chat/PromptPrefix.tsx`
-- Modify: `elysper-web/src/pages/ChatPage.tsx`
-- Modify: `elysper-web/src/pages/ChatPage.css`
+- Create: `uva-web/src/components/chat/TodoProgress.tsx`
+- Create: `uva-web/src/components/chat/PromptPrefix.tsx`
+- Modify: `uva-web/src/pages/ChatPage.tsx`
+- Modify: `uva-web/src/pages/ChatPage.css`
 
 **Interfaces:**
 - Consumes: `deriveTodos(messages)` → `PanelTodoState { items: PanelTodoItem[], completed, total } | null`（`src/lib/session-panel-data.ts:100`；`ChatPage.tsx:1505` 已算好 `panelTodos`）；`PanelTodoItem.status ∈ 'pending' | 'in_progress' | 'completed' | 'cancelled' | string`。
@@ -328,17 +328,17 @@ Expected: exit 0。
 ### Task 6: 删旧页与路由收口（D34）
 
 **Files:**
-- Delete: `elysper-web/src/pages/` 下 17 个文件（见 Step 1 清单）
-- Delete: `elysper-web/src/components/ui/ListToolbar.tsx`
-- Delete: `elysper-web/src/components/ui/MetadataTable.tsx`
-- Delete: `elysper-web/src/components/ui/metadataCells.tsx`
-- Delete: `elysper-web/src/hooks/useListFilter.ts`
-- Modify: `elysper-web/src/App.tsx`
-- Modify: `elysper-web/src/components/ui/CommandPalette.tsx`
-- Modify: `elysper-web/src/hooks/useKeyboardShortcuts.ts`
-- Modify: `elysper-web/src/components/layout/Header.tsx`
-- Modify: `elysper-web/src/components/chat/ChatMessageView.tsx`
-- Modify: `elysper-web/src/components/chat/SessionSidePanel.tsx`
+- Delete: `uva-web/src/pages/` 下 17 个文件（见 Step 1 清单）
+- Delete: `uva-web/src/components/ui/ListToolbar.tsx`
+- Delete: `uva-web/src/components/ui/MetadataTable.tsx`
+- Delete: `uva-web/src/components/ui/metadataCells.tsx`
+- Delete: `uva-web/src/hooks/useListFilter.ts`
+- Modify: `uva-web/src/App.tsx`
+- Modify: `uva-web/src/components/ui/CommandPalette.tsx`
+- Modify: `uva-web/src/hooks/useKeyboardShortcuts.ts`
+- Modify: `uva-web/src/components/layout/Header.tsx`
+- Modify: `uva-web/src/components/chat/ChatMessageView.tsx`
+- Modify: `uva-web/src/components/chat/SessionSidePanel.tsx`
 
 **Interfaces:**
 - Consumes: Task 1–5 已就位（能力目录有新家，删除不失联）。
@@ -346,7 +346,7 @@ Expected: exit 0。
 
 - [ ] **Step 1: 删 17 个页面文件**
 
-`elysper-web/src/pages/` 今天共 19 个文件；保留 `ChatPage.tsx` / `ChatPage.css`（Task 1 已加 `SettingsPage.tsx` / `SettingsPage.css`）。删除：
+`uva-web/src/pages/` 今天共 19 个文件；保留 `ChatPage.tsx` / `ChatPage.css`（Task 1 已加 `SettingsPage.tsx` / `SettingsPage.css`）。删除：
 
 ```
 AgentsPage.tsx  AgentDetailPage.tsx  ToolsPage.tsx  ToolDetailPage.tsx
@@ -389,18 +389,18 @@ TasksPage.tsx  TaskDetailPage.tsx
 
 - [ ] **Step 6: residue 检查**
 
-Run: `grep -rn "ToolsPage\|SkillsPage\|AgentsPage\|SessionsPage\|SchedulesPage\|WorkflowsPage\|EvalsPage\|TasksPage\|DetailPage" elysper-web/src`
+Run: `grep -rn "ToolsPage\|SkillsPage\|AgentsPage\|SessionsPage\|SchedulesPage\|WorkflowsPage\|EvalsPage\|TasksPage\|DetailPage" uva-web/src`
 Expected: 无命中（exit 1）。
-Run: `grep -rn "to={\`/sessions/" elysper-web/src`
+Run: `grep -rn "to={\`/sessions/" uva-web/src`
 Expected: 无命中（exit 1）。
-Run: `grep -rn "ListToolbar\|MetadataTable\|useListFilter\|DeploymentPlugins" elysper-web/src`
+Run: `grep -rn "ListToolbar\|MetadataTable\|useListFilter\|DeploymentPlugins" uva-web/src`
 Expected: 无命中（exit 1）。
 
 - [ ] **Step 7: 门禁 + 构建**
 
 Run: `make check-web`
 Expected: exit 0。
-Run: `cd elysper-web && npm run build`
+Run: `cd uva-web && npm run build`
 Expected: 构建通过；输出里不再有 tools / skills / agents / sessions / schedules / workflows / evals / tasks 的页面 chunk（只剩 chat / settings / vendor）。
 
 ---
@@ -408,12 +408,12 @@ Expected: 构建通过；输出里不再有 tools / skills / agents / sessions /
 ### Task 7: Vim 优先快捷键层（D30）
 
 **Files:**
-- Create: `elysper-web/src/hooks/useListNavigation.ts`
-- Create: `elysper-web/src/components/ui/ShortcutHelp.tsx`
-- Modify: `elysper-web/src/hooks/useKeyboardShortcuts.ts`
-- Modify: `elysper-web/src/components/ui/CommandPalette.tsx`
-- Modify: `elysper-web/src/components/layout/Sidebar.tsx`（树节点接光标态）
-- Modify: `elysper-web/src/settings/sections.ts` 注册的消费方（分区列表接光标态）
+- Create: `uva-web/src/hooks/useListNavigation.ts`
+- Create: `uva-web/src/components/ui/ShortcutHelp.tsx`
+- Modify: `uva-web/src/hooks/useKeyboardShortcuts.ts`
+- Modify: `uva-web/src/components/ui/CommandPalette.tsx`
+- Modify: `uva-web/src/components/layout/Sidebar.tsx`（树节点接光标态）
+- Modify: `uva-web/src/settings/sections.ts` 注册的消费方（分区列表接光标态）
 
 **Interfaces:**
 - Consumes: `isEditableTarget`（`useKeyboardShortcuts.ts:50` 导出）；`useSidebarCollapse`（Ctrl/Cmd+B 已有）。
@@ -429,7 +429,7 @@ Expected: 构建通过；输出里不再有 tools / skills / agents / sessions /
 
 - [ ] **Step 3: `:` 打开命令面板 + `?` 帮助 + `Esc`**
 
-`CommandPalette.tsx` 的 window 监听（`:205-216`）扩一条：收到 `window` 自定义事件 `elysper:palette-open` 时 `setOpen(true)`。`useKeyboardShortcuts.ts` 加全局键：`:`（非 editable）→ `window.dispatchEvent(new CustomEvent('elysper:palette-open'))`；`?`（Shift+/）→ 打开 `ShortcutHelp`。`ShortcutHelp.tsx`：`Modal` 浮层，列出本刀全部键位（j/k/gg/G/Ctrl+d/u/Enter/x/y/`/`/n/N/:/?/Esc/Ctrl+B/g c/g s/Ctrl+K），数据是一份本地常量表（同一份表供设置·通用的"快捷键 N 个"计数）。`Esc` 语义：面板开→关（Modal 已处理）、搜索开→关（Step 4）、设置页→`navigate('/chat')`（`SettingsPage` 顶栏既有退出钮同款）。
+`CommandPalette.tsx` 的 window 监听（`:205-216`）扩一条：收到 `window` 自定义事件 `uva:palette-open` 时 `setOpen(true)`。`useKeyboardShortcuts.ts` 加全局键：`:`（非 editable）→ `window.dispatchEvent(new CustomEvent('uva:palette-open'))`；`?`（Shift+/）→ 打开 `ShortcutHelp`。`ShortcutHelp.tsx`：`Modal` 浮层，列出本刀全部键位（j/k/gg/G/Ctrl+d/u/Enter/x/y/`/`/n/N/:/?/Esc/Ctrl+B/g c/g s/Ctrl+K），数据是一份本地常量表（同一份表供设置·通用的"快捷键 N 个"计数）。`Esc` 语义：面板开→关（Modal 已处理）、搜索开→关（Step 4）、设置页→`navigate('/chat')`（`SettingsPage` 顶栏既有退出钮同款）。
 
 - [ ] **Step 4: `/` 与 `n` / `N` 搜索跳转**
 
@@ -448,7 +448,7 @@ Expected: exit 0。
 - Modify: `CHANGELOG.md`（`[Unreleased]`）
 
 **Interfaces:**
-- Consumes: 真实后端 `cargo run -p elysper-app-server -- serve --port 8080`（Vite 代理 `/rpc` / `/readyz` / `/livez` → `:8080`，`vite.config.ts` 已配）；无 provider key 时后端回落 `DemoEchoProvider`（`src/state/app_state/mod.rs:93`），真实对话轮可跑。
+- Consumes: 真实后端 `cargo run -p uva-app-server -- serve --port 8080`（Vite 代理 `/rpc` / `/readyz` / `/livez` → `:8080`，`vite.config.ts` 已配）；无 provider key 时后端回落 `DemoEchoProvider`（`src/state/app_state/mod.rs:93`），真实对话轮可跑。
 - Produces: 验证记录（会话产物 / PR 描述）；CHANGELOG 条目。
 
 **每条验证前的固定前奏**（AGENTS.md §4.2 两个陷阱）：
@@ -467,16 +467,16 @@ await context.addInitScript(() => {
 - [ ] **Step 1: 起服务**
 
 ```bash
-cargo run -p elysper-app-server -- serve --port 8080 --web-dir elysper-web/dist
+cargo run -p uva-app-server -- serve --port 8080 --web-dir uva-web/dist
 ```
 
-（另一个终端）`cd elysper-web && npm run dev`（Vite 默认 `http://localhost:5173`）。
+（另一个终端）`cd uva-web && npm run dev`（Vite 默认 `http://localhost:5173`）。
 Expected: serve 日志出现 core `ready`；Vite 输出 `Local: http://localhost:5173/`。
 
 - [ ] **Step 2: 壳与侧栏（chat 模式）**
 
 打开 `http://localhost:5173/chat`。断言（`browser_snapshot` / `browser_find`）：
-- 品牌：`elysper` 文本与 `HARNESS` 徽标同时存在（`[data-testid="sidebar-brand"]`）。
+- 品牌：`uva` 文本与 `HARNESS` 徽标同时存在（`[data-testid="sidebar-brand"]`）。
 - `[data-testid="new-session"]` 存在且可点（点后 URL 仍是 `/chat`）。
 - `[data-testid="workspace-tree"]` 内有"默认工作区"根节点（D35 常驻）；已有会话时子节点 `[data-testid^="session-node-"]` ≥ 1。
 - 左下 `[data-testid="user-entry"]` 存在。
@@ -527,7 +527,7 @@ Expected: serve 日志出现 core `ready`；Vite 输出 `Local: http://localhost
 
 Run: `make check-web`
 Expected: exit 0（tsc + eslint + prettier 全绿）。
-Run: `cd elysper-web && npm run build`
+Run: `cd uva-web && npm run build`
 Expected: 构建通过（刀 9 验收的两条命令）。
 
 `CHANGELOG.md` 的 `[Unreleased]` 加一条：

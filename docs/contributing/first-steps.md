@@ -31,12 +31,12 @@ not.
 ## Step 1 — clone
 
 ```console
-$ git clone git@github.com:crochee/elysper.git
-Cloning into 'elysper'...
+$ git clone git@github.com:crochee/uva.git
+Cloning into 'uva'...
 ```
 
 ```console
-$ cd elysper
+$ cd uva
 ```
 
 ## Step 2 — build one crate
@@ -46,13 +46,13 @@ Building the harness builds its dependency closure and nothing
 else:
 
 ```console
-$ cargo build -p elysper-harness
+$ cargo build -p uva-harness
    Compiling proc-macro2 v1.0.107
    Compiling quote v1.0.47
    Compiling unicode-ident v1.0.24
    … 118 more `Compiling` lines; each names a crate and the
      absolute path of the checkout that built it …
-   Compiling elysper-harness v0.1.0 (/tmp/t12/fresh/crates/elysper-harness)
+   Compiling uva-harness v0.1.0 (/tmp/t12/fresh/crates/uva-harness)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.38s
 ```
 
@@ -62,11 +62,11 @@ closure; later builds are incremental.
 ## Step 3 — run one full turn
 
 ```console
-$ cargo run --example runtime_agnostic -p elysper-harness
+$ cargo run --example runtime_agnostic -p uva-harness
    … first invocation also compiles the example …
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.80s
      Running `target/debug/examples/runtime_agnostic`
-=== elysper: agent loop on a non-tokio executor ===
+=== uva: agent loop on a non-tokio executor ===
 
 spawner          : std::thread + futures::executor::block_on
 events observed  : 11
@@ -90,7 +90,7 @@ That output **is** one full turn, end to end:
 `RUNTIME-AGNOSTIC: OK` is the proof line: the turn ran, the event
 count and call counts matched what the example expects. Its
 source,
-[`runtime_agnostic.rs`](../../crates/elysper-harness/examples/runtime_agnostic.rs),
+[`runtime_agnostic.rs`](../../crates/uva-harness/examples/runtime_agnostic.rs),
 is short enough to read in one sitting.
 
 ## Step 4 — the zero-tokio path
@@ -106,7 +106,7 @@ Two ways to convince yourself:
 
 ```console
 $ make check-no-runtime
-OK: elysper-core elysper-scheduler elysper-macros elysper-eval elysper-workflow elysper-search elysper-session, elysper-telemetry --no-default-features, and elysper-tool's own deps are tokio-free
+OK: uva-core uva-scheduler uva-macros uva-eval uva-search uva-session, uva-telemetry --no-default-features, and uva-tool's own deps are tokio-free
 ```
 
 and the standing example
@@ -125,7 +125,7 @@ the repository's conventions (see `AGENTS.md`), because it hides
 which crate broke:
 
 ```console
-$ cargo test -p elysper-harness --lib
+$ cargo test -p uva-harness --lib
    … compile lines for the dev-dependencies …
 running 228 tests
 … 228 `test … ok` lines …
@@ -139,7 +139,7 @@ success shape.
 ## Step 6 — the five-minute smoke (optional)
 
 ```console
-$ cargo run --example lib_grade -p elysper-harness
+$ cargo run --example lib_grade -p uva-harness
    … compile lines …
      Running `target/debug/examples/lib_grade`
 LIB-GRADE: OK
@@ -152,7 +152,7 @@ one line — a good next file to read after `runtime_agnostic`.
 
 ## Where to go next
 
-- [`crates/elysper-harness/README.md`](../../crates/elysper-harness/README.md) —
+- [`crates/uva-harness/README.md`](../../crates/uva-harness/README.md) —
   the harness tour: assembly, strategies, hooks, the seams table.
 - [`../api-surface.md`](../api-surface.md) — which names your
   `use` lines should depend on, and which are not promised.

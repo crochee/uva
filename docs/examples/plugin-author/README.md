@@ -8,21 +8,21 @@ and it lives outside the framework's workspace on purpose.
 
 ```toml
 [dependencies]
-elysper = { path = "../../../crates/elysper", default-features = false, features = [
+uva = { path = "../../../crates/uva", default-features = false, features = [
   "tool",
   "kernel",
 ] }
 futures = "0.3"
 ```
 
-- **`elysper`** — the one framework entry. `tool` gives the `Tool` trait, the
+- **`uva`** — the one framework entry. `tool` gives the `Tool` trait, the
   `ToolRegistry` and `ToolEntry`; `kernel` gives the plugin lifecycle
   (`Plugin` / `EffectHandle` / `mount_all`) if you want your tool to be a
   kernel plugin that registers and withdraws itself.
 - **`futures`** — an executor, so the demo can run the one async call.
   Runtime-agnostic on purpose: a plugin author is not pushed onto tokio.
 - **`serde_json`** — *not* a dependency: the facade re-exports the exact
-  version the framework was built against (`elysper::serde_json`), because
+  version the framework was built against (`uva::serde_json`), because
   `Tool::parameters` speaks `serde_json::Value` and a different version
   would not satisfy the trait.
 
@@ -47,5 +47,5 @@ cargo run -q
    [`docs/plugins.md`](../../plugins.md)) all do this.
 
 The derive macro is the short path when you want it:
-`#[derive(Tool)]` from `elysper-macros` (the facade's `macros` feature)
+`#[derive(Tool)]` from `uva-macros` (the facade's `macros` feature)
 generates the four methods from a struct plus an inherent `execute`.

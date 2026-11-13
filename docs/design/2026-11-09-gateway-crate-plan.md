@@ -4,8 +4,8 @@
 
 **Goal:** 让两个宿主（TUI 与桌面壳）共用同一套"拉起 / 附着网关 + 说网关协议"的代码，并把与代码矛盾的 spec 收干净。
 
-**Architecture:** 新增 `crates/elysper-gateway`（`publish = false` 的应用支撑 crate，root workspace 成员）：
-`supervisor` 管**进程**（拉起 `elysper-app-server serve`、等 `/readyz`、退避重启、退出回收），
+**Architecture:** 新增 `crates/uva-gateway`（`publish = false` 的应用支撑 crate，root workspace 成员）：
+`supervisor` 管**进程**（拉起 `uva-app-server serve`、等 `/readyz`、退避重启、退出回收），
 `client` 管**协议**（网关 WebSocket 上的 JSON-RPC 2.0：按 id 关联请求响应、通知扇出、断线重连并
 重放订阅）。公开面**只用 `futures`**（`BoxFuture` / `mpsc`），内部用 tokio —— 这样
 `make check-public-api-runtime` 不需要为它开豁免名单（C7）。
@@ -21,13 +21,13 @@
   crate 内写 `dep.workspace = true`（AGENTS.md §3.1）。
 - tokio feature **按需声明**，禁止 `full`（AGENTS.md §1）。
 - 公开面**不得出现 `tokio::` 路径**（`make check-public-api-runtime` 扫全部 `crates/**`，
-  豁免只有 `elysper-app-server` 与 `elysper-mcp-server`）⇒ 用 `futures::future::BoxFuture`。
+  豁免只有 `uva-app-server` 与 `uva-mcp-server`）⇒ 用 `futures::future::BoxFuture`。
 - 禁止 `pub use <内部模块>::*;`（AGENTS.md §3.7）；只写显式 `pub use`。
-- 本 crate 依赖 `elysper-app-server`（`publish = false`）⇒ 本 crate **也 `publish = false`**。
+- 本 crate 依赖 `uva-app-server`（`publish = false`）⇒ 本 crate **也 `publish = false`**。
 - 新成员必须**同时**进 root `Cargo.toml` 的 `members` 与 `scripts/check-publishable.sh` 的 `ORDER`
   （该脚本用 `cargo metadata` 比对，两者必须完全一致）。
 - 每次提交前：`cargo +nightly fmt --all` + `cargo clippy --all-targets --all-features --tests --all -- -D warnings`。
-- 测试按 crate 分批：`cargo test -p elysper-gateway`（**禁止** `cargo test --workspace`，AGENTS.md §3.3）。
+- 测试按 crate 分批：`cargo test -p uva-gateway`（**禁止** `cargo test --workspace`，AGENTS.md §3.3）。
 - 不 push 远程仓库。
 
 ## Review Focus
@@ -57,7 +57,7 @@
 
 **Interfaces:**
 - Consumes: 无（纯文档任务）
-- Produces: 本地 openspec 层与代码一致；入库文档说明 `crates/elysper-gateway` 的存在
+- Produces: 本地 openspec 层与代码一致；入库文档说明 `crates/uva-gateway` 的存在
 
 - [ ] **Step 1: 改 `web-projection` 的两条禁令**
 
@@ -67,9 +67,9 @@
 ### Requirement: 表现层宿主与插件入口
 
 本变更 MUST NOT 新增**第三套**表现层宿主；已批准的宿主是
-`elysper-app-server`（网关与静态前端）、`elysper-web`（SPA）、`elysper-tui`（终端渲染）
-与 `desktop/`（Tauri 壳）。表现层 crate 白名单为 `elysper-app-server`、`elysper-web`、
-`elysper-tui`、`crates/elysper-gateway`、`desktop/`。
+`uva-app-server`（网关与静态前端）、`uva-web`（SPA）、`uva-tui`（终端渲染）
+与 `desktop/`（Tauri 壳）。表现层 crate 白名单为 `uva-app-server`、`uva-web`、
+`uva-tui`、`crates/uva-gateway`、`desktop/`。
 
 #### Scenario: 新增一个表现层 crate
 - **WHEN** 检查新增 crate 与依赖
@@ -78,7 +78,7 @@
 
 - [ ] **Step 2: 写 `desktop-projection` spec**
 
-至少覆盖三条 Requirement：sidecar 契约（壳 spawn `elysper-app-server serve`，等 `/readyz`）、
+至少覆盖三条 Requirement：sidecar 契约（壳 spawn `uva-app-server serve`，等 `/readyz`）、
 生命周期（崩溃重启、退出回收、无孤儿进程）、单一前端（桌面与浏览器同一份 `dist`）。
 每条 Requirement 至少一个 `#### Scenario:`，写法照 `web-projection/spec.md` 的既有格式。
 
@@ -104,26 +104,26 @@ Expected: 输出 `.gitignore:41:openspec`（命中 ⇒ 本地层不进 diff，�
 ### Task 2: crate 骨架与公开类型
 
 **Files:**
-- Create: `crates/elysper-gateway/Cargo.toml`
-- Create: `crates/elysper-gateway/src/lib.rs`
-- Create: `crates/elysper-gateway/src/supervisor.rs`
-- Create: `crates/elysper-gateway/src/client.rs`
-- Create: `crates/elysper-gateway/src/tests.rs`
-- Create: `crates/elysper-gateway/README.md`
+- Create: `crates/uva-gateway/Cargo.toml`
+- Create: `crates/uva-gateway/src/lib.rs`
+- Create: `crates/uva-gateway/src/supervisor.rs`
+- Create: `crates/uva-gateway/src/client.rs`
+- Create: `crates/uva-gateway/src/tests.rs`
+- Create: `crates/uva-gateway/README.md`
 - Modify: `Cargo.toml`（`[workspace.dependencies]` 加 `tokio-tungstenite`；`[workspace] members` 加本 crate）
-- Modify: `scripts/check-publishable.sh`（`ORDER` 加 `elysper-gateway`）
+- Modify: `scripts/check-publishable.sh`（`ORDER` 加 `uva-gateway`）
 
 **Interfaces:**
-- Consumes: `elysper-app-server` 的 CLI 契约（`serve --bind --port --web-dir --directory --profile --bundle --patch`，见 `crates/elysper-app-server/src/main.rs:126`）
-- 末尾两步：AGENTS.md §1 登记（在 `crates/elysper-tui/` 段之后加一段：elysper-gateway =
+- Consumes: `uva-app-server` 的 CLI 契约（`serve --bind --port --web-dir --directory --profile --bundle --patch`，见 `crates/uva-app-server/src/main.rs:126`）
+- 末尾两步：AGENTS.md §1 登记（在 `crates/uva-tui/` 段之后加一段：uva-gateway =
   两宿主共用的网关支撑——进程监管 + 网关 JSON-RPC 客户端，`publish = false`，公开面只用
-  `futures`）与 `CHANGELOG.md` `[Unreleased]` 一条（"投影第二波的地基：新增 elysper-gateway"）
+  `futures`）与 `CHANGELOG.md` `[Unreleased]` 一条（"投影第二波的地基：新增 uva-gateway"）
 - Produces: 后续任务使用的类型
 
 ```rust
-// crates/elysper-gateway/src/lib.rs
+// crates/uva-gateway/src/lib.rs
 pub struct GatewayOptions {
-    /// `elysper-app-server` 可执行文件路径。
+    /// `uva-app-server` 可执行文件路径。
     pub executable: PathBuf,
     /// 网关绑定地址，默认 `127.0.0.1`。
     pub bind: String,
@@ -207,14 +207,14 @@ pub(crate) trait GatewayProcess: Send + Sync + 'static {
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-gateway/src/tests.rs`：
+`crates/uva-gateway/src/tests.rs`：
 
 ```rust
 use crate::{GatewayOptions, GatewayState};
 
 #[test]
 fn options_default_to_loopback_and_an_unbound_port() {
-    let options = GatewayOptions::new(PathBuf::from("elysper-app-server"), PathBuf::from("/tmp"));
+    let options = GatewayOptions::new(PathBuf::from("uva-app-server"), PathBuf::from("/tmp"));
     assert_eq!(options.bind, "127.0.0.1");
     assert_eq!(options.port, 0);
     assert!(options.profile.is_none());
@@ -235,18 +235,18 @@ fn the_ready_state_carries_the_base_and_ws_urls() {
 
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-gateway --lib`
-Expected: FAIL（`could not find crate elysper_gateway` / `unresolved import`）
+Run: `cargo test -p uva-gateway --lib`
+Expected: FAIL（`could not find crate uva_gateway` / `unresolved import`）
 
 - [ ] **Step 3: 建 crate 并实现类型**
 
-`crates/elysper-gateway/Cargo.toml`（照 `crates/elysper-tui/Cargo.toml` 的写法与注释风格）：
+`crates/uva-gateway/Cargo.toml`（照 `crates/uva-tui/Cargo.toml` 的写法与注释风格）：
 
 ```toml
 [package]
-name = "elysper-gateway"
-description = "Shared gateway support for elysper hosts: process supervision plus the gateway's JSON-RPC client"
-# Application support crate: it depends on `elysper-app-server`, which is
+name = "uva-gateway"
+description = "Shared gateway support for uva hosts: process supervision plus the gateway's JSON-RPC client"
+# Application support crate: it depends on `uva-app-server`, which is
 # `publish = false`, so this one is too — nothing here belongs on a registry.
 publish = false
 version.workspace = true
@@ -263,9 +263,9 @@ categories.workspace = true
 [dependencies]
 # The core's transport contract: the Content-Length frame codec is
 # consumed from the public `rpc::framing` seam, never reimplemented.
-# `elysper-app-server` is `publish = false`, which is why this crate is
+# `uva-app-server` is `publish = false`, which is why this crate is
 # too — nothing here belongs on a registry.
-elysper-app-server.workspace = true
+uva-app-server.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 thiserror.workspace = true
@@ -294,11 +294,11 @@ tokio = { workspace = true, features = ["macros", "rt", "io-util", "time"] }
 `src/lib.rs`：
 
 ```rust
-//! Shared gateway support for elysper's hosts.
+//! Shared gateway support for uva's hosts.
 //!
 //! Two halves:
 //!
-//! - [`supervisor`] — the **process**: launch `elysper-app-server serve`,
+//! - [`supervisor`] — the **process**: launch `uva-app-server serve`,
 //!   wait for `/readyz`, restart it with a 1s → 5s backoff, and reap it on
 //!   drop. The TUI and the desktop shell both need exactly this.
 //! - [`client`] — the **protocol**: JSON-RPC 2.0 over the gateway's
@@ -327,13 +327,13 @@ pub use supervisor::{Gateway, GatewayError, GatewayOptions, GatewayState};
 
 - root `Cargo.toml` 的 `[workspace.dependencies]` 加一行（版本格式 `major.minor`）：
   `tokio-tungstenite = "0.29"`
-- root `Cargo.toml` 的 `[workspace] members` 加 `"crates/elysper-gateway",`
-- `scripts/check-publishable.sh` 的 `ORDER` 加 `elysper-gateway`（放在 `elysper-gateway`
-  依赖的 `elysper-app-server` **之后**，列表按依赖拓扑排序）
+- root `Cargo.toml` 的 `[workspace] members` 加 `"crates/uva-gateway",`
+- `scripts/check-publishable.sh` 的 `ORDER` 加 `uva-gateway`（放在 `uva-gateway`
+  依赖的 `uva-app-server` **之后**，列表按依赖拓扑排序）
 
 - [ ] **Step 5: 跑测试，确认通过**
 
-Run: `cargo test -p elysper-gateway --lib`
+Run: `cargo test -p uva-gateway --lib`
 Expected: PASS（2 passed）
 
 - [ ] **Step 6: 确认门禁没被新 crate 破掉**
@@ -345,7 +345,7 @@ Expected: 两个都输出 `OK:`（`check-publishable` 会因为新成员不在 `
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/elysper-gateway Cargo.toml scripts/check-publishable.sh
+git add crates/uva-gateway Cargo.toml scripts/check-publishable.sh
 git commit -m "feat(gateway): 新增共享网关 crate 的骨架与公开类型"
 ```
 
@@ -354,8 +354,8 @@ git commit -m "feat(gateway): 新增共享网关 crate 的骨架与公开类型"
 ### Task 3: supervisor —— 拉起网关并等就绪
 
 **Files:**
-- Modify: `crates/elysper-gateway/src/supervisor.rs`
-- Modify: `crates/elysper-gateway/src/tests.rs`
+- Modify: `crates/uva-gateway/src/supervisor.rs`
+- Modify: `crates/uva-gateway/src/tests.rs`
 
 **Interfaces:**
 - Consumes: Task 2 的 `GatewayOptions` / `GatewayState` / `GatewayError` 与 `Launcher` / `GatewayProcess` 缝
@@ -410,7 +410,7 @@ async fn the_supervisor_gives_up_with_a_reason_when_the_probe_never_succeeds() {
 
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-gateway --lib supervisor`
+Run: `cargo test -p uva-gateway --lib supervisor`
 Expected: FAIL（`supervisor` 行为未实现）
 
 - [ ] **Step 3: 实现 `supervisor.rs`**
@@ -436,13 +436,13 @@ Expected: FAIL（`supervisor` 行为未实现）
 
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p elysper-gateway --lib`
+Run: `cargo test -p uva-gateway --lib`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/elysper-gateway
+git add crates/uva-gateway
 git commit -m "feat(gateway): 监督网关进程并等它真正就绪"
 ```
 
@@ -451,8 +451,8 @@ git commit -m "feat(gateway): 监督网关进程并等它真正就绪"
 ### Task 4: supervisor —— 退避重启与回收
 
 **Files:**
-- Modify: `crates/elysper-gateway/src/supervisor.rs`
-- Modify: `crates/elysper-gateway/src/tests.rs`
+- Modify: `crates/uva-gateway/src/supervisor.rs`
+- Modify: `crates/uva-gateway/src/tests.rs`
 
 **Interfaces:**
 - Consumes: Task 3 的 `supervisor` 与 `GatewayState`
@@ -475,7 +475,7 @@ async fn dropping_the_gateway_kills_the_child_process() { /* … */ }
 
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-gateway --lib supervisor`
+Run: `cargo test -p uva-gateway --lib supervisor`
 Expected: FAIL
 
 - [ ] **Step 3: 实现退避与回收**
@@ -485,19 +485,19 @@ Expected: FAIL
   第 n 次重启等待 `min(1s * 2^(n-1), 5s)`；**测试通过注入的 sleeper 跳过真实等待**
   （把等待抽成一个 `Box<dyn Fn(Duration) -> BoxFuture<'static, ()>>` 内部缝）。
 - `Drop for Gateway`：`kill()` 子进程 + 停止监督任务（监督任务用 `CancellationToken` 语义的
-  `AtomicBool` 即可，本 crate 不引 `elysper-core` 的 `CancelToken`）。
+  `AtomicBool` 即可，本 crate 不引 `uva-core` 的 `CancelToken`）。
 - **进程组**：若子进程可能再派生子进程，`kill()` 前先 `setsid` 不做（本轮不做进程组管理，
   在 README 里写明"杀的是直接子进程"）。
 
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p elysper-gateway --lib`
+Run: `cargo test -p uva-gateway --lib`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/elysper-gateway
+git add crates/uva-gateway
 git commit -m "feat(gateway): 网关崩溃后退避重启，退出时回收子进程"
 ```
 
@@ -506,8 +506,8 @@ git commit -m "feat(gateway): 网关崩溃后退避重启，退出时回收子�
 ### Task 5: client —— 网关 WebSocket 上的 JSON-RPC
 
 **Files:**
-- Modify: `crates/elysper-gateway/src/client.rs`
-- Modify: `crates/elysper-gateway/src/tests.rs`
+- Modify: `crates/uva-gateway/src/client.rs`
+- Modify: `crates/uva-gateway/src/tests.rs`
 
 **Interfaces:**
 - Consumes: Task 2 的 `GatewayClient` / `ClientError` / `Subscription`
@@ -537,7 +537,7 @@ async fn a_server_error_object_becomes_a_client_error() { /* … */ }
 
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-gateway --lib client`
+Run: `cargo test -p uva-gateway --lib client`
 Expected: FAIL
 
 - [ ] **Step 3: 实现 `client.rs`**
@@ -546,7 +546,7 @@ Expected: FAIL
   **url 形如 `ws://127.0.0.1:9000/rpc`**。
 - 帧格式：**一条 WebSocket 文本消息 = 一个 JSON-RPC 2.0 报文**（与浏览器侧一致；
   Content-Length 分帧只在网关 ↔ core 之间）。
-- id 关联：客户端自增 `c1`、`c2`…（与 `elysper-web/src/api/rpc.ts` 同风格），
+- id 关联：客户端自增 `c1`、`c2`…（与 `uva-web/src/api/rpc.ts` 同风格），
   请求挂 `oneshot`；**响应按 id 路由**，字符串 id 与数字 id 归一到同一个键。
 - 通知：按 `method` 分发给订阅者；订阅表用 `Arc<Mutex<HashMap<String, Vec<Arc<dyn Fn(Value)>>>>>`，
   **`Subscription` drop 时移除该条**（对齐内核 Effect 的"注册即返回句柄"）。
@@ -558,13 +558,13 @@ Expected: FAIL
 
 - [ ] **Step 4: 跑测试，确认通过**
 
-Run: `cargo test -p elysper-gateway --lib`
+Run: `cargo test -p uva-gateway --lib`
 Expected: PASS
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/elysper-gateway
+git add crates/uva-gateway
 git commit -m "feat(gateway): 网关 WebSocket 上的 JSON-RPC 客户端"
 ```
 
@@ -573,8 +573,8 @@ git commit -m "feat(gateway): 网关 WebSocket 上的 JSON-RPC 客户端"
 ### Task 6: crate 收口 —— README、门禁与自检
 
 **Files:**
-- Create/Modify: `crates/elysper-gateway/README.md`
-- Modify: `crates/elysper-gateway/src/lib.rs`（若需要补模块文档）
+- Create/Modify: `crates/uva-gateway/README.md`
+- Modify: `crates/uva-gateway/src/lib.rs`（若需要补模块文档）
 
 **Interfaces:**
 - Consumes: 全部前置任务
@@ -582,7 +582,7 @@ git commit -m "feat(gateway): 网关 WebSocket 上的 JSON-RPC 客户端"
 
 - [ ] **Step 1: 写 README**
 
-`crates/elysper-gateway/README.md` 至少写清：它是什么（两个宿主共用的网关支撑）、
+`crates/uva-gateway/README.md` 至少写清：它是什么（两个宿主共用的网关支撑）、
 两半的分工（进程 / 协议）、怎么用（`Gateway::start` → `base_url()` → `GatewayClient::connect`）、
 以及两条边界（`publish = false`；公开面只用 futures，`tokio` 是实现细节）。
 写成 markdown，遵循仓库既有的 README 风格（短段落 + 代码块），`.markdownlint.json` 覆盖它。
@@ -594,7 +594,7 @@ Expected: 无输出（0 warning）
 
 - [ ] **Step 3: 跑本 crate 的测试**
 
-Run: `cargo test -p elysper-gateway`
+Run: `cargo test -p uva-gateway`
 Expected: 全部 passed
 
 - [ ] **Step 4: 跑门禁**
@@ -606,6 +606,6 @@ Expected: 全绿（833s 量级）。若 `check-publishable` 报"成员与 ORDER 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/elysper-gateway
+git add crates/uva-gateway
 git commit -m "docs(gateway): 补 README 并跑通全量门禁"
 ```

@@ -1,15 +1,15 @@
 //! A third-party tool plugin, written the way a plugin author would
 //! write it: implement the trait, register the tool, call it.
 //!
-//! The framework entry is **one dependency** (`elysper`) — the `Tool`
+//! The framework entry is **one dependency** (`uva`) — the `Tool`
 //! trait, the registry and the kernel plugin contract all come from
 //! it, so a plugin author never has to hunt for "which crate holds the
 //! seam I implement".
 
 use std::sync::Arc;
 
-use elysper::tool::{Context, Tool, ToolEntry, ToolOutput, ToolRegistry};
-use elysper::prelude::async_trait;
+use uva::tool::{Context, Tool, ToolEntry, ToolOutput, ToolRegistry};
+use uva::prelude::async_trait;
 
 /// The plugin's tool: a greeting with a name.
 struct GreetTool;
@@ -24,8 +24,8 @@ impl Tool for GreetTool {
         "Greet someone by name."
     }
 
-    fn parameters(&self) -> elysper::serde_json::Value {
-        elysper::serde_json::json!({
+    fn parameters(&self) -> uva::serde_json::Value {
+        uva::serde_json::json!({
             "type": "object",
             "properties": {
                 "name": { "type": "string", "description": "Who to greet." }
@@ -36,7 +36,7 @@ impl Tool for GreetTool {
 
     async fn call(
         &self,
-        input: elysper::serde_json::Value,
+        input: uva::serde_json::Value,
         _context: &Context,
     ) -> ToolOutput {
         // A tool parses its own input and reports a *model-facing*
@@ -60,7 +60,7 @@ fn main() {
     let output = futures::executor::block_on(async {
         GreetTool
             .call(
-                elysper::serde_json::json!({ "name": "world" }),
+                uva::serde_json::json!({ "name": "world" }),
                 &Context::default(),
             )
             .await
@@ -70,7 +70,7 @@ fn main() {
         .content
         .iter()
         .filter_map(|part| match part {
-            elysper::provider::ContentPart::Text(text) => Some(text.text.as_str()),
+            uva::provider::ContentPart::Text(text) => Some(text.text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()

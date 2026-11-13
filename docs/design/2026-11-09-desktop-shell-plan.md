@@ -2,17 +2,17 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 交付设计文档 §8 的刀 3：`desktop/` 独立 workspace 里的 Tauri 2 壳——拉起 `elysper-app-server serve` sidecar、等 `/readyz` 就绪、开窗（`WebviewUrl::External`）、sidecar 死亡则重启并把窗口重定向、窗口关闭则回收 sidecar（无孤儿进程）；外加 `.github/workflows/desktop.yml`（apt 装 webkit 系依赖，跑该 workspace 的 fmt / clippy / test / `cargo deny`）与仓库文档同步。
+**Goal:** 交付设计文档 §8 的刀 3：`desktop/` 独立 workspace 里的 Tauri 2 壳——拉起 `uva-app-server serve` sidecar、等 `/readyz` 就绪、开窗（`WebviewUrl::External`）、sidecar 死亡则重启并把窗口重定向、窗口关闭则回收 sidecar（无孤儿进程）；外加 `.github/workflows/desktop.yml`（apt 装 webkit 系依赖，跑该 workspace 的 fmt / clippy / test / `cargo deny`）与仓库文档同步。
 
-**Architecture:** 壳不做协议、不做渲染。进程监管（拉起 / 等就绪 / 退避重启 / 回收）全部委托 `crates/elysper-gateway` 的 supervisor（刀 1 产物，跨 workspace 的 path 依赖——两份 lockfile 是已批准的代价，设计 §10 R-6）；窗口在生产里加载 sidecar 的 `base_url`（页面 origin 与 WS origin 同源，D1），在开发里加载 Vite dev server `http://localhost:5173`（代理已就位，前端零改动，D2）。`desktop/` 自带 `[workspace]` 表、**不进** root workspace 的 `members`——`make lint-rust` 的 `--all-features` 因此永远不会编到 GUI 目标（C2 / D3）。同一份前端：`elysper-web/dist` 同步成 `desktop/dist`，同时作为 `frontendDist`、`bundle.resources` 与 `serve --web-dir` 的输入。
+**Architecture:** 壳不做协议、不做渲染。进程监管（拉起 / 等就绪 / 退避重启 / 回收）全部委托 `crates/uva-gateway` 的 supervisor（刀 1 产物，跨 workspace 的 path 依赖——两份 lockfile 是已批准的代价，设计 §10 R-6）；窗口在生产里加载 sidecar 的 `base_url`（页面 origin 与 WS origin 同源，D1），在开发里加载 Vite dev server `http://localhost:5173`（代理已就位，前端零改动，D2）。`desktop/` 自带 `[workspace]` 表、**不进** root workspace 的 `members`——`make lint-rust` 的 `--all-features` 因此永远不会编到 GUI 目标（C2 / D3）。同一份前端：`uva-web/dist` 同步成 `desktop/dist`，同时作为 `frontendDist`、`bundle.resources` 与 `serve --web-dir` 的输入。
 
-**Tech Stack:** Rust stable 通道（`rust-toolchain.toml`；fmt 用 nightly，照 root 先例）、tauri 2.12（feature `wry`；C1 实测 `cargo check` 通过）、tauri-build 2、`crates/elysper-gateway`（path，刀 1）、tokio 1.53（feature `time`）、anyhow 1.0（app 边界）、Vite 8（`elysper-web` 既有构建）、GitHub Actions ubuntu-latest（apt 包名）
+**Tech Stack:** Rust stable 通道（`rust-toolchain.toml`；fmt 用 nightly，照 root 先例）、tauri 2.12（feature `wry`；C1 实测 `cargo check` 通过）、tauri-build 2、`crates/uva-gateway`（path，刀 1）、tokio 1.53（feature `time`）、anyhow 1.0（app 边界）、Vite 8（`uva-web` 既有构建）、GitHub Actions ubuntu-latest（apt 包名）
 
 **Spec:** `docs/design/2026-11-09-desktop-frontend-tree-design.md` —— §8 的刀 3，§7 的 D1 / D2 / D3 / D4 / D10 / D14，§3 的 C1 / C2 / C5 / C10 / C11
 
 ## Global Constraints
 
-- **前置：刀 1 先落地。** 本计划消费 `crates/elysper-gateway` 的公开面
+- **前置：刀 1 先落地。** 本计划消费 `crates/uva-gateway` 的公开面
   （`Gateway` / `GatewayOptions` / `GatewayState` / `GatewayError`，签名见
   `docs/design/2026-11-09-gateway-crate-plan.md` 的 Task 2）。**该 crate 目前不存在**
   （2026-11-09 核实：`crates/` 下无此目录）；它没合入之前，Task 1 起的每条 `cargo` 命令都会因
@@ -21,25 +21,25 @@
   （`members = ["src-tauri"]`，`resolver = "2"`）；root `Cargo.toml` 的 `members` **一行不改**。
   `desktop/Cargo.lock` **提交入库**（应用 workspace 锁依赖，与根 `Cargo.lock` 立场一致）。
 - **依赖白名单（D14）**：壳的直接依赖只有 `tauri`（加 build-dep `tauri-build`）、
-  `elysper-gateway`（path）、`tokio`、`serde_json`、`anyhow`。**不引 `tokio-tungstenite`**——
+  `uva-gateway`（path）、`tokio`、`serde_json`、`anyhow`。**不引 `tokio-tungstenite`**——
   壳不碰协议，`GatewayClient` 留在 crate 里给下一个宿主。白名单是**上界**：实现结束仍未用到的
   依赖（很可能包括 `serde_json`）不写进 `Cargo.toml`，不预留。
 - **错误处理（AGENTS.md §3.1）**：壳是 app ⇒ 只用 `anyhow`；`GatewayError` 在边界
   `map_err` 成带上下文的 `anyhow::Error`。
 - **依赖版本 `major.minor`**（AGENTS.md §3.1）：独立 workspace 用不了 `dep.workspace = true`，
   版本直接写在 `desktop/src-tauri/Cargo.toml`（`tauri = "2.12"`、`tokio = "1.53"`、
-  `anyhow = "1.0"`）；`elysper-gateway` 走 path 不带版本。tokio feature 按需声明、禁止 `full`：
+  `anyhow = "1.0"`）；`uva-gateway` 走 path 不带版本。tokio feature 按需声明、禁止 `full`：
   壳直接用到的只有 `time`（30s 就绪超时）。
-- **不碰前端（D2 / AGENTS.md §4.2）**：`elysper-web/` 一行不改。"重连中"的表达复用既有离线徽标
-  （`elysper-web/src/hooks/useServerHealth.ts` + `elysper-web/src/api/rpc.ts` 的
+- **不碰前端（D2 / AGENTS.md §4.2）**：`uva-web/` 一行不改。"重连中"的表达复用既有离线徽标
+  （`uva-web/src/hooks/useServerHealth.ts` + `uva-web/src/api/rpc.ts` 的
   capped 指数退避重连），壳不加任何窗口级 UI。
 - **fmt / lint**：rustfmt 按源文件目录**向上**找配置，`desktop/src-tauri/src/*` 会命中仓库根
   `rustfmt.toml`——**不要**在 `desktop/` 里新建 fmt 配置。fmt 在 `desktop/` 目录下跑
   `cargo +nightly fmt --all`（只覆盖本 workspace）；clippy 照 root `make lint-rust` 的原样命令
   `cargo clippy --all-targets --all-features --tests --all -- -D warnings`。
-- **测试按 crate 分批**（AGENTS.md §3.3）：`cargo test -p elysper-desktop --lib`；
+- **测试按 crate 分批**（AGENTS.md §3.3）：`cargo test -p uva-desktop --lib`；
   禁止 `cargo test --workspace`。壳的测试只测纯函数（选项解析、候选顺序、URL 决策）——
-  `elysper-gateway` 的 `Launcher` 缝是 `pub(crate)`，壳从外面注入不了假进程；
+  `uva-gateway` 的 `Launcher` 缝是 `pub(crate)`，壳从外面注入不了假进程；
   端到端行为按设计文档刀 3 的验收做**手工冒烟**（Task 3 Step 8-11）。
 - **本机可跑**（C1）：Arch + `webkit2gtk-4.1` 2.54.2 已装、WSLg `DISPLAY=:0`。CI 跑
   ubuntu-latest，用 apt 的包名（`libwebkit2gtk-4.1-dev` 等），与本机 pacman 无关。
@@ -58,15 +58,15 @@
    打包期 overlay（Task 1 Step 3），基础配置只剩 `frontendDist` / `resources` 两个
    dist 编译期输入。〕
 2. **dev 模式的端口是写死的**。Vite 代理目标硬编
-   `process.env.ELYSPER_BACKEND_PORT || '8080'`（`elysper-web/vite.config.ts:6-7`），而
+   `process.env.UVA_BACKEND_PORT || '8080'`（`uva-web/vite.config.ts:6-7`），而
    生产端口策略是 `port = 0`（D4）。dev 分支若也用 0，Vite 会代理到一个没人监听的端口，
-   页面永远离线 ⇒ dev（debug 构建）绑 `ELYSPER_BACKEND_PORT`（缺省 8080），release 才用 0。
+   页面永远离线 ⇒ dev（debug 构建）绑 `UVA_BACKEND_PORT`（缺省 8080），release 才用 0。
 3. **端口换了窗口必须重定向**。D10：重启优先复用原端口，bind 失败则重选 ⇒ 新一代 `Ready`
    的 `base_url` 可能换端口。只看"supervisor 活着"不比对 URL，窗口会停在一个已死端口上
    （白屏 / 永远离线）⇒ `states()` 的每条 `Ready` 都与窗口当前 URL 比对，不同则
    `WebviewWindow::navigate`。
 4. **窗口关闭 ⇒ 孤儿 sidecar**。最后一个窗口关闭后应用默认直接退出；忘了 `shutdown()` 则
-   `elysper-app-server` 连同它监管的 core 全部存活 ⇒ `RunEvent::Exit` 里显式
+   `uva-app-server` 连同它监管的 core 全部存活 ⇒ `RunEvent::Exit` 里显式
    `gateway.shutdown()`（`Gateway` 的 `Drop` 再兜一层），冒烟用 `pgrep` 验证无孤儿。
 5. **`cargo deny` 第一次吃进 gtk / webkit 系 crate**。桌面 lockfile 带 `webkit2gtk-sys` /
    `soup3-sys` / `gtk-sys` 一族，root `deny.toml` 的 license 白名单未必全认。失败时的处置是
@@ -94,9 +94,9 @@
 - Modify: `.gitignore`（追加两行，见 Step 6）
 
 **Interfaces:**
-- Consumes: `elysper-web` 的构建（`npm ci && npm run build`，输出 `elysper-web/dist`——
-  Vite 缺省 outDir，`elysper-web/vite.config.ts` 无覆盖）；刀 1 的 `crates/elysper-gateway`
-- Produces: 能 `cargo check` 的壳 crate `elysper-desktop`（窗口逻辑到 Task 3 才有）
+- Consumes: `uva-web` 的构建（`npm ci && npm run build`，输出 `uva-web/dist`——
+  Vite 缺省 outDir，`uva-web/vite.config.ts` 无覆盖）；刀 1 的 `crates/uva-gateway`
+- Produces: 能 `cargo check` 的壳 crate `uva-desktop`（窗口逻辑到 Task 3 才有）
 
 - [ ] **Step 1: 写 workspace 根 `desktop/Cargo.toml`**
 
@@ -119,7 +119,7 @@ resolver = "2"
 
 ```toml
 [package]
-name = "elysper-desktop"
+name = "uva-desktop"
 description = "The Tauri desktop shell: supervise the gateway sidecar and host its webview"
 # Application crate behind a cross-workspace path dependency on a
 # `publish = false` crate; nothing here belongs on a registry.
@@ -132,7 +132,7 @@ edition = "2021"
 # (spawn `serve`, wait for /readyz, backoff restart, reap) lives in
 # the shared gateway crate (design D14). Cross-workspace path dep —
 # see the workspace root comment for the accepted cost.
-elysper-gateway = { path = "../../crates/elysper-gateway" }
+uva-gateway = { path = "../../crates/uva-gateway" }
 # `wry` is the webview backend C1 verified locally (2.12.5).
 tauri = { version = "2.12", features = ["wry"] }
 # App boundary: errors bubble as context strings, nothing to match.
@@ -159,9 +159,9 @@ fn main() {
 ```json
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Elysper",
+  "productName": "Uva",
   "version": "0.1.0",
-  "identifier": "dev.elysper.desktop",
+  "identifier": "dev.uva.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173"
@@ -194,11 +194,11 @@ fn main() {
   目标 ⇒ 打包后 `resource_dir()/dist` 就是 `serve --web-dir` 的运行期输入。
 - `bundle.externalBin` **移入 `tauri.bundle.conf.json` overlay**（2026-11-10 修订：tauri-build
   2.7.4 在**编译期**无条件校验并拷贝 `externalBin`——缺文件即 `resource path
-  binaries/elysper-app-server-<triple> doesn't exist`，本机已复现；留在基础配置会迫使
+  binaries/uva-app-server-<triple> doesn't exist`，本机已复现；留在基础配置会迫使
   每条 cargo 命令、包括 CI 的 fmt/clippy/test，先构建真 sidecar）。overlay 只在手工打包时
   叠加：`make bundle` = `frontend + sidecar` 后 `cargo tauri build --config
   tauri.bundle.conf.json`。打包输入文件名必须带 target triple
-  （`binaries/elysper-app-server-x86_64-unknown-linux-gnu`，`make sidecar` 产出）；
+  （`binaries/uva-app-server-x86_64-unknown-linux-gnu`，`make sidecar` 产出）；
   打包器把它拷到主程序旁时**去掉 triple 后缀**。该目录 gitignore（Step 6）。
 - `devUrl` 记录 D2 的开发期契约（窗口开 5173，Vite 代理 `/rpc` 与 `/readyz`）。
 
@@ -209,7 +209,7 @@ fn main() {
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    elysper_desktop::run()
+    uva_desktop::run()
 }
 ```
 
@@ -219,7 +219,7 @@ fn main() {
 //!
 //! Four jobs and nothing else (design knife 3):
 //!
-//! 1. start the sidecar (`elysper-app-server serve`) via the shared
+//! 1. start the sidecar (`uva-app-server serve`) via the shared
 //!    gateway supervisor and wait for `/readyz`;
 //! 2. open one window at the gateway's `base_url` (external URL, so
 //!    the page origin and the WebSocket origin are the same);
@@ -228,7 +228,7 @@ fn main() {
 //! 4. when the window closes, reap the sidecar (no orphans).
 //!
 //! The shell speaks no protocol: JSON-RPC belongs to the gateway and
-//! the SPA. The webview shows the same `elysper-web/dist` the
+//! the SPA. The webview shows the same `uva-web/dist` the
 //! browser does.
 
 #![forbid(unsafe_code)]
@@ -266,14 +266,14 @@ SHELL := /bin/bash
 help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
-frontend: ## Build elysper-web and sync its dist into desktop/dist
-	cd ../elysper-web && npm ci && npm run build
-	rm -rf dist && cp -R ../elysper-web/dist dist
+frontend: ## Build uva-web and sync its dist into desktop/dist
+	cd ../uva-web && npm ci && npm run build
+	rm -rf dist && cp -R ../uva-web/dist dist
 
 sidecar: ## Copy the root-workspace app-server binary as the Tauri sidecar
-	cargo build --manifest-path ../Cargo.toml -p elysper-app-server --release
+	cargo build --manifest-path ../Cargo.toml -p uva-app-server --release
 	mkdir -p src-tauri/binaries
-	cp ../target/release/elysper-app-server "src-tauri/binaries/elysper-app-server-$$(rustc -vV | sed -n 's/host: //p')"
+	cp ../target/release/uva-app-server "src-tauri/binaries/uva-app-server-$$(rustc -vV | sed -n 's/host: //p')"
 
 bundle: frontend sidecar ## Package the release bundle (needs cargo-tauri; sidecar via overlay)
 	cd src-tauri && cargo tauri build --config tauri.bundle.conf.json
@@ -282,7 +282,7 @@ check: frontend ## cargo check over this workspace only
 	cargo check --all
 
 test: frontend ## Unit tests, one crate (never --workspace)
-	cargo test -p elysper-desktop --lib
+	cargo test -p uva-desktop --lib
 
 lint: frontend ## clippy with the root make lint-rust's exact flags
 	cargo clippy --all-targets --all-features --tests --all -- -D warnings
@@ -297,19 +297,19 @@ deny: ## License / ban / source check for THIS workspace's lockfile (C10)
 	cargo deny --workspace check licenses bans sources
 
 run: frontend ## Dev run (debug build; window opens the Vite dev server)
-	cargo run -p elysper-desktop
+	cargo run -p uva-desktop
 
 .PHONY: help frontend sidecar check test bundle lint fmt fmt-check deny run
 ```
 
 `frontend` 是"dist 进桌面壳"的答案：**每次 cargo 之前**先 `npm run build`
-（`tsc --noEmit && vite build`，产物 `elysper-web/dist`）再 `cp -R` 成 `desktop/dist`。
+（`tsc --noEmit && vite build`，产物 `uva-web/dist`）再 `cp -R` 成 `desktop/dist`。
 同一份副本服务三个消费者：`frontendDist`（编译期嵌入）、`bundle.resources`（打包期拷贝）、
 `serve --web-dir`（运行期由壳传给 sidecar）。
 
 - [ ] **Step 6: 追加 `.gitignore`**
 
-在文件末尾（`crates/elysper-app-server/web-dist/` 那段之后）加：
+在文件末尾（`crates/uva-app-server/web-dist/` 那段之后）加：
 
 ```gitignore
 # Desktop shell build inputs: the Tauri sidecar staging copy (the
@@ -355,9 +355,9 @@ git commit -m "feat(desktop): Tauri 壳的独立 workspace 骨架与 dist 同步
 - Modify: `desktop/src-tauri/src/lib.rs`（挂 `mod options; mod tests;`）
 
 **Interfaces:**
-- Consumes: TUI 的 CLI 先例（`crates/elysper-tui/src/main.rs:54-64`：`--directory` / `--profile` /
-  `--app-server` + env `ELYSPER_APP_SERVER`）；`serve` 的参数面
-  （`crates/elysper-app-server/src/main.rs:126-152`）
+- Consumes: TUI 的 CLI 先例（`crates/uva-tui/src/main.rs:54-64`：`--directory` / `--profile` /
+  `--app-server` + env `UVA_APP_SERVER`）；`serve` 的参数面
+  （`crates/uva-app-server/src/main.rs:126-152`）
 - Produces: `Options`（壳的全部输入）与三个纯解析函数；`GatewayOptions` 的组装在 Task 3
 
 不引 clap：白名单五个依赖，四个旗标不值得第六个。解析是纯函数（`&[String]` 进、
@@ -371,7 +371,7 @@ pub struct Options {
     pub profile: Option<PathBuf>,
     pub bundle: Option<PathBuf>,
     pub patch: Option<PathBuf>,
-    /// `--app-server` 或 env `ELYSPER_APP_SERVER`。
+    /// `--app-server` 或 env `UVA_APP_SERVER`。
     pub app_server: Option<PathBuf>,
     /// `--web-dir`：显式覆盖 dist 的定位。
     pub web_dir: Option<PathBuf>,
@@ -394,7 +394,7 @@ impl Options {
 pub fn app_server_candidates(flag: Option<&Path>, exe_dir: Option<&Path>) -> Vec<PathBuf>;
 
 /// dist 定位顺序：`--web-dir` → `resource_dir/dist`（打包产物）→
-/// `../../elysper-web/dist`（dev：`cargo run` 的 cwd 是 `desktop/src-tauri`）。
+/// `../../uva-web/dist`（dev：`cargo run` 的 cwd 是 `desktop/src-tauri`）。
 pub fn web_dir_candidates(flag: Option<&Path>, resource_dist: Option<&Path>) -> Vec<PathBuf>;
 
 /// 取第一个"存在"的候选（`exists` 注入，测试不用碰磁盘）。
@@ -433,21 +433,21 @@ fn an_unknown_flag_is_rejected() {
 #[test]
 fn the_app_server_resolution_order_is_flag_then_exe_dir_then_path() {
     let flag = PathBuf::from("/opt/server");
-    let exe_dir = Some(PathBuf::from("/usr/lib/elysper"));
+    let exe_dir = Some(PathBuf::from("/usr/lib/uva"));
     let candidates = app_server_candidates(Some(&flag), exe_dir.as_deref());
     assert_eq!(candidates[0], flag);
-    assert_eq!(candidates[1], PathBuf::from("/usr/lib/elysper/elysper-app-server"));
-    assert_eq!(candidates[2], PathBuf::from("elysper-app-server"));
+    assert_eq!(candidates[1], PathBuf::from("/usr/lib/uva/uva-app-server"));
+    assert_eq!(candidates[2], PathBuf::from("uva-app-server"));
 }
 
 #[test]
 fn the_web_dir_resolution_order_is_flag_then_resource_then_dev_checkout() {
     let flag = PathBuf::from("/tmp/dist");
-    let resource = PathBuf::from("/usr/lib/elysper/resources/dist");
+    let resource = PathBuf::from("/usr/lib/uva/resources/dist");
     let candidates = web_dir_candidates(Some(&flag), Some(&resource));
     assert_eq!(candidates[0], flag);
     assert_eq!(candidates[1], resource);
-    assert!(candidates[2].ends_with("elysper-web/dist"));
+    assert!(candidates[2].ends_with("uva-web/dist"));
 }
 
 #[test]
@@ -482,7 +482,7 @@ Expected: FAIL（`unresolved import crate::options`）——同时验证了 `mak
 - `parse_from` 手写循环：认 `--directory` / `--profile` / `--bundle` / `--patch` /
   `--app-server` / `--web-dir` / `--dev-url`（每个跟一个值）、`--help`（打印用法后返回
   `Err` 让上层退出）、未知旗标报错并回显旗标名。env 只兜 `app_server`
-  （`ELYSPER_APP_SERVER`，与 TUI 同名同义）。
+  （`UVA_APP_SERVER`，与 TUI 同名同义）。
 - `app_server_candidates` / `web_dir_candidates` 只**排顺序**不做 IO；IO（`Path::exists`、
   `std::env::current_exe()`、`app.path().resource_dir()`）留给调用方在 Task 3 组装。
 - `gateway_port`：`is_release == true` → `Ok(0)`；否则解析 `backend_port`
@@ -584,8 +584,8 @@ Expected: PASS（`10 passed`——Task 2 的 6 条 + 本步 4 条）
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let env = options::Env {
-        app_server: std::env::var("ELYSPER_APP_SERVER").ok(),
-        backend_port: std::env::var("ELYSPER_BACKEND_PORT").ok(),
+        app_server: std::env::var("UVA_APP_SERVER").ok(),
+        backend_port: std::env::var("UVA_BACKEND_PORT").ok(),
     };
     let options = options::Options::parse_from(&args, &env)
         .unwrap_or_else(|usage| { eprintln!("{usage}"); std::process::exit(2); });
@@ -597,7 +597,7 @@ pub fn run() {
             let executable = options::first_existing(
                 &options::app_server_candidates(options.app_server.as_deref(), exe_dir.as_deref()),
                 |p| p.is_file(),
-            ).cloned().context("no elysper-app-server found: pass --app-server or add it to PATH")?;
+            ).cloned().context("no uva-app-server found: pass --app-server or add it to PATH")?;
             let resource_dist = app.path().resource_dir().ok().map(|d| d.join("dist"));
             let web_dir = options::first_existing(
                 &options::web_dir_candidates(options.web_dir.as_deref(), resource_dist.as_deref()),
@@ -607,14 +607,14 @@ pub fn run() {
             // 2. 组装 GatewayOptions 并限时等待就绪（D10：30s）。
             let is_release = !cfg!(debug_assertions);
             let port = options::gateway_port(is_release, env.backend_port.as_deref())?;
-            let gateway_options = elysper_gateway::GatewayOptions {
+            let gateway_options = uva_gateway::GatewayOptions {
                 executable, bind: "127.0.0.1".into(), port,
                 directory: options.directory.clone(), profile: options.profile.clone(),
                 bundle: options.bundle.clone(), patch: options.patch.clone(),
                 web_dir: Some(web_dir),
             };
             let gateway = tauri::async_runtime::block_on(async {
-                tokio::time::timeout(READY_TIMEOUT, elysper_gateway::Gateway::start(gateway_options))
+                tokio::time::timeout(READY_TIMEOUT, uva_gateway::Gateway::start(gateway_options))
                     .await
                     .map_err(|_| anyhow!("gateway not ready within 30s (design D10)"))??
             }).map_err(|error| anyhow!("failed to start the gateway sidecar: {error}"))?;
@@ -625,7 +625,7 @@ pub fn run() {
             tauri::webview::WebviewWindowBuilder::new(
                 app, "main".to_string(),
                 tauri::WebviewUrl::External(url.parse().context("window url")?),
-            ).title("Elysper").build().context("failed to open the window")?;
+            ).title("Uva").build().context("failed to open the window")?;
 
             // 4. 记账 + 状态监听：新一代 Ready 且端口变了 → navigate。
             let current = std::sync::Mutex::new(url);
@@ -635,7 +635,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 use futures::StreamExt;
                 while let Some(state) = states.next().await {
-                    let elysper_gateway::GatewayState::Ready { base_url, .. } = state else { continue };
+                    let uva_gateway::GatewayState::Ready { base_url, .. } = state else { continue };
                     let Some(next) = window_nav::next_window_url(
                         current.lock().unwrap().as_deref(), dev_url.as_deref(), &base_url,
                     ) else { continue };
@@ -670,7 +670,7 @@ const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const DEV_URL: &str = "http://localhost:5173";
 
 /// Tauri managed state：让 Exit 事件够得着 supervisor。
-struct GatewayHandle(elysper_gateway::Gateway);
+struct GatewayHandle(uva_gateway::Gateway);
 ```
 
 实现注意：
@@ -693,7 +693,7 @@ struct GatewayHandle(elysper_gateway::Gateway);
   3. 窗口 URL 记账（骨架里的 `Mutex<Option<String>>`）只有监听线程读写 ⇒ 线程**独占**
      该状态，无锁（也符合本仓 parking_lot 规则与白名单的双重约束）。
   4. `GatewayOptions` 字段全 pub：按 struct 字面量组装（同语义）。
-  5. `web_dir_candidates` 追加 `../../elysper-web/dist`：`make run`（cwd=desktop/）与
+  5. `web_dir_candidates` 追加 `../../uva-web/dist`：`make run`（cwd=desktop/）与
      `cargo tauri dev`（cwd=src-tauri/）两种工作目录都要命中 dev checkout。
 
 - [ ] **Step 4: 编译与单测**
@@ -708,12 +708,12 @@ Expected: 均无 diff
 
 - [ ] **Step 6: 冒烟（dev 链路，两个终端）**
 
-终端 1：`cd elysper-web && npm run dev`
+终端 1：`cd uva-web && npm run dev`
 终端 2：
 
 ```bash
-cargo build -p elysper-app-server
-cd desktop && ELYSPER_APP_SERVER=../target/debug/elysper-app-server cargo run -p elysper-desktop
+cargo build -p uva-app-server
+cd desktop && UVA_APP_SERVER=../target/debug/uva-app-server cargo run -p uva-desktop
 ```
 
 Expected（人工核对，本机 C1 环境）：窗口打开并加载 `http://localhost:5173`，会话列表可见
@@ -723,8 +723,8 @@ Expected（人工核对，本机 C1 环境）：窗口打开并加载 `http://lo
 - [ ] **Step 7: 冒烟（release 链路，不经 Vite）**
 
 ```bash
-cargo build -p elysper-app-server --release
-cd desktop && ELYSPER_APP_SERVER=../target/release/elysper-app-server cargo run -p elysper-desktop --release
+cargo build -p uva-app-server --release
+cd desktop && UVA_APP_SERVER=../target/release/uva-app-server cargo run -p uva-desktop --release
 ```
 
 Expected（人工核对）：窗口直接加载 sidecar 的 `base_url`（`http://127.0.0.1:<port>/`，
@@ -735,7 +735,7 @@ Expected（人工核对）：窗口直接加载 sidecar 的 `base_url`（`http:/
 壳运行中：
 
 ```bash
-pkill -f 'elysper-app-server serve' && sleep 8
+pkill -f 'uva-app-server serve' && sleep 8
 ```
 
 Expected（人工核对，对应设计刀 3 验收）：窗口内出现**既有**离线徽标
@@ -748,7 +748,7 @@ Expected（人工核对，对应设计刀 3 验收）：窗口内出现**既有*
 关闭桌面窗口后：
 
 ```bash
-pgrep -af elysper-app-server || echo "no orphans"
+pgrep -af uva-app-server || echo "no orphans"
 ```
 
 Expected: `no orphans`（`RunEvent::Exit` → `shutdown()` 生效；若仍有进程，回查 Step 3 的
@@ -792,7 +792,7 @@ on:
     paths:
       - "desktop/**"
       - "crates/**"
-      - "elysper-web/**"
+      - "uva-web/**"
       - "Cargo.toml"
       - "deny.toml"
       - ".github/workflows/desktop.yml"
@@ -801,7 +801,7 @@ on:
     paths:
       - "desktop/**"
       - "crates/**"
-      - "elysper-web/**"
+      - "uva-web/**"
       - "Cargo.toml"
       - "deny.toml"
       - ".github/workflows/desktop.yml"
@@ -851,14 +851,14 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: elysper-web/package-lock.json
+          cache-dependency-path: uva-web/package-lock.json
 
       # tauri's codegen embeds frontendDist at compile time, so the
       # dist copy must exist before ANY cargo command (Review Focus
       # #1). This mirrors `make -C desktop frontend`.
       - name: Build the web front-end and sync the dist copy
         run: |
-          cd elysper-web && npm ci && npm run build
+          cd uva-web && npm ci && npm run build
           rm -rf ../desktop/dist && cp -R dist ../desktop/dist
 
       - name: Cache Cargo
@@ -887,7 +887,7 @@ jobs:
 
       - name: test
         working-directory: desktop
-        run: cargo test -p elysper-desktop --lib
+        run: cargo test -p uva-desktop --lib
 
       # Same install pattern as rust-quality.yml. The check runs over
       # the DESKTOP lockfile (the root one never sees tauri's tree),
@@ -901,8 +901,8 @@ jobs:
 
 要点：
 
-- `paths` 过滤包含 `crates/**`：桌面壳经 path 依赖编到 `elysper-gateway` →
-  `elysper-app-server` → facade 的整棵树，root 侧的 crate 改动同样影响桌面构建。
+- `paths` 过滤包含 `crates/**`：桌面壳经 path 依赖编到 `uva-gateway` →
+  `uva-app-server` → facade 的整棵树，root 侧的 crate 改动同样影响桌面构建。
 - `cargo deny` 的三个全局选项（`--manifest-path` / `--config` / `--workspace`）必须写在
   子命令 `check` **之前**（cargo-deny 的参数布局，2026-11-09 本机 `cargo deny --help` 核实）。
 - **不**在 CI 里跑 `cargo tauri build`（打包产物不是本轮验收，且多平台 bundling 超出
@@ -946,7 +946,7 @@ git commit -m "ci(desktop): 桌面壳独立门禁（webkit 依赖 + fmt/clippy/t
 ### Task 5: 仓库同步（gateway README · AGENTS §1/§3.6 · CHANGELOG）
 
 **Files:**
-- Modify: `crates/elysper-gateway/README.md`
+- Modify: `crates/uva-gateway/README.md`
 - Modify: `AGENTS.md`（§1 环境段 + §3.6 门禁表）
 - Modify: `CHANGELOG.md`（`[Unreleased]`）
 
@@ -954,7 +954,7 @@ git commit -m "ci(desktop): 桌面壳独立门禁（webkit 依赖 + fmt/clippy/t
 - Consumes: 前四个任务的全部产物
 - Produces: 入库文档与现状一致（`make check-claim-language` 与人工 review 的依据）
 
-- [ ] **Step 1: `crates/elysper-gateway/README.md` 补桌面壳一节**
+- [ ] **Step 1: `crates/uva-gateway/README.md` 补桌面壳一节**
 
 在"怎么用"之后加一小节（标题 `## The desktop shell`，英文，照该 README 既有风格）：
 
@@ -965,11 +965,11 @@ git commit -m "ci(desktop): 桌面壳独立门禁（webkit 依赖 + fmt/clippy/t
 
 - [ ] **Step 2: `AGENTS.md` §1 加 desktop 条目**
 
-在刀 1 加的 `elysper-gateway` 条目之后（若刀 1 未合入则在 `elysper-tui` 条目
+在刀 1 加的 `uva-gateway` 条目之后（若刀 1 未合入则在 `uva-tui` 条目
 `AGENTS.md:20` 之后）加一条，格式照邻居：
 
 > - [desktop/](desktop/) Tauri 2 桌面壳（**独立 workspace**，不是 root 成员，D3/C2）：只做四件事——
->   经 `crates/elysper-gateway` 的 supervisor 拉起 `elysper-app-server serve` sidecar、等
+>   经 `crates/uva-gateway` 的 supervisor 拉起 `uva-app-server serve` sidecar、等
 >   `/readyz`、开窗（`WebviewUrl::External(base_url)`）、sidecar 死亡重启并把窗口重定向 /
 >   窗口关闭回收（无孤儿）。壳不讲协议（不引 `tokio-tungstenite`，D14）；webkit 系系统依赖
 >   因此不进 `make ci`；其 fmt / clippy / test / cargo deny 在 `.github/workflows/desktop.yml`。
@@ -990,9 +990,9 @@ git commit -m "ci(desktop): 桌面壳独立门禁（webkit 依赖 + fmt/clippy/t
 
 ```markdown
 - **Desktop 入口（刀 3）**：新增 `desktop/`（Tauri 2 壳，独立 workspace、不进 root
-  workspace，webkit 系系统依赖因此不进 `make ci`）——经 `crates/elysper-gateway` 拉起
-  `elysper-app-server serve` sidecar、等 `/readyz`、开窗加载与浏览器同一份
-  `elysper-web/dist`；sidecar 死亡自动重启并重定向窗口，窗口关闭回收 sidecar。配套
+  workspace，webkit 系系统依赖因此不进 `make ci`）——经 `crates/uva-gateway` 拉起
+  `uva-app-server serve` sidecar、等 `/readyz`、开窗加载与浏览器同一份
+  `uva-web/dist`；sidecar 死亡自动重启并重定向窗口，窗口关闭回收 sidecar。配套
   `.github/workflows/desktop.yml`（apt 装 webkit 依赖 + fmt / clippy / test +
   `cargo deny`，补齐 root `cargo deny` 看不到桌面 lockfile 的缺口）。
 ```
@@ -1009,7 +1009,7 @@ Expected: 三条全绿（文档改动不该碰代码，这是确认不是修复�
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/elysper-gateway/README.md AGENTS.md CHANGELOG.md
+git add crates/uva-gateway/README.md AGENTS.md CHANGELOG.md
 git commit -m "docs: 登记桌面壳与其独立 CI 门禁"
 ```
 
@@ -1022,9 +1022,9 @@ git commit -m "docs: 登记桌面壳与其独立 CI 门禁"
 | C2（`--all-features` 不编 GUI） | Task 1 Step 1 的 workspace 隔离 + Step 9 的 `cargo metadata` 证明 |
 | C10（deny 只覆盖 root） | Task 4 的 `cargo deny --manifest-path desktop/Cargo.toml --config deny.toml` |
 | D1（sidecar = `serve`，壳不讲协议） | Task 3 Step 3 只用 `Gateway::start` / `base_url()` |
-| D2（一套前端、壳不碰前端） | 全程无 `elysper-web` 改动；dev 走 Vite 代理（Task 3 Step 6） |
-| D3（三段代码位置） | `desktop/` 独立 workspace（Task 1），path 依赖 `../../crates/elysper-gateway` |
-| D4（端口由宿主选） | release `port = 0` 交给 supervisor；dev 绑 `ELYSPER_BACKEND_PORT`/8080（Review Focus #2） |
+| D2（一套前端、壳不碰前端） | 全程无 `uva-web` 改动；dev 走 Vite 代理（Task 3 Step 6） |
+| D3（三段代码位置） | `desktop/` 独立 workspace（Task 1），path 依赖 `../../crates/uva-gateway` |
+| D4（端口由宿主选） | release `port = 0` 交给 supervisor；dev 绑 `UVA_BACKEND_PORT`/8080（Review Focus #2） |
 | D10（二进制定位 / 30s / 退避 / 端口复用） | Task 2 的候选顺序 + Task 3 的 `READY_TIMEOUT` 与 `next_window_url` |
 | D14（壳不引 `tokio-tungstenite`） | Task 1 Step 2 的依赖清单（白名单上界） |
 | 刀 3 验收（离线徽标自愈、无孤儿） | Task 3 Step 8 / Step 9 的手工冒烟 |

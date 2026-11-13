@@ -2,7 +2,7 @@
 
 日期：2026-10-24
 状态：待批准（§5.2 已定：(i) harness 写整条消息）
-范围：`elysper-session` / `elysper-harness` / `elysper-server` / `elysper-context` / `elysper` facade / `elysper-web`
+范围：`uva-session` / `uva-harness` / `uva-app-server` / `uva-context` / `uva` facade / `uva-web`
 上游：[`2026-10-23-harness-v2-design.md`](2026-10-23-harness-v2-design.md)（§4.2 / §4.3 / §4.6 / §7）
 本轮是那份设计的**第一段落地**：先把「谁写日志、序号从哪来、一次 fsync 付多少钱、恢复后读回什么」
 收口，再谈 plugin/、循环从 fold 推导、挂起恢复。
@@ -11,7 +11,7 @@
 
 ## 1. 意图与为什么
 
-`elysper-harness` 已经长出一个批量写器（`crates/elysper-harness/src/log/`），但它**生产上无人使用**；
+`uva-harness` 已经长出一个批量写器（`crates/uva-harness/src/log/`），但它**生产上无人使用**；
 跑生产的是一条更老、更贵的写法：每写一行 JSONL 就 `fsync` 一次，写入口散在五个地方，
 而且**序号有两个来源**。
 
@@ -82,18 +82,18 @@
 
 继承 `AGENTS.md` 的既有门禁，不新增例外：
 
-- 依赖单向：`elysper` → `elysper-*` → `elysper-core`。**写者下沉到 `elysper-session` 不违反**
+- 依赖单向：`uva` → `uva-*` → `uva-core`。**写者下沉到 `uva-session` 不违反**
   （session 在 harness 下面；harness 本来就依赖 session）。
-- 库 crate 只用 `thiserror`；`elysper-server` 是 app crate，用 `anyhow`。
-- 墙钟走 `elysper_core::Clock`；ID 走 `elysper_core::IdGen`。
-- `max_width = 80`；禁通配符导入；`elysper-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
+- 库 crate 只用 `thiserror`；`uva-app-server` 是 app crate，用 `anyhow`。
+- 墙钟走 `uva_core::Clock`；ID 走 `uva_core::IdGen`。
+- `max_width = 80`；禁通配符导入；`uva-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
 - `make check-public-api-runtime`：库 crate 的公开 API 不得出现具体运行时类型
-  （`elysper-session` 在门禁范围内 → 写者的锁只能是私有字段，且类型必须 runtime-free：
+  （`uva-session` 在门禁范围内 → 写者的锁只能是私有字段，且类型必须 runtime-free：
   用 `futures::lock::Mutex`，session crate 已依赖 `futures` ✓）。
-- `make check-clock`：`elysper-session` 库代码不得直接 `chrono::Utc::now()` → 写者必须持有
-  一个 `elysper_core::Clock`。
+- `make check-clock`：`uva-session` 库代码不得直接 `chrono::Utc::now()` → 写者必须持有
+  一个 `uva_core::Clock`。
 - `scripts/harness-docs/baseline` = 56，当前实测 53；只许降不许升。
-- `scripts/paradigm-surface/baselines/crates/elysper-session` = 13，当前 13（**正好顶格**）：
+- `scripts/paradigm-surface/baselines/crates/uva-session` = 13，当前 13（**正好顶格**）：
   写者要新增 re-export，就必须在同一个提交里抬这条基线。
 - `MINIMAL.md` 是**被编译的 doctest**（`make test-guides` ⊂ `make ci`）：它今天用的是
   `Durability` / `LogWriter::new(sink, Durability::StepBoundary)` / `TypedEventSink::channel(64)` /
@@ -106,22 +106,22 @@
 
 | 事实 | 证据 |
 |---|---|
-| harness 的批量写器生产上无人使用 | server 从不调 `with_log_writer`；`LogWriter` 还出现在 `MINIMAL.md:224,247`、`CHANGELOG.md:22,26` 与 facade 的 `elysper::harness::{LogWriter, Durability}` 公开路径上 |
+| harness 的批量写器生产上无人使用 | server 从不调 `with_log_writer`；`LogWriter` 还出现在 `MINIMAL.md:224,247`、`CHANGELOG.md:22,26` 与 facade 的 `uva::harness::{LogWriter, Durability}` 公开路径上 |
 | server 走的是老路 | `run_task.rs:94` 设 `config.typed_event_sink`；`agent_assembly.rs:84-85` → `with_typed_event_sink` |
-| 老路丢行 | `elysper-session/src/typed_event_sink.rs:162` |
-| 批量口有生产调用方 | `elysper-server/src/routes/sessions.rs:998` 的 `child.append_many(&inherited)`（会话 fork）；`crates/elysper-harness/src/log/mod.rs:199` |
+| 老路丢行 | `uva-session/src/typed_event_sink.rs:162` |
+| 批量口有生产调用方 | `uva-app-server/src/routes/sessions.rs:998` 的 `child.append_many(&inherited)`（会话 fork）；`crates/uva-harness/src/log/mod.rs:199` |
 | `Durability::Batched` 从未构造 | 全仓库无构造点；`log/mod.rs:208` 的 `flush_if_batched` **每次 append 都会被调用**（`:150`），只有它的 `Batched` 分支（`:209-212`）是死的 |
 | `Durability` 无生产使用者 | server 不用 `LogWriter` → 四档都没有生产构造点 |
 | 折叠器按位置算序号 | `log_surface.rs:484-489`：`seq += 1` 逐事件行递增；模块文档 `:30-33` 明说「seq 是行在日志里的位置」 |
 | 账本的种子也是位置序号 | `run_task.rs:189` `ledger.record(index as u64 + 1, row)` |
 | 折叠器与写者会不同步 | 见 §4.1 F6 |
-| `SessionSink::append_many` 的**默认实现**是逐行 `append` | `elysper-session/src/sink.rs:287-292` → 「一次 flush = 一次 fsync」只对覆写了它的 sink 成立（`jsonl.rs:341`、`in_memory.rs:123`） |
+| `SessionSink::append_many` 的**默认实现**是逐行 `append` | `uva-session/src/sink.rs:287-292` → 「一次 flush = 一次 fsync」只对覆写了它的 sink 成立（`jsonl.rs:341`、`in_memory.rs:123`） |
 
 ### 4.1 追加核实（写完初稿 + 独立实现者审查后补的八个事实）
 
 **F1 · 每个 token 两行、两次 fsync。**
 - provider 每个文本 delta → `StreamChunk::Content(ContentPart::Text)`
-  （`elysper-provider/src/assembler.rs:145-151`）→ assembler **为每个 delta 追加一个 part**
+  （`uva-provider/src/assembler.rs:145-151`）→ assembler **为每个 delta 追加一个 part**
   （`append_part`，`:388`）→ harness 的 `publish_parts`（`harness/agent/re_act/stream.rs:99-108`）
   逐 part 发 `AgentEvent::Model(ContentPart::Text(delta))`。
 - 该事件 `is_durable()` == true（`harness/src/events/mod.rs:70-79`）→ server **每个 delta 写一行 +
@@ -134,10 +134,10 @@
 **F2 · 恢复后模型看到的历史被打碎（P0 正确性 bug）。**
 - 每个 delta 一行 → 每行是一个只含文本的 assistant 消息（`log_surface.rs:309-317` `classify_part`）。
 - 投影层**只**在「上一条 assistant 消息带未闭合的 ToolUse」时合并
-  （`elysper-context/src/memory/session.rs:78-97`），**连续两条纯文本 assistant 行不合并**。
+  （`uva-context/src/memory/session.rs:78-97`），**连续两条纯文本 assistant 行不合并**。
 - 实测（一次性探针，已删）：3 行 `{"type":"Model","data":{"type":"text",…}}` 经
   `events_to_messages` → **3 条** assistant 消息（`"Hel"` / `"lo "` / `"world"`）。
-- ⇒ 前端看不出来（`elysper-web/src/lib/session-to-messages.ts:510` 的 web 侧投影**会**把文本块
+- ⇒ 前端看不出来（`uva-web/src/lib/session-to-messages.ts:510` 的 web 侧投影**会**把文本块
   合并进同一条 assistant 轮次），但**模型看得到**：resume 后它自己的上一轮回答被拆成几百条消息。
 
 **F3 · `request_header` 每 run 写两遍。** server 一行（`run_task.rs:293-316`）+ harness 一行
@@ -158,37 +158,37 @@ fold 改读行里的 `seq` 后，种子必须用**同一个判定**（§5.5）�
 → 日志里出现重复序号。
 
 **F8 · 写点比 controller 多得多。**
-- `elysper-server/src/routes/sessions.rs`：`:998`（`append_many`，会话 fork 继承行）、`:1128`、`:1164`、
+- `uva-app-server/src/routes/sessions.rs`：`:998`（`append_many`，会话 fork 继承行）、`:1128`、`:1164`、
   `:1505`、`:1513`、`:1651`、`:1821`、`:1829`。
-- `elysper-server/src/routes/messages/mod.rs:531-532`（种子历史）。
-- `elysper-server/src/session/subagent_router.rs`：`:181`、`:185`、`:202`、`:217`、`:229`。
-- `elysper-context/src/memory/typed.rs:145-148`（`repair_session`，**生产调用方**：
-  `elysper-server/src/state/app_state/sessions.rs:135`，每次建 controller 都调）与
-  `elysper-context/src/memory/session.rs:211`（`SessionMemory::append`，公共 API）。
+- `uva-app-server/src/routes/messages/mod.rs:531-532`（种子历史）。
+- `uva-app-server/src/session/subagent_router.rs`：`:181`、`:185`、`:202`、`:217`、`:229`。
+- `uva-context/src/memory/typed.rs:145-148`（`repair_session`，**生产调用方**：
+  `uva-app-server/src/state/app_state/sessions.rs:135`，每次建 controller 都调）与
+  `uva-context/src/memory/session.rs:211`（`SessionMemory::append`，公共 API）。
 ⇒ 「一个会话一个写者」不能只在 controller 里实现：**写者必须挂在会话本身**，
 任何拿到 `(user_id, session_id)` 的代码都要能取到同一个写者。
-`elysper-session/src/manager.rs:79` 的 `SessionRegistry::sink()` 已经是这个角色（它按会话缓存 sink ✓），
+`uva-session/src/manager.rs:79` 的 `SessionRegistry::sink()` 已经是这个角色（它按会话缓存 sink ✓），
 写者应当与它并列：`SessionRegistry::writer(user_id, session_id) -> Arc<LogWriter>`。
 
 ---
 
 ## 5. 架构决定
 
-### 5.1 写者接缝下沉到 `elysper-session`（推翻 v2 设计 §4.5）
+### 5.1 写者接缝下沉到 `uva-session`（推翻 v2 设计 §4.5）
 
 v2 设计写的是「`log/` 是 harness 私有模块，因为『哪些行是 durable』必须与循环的实现同处一个 crate」。
 **本轮推翻这一条**，理由：
 
-- 折叠器（`fold_surface.rs`）本来就在 `elysper-session`，而 provenance 校验必须让「写者取的号」
+- 折叠器（`fold_surface.rs`）本来就在 `uva-session`，而 provenance 校验必须让「写者取的号」
   和「折叠器算的号」是同一个数。把写者放 harness、折叠器放 session，等于把同一个不变量的两端
   分在两个 crate 里，中间靠约定。
-- `CompactionCheckpoint`（在 `elysper-session`）的回调是**同步**的：它必须能在不 await 的情况下
+- `CompactionCheckpoint`（在 `uva-session`）的回调是**同步**的：它必须能在不 await 的情况下
   把压缩行交给写者。写者在 harness 时它够不着，只能另开一条通道——那条通道就是今天会丢行的
   `TypedEventSink`。写者在 session 时，同步回调直接走写者的 spill 通道，整条老路可以删。
 - 「哪些行 durable」的**判定**并没有因此跑到别的 crate 去：判定仍在 harness
   （`events/mod.rs::is_durable`），写者只负责把判定结果落盘。
 
-依赖方向不变：`elysper-harness` → `elysper-session` 已存在。
+依赖方向不变：`uva-harness` → `uva-session` 已存在。
 
 ### 5.2 delta 与完整消息的界线（**已定：(i)**）
 
@@ -242,7 +242,7 @@ server 在另一个任务里收到 tool_result 事件才入队的话，harness �
 - server 在**广播一条 durable 事实之前** flush 一次 → 「看到的都在盘上」由此成立。
   两者刷的是同一个写者。
 
-**web 的连带改动**：`elysper-web/src/lib/session-to-messages.ts` 的 `applyHistoryEntry`（`:524`）
+**web 的连带改动**：`uva-web/src/lib/session-to-messages.ts` 的 `applyHistoryEntry`（`:524`）
 今天只认 `UserInput` / `Model`（`:95-96`），要加一个 `assistant_message` 分支。
 **流式渲染不动**（delta 的 wire 形状不变），只有历史投影要改。
 
@@ -254,14 +254,14 @@ server 在另一个任务里收到 tool_result 事件才入队的话，harness �
 
 ### 5.3 一个会话一个写者
 
-- `LogWriter` 住在 `crates/elysper-session/src/writer.rs`，包一个 `Arc<dyn SessionSink>` 与一个
-  `elysper_core::Clock`。
+- `LogWriter` 住在 `crates/uva-session/src/writer.rs`，包一个 `Arc<dyn SessionSink>` 与一个
+  `uva_core::Clock`。
 - **一个会话一个实例**，挂在会话本身：`SessionRegistry::writer(user_id, session_id) -> Arc<LogWriter>`
   （与 `SessionRegistry::sink()` 并列，后者已经按会话缓存 sink ✓）。理由见 F8。
 - run 期间把写者交给 agent（`ReActAgent::with_log_writer`）；反馈、关闭标记、子代理标记、
   会话 fork、消息编辑、上下文 crate 的写回也都用它。
 - 写者是该会话**唯一**的写者。**任何代码路径都不得再直接 `SessionSink::append`**
-  （写者自身除外）——这条门禁是**全仓库**的，因此 `elysper-context` 的两个写点
+  （写者自身除外）——这条门禁是**全仓库**的，因此 `uva-context` 的两个写点
   （`memory/typed.rs:145-148`、`memory/session.rs:211`）必须一起改，它们的公共 API
   （`repair_session(Arc<dyn SessionSink>)`、`SessionMemory::new(sink)`）随之变成拿写者。
 - **计数器必须从日志里已有的最大序号续接，不能从行数续接**（F7）：开一个已有日志时，
@@ -325,31 +325,31 @@ server 在另一个任务里收到 tool_result 事件才入队的话，harness �
 
 | 删什么 | 在哪 | 连带 |
 |---|---|---|
-| `TypedEventSink` / `TypedEventReceiver`（**通道**，不是类型） | `crates/elysper-session/src/typed_event_sink.rs` | 同文件的 `TypedEventRecord`（`:68`）与 `CompactionRecordView`（`:111`）**保留**——后者是 server 的公共 API（`agent_run_config.rs:28,41,49`），且经 facade 的 glob 导出 |
-| facade 的 `TypedEventSink` re-export 与文档引用 | `crates/elysper/src/prelude.rs:123`、`src/lib.rs:57,136,251`、`src/session.rs:7-8` | `MINIMAL.md`、`README.md:258,270,275`、`SEAMS.md:21` 同步改写 |
-| `EventSink.typed_sink` 字段、`has_typed()` | `crates/elysper-harness/src/agent/sink.rs:31,54` | `EventSink::new` 的参数从 3 个变 2 个 → **11 个调用点、7 个文件、4 个 crate**：`elysper-strategy-cot`、`elysper-strategy-best-of-n`、`elysper-strategy-plan-execute`（含 example）、`elysper-harness` 自身；strategy crate 还在调 `sink.emit_typed(...)`（`cot:138-141`、`best-of-n:288-291`），路由随之变 |
-| `EnvCaps.typed_sink` 字段 | `crates/elysper-harness/src/agent/caps.rs:58,106` | — |
-| `ReActAgent::with_typed_event_sink` | `crates/elysper-harness/src/agent/re_act/agent.rs:214` | `crates/elysper-harness/examples/assemble_with_builder.rs:33,76,101` 与 `crates/elysper/examples/assemble_from_zero.rs:191-199` 同步改 |
+| `TypedEventSink` / `TypedEventReceiver`（**通道**，不是类型） | `crates/uva-session/src/typed_event_sink.rs` | 同文件的 `TypedEventRecord`（`:68`）与 `CompactionRecordView`（`:111`）**保留**——后者是 server 的公共 API（`agent_run_config.rs:28,41,49`），且经 facade 的 glob 导出 |
+| facade 的 `TypedEventSink` re-export 与文档引用 | `crates/uva/src/prelude.rs:123`、`src/lib.rs:57,136,251`、`src/session.rs:7-8` | `MINIMAL.md`、`README.md:258,270,275`、`SEAMS.md:21` 同步改写 |
+| `EventSink.typed_sink` 字段、`has_typed()` | `crates/uva-harness/src/agent/sink.rs:31,54` | `EventSink::new` 的参数从 3 个变 2 个 → **11 个调用点、7 个文件、4 个 crate**：`uva-strategy-cot`、`uva-strategy-best-of-n`、`uva-strategy-plan-execute`（含 example）、`uva-harness` 自身；strategy crate 还在调 `sink.emit_typed(...)`（`cot:138-141`、`best-of-n:288-291`），路由随之变 |
+| `EnvCaps.typed_sink` 字段 | `crates/uva-harness/src/agent/caps.rs:58,106` | — |
+| `ReActAgent::with_typed_event_sink` | `crates/uva-harness/src/agent/re_act/agent.rs:214` | `crates/uva-harness/examples/assemble_with_builder.rs:33,76,101` 与 `crates/uva/examples/assemble_from_zero.rs:191-199` 同步改 |
 | harness 的 `log/` 模块（`mod.rs` / `queue.rs` / `tests.rs`） | 搬到 session crate | — |
-| `Durability` 枚举 | `crates/elysper-harness/src/log/mod.rs:36-56` | 四档全无生产使用者；`Batched` 从未构造 → `flush_if_batched` 的 `Batched` 分支（`:209-212`）随之删 |
-| `LogWriter::durability()` 死 getter | `crates/elysper-harness/src/log/mod.rs:115` | — |
+| `Durability` 枚举 | `crates/uva-harness/src/log/mod.rs:36-56` | 四档全无生产使用者；`Batched` 从未构造 → `flush_if_batched` 的 `Batched` 分支（`:209-212`）随之删 |
+| `LogWriter::durability()` 死 getter | `crates/uva-harness/src/log/mod.rs:115` | — |
 | server 与 context crate 对 `SessionSink::append` 的直接调用 | 见 F8 | 全部改走写者 |
-| 每 delta 一条 `AssistantChunk` 行 | `crates/elysper-harness/src/agent/re_act/stream.rs:39-66` | 整条 assistant 消息行承载同样的信息（delta 拼起来就是文本），逐 chunk 边界不值得留 |
+| 每 delta 一条 `AssistantChunk` 行 | `crates/uva-harness/src/agent/re_act/stream.rs:39-66` | 整条 assistant 消息行承载同样的信息（delta 拼起来就是文本），逐 chunk 边界不值得留 |
 
-**不删**：`assemble_chunks`（`crates/elysper-session/src/surface.rs:207`）——它是公共 re-export
+**不删**：`assemble_chunks`（`crates/uva-session/src/surface.rs:207`）——它是公共 re-export
 （`session/src/lib.rs:130`，facade glob 再导出一次）、有 intra-doc 链接
 （`events.rs:153`、`surface.rs:12`，`make doc-check` 用 `-D warnings`，删了直接红）、
 还有一个 harness 测试在用（`steering_hooks.rs:118,186`）。留着无害。
 
 `Durability` 一并删掉的理由：它今天没有任何生产构造点，而「什么时候 flush」本来就该由调用方决定
-（harness 在 step 边界、server 在广播前）。`elysper::harness::Durability` 这个路径随之消失
+（harness 在 step 边界、server 在广播前）。`uva::harness::Durability` 这个路径随之消失
 （破坏性，已批准）。
 
 ---
 
 ## 6. API 草案
 
-`crates/elysper-session/src/writer.rs`：
+`crates/uva-session/src/writer.rs`：
 
 ```rust
 /// 一个会话的唯一写者。
@@ -360,7 +360,7 @@ pub struct LogWriter { /* sink, clock, ledger, queue, spill */ }
 
 impl LogWriter {
     /// 建一个写者。`sink` 是这个会话的持久化后端；`clock` 给每一行盖时间戳
-    /// （`elysper_core::Clock`——库代码不得直接 `chrono::Utc::now()`）。
+    /// （`uva_core::Clock`——库代码不得直接 `chrono::Utc::now()`）。
     pub fn new(sink: Arc<dyn SessionSink>, clock: Arc<dyn Clock>) -> Self;
 
     /// 挂上这个会话的账本（压缩检查点用它定位被遮蔽的行）。
@@ -403,7 +403,7 @@ impl CompactionCheckpoint {
 
 两个回调（`record_callback` / `lifecycle_callback`）是同步的 → 走 `append_event_nowait` ✓。
 
-`elysper-context` 的两个公共 API 随之改：
+`uva-context` 的两个公共 API 随之改：
 - `repair_session(sink: Arc<dyn SessionSink>)` → 拿写者（它自己算的 closers 序号
   `repair.rs:201-240` 的 `state.last_seq + 1` 是**第三个序号来源**，必须去掉）。
 - `SessionMemory::new(sink)` → 拿写者（`memory/session.rs:211`）。
@@ -415,7 +415,7 @@ impl CompactionCheckpoint {
 
 ## 7. 改动清单
 
-### `elysper-session`
+### `uva-session`
 - 新增 `src/writer.rs`（写者 + 队列/spill + 账本喂入 + 计数器续接），`src/writer/tests.rs`。
 - 删 `src/typed_event_sink.rs` 里的**通道**（`TypedEventSink` / `TypedEventReceiver`），
   保留 `TypedEventRecord` 与 `CompactionRecordView`（公共 API）。
@@ -430,7 +430,7 @@ impl CompactionCheckpoint {
 - `src/events.rs`：typed 行的 `seq` / `ts` 由写者盖章（事件自带的 `seq: 0` 被覆盖）。
 - `examples/compaction_checkpoint.rs`：改用写者。
 
-### `elysper-harness`
+### `uva-harness`
 - 删 `src/log/`（`mod.rs` / `queue.rs` / `tests.rs`）；`src/lib.rs` 的 `pub use log::{…}` 去掉。
 - `src/agent/sink.rs`：`EventSink` 只留 `log_writer: Option<Arc<LogWriter>>`；删 `typed_sink` 与
   `has_typed()`；`EventSink::new` 少一个参数 → **11 个调用点、4 个 crate**（见 §5.9）。
@@ -445,7 +445,7 @@ impl CompactionCheckpoint {
 - `src/agent/re_act/tests/steering_hooks.rs:118,186`：`assemble_chunks` 保留 → 测试不动 ✓。
 - `examples/assemble_with_builder.rs`：改用写者。
 
-### `elysper-server`
+### `uva-app-server`
 - `session/controller/run_log.rs`：`RunLog` 改持 `Arc<LogWriter>`。
 - `session/controller/dispatch.rs:320`、`inner.rs:166`、`subagent_router.rs:181,185,202,217,229`、
   `routes/sessions.rs:998,1128,1164,1505,1513,1651,1821,1829`、`routes/messages/mod.rs:531-532`：
@@ -461,23 +461,23 @@ impl CompactionCheckpoint {
   路由器不再复制子 agent 的模型事件（只复制它自己写的标记行）。
 - `state/app_state/sessions.rs:135`：`repair_session` 改拿写者。
 
-### `elysper-context`
+### `uva-context`
 - `src/memory/typed.rs:145-148`：`repair_session` 改拿写者（不再自己算 closers 的序号）。
 - `src/memory/session.rs:211`：`SessionMemory::append` 改走写者；`SessionMemory::new(sink)` 的
   公共签名随之改。
 
-### `elysper-strategy-cot` / `elysper-strategy-best-of-n` / `elysper-strategy-plan-execute`
+### `uva-strategy-cot` / `uva-strategy-best-of-n` / `uva-strategy-plan-execute`
 - `EventSink::new` 的参数变化 → 同步改（`cot/src/lib.rs`、`best-of-n/src/lib.rs`、
   `plan-execute/src/strategy.rs`、各自的 example）；它们调 `sink.emit_typed(...)` 的地方随之改。
 
-### `elysper`（facade）
+### `uva`（facade）
 - `src/prelude.rs` / `src/lib.rs` / `src/session.rs`：去掉通道与 `Durability` 的 re-export 与文档引用；
-  **写者的导出路径定为 `elysper::session::LogWriter`**（harness 模块没了；`elysper::harness::LogWriter`
+  **写者的导出路径定为 `uva::session::LogWriter`**（harness 模块没了；`uva::harness::LogWriter`
   这个路径消失）。
 - `examples/assemble_from_zero.rs`、`tests/feature_gating.rs`：更新。
 - `MINIMAL.md`（**被编译的 doctest**）、`README.md:258,270,275`、`SEAMS.md:21`：同步改写。
 
-### `elysper-web`
+### `uva-web`
 - `src/lib/session-to-messages.ts`：`applyHistoryEntry`（`:524`）要认 `assistant_message` 行
   （今天只认 `UserInput` / `Model`，见 `:95-96`）；文本合并逻辑不变。
 
@@ -509,10 +509,10 @@ impl CompactionCheckpoint {
 
 ```bash
 cargo build --workspace
-cargo test -p elysper-session --lib
-cargo test -p elysper-harness --lib
-cargo test -p elysper-server --lib
-cargo test -p elysper-context --lib
+cargo test -p uva-session --lib
+cargo test -p uva-harness --lib
+cargo test -p uva-app-server --lib
+cargo test -p uva-context --lib
 cargo +nightly fmt --all
 make ci                      # fmt-check + lint-rust + doc-check + test-guides + 各类棘轮
 make check-harness-docs      # 注释预算必须 ≤ 56（当前 53）
@@ -551,7 +551,7 @@ make check-pub-surface-strict
 | 并发写的顺序不再等于序号顺序 | I2/I3：折叠器读 `seq`，顺序不再是前提 |
 | 计数器续接改成「取最大 seq」需要读文件尾 | 开一个已有日志时多做一次尾读；旧日志退回行数（F7 的兼容分支） |
 | 公共 API 破坏面比预期大 | `EventSink::new` 的参数变化波及 4 个 crate；`TypedEventSink` 的删除波及 facade、MINIMAL.md、README、SEAMS、三个 example、三个 strategy crate——**一次切干净，不留 shim** |
-| `elysper-session` 的 `pub use` 顶格（13/13） | 同一个提交里抬 `scripts/paradigm-surface` 基线 |
+| `uva-session` 的 `pub use` 顶格（13/13） | 同一个提交里抬 `scripts/paradigm-surface` 基线 |
 | server 多节点（Redis 模式）下两个节点同时写同一会话 | 会话有租约（`cluster/redis_bus.rs`），同一时刻只有一个持有者；`seq` 由 sink 的计数器发，跨节点不成立 → **多节点下同一会话不得并发写**，这是既有约束，不是本轮引入 |
 | 「每 step 一次 fsync」没做 | 明确列为非目标；下一轮做（需要新增一个 step 边界事件 + 改 durable 行的广播时机） |
 

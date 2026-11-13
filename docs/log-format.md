@@ -9,9 +9,9 @@ schema version guarantees, what happens when this build meets a
 file it cannot read, and the path for changing the format.
 
 The code behind every claim here is
-[`crates/elysper-session/src/jsonl.rs`](crates/elysper-session/src/jsonl.rs);
+[`crates/uva-session/src/jsonl/`](../crates/uva-session/src/jsonl/);
 the events themselves are `SessionEvent` in
-[`crates/elysper-session/src/events.rs`](crates/elysper-session/src/events.rs).
+[`crates/uva-session/src/events/`](../crates/uva-session/src/events/).
 
 ## What a v2 file looks like
 
@@ -19,7 +19,7 @@ The first non-empty line is the **header**; every line after it is
 an event row:
 
 ```json
-{"_meta":{"kind":"elysper_session_meta","schema_version":2,"id":"<session id>"}}
+{"_meta":{"kind":"uva_session_meta","schema_version":2,"id":"<session id>"}}
 {"type":"user_message","seq":1,"ts":"2026-10-27T09:14:02Z","data":{…}}
 {"type":"assistant_message","seq":2,"ts":"2026-10-27T09:14:03Z","data":{…}}
 {"type":"tool_result","seq":5,"ts":"2026-10-27T09:14:04Z","data":{…}}
@@ -118,7 +118,7 @@ The forward path, when a row shape or invariant changes in a way
 older readers cannot safely consume:
 
 1. Bump `CURRENT_SCHEMA_VERSION` in
-   [`crates/elysper-session/src/jsonl.rs`](crates/elysper-session/src/jsonl.rs).
+   [`crates/uva-session/src/jsonl/`](../crates/uva-session/src/jsonl/).
    The gate needs no separate wiring — the reader compares
    against the constant, so every other version (older and newer)
    is refused from the moment the constant moves.

@@ -1,4 +1,4 @@
-# shellcheck.yml — Elysper
+# shellcheck.yml — Uva
 #
 # Lock the bash gate scripts to a clean `shellcheck` baseline. These
 # scripts are invoked from `Makefile` and
@@ -12,7 +12,7 @@
 # downloads the official `koalaman/shellcheck` Linux binary so no apt
 # or sudo is needed.
 #
-# 触发: push / PR / 每天 UTC 05:00（与 stale / markdown-lint 错开 1 小时）。
+# 触发: push / PR / 每周三 UTC 05:00（与 stale / markdown-lint 错开）。
 name: shellcheck
 
 on:
@@ -21,7 +21,7 @@ on:
   pull_request:
     branches: [master]
   schedule:
-    - cron: "0 5 * * *"
+    - cron: "0 5 * * 3"
   workflow_dispatch:
 
 permissions:
@@ -59,6 +59,7 @@ jobs:
             ./scripts/check-publishable.sh
             ./scripts/check-single-writer.sh
             ./scripts/check-stdout.sh
+            ./scripts/verify-harness-e2e.sh
           # SC1091 (sourced file not found) is irrelevant: the gate
           # scripts do not source anything. SC2086 (unquoted globbing)
           # is intentional in the awk pipeline; see the comment in

@@ -8,16 +8,16 @@
 #
 # Why this exists: `check-harness-shape` already pins the
 # harness crate's function length / nesting budget; plugin crates
-# (`elysper-tool-plugins` / `-policy-plugins` / `-plugin-runtime` plus
-# `elysper-mcp` / `-skill` / `-attachment`) ship one plugin per module
+# (`uva-tool-plugins` / `-policy-plugins` / `-plugin-runtime` plus
+# `uva-mcp` / `-skill` / `-attachment`) ship one plugin per module
 # directory, and the same long-file drift that motivated the harness
 # budget shows up there too. The gate is intentionally
 # file-grained (not function-grained): plugins are small and the
 # natural remediation is splitting the file, not extracting helpers
 # inline.
 #
-# Scoped to plugin crates on purpose: `elysper-harness` is governed
-# by `check-harness-shape`; `elysper-app-server` and `elysper-mcp-server`
+# Scoped to plugin crates on purpose: `uva-harness` is governed
+# by `check-harness-shape`; `uva-app-server` and `uva-mcp-server`
 # are app / binary crates and their file layout is deployment-driven.
 #
 # Exit 0 with an `OK:` line, or exit 1 with the offending files.
@@ -29,12 +29,11 @@ cd "$(dirname "$0")/.."
 # Plugin-crate roots whose production source files participate in
 # the gate. Each root is the leaf crate directory under `crates/`.
 PLUGIN_CRATE_ROOTS=(
-  crates/elysper-tool-plugins
-  crates/elysper-policy-plugins
-  crates/elysper-plugin-runtime
-  crates/elysper-mcp
-  crates/elysper-skill
-  crates/elysper-attachment
+  crates/uva-tool-plugins
+  crates/uva-policy-plugins
+  crates/uva-mcp
+  crates/uva-skill
+  crates/uva-attachment
 )
 
 # Baseline cap: highest current line count across the scanned file

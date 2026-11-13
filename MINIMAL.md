@@ -1,37 +1,36 @@
-# The Minimal Elysper Agent
+# The Minimal Uva Agent
 
 A from-zero guide for the consumer who wants the **smallest** working
 agent and is willing to learn more pieces later. Each crate is opt-in;
-nothing in `elysper` is forced on you.
+nothing in `uva` is forced on you.
 
 ## Step 0 — Decide what you actually need
 
 | Want to … | Add this crate | Add this feature flag |
 |---|---|---|
-| Talk to a model (your own impl) | `elysper-provider` | `provider` |
-| Use the bundled Anthropic adapter | `elysper-provider` | `provider-anthropic` |
-| Use the bundled OpenAI adapter | `elysper-provider` | `provider-openai` |
-| Define tools | `elysper-tool` | `tool` |
-| Give the agent the offline file and process tools | `elysper-tool-plugins` (`read`, `write`, `shell`, `todo`) | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
-| Let the agent fetch URLs | `elysper-tool-plugins` (`web`) | `tool-web` |
-| Delegate to peer agents | `elysper-tool-plugins` (`task`) | `tool-task` |
-| Run a ReAct loop | `elysper-harness` | `harness` |
-| Have a context window policy | `elysper-context` | `context` |
-| Persist session events | `elysper-session` | `session` |
-| Apply guards / hints / hooks | `elysper-steering` | `steering` |
-| Cancel a run | `elysper-core` (in the others already) | `core` |
-| Derive `#[derive(Tool)]` | `elysper-macros` | `macros` |
-| Persist SQLite memory | `elysper-context` | `sqlite` |
-| Drive MCP servers | `elysper-mcp` | `mcp` |
-| Let the agent browse and call MCP tools | `elysper-mcp` | `mcp` |
-| Run a scheduler (host-owned timer) | `elysper-scheduler` | `scheduler` |
-| Let the agent create / pause / cancel scheduled jobs | `elysper-tool-plugins` (`scheduler`) | `tool-scheduler` |
-| Define workflows | `elysper-workflow` | `workflow` |
-| Run eval suites | `elysper-eval` | `eval` |
-| Bundle skills | `elysper-skill` | `skill` |
-| Attach images / audio / files | `elysper-attachment` | `attachment` |
-| Extend the runtime with kernel plugins (manifests, mount, unload) | `elysper-kernel` | `kernel` |
-| Run the reference agent runtime (stdio core / gateway binary) | `elysper-app-server` (binary crate, not a lib dep) | — |
+| Talk to a model (your own impl) | `uva-provider` | `provider` |
+| Use the bundled Anthropic adapter | `uva-provider` | `provider-anthropic` |
+| Use the bundled OpenAI adapter | `uva-provider` | `provider-openai` |
+| Define tools | `uva-tool` | `tool` |
+| Give the agent the offline file and process tools | `uva-tool-plugins` (`read`, `write`, `shell`, `todo`) | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
+| Let the agent fetch URLs | `uva-tool-plugins` (`web`) | `tool-web` |
+| Delegate to peer agents | `uva-tool-plugins` (`task`) | `tool-task` |
+| Run a ReAct loop | `uva-harness` | `harness` |
+| Have a context window policy | `uva-context` | `context` |
+| Persist session events | `uva-session` | `session` |
+| Apply guards / hints / hooks | `uva-steering` | `steering` |
+| Cancel a run | `uva-core` (in the others already) | `core` |
+| Implement a tool | `uva-tool` | `tool` (the trait + the registry) |
+| Persist SQLite memory | `uva-context` | `sqlite` |
+| Drive MCP servers | `uva-mcp` | `mcp` |
+| Let the agent browse and call MCP tools | `uva-mcp` | `mcp` |
+| Run a scheduler (host-owned timer) | `uva-scheduler` | `scheduler` |
+| Let the agent create / pause / cancel scheduled jobs | `uva-tool-plugins` (`scheduler`) | `tool-scheduler` |
+| Run eval suites | `uva-eval` | `eval` |
+| Bundle skills | `uva-skill` | `skill` |
+| Attach images / audio / files | `uva-attachment` | `attachment` |
+| Extend the runtime with kernel plugins (manifests, mount, unload) | `uva-kernel` | `kernel` |
+| Run the reference agent runtime (stdio core / gateway binary) | `uva-app-server` (binary crate, not a lib dep) | — |
 
 The default feature set assembles a basic agent — including the two
 bundled HTTP adapters and the `web_fetch` builtin. The **minimum**
@@ -39,7 +38,7 @@ subset you can ship an MVP with is:
 
 ```toml
 [dependencies]
-elysper = { version = "0.1", default-features = false, features = [
+uva = { version = "0.1", default-features = false, features = [
     "core", "provider", "context", "tool", "session", "steering", "harness",
 ] }
 ```
@@ -71,7 +70,7 @@ as a single delta, so overriding it is an optimisation, not an
 obligation.
 
 ```rust
-use elysper::prelude::*;
+use uva::prelude::*;
 
 // Simple path: one synchronous answer per turn.
 struct OneShot { answer: &'static str }
@@ -106,8 +105,8 @@ impl ModelProvider for OneShot {
 }
 ```
 
-For a real provider, see `elysper-provider::AnthropicProvider` and
-`elysper-provider::OpenAICompatibleProvider`. They both implement the
+For a real provider, see `uva-provider::AnthropicProvider` and
+`uva-provider::OpenAICompatibleProvider`. They both implement the
 same trait, so the rest of your code does not change.
 
 ## Step 2 — Assemble the agent
@@ -121,7 +120,7 @@ it runs one turn.
 use std::{sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use elysper::prelude::*;
+use uva::prelude::*;
 
 async fn assemble(provider: Arc<dyn ModelProvider>) {
     // 1) tools      — the paradigm ships no agent-facing set: the
@@ -180,7 +179,7 @@ make check-mvp-deps
 ```
 
 `docs/examples/minimal-consumer` is the guide above turned into a
-program: one dependency (`elysper`, `default-features = false`), the
+program: one dependency (`uva`, `default-features = false`), the
 seven features, a scripted provider that asks for a tool, a hand-written
 `Tool`, and an assertion that the tool really ran. It compiles no tool
 implementation at all — the paradigm ships the registry and the trait,
@@ -196,15 +195,15 @@ re-enters that feature set.
 | A bundled model adapter | add the `provider-anthropic` / `provider-openai` feature → `AnthropicProvider` / `OpenAICompatibleProvider` |
 | The offline file and process tools | add `tool-read` / `tool-write` / `tool-shell` / `tool-todo` and register the bricks you want: `registry.register_entry(ToolEntry::new(Arc::new(ReadTool::new())))` |
 | `web_fetch` | add the `tool-web` feature |
-| Your own executor | `.with_spawner(Arc::new(MySpawner))` — the loop's per-run detach goes wherever you say (`cargo run --example runtime_agnostic -p elysper-harness`) |
-| Durable run log | `elysper::session::LogWriter::new(sink, clock)` + `.with_log_writer(writer)` — the session's one writer stamps each row's ordinal, buffers it, and flushes at the step boundary |
+| Your own executor | `.with_spawner(Arc::new(MySpawner))` — the loop's per-run detach goes wherever you say (`cargo run --example runtime_agnostic -p uva-harness`) |
+| Durable run log | `uva::session::LogWriter::new(sink, clock)` + `.with_log_writer(writer)` — the session's one writer stamps each row's ordinal, buffers it, and flushes at the step boundary |
 | Structured output schema | `.with_output_schema(json!({...}))` |
 | LLM-driven compaction | `SummaryCompactor::new(provider, model).with_settings(settings)` + `.with_compactor(...)`: the session crate owns the one compaction engine, and a context manager only projects the request |
 | The defensive policy | `Host::default_policy(workspace)` instead of `Host::new()` — five guards, three hints, the adaptive tracker and the logging hook |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
-| Multi-agent delegation | `elysper-tool-plugins` (`task`): `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
-| Plugin kernel | add the `kernel` feature and mount a manifest group: `let ctx = elysper::kernel::Context::new(); let mounted = elysper::kernel::mount_all(&ctx, &[Arc::new(MyPlugin)])?;` — `mounted.dispose_plugin("my-id")` unloads one plugin and parks its consumers; UI extensions are `[ui]` profile rows the frontend renders from `ui/schema`, never remote code |
-| Remote MCP tools the host discovered | `elysper-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
+| Multi-agent delegation | `uva-tool-plugins` (`task`): `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
+| Plugin kernel | add the `kernel` feature and mount a manifest group: `let ctx = uva::kernel::Context::new(); let mounted = uva::kernel::mount_all(&ctx, &[Arc::new(MyPlugin)])?;` — `mounted.dispose_plugin("my-id")` unloads one plugin and parks its consumers; UI extensions are `[ui]` profile rows the frontend renders from `ui/schema`, never remote code |
+| Remote MCP tools the host discovered | `uva-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
 | Scheduling, model-side | add `tool-scheduler` and share one store: `let store = Arc::new(ScheduleStore::new(dir)); register_scheduler_tool(&registry, SchedulerTool::new(Arc::clone(&store)));` — the host still owns delivery (`Scheduler::new(store).tick(now)`), and a tool-side write (or a `ScheduleStore::load` that ingests another process's rows) reaches the next `tick` / `next_deadline` on its own: the pass sees the store's revision move and rebuilds its wheel. `Scheduler::resync(now)` stays available as the explicit rebuild, for a host that needs the wheel correct between passes |
 
 Each one is **opt-in**: if you do not add the feature or call the
@@ -222,11 +221,11 @@ table silently lying.
 use std::sync::Arc;
 
 use serde_json::json;
-use elysper::core::spawn::{BoxFuture, Spawner};
-use elysper::harness::ReActAgent;
-use elysper::prelude::*;
-use elysper::session::{LogWriter, SummaryCompactor, in_memory::InMemorySessionSink};
-use elysper::tool::ToolRestriction;
+use uva::core::spawn::{BoxFuture, Spawner};
+use uva::harness::ReActAgent;
+use uva::prelude::*;
+use uva::session::{LogWriter, SummaryCompactor, in_memory::InMemorySessionSink};
+use uva::tool::ToolRestriction;
 
 // Everything the Step-3 table names, in one chain. Each call is the
 // real mutator name: the bare `.spawner(..)` / `.strategy(..)` forms
@@ -254,7 +253,7 @@ fn every_opt_in(
 
     // Compression is the session's `Compactor`; a context manager only
     // projects or trims the request it is handed.
-    let settings = elysper::session::CompactionSettings::default();
+    let settings = uva::session::CompactionSettings::default();
     let compactor =
         Arc::new(SummaryCompactor::new(Arc::clone(&provider), "model").with_settings(settings));
 
@@ -276,7 +275,7 @@ The prelude is the **minimum** vocabulary for the canonical
 7-piece assembly. Beyond that, name types by module path:
 
 ```rust
-use elysper::{
+use uva::{
     session::jsonl::JsonlSessionSink, // production durable sink
     session::{SummaryCompactor, plan_compaction}, // the one compaction engine
     tool::ToolSurfacePolicy,  // what the model is shown
@@ -284,8 +283,8 @@ use elysper::{
 ```
 
 The plugin family adds its own modules once you enable the feature —
-`elysper::tool_read::ReadTool`, `elysper::tool_web::WebFetchTool`,
-`elysper::tool_task::TaskDelegator`, and so on:
+`uva::tool_read::ReadTool`, `uva::tool_web::WebFetchTool`,
+`uva::tool_task::TaskDelegator`, and so on:
 if a name is not in the prelude, the module that owns it has it.
 
 Every `pub use` at the facade's module roots is a lego brick; the
@@ -296,8 +295,8 @@ in the prelude.
 
 | Don't | Do |
 |---|---|
-| Reach into `elysper_provider::types::Content` directly from your app | Use `Content` through the prelude or `elysper::prelude::Content` |
-| Hard-code `Arc<tokio_util::sync::CancellationToken>` as a `CancelToken` | Use `elysper_core::AtomicCancelToken` and keep the runtime choice yours |
+| Reach into `uva_provider::types::Content` directly from your app | Use `Content` through the prelude or `uva::prelude::Content` |
+| Hard-code `Arc<tokio_util::sync::CancellationToken>` as a `CancelToken` | Use `uva_core::AtomicCancelToken` and keep the runtime choice yours |
 | Implement `Agent` directly for a custom paradigm | Compose: change the loop, keep `Host` / `ContextManager` / `ToolRegistry` the same |
 | Build `Vec<Arc<dyn Tool>>` by hand | Use `ToolRegistry` — it gives you scoping, surfacing, and the deferred-exposure seam for free |
 | Pass `&dyn ModelProvider` across an `await` | Wrap it in `Arc<dyn ModelProvider>` once, share the `Arc` |
@@ -305,7 +304,7 @@ in the prelude.
 ## Where to read next
 
 - [`SEAMS.md`](SEAMS.md) — every extendable trait in one table, with the line that installs a replacement
-- [`crates/elysper/examples/assemble_from_zero.rs`](crates/elysper/examples/assemble_from_zero.rs) — the full MVP code as a runnable program
+- [`crates/uva/examples/assemble_from_zero.rs`](crates/uva/examples/assemble_from_zero.rs) — the full MVP code as a runnable program
 - [`docs/examples/README.md`](docs/examples/README.md) — every example, organised by seam
-- [`crates/elysper/Cargo.toml`](crates/elysper/Cargo.toml) — the canonical feature → module map
-- [`docs/architecture/adr/`](docs/architecture/adr/) — the decisions that shaped this shape
+- [`crates/uva/Cargo.toml`](crates/uva/Cargo.toml) — the canonical feature → module map
+- [`docs/architecture.md`](docs/architecture.md) — the crate map and the decisions that shaped this shape

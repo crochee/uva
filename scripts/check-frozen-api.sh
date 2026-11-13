@@ -64,13 +64,13 @@ cd "$(dirname "$0")/.."
 # The frozen crates: the seven paradigm crates whose lib.rs is a
 # curated surface. Kept explicit so a new crate never joins silently.
 FROZEN_CRATES=(
-  crates/elysper-core
-  crates/elysper-context
-  crates/elysper-harness
-  crates/elysper-provider
-  crates/elysper-session
-  crates/elysper-steering
-  crates/elysper-tool
+  crates/uva-core
+  crates/uva-context
+  crates/uva-harness
+  crates/uva-provider
+  crates/uva-session
+  crates/uva-steering
+  crates/uva-tool
 )
 
 baseline_file="scripts/frozen-api/baseline"

@@ -1,5 +1,5 @@
 [package]
-name = "elysper-desktop"
+name = "uva-desktop"
 description = "The Tauri desktop shell: supervise the gateway sidecar and host its webview"
 # Application crate behind a cross-workspace path dependency on a
 # `publish = false` crate; nothing here belongs on a registry.
@@ -13,7 +13,7 @@ license = "MIT"
 # (spawn `serve`, wait for /readyz with a 30s budget, backoff restart,
 # reap) lives in the shared gateway crate (design D14). Cross-workspace
 # path dep — see the workspace root comment for the accepted cost.
-elysper-gateway = { path = "../../crates/elysper-gateway" }
+uva-gateway = { path = "../../crates/uva-gateway" }
 # `wry` is the webview backend C1 verified locally (2.12.5).
 tauri = { version = "2.12", features = ["wry"] }
 # App boundary: errors bubble as context strings, nothing to match

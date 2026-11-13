@@ -1,15 +1,15 @@
-diff --git a/crates/elysper-telemetry/src/env.rs b/crates/elysper-telemetry/src/env.rs
+diff --git a/crates/uva-telemetry/src/env.rs b/crates/uva-telemetry/src/env.rs
 index 9a8b7c6..1d2e3f4 100644
---- a/crates/elysper-telemetry/src/env.rs
-+++ b/crates/elysper-telemetry/src/env.rs
+--- a/crates/uva-telemetry/src/env.rs
++++ b/crates/uva-telemetry/src/env.rs
 @@ -12,8 +12,11 @@ pub fn log_filter() -> String {
--    std::env::var("ELYSPER_LOG").unwrap_or_else(|_| "info".to_string())
-+    std::env::var("ELYSPER_LOG_LEVEL")
-+        .or_else(|_| std::env::var("ELYSPER_LOG"))
+-    std::env::var("UVA_LOG").unwrap_or_else(|_| "info".to_string())
++    std::env::var("UVA_LOG_LEVEL")
++        .or_else(|_| std::env::var("UVA_LOG"))
 +        .unwrap_or_else(|_| "info".to_string())
  }
  
  pub fn otlp_endpoint() -> Option<String> {
--    std::env::var("ELYSPER_OTLP").ok()
-+    std::env::var("ELYSPER_OTLP_ENDPOINT").ok()
+-    std::env::var("UVA_OTLP").ok()
++    std::env::var("UVA_OTLP_ENDPOINT").ok()
  }

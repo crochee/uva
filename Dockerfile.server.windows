@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Multi-stage Dockerfile for cross-compiling elysper-app-server to
+# Multi-stage Dockerfile for cross-compiling uva-app-server to
 # Windows PE (x86_64-pc-windows-gnu).
 #
 # Pattern mirrors `Dockerfile.server` (musl) and `Dockerfile.mcp`:
@@ -14,17 +14,17 @@
 #
 # 镜像只用于出产物, 不运行: 末尾 `FROM scratch AS artifact` 把 PE 拷出,
 # 由 `docker buildx build --target artifact --output type=local,dest=dist .`
-# 直接落地 dist/elysper-app-server.exe. 镜像本体不持久化.
+# 直接落地 dist/uva-app-server.exe. 镜像本体不持久化.
 #
 # Build identity 同样由 `build.rs` 通过 cargo:rustc-env= 烘进二进制,
-# 与 Dockerfile.server / release.yml 走同一份协议 (ELYSPER_GIT_SHA /
-# ELYSPER_BUILD_TIME / ELYSPER_TARGET=...). CI 透传 tag SHA + wall-clock;
+# 与 Dockerfile.server / release.yml 走同一份协议 (UVA_GIT_SHA /
+# UVA_BUILD_TIME / UVA_TARGET=...). CI 透传 tag SHA + wall-clock;
 # 本地 `make windows` 无 SHA 时 `build.rs` 走 git 回退或 unknown 占位.
 
 ARG RUST_IMAGE=rust:1.98-slim-bookworm
 
-ARG ELYSPER_GIT_SHA=""
-ARG ELYSPER_BUILD_TIME=""
+ARG UVA_GIT_SHA=""
+ARG UVA_BUILD_TIME=""
 
 ########## Stage 0: chef —— 工具链 + mingw + cargo-chef (可复用基底) ##########
 FROM --platform=$BUILDPLATFORM ${RUST_IMAGE} AS chef
@@ -81,30 +81,30 @@ ENV CARGO_PROFILE_RELEASE_LTO=thin \
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo chef cook --release --target x86_64-pc-windows-gnu \
-        -p elysper-app-server --bin elysper-app-server \
+        -p uva-app-server --bin uva-app-server \
         --recipe-path recipe.json
 
 ########## Stage 3: builder —— 本仓库 crate (增量: 只编 crates/) ##########
 FROM cacher AS builder
-ARG ELYSPER_GIT_SHA
-ARG ELYSPER_BUILD_TIME
-ENV ELYSPER_GIT_SHA=${ELYSPER_GIT_SHA} \
-    ELYSPER_BUILD_TIME=${ELYSPER_BUILD_TIME} \
-    ELYSPER_PROFILE=release \
-    ELYSPER_TARGET=x86_64-pc-windows-gnu
+ARG UVA_GIT_SHA
+ARG UVA_BUILD_TIME
+ENV UVA_GIT_SHA=${UVA_GIT_SHA} \
+    UVA_BUILD_TIME=${UVA_BUILD_TIME} \
+    UVA_PROFILE=release \
+    UVA_TARGET=x86_64-pc-windows-gnu
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 # `.git/HEAD` 让 build.rs 在本地 docker 构建下能跑 `git rev-parse HEAD`
-# 回退; CI 透传 ELYSPER_GIT_SHA, 这一步被覆盖. .dockerignore 当前把
+# 回退; CI 透传 UVA_GIT_SHA, 这一步被覆盖. .dockerignore 当前把
 # .git/ 整体排除 —— 本地 `make windows` 因此会落到 build.rs 的 "unknown"
 # 分支, 与 release.yml 的预期一致 (CI 永远是 source of truth).
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo build --release --locked --target x86_64-pc-windows-gnu \
-        -p elysper-app-server \
-    && cp target/x86_64-pc-windows-gnu/release/elysper-app-server.exe \
-        /elysper-app-server.exe
+        -p uva-app-server \
+    && cp target/x86_64-pc-windows-gnu/release/uva-app-server.exe \
+        /uva-app-server.exe
 
 ########## Stage 4: artifact —— scratch 导出层 (--target artifact 入口) ##########
 FROM scratch AS artifact
-COPY --from=builder /elysper-app-server.exe /elysper-app-server.exe
+COPY --from=builder /uva-app-server.exe /uva-app-server.exe

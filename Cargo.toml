@@ -1,33 +1,29 @@
 [workspace]
 members = [
-    "crates/elysper",
-    "crates/elysper-core",
-    "crates/elysper-kernel",
-    "crates/elysper-telemetry",
-    "crates/elysper-provider",
-    "crates/elysper-context",
-    "crates/elysper-tool",
-    "crates/elysper-tool-plugins",
-    "crates/elysper-policy-plugins",
-    "crates/elysper-plugin-runtime",
-    "crates/elysper-skill",
-    "crates/elysper-agents",
-    "crates/elysper-session",
-    "crates/elysper-steering",
-    "crates/elysper-harness",
-    "crates/elysper-harness-tokio",
-    "crates/elysper-app-server",
-    "crates/elysper-test-support",
-    "crates/elysper-mcp",
-    "crates/elysper-mcp-server",
-    "crates/elysper-search",
-    "crates/elysper-scheduler",
-    "crates/elysper-macros",
-    "crates/elysper-eval",
-    "crates/elysper-workflow",
-    "crates/elysper-runtime",
-    "crates/elysper-tui",
-    "crates/elysper-gateway",
+    "crates/uva",
+    "crates/uva-core",
+    "crates/uva-kernel",
+    "crates/uva-telemetry",
+    "crates/uva-provider",
+    "crates/uva-context",
+    "crates/uva-tool",
+    "crates/uva-tool-plugins",
+    "crates/uva-policy-plugins",
+    "crates/uva-skill",
+    "crates/uva-session",
+    "crates/uva-steering",
+    "crates/uva-harness",
+    "crates/uva-core-tokio",
+    "crates/uva-app-server",
+    "crates/uva-test-support",
+    "crates/uva-mcp",
+    "crates/uva-mcp-server",
+    "crates/uva-search",
+    "crates/uva-scheduler",
+    "crates/uva-eval",
+    "crates/uva-runtime",
+    "crates/uva-tui",
+    "crates/uva-gateway",
 ]
 resolver = "2"
 
@@ -35,55 +31,38 @@ resolver = "2"
 blake3 = "1.5"
 # The facade crate: one dependency, one prelude. It re-exports the
 # pieces below and is never depended on by them (one-way, no cycle).
-elysper = { path = "crates/elysper", version = "0.1" }
-elysper-core = { path = "crates/elysper-core", version = "0.1" }
-elysper-kernel = { path = "crates/elysper-kernel", version = "0.1" }
-elysper-telemetry = { path = "crates/elysper-telemetry", version = "0.1", default-features = false }
-elysper-provider = { path = "crates/elysper-provider", version = "0.1", default-features = false }
-elysper-context = { path = "crates/elysper-context", version = "0.1" }
-elysper-tool = { path = "crates/elysper-tool", version = "0.1", default-features = false }
-elysper-tool-plugins = { path = "crates/elysper-tool-plugins", version = "0.1", default-features = false }
-elysper-policy-plugins = { path = "crates/elysper-policy-plugins", version = "0.1", default-features = false }
-elysper-plugin-runtime = { path = "crates/elysper-plugin-runtime", version = "0.1", default-features = false }
-elysper-skill = { path = "crates/elysper-skill", version = "0.1" }
-elysper-agents = { path = "crates/elysper-agents", version = "0.1" }
- elysper-steering = { path = "crates/elysper-steering", version = "0.1" }
-elysper-session = { path = "crates/elysper-session", version = "0.1" }
-elysper-harness = { path = "crates/elysper-harness", version = "0.1" }
-elysper-harness-tokio = { path = "crates/elysper-harness-tokio", version = "0.1" }
-elysper-app-server = { path = "crates/elysper-app-server", version = "0.1" }
-elysper-attachment = { path = "crates/elysper-attachment", version = "0.1" }
-elysper-mcp = { path = "crates/elysper-mcp", version = "0.1" }
-elysper-mcp-server = { path = "crates/elysper-mcp-server", version = "0.1" }
-elysper-scheduler = { path = "crates/elysper-scheduler", version = "0.1" }
-elysper-search = { path = "crates/elysper-search", version = "0.1" }
-elysper-test-support = { path = "crates/elysper-test-support", version = "0.1" }
-elysper-macros = { path = "crates/elysper-macros", version = "0.1" }
-elysper-eval = { path = "crates/elysper-eval", version = "0.1" }
-elysper-workflow = { path = "crates/elysper-workflow", version = "0.1" }
-elysper-runtime = { path = "crates/elysper-runtime", version = "0.1" }
+uva = { path = "crates/uva", version = "0.1" }
+uva-core = { path = "crates/uva-core", version = "0.1" }
+uva-kernel = { path = "crates/uva-kernel", version = "0.1" }
+uva-telemetry = { path = "crates/uva-telemetry", version = "0.1", default-features = false }
+uva-provider = { path = "crates/uva-provider", version = "0.1", default-features = false }
+uva-context = { path = "crates/uva-context", version = "0.1" }
+uva-tool = { path = "crates/uva-tool", version = "0.1", default-features = false }
+uva-tool-plugins = { path = "crates/uva-tool-plugins", version = "0.1", default-features = false }
+uva-policy-plugins = { path = "crates/uva-policy-plugins", version = "0.1", default-features = false }
+uva-skill = { path = "crates/uva-skill", version = "0.1" }
+ uva-steering = { path = "crates/uva-steering", version = "0.1" }
+uva-session = { path = "crates/uva-session", version = "0.1" }
+uva-harness = { path = "crates/uva-harness", version = "0.1" }
+uva-core-tokio = { path = "crates/uva-core-tokio", version = "0.1" }
+uva-app-server = { path = "crates/uva-app-server", version = "0.1" }
+uva-attachment = { path = "crates/uva-attachment", version = "0.1" }
+uva-mcp = { path = "crates/uva-mcp", version = "0.1" }
+uva-mcp-server = { path = "crates/uva-mcp-server", version = "0.1" }
+uva-scheduler = { path = "crates/uva-scheduler", version = "0.1" }
+uva-search = { path = "crates/uva-search", version = "0.1" }
+uva-test-support = { path = "crates/uva-test-support", version = "0.1" }
+uva-eval = { path = "crates/uva-eval", version = "0.1" }
+uva-runtime = { path = "crates/uva-runtime", version = "0.1" }
 # The terminal projection: a ratatui/crossterm front-end that drives the
 # `serve` gateway through the shared gateway crate (the same `/rpc`
 # WebSocket the browser speaks). It is an application crate, so it
 # stays `publish = false`.
-elysper-tui = { path = "crates/elysper-tui", version = "0.1" }
+uva-tui = { path = "crates/uva-tui", version = "0.1" }
 # Shared gateway support for the hosts: the `serve` process supervisor
 # and its WebSocket JSON-RPC client. `publish = false` — it consumes
 # the app server's CLI contract.
-elysper-gateway = { path = "crates/elysper-gateway", version = "0.1" }
-# The dynamic plugin channel's wire contract. serde-only on purpose:
-# a third-party plugin author depends on this alone, so it must never
-# grow a harness or runtime dependency.
-# The dynamic plugin channel's host half: it turns a plugin *process*
-# speaking the wire protocol into `Host` registrations. Runtime-free
-# on purpose (std process + the `Blocking`/`Sleeper` seams), which is
-# why it cannot reuse `elysper-mcp`'s tokio transport stack.
-# The opt-in Wasm component runtime. Only the facade's `wasm` feature
-# reaches it, so the default dependency graph stays wasmtime-free.
-# Once per Wasm runtime crate: pinned to the current stable minor. No
-# default features — the crate enables exactly the component model, the
-# runtime, Cranelift, std, and the WAT parser.
-wasmtime = { version = "50", default-features = false }
+uva-gateway = { path = "crates/uva-gateway", version = "0.1" }
 syn = "2.0"
 quote = "1.0"
 proc-macro2 = "1.0"
@@ -131,7 +110,7 @@ validator = { version = "0.21", features = ["derive"] }
 # Utilities
 ulid = { version = "3.0", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-# Cron parsing is opt-in: only `elysper-scheduler`'s `cron` feature
+# Cron parsing is opt-in: only `uva-scheduler`'s `cron` feature
 # pulls this in, and it does so behind `dep:cron`, so no default build
 # grows a parser dependency.
 cron = "0.17"
@@ -140,13 +119,13 @@ indexmap = "2.14"
 parking_lot = "0.12"
 rand = "0.8"
 # `bundled` compiles SQLite from the amalgamation (FTS5 enabled) so the
-# build needs no system libsqlite3; only the optional `elysper-context`
+# build needs no system libsqlite3; only the optional `uva-context`
 # `sqlite` feature pulls this in.
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 # HTTP server
 axum = { version = "0.8", features = ["ws"] }
-# Optional cluster bus backend (`elysper-app-server` feature
+# Optional cluster bus backend (`uva-app-server` feature
 # `cluster-redis`): pub/sub + `SET NX EX` leases. Only the
 # tokio async command surface is needed (multiplexed connections),
 # so the client's extra capabilities stay off.
@@ -164,7 +143,7 @@ reqwest = { version = "0.13", features = ["json", "stream"] }
 #                TLS for `https://` gRPC endpoints; metrics/logs signals off)
 #   - metrics  → prometheus (text exposition only; protobuf / push off)
 # Crate-level feature gates (`otel`, `metrics`) live in
-# `crates/elysper-telemetry/Cargo.toml` and re-export through downstream
+# `crates/uva-telemetry/Cargo.toml` and re-export through downstream
 # crates that opt into observability.
 tracing = { version = "0.1", default-features = false, features = [
   "std",
@@ -218,17 +197,17 @@ dotenvy = "0.15"
 # CLI
 clap = { version = "4.6", features = ["derive", "env"] }
 
-# Terminal UI (`elysper-tui` only). `ratatui`'s default backend is the
+# Terminal UI (`uva-tui` only). `ratatui`'s default backend is the
 # crossterm one, so the explicit feature keeps the dependency honest
 # without pulling a second terminal backend. Both crates are MIT; the
 # `event-stream` feature (a futures `Stream` of terminal events) is
-# enabled at the `elysper-tui` line, not here, because no other crate
+# enabled at the `uva-tui` line, not here, because no other crate
 # reads terminal events.
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 
 # Static assets baked into the binary (the `embed-web` feature of
-# `elysper-app-server`).
+# `uva-app-server`).
 rust-embed = "8.7"
 
 # YAML parsing
@@ -239,9 +218,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-repository = "https://github.com/crochee/elysper"
-homepage = "https://github.com/crochee/elysper"
-documentation = "https://docs.rs/elysper"
+repository = "https://github.com/crochee/uva"
+homepage = "https://github.com/crochee/uva"
+documentation = "https://docs.rs/uva"
 readme = "README.md"
 keywords = ["ai", "agent", "llm", "plugin", "orchestration"]
 categories = ["asynchronous", "development-tools"]
@@ -317,7 +296,7 @@ missing_crate_level_docs = "warn"
 #
 # Without this block, docs.rs falls back to "default features only", so
 # every opt-in feature surface (`cron` / `mcp` / `search` / `eval` /
-# `workflow` / `scheduler` / `telemetry` / `sqlite` / `attachment` /
+# `scheduler` / `telemetry` / `sqlite` / `attachment` /
 # `skill` / `tool-scheduler` / `tool-search` …) renders as an empty
 # module. That hides the opt-in contract from anyone reading the
 # rendered docs — exactly the audience the facade is for.

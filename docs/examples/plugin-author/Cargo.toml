@@ -12,7 +12,7 @@ publish = false
 # The framework entry: one dependency, the traits and the registries.
 # `tool` is the tool seam (the `Tool` trait + `ToolRegistry`), `kernel`
 # is the plugin lifecycle contract (`Plugin` / `EffectHandle`).
-elysper = { path = "../../../crates/elysper", default-features = false, features = [
+uva = { path = "../../../crates/uva", default-features = false, features = [
   "tool",
   "kernel",
 ] }

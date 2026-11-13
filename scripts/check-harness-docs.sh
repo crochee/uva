@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Comment-budget gate: the doc-comment lines sitting on non-`pub`
-# items under `crates/elysper-harness/src` must stay at or under
+# items under `crates/uva-harness/src` must stay at or under
 # the integer in `scripts/harness-docs/baseline`.
 #
 # Why this exists: the crate's *public* docs are the docs.rs
@@ -37,7 +37,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SRC_ROOT="crates/elysper-harness/src"
+SRC_ROOT="crates/uva-harness/src"
 BASELINE_FILE="scripts/harness-docs/baseline"
 
 if [[ ! -f "$BASELINE_FILE" ]]; then

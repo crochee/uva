@@ -15,17 +15,16 @@
 
 | 目录 / crate | 关注面 |
 | :--- | :--- |
-| `crates/elysper-core/` / `crates/elysper-macros/` | 核心 trait（`CancelToken` / `Spawner` / `Clock` / `IdGen` / `Registry`）；proc-macro `#[derive(Tool)]` |
-| `crates/elysper-provider/` | 模型适配（Anthropic / OpenAI compatible），wire type 与 streaming |
-| `crates/elysper-tool/` / 8 个 tool plugin crate | 工具范式 + 离线工具集 |
-| `crates/elysper-harness/` | ReAct 循环 + `Agent` / `ToolInterceptor` / strategy seam |
-| `crates/elysper-server/` | axum HTTP / SSE / `config.yaml` 加载 + 启动 |
-| `elysper-web/` | React / TS UI；MCP 浏览器面 |
+| `crates/uva-core/` / `crates/uva-macros/` | 核心 trait（`CancelToken` / `Spawner` / `Clock` / `IdGen` / `Registry`）；proc-macro `#[derive(Tool)]` |
+| `crates/uva-provider/` | 模型适配（Anthropic / OpenAI compatible），wire type 与 streaming |
+| `crates/uva-tool/` / 8 个 tool plugin crate | 工具范式 + 离线工具集 |
+| `crates/uva-harness/` | ReAct 循环 + `Agent` / `ToolInterceptor` / strategy seam |
+| `crates/uva-app-server/` | axum HTTP / SSE / `config.yaml` 加载 + 启动 |
+| `uva-web/` | React / TS UI；MCP 浏览器面 |
 | `.github/workflows/` / `Makefile` / `scripts/` | CI / 自动化 / 棘轮 |
 | `docs/` / 顶层 `*.md` | 文档体系（`MINIMAL` / `SEAMS` / `AGENTS` / `CHANGELOG`） |
-| `crates/elysper-search/` / `crates/elysper-tool-search/` | 通用搜索引擎 + 跨域 search 工具 |
-| `crates/elysper-scheduler/` / `crates/elysper-tool-scheduler/` | 调度运行时 + `schedule` 工具 |
-| `crates/elysper-workflow/` | 多智能体 workflow runtime |
+| `crates/uva-search/` / `crates/uva-tool-search/` | 通用搜索引擎 + 跨域 search 工具 |
+| `crates/uva-scheduler/` / `crates/uva-tool-scheduler/` | 调度运行时 + `schedule` 工具 |
 
 ## 权限授予
 

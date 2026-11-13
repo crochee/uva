@@ -4,7 +4,7 @@
 
 **Goal:** 一个会话一个写者、序号只有行里的 `seq` 一个来源、一次 flush 一次 `append_many`；assistant 一轮在日志里是一行，模型 resume 后看到的是一条完整的 assistant 消息。
 
-**Architecture:** 写者接缝从 `elysper-harness` 下沉到 `elysper-session`（折叠器本来就在那里，写者与折叠器必须能共用同一个序号判定）。server 通过 `SessionRegistry::writer(user_id, session_id)` 拿到该会话唯一的写者，harness 通过 `with_log_writer` 拿到同一个写者；两者都只经它落盘。折叠器改读行里的 `seq`（旧日志没有该字段时按位置计数，行为不变）。harness 写模型可见的事实（整条 assistant 消息一行、工具结果一行），delta 只走事件流不落盘。
+**Architecture:** 写者接缝从 `uva-harness` 下沉到 `uva-session`（折叠器本来就在那里，写者与折叠器必须能共用同一个序号判定）。server 通过 `SessionRegistry::writer(user_id, session_id)` 拿到该会话唯一的写者，harness 通过 `with_log_writer` 拿到同一个写者；两者都只经它落盘。折叠器改读行里的 `seq`（旧日志没有该字段时按位置计数，行为不变）。harness 写模型可见的事实（整条 assistant 消息一行、工具结果一行），delta 只走事件流不落盘。
 
 **Tech Stack:** Rust 1.98、edition 2024、`futures::channel::mpsc` + `futures::lock::Mutex`（runtime-free）、`thiserror`、`serde_json`。不新增依赖。不新增 cargo feature。
 
@@ -12,14 +12,14 @@
 
 ## Global Constraints
 
-- 库 crate 只用 `thiserror`；`elysper-server` 是 app crate，用 `anyhow`。
+- 库 crate 只用 `thiserror`；`uva-app-server` 是 app crate，用 `anyhow`。
 - 依赖版本一律 `major.minor`；新依赖只能来自根 `Cargo.toml` 的 `[workspace.dependencies]`，crate 内写 `dep = { workspace = true }`。
-- `max_width = 80`；禁通配符导入；`elysper-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
-- 库代码不得直接 `chrono::Utc::now()`——墙钟走 `elysper_core::Clock`。
+- `max_width = 80`；禁通配符导入；`uva-harness` 生产代码无函数 >100 行、无嵌套 >4 层。
+- 库代码不得直接 `chrono::Utc::now()`——墙钟走 `uva_core::Clock`。
 - 库 crate 的公开 API 不得出现具体运行时类型（`tokio::` 等）——写者的内部锁用 `futures::lock::Mutex`。
-- `elysper-harness` 不得长出 `[features]` 表，不得依赖 tokio。
+- `uva-harness` 不得长出 `[features]` 表，不得依赖 tokio。
 - `scripts/harness-docs/baseline` = 56（当前 53）：私有项的 `///` 行数只许降不许升。
-- `scripts/paradigm-surface/baselines/crates/elysper-session` = 13（当前 13）：新增 `pub use` 行必须在**同一个提交**里抬基线。
+- `scripts/paradigm-surface/baselines/crates/uva-session` = 13（当前 13）：新增 `pub use` 行必须在**同一个提交**里抬基线。
 - `MINIMAL.md` 是被编译的 doctest（`make test-guides` ⊂ `make ci`）：改了公开 API 就必须同提交改它。
 - 破坏性 API 一次切干净，不留 shim、不留别名。
 - 每个任务结束时：工作区能编译、`cargo +nightly fmt --all` 干净、该 crate 的测试绿。
@@ -41,58 +41,58 @@
 
 **新建：**
 
-- `crates/elysper-session/src/writer/mod.rs` — `LogWriter`：取号、入队（背压）、spill（同步路径）、批量 flush、账本喂入、计数器续接。
-- `crates/elysper-session/src/writer/tests.rs` — 写者的单元测试（`#[cfg(test)] mod tests;` 声明在 `writer/mod.rs`）。
-- `crates/elysper-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs` — 「一轮一行」的生命周期测试（并入 `lifecycle/mod.rs` 的 `mod` 列表）。
+- `crates/uva-session/src/writer/mod.rs` — `LogWriter`：取号、入队（背压）、spill（同步路径）、批量 flush、账本喂入、计数器续接。
+- `crates/uva-session/src/writer/tests.rs` — 写者的单元测试（`#[cfg(test)] mod tests;` 声明在 `writer/mod.rs`）。
+- `crates/uva-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs` — 「一轮一行」的生命周期测试（并入 `lifecycle/mod.rs` 的 `mod` 列表）。
 
 **删除：**
 
-- `crates/elysper-harness/src/log/mod.rs`、`log/queue.rs`、`log/tests.rs`（写者下沉到 session crate）。
-- `crates/elysper-session/src/typed_event_sink.rs` 里的**通道**（`TypedEventSink` / `TypedEventReceiver`）；同文件的 `TypedEventRecord` 与 `CompactionRecordView` **保留**（公共 API）。
+- `crates/uva-harness/src/log/mod.rs`、`log/queue.rs`、`log/tests.rs`（写者下沉到 session crate）。
+- `crates/uva-session/src/typed_event_sink.rs` 里的**通道**（`TypedEventSink` / `TypedEventReceiver`）；同文件的 `TypedEventRecord` 与 `CompactionRecordView` **保留**（公共 API）。
 
 **修改（生产代码）：**
 
-- `crates/elysper-session/src/log_surface.rs` — 折叠器读行里的 `seq`；新增共用的判定函数 `log_is_stamped`；账本的 `record` 不变。
-- `crates/elysper-session/src/manager.rs` — `SessionRegistry::writer(user_id, session_id) -> Arc<LogWriter>`。
-- `crates/elysper-session/src/compaction_checkpoint.rs` — 改持 `Arc<LogWriter>`；两个同步回调走 `append_event_nowait`。
-- `crates/elysper-session/src/jsonl.rs`、`in_memory.rs` — 计数器从「日志里已有的最大 `seq`」续接（旧的按行数）。
-- `crates/elysper-session/src/lib.rs` — 去掉通道的 re-export，加 `LogWriter`（→ 抬 paradigm-surface 基线）。
-- `crates/elysper-harness/src/agent/sink.rs` — `EventSink` 只留写者；`EventSink::new` 从 3 参变 2 参。
-- `crates/elysper-harness/src/agent/caps.rs` — `EnvCaps` 删 `typed_sink`。
-- `crates/elysper-harness/src/agent/re_act/agent.rs` — 删 `with_typed_event_sink`；`with_log_writer` 换成 session 的类型。
-- `crates/elysper-harness/src/agent/re_act/stream.rs` — delta 不再逐个落盘；模型调用结束时写整条 assistant 消息一行。
-- `crates/elysper-harness/src/agent/re_act/loop/tools/commit.rs` — 工具结果行由 harness 写。
-- `crates/elysper-harness/src/agent/re_act/loop/mod.rs`、`finalize.rs` — `flush_log()` 调 session 的写者。
-- `crates/elysper-harness/src/events/mod.rs` — `AgentEvent::is_durable()`：model 族全部 false。
-- `crates/elysper-harness/src/lib.rs` — 去掉 `pub use log::{…}`。
-- `crates/elysper-harness/src/agent/re_act/tests/lifecycle/log_writer.rs` — 写者测试改用 session 的类型。
-- `crates/elysper-harness/examples/assemble_with_builder.rs` — 改用写者。
-- `crates/elysper-strategy-cot/src/lib.rs`、`elysper-strategy-best-of-n/src/lib.rs`、`elysper-strategy-plan-execute/src/strategy.rs`（+ 各自 example）— `EventSink::new` 的调用点与 `emit_typed` 的路由。
-- `crates/elysper-server/src/session/controller/{run_log,run_task,persist,dispatch,inner}.rs`、`session/subagent_router.rs`、`routes/sessions.rs`、`routes/messages/mod.rs` — 全部改走写者。
-- `crates/elysper-server/src/agent_run_config.rs` — 删 `typed_event_sink` 字段。
-- `crates/elysper-context/src/memory/{typed,session}.rs` — 两个写点改拿写者。
-- `crates/elysper/src/{prelude,lib,session}.rs` — re-export 与文档。
-- `elysper-web/src/lib/session-to-messages.ts` — 历史投影认 `assistant_message` 行。
+- `crates/uva-session/src/log_surface.rs` — 折叠器读行里的 `seq`；新增共用的判定函数 `log_is_stamped`；账本的 `record` 不变。
+- `crates/uva-session/src/manager.rs` — `SessionRegistry::writer(user_id, session_id) -> Arc<LogWriter>`。
+- `crates/uva-session/src/compaction_checkpoint.rs` — 改持 `Arc<LogWriter>`；两个同步回调走 `append_event_nowait`。
+- `crates/uva-session/src/jsonl.rs`、`in_memory.rs` — 计数器从「日志里已有的最大 `seq`」续接（旧的按行数）。
+- `crates/uva-session/src/lib.rs` — 去掉通道的 re-export，加 `LogWriter`（→ 抬 paradigm-surface 基线）。
+- `crates/uva-harness/src/agent/sink.rs` — `EventSink` 只留写者；`EventSink::new` 从 3 参变 2 参。
+- `crates/uva-harness/src/agent/caps.rs` — `EnvCaps` 删 `typed_sink`。
+- `crates/uva-harness/src/agent/re_act/agent.rs` — 删 `with_typed_event_sink`；`with_log_writer` 换成 session 的类型。
+- `crates/uva-harness/src/agent/re_act/stream.rs` — delta 不再逐个落盘；模型调用结束时写整条 assistant 消息一行。
+- `crates/uva-harness/src/agent/re_act/loop/tools/commit.rs` — 工具结果行由 harness 写。
+- `crates/uva-harness/src/agent/re_act/loop/mod.rs`、`finalize.rs` — `flush_log()` 调 session 的写者。
+- `crates/uva-harness/src/events/mod.rs` — `AgentEvent::is_durable()`：model 族全部 false。
+- `crates/uva-harness/src/lib.rs` — 去掉 `pub use log::{…}`。
+- `crates/uva-harness/src/agent/re_act/tests/lifecycle/log_writer.rs` — 写者测试改用 session 的类型。
+- `crates/uva-harness/examples/assemble_with_builder.rs` — 改用写者。
+- `crates/uva-strategy-cot/src/lib.rs`、`uva-strategy-best-of-n/src/lib.rs`、`uva-strategy-plan-execute/src/strategy.rs`（+ 各自 example）— `EventSink::new` 的调用点与 `emit_typed` 的路由。
+- `crates/uva-app-server/src/session/controller/{run_log,run_task,persist,dispatch,inner}.rs`、`session/subagent_router.rs`、`routes/sessions.rs`、`routes/messages/mod.rs` — 全部改走写者。
+- `crates/uva-app-server/src/agent_run_config.rs` — 删 `typed_event_sink` 字段。
+- `crates/uva-context/src/memory/{typed,session}.rs` — 两个写点改拿写者。
+- `crates/uva/src/{prelude,lib,session}.rs` — re-export 与文档。
+- `uva-web/src/lib/session-to-messages.ts` — 历史投影认 `assistant_message` 行。
 
 **修改（文档 / 教程）：**
 
-- `MINIMAL.md`、`README.md`、`SEAMS.md`、`crates/elysper/examples/assemble_from_zero.rs`、
-  `crates/elysper-harness/examples/assemble_with_builder.rs`、`crates/elysper-session/examples/compaction_checkpoint.rs`、
-  `crates/elysper/tests/feature_gating.rs`、`crates/elysper-harness/src/agent/strategy/tests.rs`。
+- `MINIMAL.md`、`README.md`、`SEAMS.md`、`crates/uva/examples/assemble_from_zero.rs`、
+  `crates/uva-harness/examples/assemble_with_builder.rs`、`crates/uva-session/examples/compaction_checkpoint.rs`、
+  `crates/uva/tests/feature_gating.rs`、`crates/uva-harness/src/agent/strategy/tests.rs`。
 
 ---
 
 ### Task 1: 折叠器与账本用行里的 `seq`
 
 **Files:**
-- Modify: `crates/elysper-session/src/log_surface.rs`
-- Test: `crates/elysper-session/src/log_surface.rs`（内联测试块当前 126 行，尚有余量）
+- Modify: `crates/uva-session/src/log_surface.rs`
+- Test: `crates/uva-session/src/log_surface.rs`（内联测试块当前 126 行，尚有余量）
 
 **Interfaces:**
 - Consumes: 无（起点任务）。
 - Produces:
   ```rust
-  // crates/elysper-session/src/log_surface.rs
+  // crates/uva-session/src/log_surface.rs
   /// 这份日志里的每一个事件行是否都带 `seq` 字段。
   ///
   /// 折叠器、账本、计数器续接共用这一个判断：逐行混用两套编号
@@ -104,7 +104,7 @@
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `crates/elysper-session/src/log_surface.rs` 的内联测试块里加：
+在 `crates/uva-session/src/log_surface.rs` 的内联测试块里加：
 
 ```rust
 #[test]
@@ -138,18 +138,18 @@ fn a_mixed_log_falls_back_to_positional_ordinals() {
 }
 ```
 
-`fold_log_surface` 的 `surface_seqs` 字段名与类型以 `crates/elysper-session/src/surface.rs` 里
+`fold_log_surface` 的 `surface_seqs` 字段名与类型以 `crates/uva-session/src/surface.rs` 里
 `FoldedSurface` 的现状为准（`surface_seqs: Vec<u64>`，与 `messages` 平行）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-session --lib log_surface -- --nocapture`
+Run: `cargo test -p uva-session --lib log_surface -- --nocapture`
 Expected: FAIL —— `log_is_stamped` 不存在，且 `a_stamped_log_uses_the_rows_own_ordinals`
 拿到的是 `[1, 2]` 而不是 `[7, 9]`。
 
 - [ ] **Step 3: 实现判定函数与折叠器改动**
 
-在 `crates/elysper-session/src/log_surface.rs`：
+在 `crates/uva-session/src/log_surface.rs`：
 
 ```rust
 /// 这份日志里的每一个事件行是否都带 `seq` 字段。
@@ -169,32 +169,32 @@ pub fn log_is_stamped(rows: &[Value]) -> bool {
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p elysper-session --lib`
+Run: `cargo test -p uva-session --lib`
 Expected: PASS（新增三条 + 既有全绿）。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add crates/elysper-session/src/log_surface.rs
+git add crates/uva-session/src/log_surface.rs
 git commit -m "feat(session): the fold reads each row's own ordinal"
 ```
 
 ---
 
-### Task 2: `LogWriter`——写者接缝搬到 `elysper-session`
+### Task 2: `LogWriter`——写者接缝搬到 `uva-session`
 
 **Files:**
-- Create: `crates/elysper-session/src/writer/mod.rs`
-- Create: `crates/elysper-session/src/writer/tests.rs`
-- Modify: `crates/elysper-session/src/lib.rs`（`mod writer;` + `pub use writer::LogWriter;` → 抬 paradigm-surface 基线）
-- Modify: `crates/elysper-session/src/jsonl.rs`、`in_memory.rs`（计数器续接）
-- Modify: `scripts/paradigm-surface/baselines/crates/elysper-session`（13 → 14，同提交）
+- Create: `crates/uva-session/src/writer/mod.rs`
+- Create: `crates/uva-session/src/writer/tests.rs`
+- Modify: `crates/uva-session/src/lib.rs`（`mod writer;` + `pub use writer::LogWriter;` → 抬 paradigm-surface 基线）
+- Modify: `crates/uva-session/src/jsonl.rs`、`in_memory.rs`（计数器续接）
+- Modify: `scripts/paradigm-surface/baselines/crates/uva-session`（13 → 14，同提交）
 
 **Interfaces:**
-- Consumes: `elysper_session::{SessionSink, SessionError, SessionEvent, SurfaceLedger, log_surface::log_is_stamped}`、`elysper_core::Clock`。
+- Consumes: `uva_session::{SessionSink, SessionError, SessionEvent, SurfaceLedger, log_surface::log_is_stamped}`、`uva_core::Clock`。
 - Produces:
   ```rust
-  // crates/elysper-session/src/writer/mod.rs
+  // crates/uva-session/src/writer/mod.rs
   /// 一个会话的唯一写者。
   ///
   /// 取号来自 sink 的计数器（`SessionSink::alloc_seq`），落盘按批走
@@ -226,7 +226,7 @@ git commit -m "feat(session): the fold reads each row's own ordinal"
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-session/src/writer/tests.rs`：
+`crates/uva-session/src/writer/tests.rs`：
 
 ```rust
 #[tokio::test]
@@ -267,11 +267,11 @@ async fn restart_does_not_reuse_a_burned_ordinal() {
 ```
 
 `CountingSink` 是测试里的一个 `SessionSink` 实现，计数 `append` / `append_many` 的调用次数。
-`InMemorySessionSink` 已存在（`crates/elysper-session/src/in_memory.rs`）。
+`InMemorySessionSink` 已存在（`crates/uva-session/src/in_memory.rs`）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-session --lib writer -- --nocapture`
+Run: `cargo test -p uva-session --lib writer -- --nocapture`
 Expected: FAIL —— `LogWriter` 不存在。
 
 - [ ] **Step 3: 实现 `writer/mod.rs`**
@@ -304,7 +304,7 @@ pub struct LogWriter {
   `Sender::clone` 只是 Arc 计数），在**局部**可变借用上 `send().await`；
   接收端 `Receiver` 放在 `parking_lot::Mutex` 里，`flush` 取行时短暂持锁、**不跨 await**。
 - **队列满时的处理**：`append` 发现队列满时，**先 `flush()` 腾出空间**再发
-  （今天的 harness 写器就是这么做的：`crates/elysper-harness/src/log/mod.rs:148-152`）。
+  （今天的 harness 写器就是这么做的：`crates/uva-harness/src/log/mod.rs:148-152`）。
   没有排空方，满了就会永久等待。
 - **flush**：把 spill 与队列里的行收齐 → 按 `seq` 排序 → 一次 `sink.append_many(&values)`。
   `Durability` 不存在（本轮删除），flush 的节奏由调用方决定。
@@ -316,7 +316,7 @@ pub struct LogWriter {
 
 - [ ] **Step 4: 实现计数器续接（`jsonl.rs` / `in_memory.rs`）**
 
-`JsonlSessionSink::new`（`crates/elysper-session/src/jsonl.rs:207`）今天用
+`JsonlSessionSink::new`（`crates/uva-session/src/jsonl.rs:207`）今天用
 `count_lines(...)` 给 `next_seq` 播种。改成：
 
 - 读出文件里的最后一行（尾读即可，不必扫全文件），若它带 `seq` 且整份日志都带 `seq`
@@ -327,17 +327,17 @@ pub struct LogWriter {
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cargo test -p elysper-session --lib`
+Run: `cargo test -p uva-session --lib`
 Expected: PASS。
 
 - [ ] **Step 6: 抬 paradigm-surface 基线并提交**
 
 ```bash
-# crates/elysper-session/src/lib.rs 加了 `pub use writer::LogWriter;` → 13 → 14
+# crates/uva-session/src/lib.rs 加了 `pub use writer::LogWriter;` → 13 → 14
 # （门禁是「不得超过基线」，所以这是唯一一次抬升；Task 4 删通道后行数降到 12，基线不动）
-sed -i 's/^13$/14/' scripts/paradigm-surface/baselines/crates/elysper-session
-cargo test -p elysper-session --lib
-git add crates/elysper-session scripts/paradigm-surface/baselines/crates/elysper-session
+sed -i 's/^13$/14/' scripts/paradigm-surface/baselines/crates/uva-session
+cargo test -p uva-session --lib
+git add crates/uva-session scripts/paradigm-surface/baselines/crates/uva-session
 git commit -m "feat(session): LogWriter — one writer per session, batched flush"
 ```
 
@@ -346,14 +346,14 @@ git commit -m "feat(session): LogWriter — one writer per session, batched flus
 ### Task 3: session crate 接线——注册表的写者、压缩检查点改持写者
 
 **Files:**
-- Modify: `crates/elysper-session/src/manager.rs`（`SessionRegistry::writer`）
-- Modify: `crates/elysper-session/src/compaction_checkpoint.rs`（改持写者 + 同步回调走 spill）
-- Modify: `crates/elysper-session/src/repair.rs`（补齐行的序号交给写者）
-- Modify: `crates/elysper-session/examples/compaction_checkpoint.rs`（改用写者）
-- Modify: `crates/elysper-server/src/session/controller/mod.rs`（控制器多持一个写者）
-- Modify: `crates/elysper-server/src/session/controller/run_task.rs:86`（检查点改拿写者）
-- Modify: `crates/elysper-server/src/state/app_state/sessions.rs`（构造控制器时取写者）
-- Test: `crates/elysper-session/src/writer/tests.rs`、`crates/elysper-session/src/compaction_checkpoint.rs`
+- Modify: `crates/uva-session/src/manager.rs`（`SessionRegistry::writer`）
+- Modify: `crates/uva-session/src/compaction_checkpoint.rs`（改持写者 + 同步回调走 spill）
+- Modify: `crates/uva-session/src/repair.rs`（补齐行的序号交给写者）
+- Modify: `crates/uva-session/examples/compaction_checkpoint.rs`（改用写者）
+- Modify: `crates/uva-app-server/src/session/controller/mod.rs`（控制器多持一个写者）
+- Modify: `crates/uva-app-server/src/session/controller/run_task.rs:86`（检查点改拿写者）
+- Modify: `crates/uva-app-server/src/state/app_state/sessions.rs`（构造控制器时取写者）
+- Test: `crates/uva-session/src/writer/tests.rs`、`crates/uva-session/src/compaction_checkpoint.rs`
 
 > **通道（`TypedEventSink`）本任务不删**——它还有使用者（harness 的 `EnvCaps.typed_sink`）。
 > 删除放在 Task 4，与它最后的使用者一起切干净。
@@ -362,12 +362,12 @@ git commit -m "feat(session): LogWriter — one writer per session, batched flus
 - Consumes: Task 2 的 `LogWriter`。
 - Produces:
   ```rust
-  // crates/elysper-session/src/manager.rs
+  // crates/uva-session/src/manager.rs
   impl SessionRegistry {
       /// 这个会话的唯一写者（与 `sink()` 并列，按会话缓存）。
       pub fn writer(&self, user_id: &str, session_id: &str) -> Arc<LogWriter>;
   }
-  // crates/elysper-session/src/compaction_checkpoint.rs
+  // crates/uva-session/src/compaction_checkpoint.rs
   impl CompactionCheckpoint {
       /// 建一个检查点：写者负责落盘，账本负责定位被遮蔽的行。
       pub fn new(writer: Arc<LogWriter>, ledger: Arc<SurfaceLedger>) -> Arc<Self>;
@@ -376,7 +376,7 @@ git commit -m "feat(session): LogWriter — one writer per session, batched flus
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-session/src/writer/tests.rs`：
+`crates/uva-session/src/writer/tests.rs`：
 
 ```rust
 #[tokio::test]
@@ -389,29 +389,29 @@ async fn compaction_row_survives_a_full_queue() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-session --lib compaction_row_survives`
+Run: `cargo test -p uva-session --lib compaction_row_survives`
 Expected: FAIL —— `CompactionCheckpoint::new` 还不接受写者。
 
 - [ ] **Step 3: `SessionRegistry::writer`**
 
-`crates/elysper-session/src/manager.rs`：照 `sink()`（`:79`）的样子加一个
+`crates/uva-session/src/manager.rs`：照 `sink()`（`:79`）的样子加一个
 `writers: RwLock<HashMap<String, Arc<LogWriter>>>` 缓存，key 用同一个 `sink_key(user_id, session_id)`；
 `remove()`（`:129`）要把 writer 一起从缓存里摘掉。
 
 - [ ] **Step 4: `CompactionCheckpoint` 改持写者**
 
-`crates/elysper-session/src/compaction_checkpoint.rs`：
+`crates/uva-session/src/compaction_checkpoint.rs`：
 
 - 字段 `sink: TypedEventSink` → `writer: Arc<LogWriter>`。
 - `new(writer, ledger)`。
 - `lifecycle_callback`（`:177`）与 `emit_record`（`:207`）里的 `sink.record(...)` →
   `writer.append_event_nowait(&event)`（同步路径，进 spill，绝不丢）。
 - `resolve_pending()` 的语义不变（调用方拿回事件后用同一个写者落盘）。
-- `crates/elysper-session/examples/compaction_checkpoint.rs`：改用写者（签名变了）。
+- `crates/uva-session/examples/compaction_checkpoint.rs`：改用写者（签名变了）。
 
 - [ ] **Step 5: 补齐行的序号交给写者**
 
-`crates/elysper-session/src/repair.rs`：`interrupted_turn_closers`（`:201-240`）今天自己算
+`crates/uva-session/src/repair.rs`：`interrupted_turn_closers`（`:201-240`）今天自己算
 `state.last_seq + 1`——那是**第三个序号来源**。改成：补齐事件带 `seq: 0`，由写者盖章
 （Task 2 的 typed 行盖章规则已经覆盖：`seq`/`ts` 是 `type` 的兄弟字段，写者覆盖它们）。
 
@@ -419,25 +419,25 @@ Expected: FAIL —— `CompactionCheckpoint::new` 还不接受写者。
 
 `CompactionCheckpoint::new` 的签名变了 → server 的调用点要改：
 
-- `crates/elysper-server/src/session/controller/mod.rs`：跑 agent 的那一半（`ControllerInner`）多持一个
+- `crates/uva-app-server/src/session/controller/mod.rs`：跑 agent 的那一半（`ControllerInner`）多持一个
   `Arc<LogWriter>`；**只有拥有者路径（`spawn_with_lease`）拿写者**——`spawn_remote`（转发节点）
   不拿：转发节点不得创建会话的 sink 与目录（`sessions.rs:83-85` 的既有不变量）。
-- `crates/elysper-server/src/state/app_state/sessions.rs`：构造控制器时用
+- `crates/uva-app-server/src/state/app_state/sessions.rs`：构造控制器时用
   `state.session_manager.writer(user_id, session_id)` 取写者。
-- `crates/elysper-server/src/session/controller/run_task.rs:86`：
+- `crates/uva-app-server/src/session/controller/run_task.rs:86`：
   `CompactionCheckpoint::new(writer.clone(), Arc::clone(&ledger))`。
 
 Run: `cargo build --workspace` → 预期：编译通过（server 的其余写点本轮不动）。
 
 - [ ] **Step 7: 跑测试确认通过**
 
-Run: `cargo test -p elysper-session --lib && cargo test -p elysper-server --lib`
+Run: `cargo test -p uva-session --lib && cargo test -p uva-app-server --lib`
 Expected: PASS。
 
 - [ ] **Step 8: 提交**
 
 ```bash
-git add crates/elysper-session scripts/paradigm-surface/baselines/crates/elysper-session
+git add crates/uva-session scripts/paradigm-surface/baselines/crates/uva-session
 git commit -m "refactor(session): one writer per session; drop the channel that drops rows"
 ```
 
@@ -446,41 +446,41 @@ git commit -m "refactor(session): one writer per session; drop the channel that 
 ### Task 4: harness 的结构行走写者，删掉 typed sink（公共 API 一次性切干净）
 
 **Files:**
-- Modify: `crates/elysper-session/src/typed_event_sink.rs`（**删掉通道**，留 `TypedEventRecord` 与 `CompactionRecordView`）
-- Modify: `crates/elysper-session/src/lib.rs`（去掉通道的 re-export）
-- Modify: `crates/elysper-harness/src/agent/sink.rs`、`agent/caps.rs`、`agent/re_act/agent.rs`、
+- Modify: `crates/uva-session/src/typed_event_sink.rs`（**删掉通道**，留 `TypedEventRecord` 与 `CompactionRecordView`）
+- Modify: `crates/uva-session/src/lib.rs`（去掉通道的 re-export）
+- Modify: `crates/uva-harness/src/agent/sink.rs`、`agent/caps.rs`、`agent/re_act/agent.rs`、
   `agent/re_act/loop/mod.rs`、`agent/re_act/loop/finalize.rs`、`agent/re_act/stream.rs`、`src/lib.rs`
-- Modify: `crates/elysper-harness/src/agent/strategy/tests.rs`
-- Modify: `crates/elysper-strategy-cot/src/lib.rs`、`elysper-strategy-best-of-n/src/lib.rs`、
-  `elysper-strategy-plan-execute/src/strategy.rs`（+ 各自 example）
-- Modify: `crates/elysper/src/{prelude,lib,session}.rs`、`crates/elysper/tests/feature_gating.rs`、
-  `crates/elysper/examples/assemble_from_zero.rs`、`crates/elysper-harness/examples/assemble_with_builder.rs`
+- Modify: `crates/uva-harness/src/agent/strategy/tests.rs`
+- Modify: `crates/uva-strategy-cot/src/lib.rs`、`uva-strategy-best-of-n/src/lib.rs`、
+  `uva-strategy-plan-execute/src/strategy.rs`（+ 各自 example）
+- Modify: `crates/uva/src/{prelude,lib,session}.rs`、`crates/uva/tests/feature_gating.rs`、
+  `crates/uva/examples/assemble_from_zero.rs`、`crates/uva-harness/examples/assemble_with_builder.rs`
 - Modify: `MINIMAL.md`、`README.md`、`SEAMS.md`
-- Delete: `crates/elysper-harness/src/log/`（三个文件）
+- Delete: `crates/uva-harness/src/log/`（三个文件）
 
 **Interfaces:**
-- Consumes: Task 2 的 `elysper_session::LogWriter`。
+- Consumes: Task 2 的 `uva_session::LogWriter`。
 - Produces:
   ```rust
-  // crates/elysper-harness/src/agent/sink.rs
+  // crates/uva-harness/src/agent/sink.rs
   impl EventSink {
       /// 2 参（原来 3 参）：tx + 写者。
       pub fn new(tx: Arc<mpsc::UnboundedSender<AgentEvent>>, log_writer: Option<Arc<LogWriter>>) -> Self;
       /// 写一条 typed 会话事件（结构行）。写者没装时是 no-op。
       pub fn emit_typed(&self, event: SessionEvent);
   }
-  // crates/elysper-harness/src/agent/re_act/agent.rs
+  // crates/uva-harness/src/agent/re_act/agent.rs
   impl ReActAgent {
       /// 装上这个会话的写者。类型从 harness 的 LogWriter 换成 session 的。
       pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self;
   }
   ```
-  `LogWriter` 的 facade 路径定为 **`elysper::session::LogWriter`**（harness 的 `log` 模块消失，
-  `elysper::harness::LogWriter` 与 `elysper::harness::Durability` 随之消失）。
+  `LogWriter` 的 facade 路径定为 **`uva::session::LogWriter`**（harness 的 `log` 模块消失，
+  `uva::harness::LogWriter` 与 `uva::harness::Durability` 随之消失）。
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-harness/src/agent/re_act/tests/lifecycle/` 加一条（并入 `lifecycle/mod.rs` 的
+`crates/uva-harness/src/agent/re_act/tests/lifecycle/` 加一条（并入 `lifecycle/mod.rs` 的
 `mod` 列表）：
 
 ```rust
@@ -493,37 +493,37 @@ async fn structural_rows_go_through_the_writer() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-harness --lib structural_rows_go_through_the_writer`
+Run: `cargo test -p uva-harness --lib structural_rows_go_through_the_writer`
 Expected: FAIL —— `with_log_writer` 的类型还是 harness 的 `LogWriter`，且结构行还走老路。
 
 - [ ] **Step 3: `EventSink` 与 caps：换类型、删老路**
 
-- `crates/elysper-harness/src/agent/sink.rs`：`EventSink` 的 `typed_sink` 字段与 `has_typed()` 删除；
-  `log_writer` 的类型改成 `elysper_session::LogWriter`；`new` 少一个参数；
+- `crates/uva-harness/src/agent/sink.rs`：`EventSink` 的 `typed_sink` 字段与 `has_typed()` 删除；
+  `log_writer` 的类型改成 `uva_session::LogWriter`；`new` 少一个参数；
   `emit_typed` 改成：写者在场 → `writer.append_nowait(row)`（同步路径，结构行不阻塞循环）；
   写者不在场 → 什么都不做（结构行是日志事实，没有写者就没有日志）。
-- `crates/elysper-harness/src/agent/caps.rs`：`EnvCaps` 删 `typed_sink` 字段。
-- `crates/elysper-harness/src/agent/re_act/agent.rs`：删 `with_typed_event_sink`；
-  `with_log_writer` 的参数类型换成 `Arc<elysper_session::LogWriter>`。
-- `crates/elysper-harness/src/agent/re_act/loop/mod.rs` 的 `flush_log()` 与
+- `crates/uva-harness/src/agent/caps.rs`：`EnvCaps` 删 `typed_sink` 字段。
+- `crates/uva-harness/src/agent/re_act/agent.rs`：删 `with_typed_event_sink`；
+  `with_log_writer` 的参数类型换成 `Arc<uva_session::LogWriter>`。
+- `crates/uva-harness/src/agent/re_act/loop/mod.rs` 的 `flush_log()` 与
   `loop/finalize.rs`：调 `writer.flush()`（语义不变：调用模型之前 / 收尾时）。
-- `crates/elysper-harness/src/agent/re_act/stream.rs`：那段 `emit_typed(AssistantChunk)`
+- `crates/uva-harness/src/agent/re_act/stream.rs`：那段 `emit_typed(AssistantChunk)`
   （`:39-66`）**本任务先保留**（Task 6 才删），但它现在走写者而不是通道。
 
-Run: `cargo build -p elysper-harness` → 预期：harness 自身的编译错误（`EventSink::new` 的
+Run: `cargo build -p uva-harness` → 预期：harness 自身的编译错误（`EventSink::new` 的
 调用点还没改），但**不**有类型错误。
 
 - [ ] **Step 4: 删掉 harness 的 `log/` 模块 + session crate 的通道**
 
-`crates/elysper-harness/src/lib.rs`：删 `pub use log::{Durability, LogWriter};` 与 `mod log;`；
-删除 `crates/elysper-harness/src/log/`（`mod.rs` / `queue.rs` / `tests.rs`）——
+`crates/uva-harness/src/lib.rs`：删 `pub use log::{Durability, LogWriter};` 与 `mod log;`；
+删除 `crates/uva-harness/src/log/`（`mod.rs` / `queue.rs` / `tests.rs`）——
 写者的测试已经搬进 session crate（Task 2）。
 
-`crates/elysper-session/src/typed_event_sink.rs`：删掉 `TypedEventSink` 与 `TypedEventReceiver`
+`crates/uva-session/src/typed_event_sink.rs`：删掉 `TypedEventSink` 与 `TypedEventReceiver`
 两个类型与其实现；**保留** `TypedEventRecord` 与 `CompactionRecordView`（公共 API，
 `CompactionRecordView` 还是 server 的公共 API 的一部分：
-`crates/elysper-server/src/agent_run_config.rs:28,41,49`）。
-`crates/elysper-session/src/lib.rs`：去掉这两个类型的 re-export（`lib.rs:161-166`）。
+`crates/uva-app-server/src/agent_run_config.rs:28,41,49`）。
+`crates/uva-session/src/lib.rs`：去掉这两个类型的 re-export（`lib.rs:161-166`）。
 → `pub use` 行数从 14 降到 12，**基线不动**（门禁是「不得超过基线」，不是「必须相等」）。
 
 Run: `cargo build --workspace` → 预期：只剩 `EventSink::new` 调用点与通道使用者的编译错误。
@@ -531,35 +531,35 @@ Run: `cargo build --workspace` → 预期：只剩 `EventSink::new` 调用点与
 - [ ] **Step 5: 三个 strategy crate 与所有调用点**
 
 `EventSink::new` 从 3 参变 2 参 → 11 个调用点、7 个文件、4 个 crate：
-`crates/elysper-strategy-cot/src/lib.rs`、`crates/elysper-strategy-best-of-n/src/lib.rs`、
-`crates/elysper-strategy-plan-execute/src/strategy.rs`（+ `examples/plan_execute_demo.rs`）、
-`crates/elysper-harness/src/agent/strategy/tests.rs`（`:186`、`:214`）、
-`crates/elysper-harness/src/agent/re_act/stream.rs`（`:158`）、
-`crates/elysper-harness/src/agent/re_act/agent.rs`（`:90`）。
+`crates/uva-strategy-cot/src/lib.rs`、`crates/uva-strategy-best-of-n/src/lib.rs`、
+`crates/uva-strategy-plan-execute/src/strategy.rs`（+ `examples/plan_execute_demo.rs`）、
+`crates/uva-harness/src/agent/strategy/tests.rs`（`:186`、`:214`）、
+`crates/uva-harness/src/agent/re_act/stream.rs`（`:158`）、
+`crates/uva-harness/src/agent/re_act/agent.rs`（`:90`）。
 它们调 `sink.emit_typed(...)` 的地方（`cot:138-141`、`best-of-n:288-291`）随之改成写者路径。
 
 - [ ] **Step 6: facade、示例、文档**
 
-- `crates/elysper/src/prelude.rs`：去掉 `TypedEventSink` 的 re-export；`Durability` 一并去掉。
-- `crates/elysper/src/lib.rs`、`src/session.rs`：删掉提到这两个类型的文档行。
-- `crates/elysper/tests/feature_gating.rs:46,93`：更新 re-export 断言。
-- `crates/elysper/examples/assemble_from_zero.rs:191-199`、
-  `crates/elysper-harness/examples/assemble_with_builder.rs:33,76,101`：改用写者。
+- `crates/uva/src/prelude.rs`：去掉 `TypedEventSink` 的 re-export；`Durability` 一并去掉。
+- `crates/uva/src/lib.rs`、`src/session.rs`：删掉提到这两个类型的文档行。
+- `crates/uva/tests/feature_gating.rs:46,93`：更新 re-export 断言。
+- `crates/uva/examples/assemble_from_zero.rs:191-199`、
+  `crates/uva-harness/examples/assemble_with_builder.rs:33,76,101`：改用写者。
 - `MINIMAL.md`（**被编译的 doctest**）：它今天用
-  `elysper::harness::{Durability, LogWriter, ReActAgent}`、`TypedEventSink::channel(64)`、
+  `uva::harness::{Durability, LogWriter, ReActAgent}`、`TypedEventSink::channel(64)`、
   `LogWriter::new(sink, Durability::StepBoundary)`、`.with_typed_event_sink(typed_sink)` →
-  全部改成新的写法（`elysper::session::LogWriter::new(sink, clock)` + `with_log_writer`）。
+  全部改成新的写法（`uva::session::LogWriter::new(sink, clock)` + `with_log_writer`）。
 - `README.md:258,270,275`、`SEAMS.md:21`：同步改写。
 
 - [ ] **Step 7: 跑测试与门禁**
 
 Run:
 ```bash
-cargo test -p elysper-harness --lib
-cargo test -p elysper-strategy-cot --lib
-cargo test -p elysper-strategy-best-of-n --lib
-cargo test -p elysper-strategy-plan-execute --lib
-cargo test -p elysper --doc
+cargo test -p uva-harness --lib
+cargo test -p uva-strategy-cot --lib
+cargo test -p uva-strategy-best-of-n --lib
+cargo test -p uva-strategy-plan-execute --lib
+cargo test -p uva --doc
 make test-guides
 make check-harness-docs
 ```
@@ -568,8 +568,8 @@ Expected: 全绿；`check-harness-docs` ≤ 56。
 - [ ] **Step 8: 提交**
 
 ```bash
-git add -A crates/elysper-harness crates/elysper-strategy-cot crates/elysper-strategy-best-of-n \
-       crates/elysper-strategy-plan-execute crates/elysper MINIMAL.md README.md SEAMS.md
+git add -A crates/uva-harness crates/uva-strategy-cot crates/uva-strategy-best-of-n \
+       crates/uva-strategy-plan-execute crates/uva MINIMAL.md README.md SEAMS.md
 git commit -m "refactor(harness): structural rows go through the session writer"
 ```
 
@@ -578,12 +578,12 @@ git commit -m "refactor(harness): structural rows go through the session writer"
 ### Task 5: server 一个会话一个写者
 
 **Files:**
-- Modify: `crates/elysper-server/src/session/controller/run_log.rs`、`run_task.rs`、`persist.rs`、
+- Modify: `crates/uva-app-server/src/session/controller/run_log.rs`、`run_task.rs`、`persist.rs`、
   `dispatch.rs`、`inner.rs`、`mod.rs`
-- Modify: `crates/elysper-server/src/session/subagent_router.rs`
-- Modify: `crates/elysper-server/src/routes/sessions.rs`、`routes/messages/mod.rs`
-- Modify: `crates/elysper-server/src/agent_run_config.rs`（删 `typed_event_sink` 字段）
-- Test: `crates/elysper-server/src/session/controller/tests/`
+- Modify: `crates/uva-app-server/src/session/subagent_router.rs`
+- Modify: `crates/uva-app-server/src/routes/sessions.rs`、`routes/messages/mod.rs`
+- Modify: `crates/uva-app-server/src/agent_run_config.rs`（删 `typed_event_sink` 字段）
+- Test: `crates/uva-app-server/src/session/controller/tests/`
 
 **Interfaces:**
 - Consumes: Task 2 的 `LogWriter`、Task 3 的 `SessionRegistry::writer`。
@@ -592,7 +592,7 @@ git commit -m "refactor(harness): structural rows go through the session writer"
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-server/src/session/controller/tests/`：
+`crates/uva-app-server/src/session/controller/tests/`：
 
 ```rust
 #[tokio::test]
@@ -615,12 +615,12 @@ async fn a_forked_session_restamps_its_inherited_rows() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-server --lib controller::tests`
+Run: `cargo test -p uva-app-server --lib controller::tests`
 Expected: FAIL（feedback 与 fork 两条今天就红）。
 
 - [ ] **Step 3: `RunLog` 改持写者**
 
-`crates/elysper-server/src/session/controller/run_log.rs`：
+`crates/uva-app-server/src/session/controller/run_log.rs`：
 
 - 字段 `store: Arc<dyn SessionSink>` → `writer: Arc<LogWriter>`（账本另持）。
 - `append` / `append_typed`：「取号 + 入队」，返回拿到的序号；**不再**在这里 fsync。
@@ -643,13 +643,13 @@ Expected: FAIL（feedback 与 fork 两条今天就红）。
 
 - [ ] **Step 5: 广播前落盘**
 
-`crates/elysper-server/src/session/controller/persist.rs`：
+`crates/uva-app-server/src/session/controller/persist.rs`：
 `append_if_durable`（`:181`）入队后、广播前调 `writer.flush().await`——
 「你看到的 durable 事实一定在盘上」的契约由这一步保证。
 
 - [ ] **Step 6: 跑测试确认通过 + 单一写者的 grep 门禁**
 
-Run: `cargo test -p elysper-server --lib`
+Run: `cargo test -p uva-app-server --lib`
 Expected: PASS。
 
 再跑一次「一个会话一个写者」的门禁（不变量 I1）——除写者自身以外，
@@ -657,10 +657,10 @@ Expected: PASS。
 
 ```bash
 grep -rn "session_store\.append\|sink\.append(\|\.append_many(" --include='*.rs' crates/ \
-  | grep -v "crates/elysper-session/src/writer/" \
-  | grep -v "crates/elysper-session/src/jsonl.rs" \
-  | grep -v "crates/elysper-session/src/in_memory.rs" \
-  | grep -v "crates/elysper-session/src/sink.rs" \
+  | grep -v "crates/uva-session/src/writer/" \
+  | grep -v "crates/uva-session/src/jsonl.rs" \
+  | grep -v "crates/uva-session/src/in_memory.rs" \
+  | grep -v "crates/uva-session/src/sink.rs" \
   | grep -v "/tests/" | grep -v "#\[cfg(test)\]"
 ```
 
@@ -669,7 +669,7 @@ Expected: 命中数为 0（或每一条都在注释/文档里）。有命中就�
 - [ ] **Step 7: 提交**
 
 ```bash
-git add -A crates/elysper-server
+git add -A crates/uva-app-server
 git commit -m "refactor(server): every session row goes through one writer"
 ```
 
@@ -678,10 +678,10 @@ git commit -m "refactor(server): every session row goes through one writer"
 ### Task 6: delta 不落盘，一轮一行
 
 **Files:**
-- Modify: `crates/elysper-harness/src/agent/re_act/stream.rs`（删逐 chunk 落盘；写整条 assistant 消息）
-- Modify: `crates/elysper-harness/src/agent/re_act/loop/tools/commit.rs`（工具结果行由 harness 写）
-- Modify: `crates/elysper-harness/src/events/mod.rs`（`is_durable()`：model 族全部 false）
-- Test: `crates/elysper-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs`（新建）
+- Modify: `crates/uva-harness/src/agent/re_act/stream.rs`（删逐 chunk 落盘；写整条 assistant 消息）
+- Modify: `crates/uva-harness/src/agent/re_act/loop/tools/commit.rs`（工具结果行由 harness 写）
+- Modify: `crates/uva-harness/src/events/mod.rs`（`is_durable()`：model 族全部 false）
+- Test: `crates/uva-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs`（新建）
 
 **Interfaces:**
 - Consumes: Task 2/4 的写者。
@@ -690,7 +690,7 @@ git commit -m "refactor(server): every session row goes through one writer"
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs`：
+`crates/uva-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs`：
 
 ```rust
 #[tokio::test]
@@ -715,17 +715,17 @@ async fn deltas_still_stream_as_events_but_are_not_persisted() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-harness --lib one_row_per_turn`
+Run: `cargo test -p uva-harness --lib one_row_per_turn`
 Expected: FAIL —— 今天每个 delta 一行。
 
 - [ ] **Step 3: 改 `is_durable()`**
 
-`crates/elysper-harness/src/events/mod.rs:70-79`：model 族全部返回 `false`（delta 与工具结果
+`crates/uva-harness/src/events/mod.rs:70-79`：model 族全部返回 `false`（delta 与工具结果
 都由 harness 直接写日志，host 不再从事件里持久化它们）。
 
 - [ ] **Step 4: harness 写整条 assistant 消息**
 
-`crates/elysper-harness/src/agent/re_act/stream.rs`：
+`crates/uva-harness/src/agent/re_act/stream.rs`：
 
 - 删掉 `ChunkAssembler::ingest` 里逐 chunk 的 `emit_typed(AssistantChunk)`（`:39-66`）。
 - 模型调用结束时（`finalize_outcome` 已知组装好的 parts），把整条 assistant 消息写成**一行**：
@@ -736,21 +736,21 @@ Expected: FAIL —— 今天每个 delta 一行。
 
 - [ ] **Step 5: 工具结果行由 harness 写**
 
-`crates/elysper-harness/src/agent/re_act/loop/tools/commit.rs`：
+`crates/uva-harness/src/agent/re_act/loop/tools/commit.rs`：
 `commit_tool_result`（`:103`）除了发事件，还要经写者写一行
 `SessionEvent::ToolResult { seq: 0, ts: String::new(), data: <ToolResult 消息的 JSON>, surface_op: None }`。
 
 - [ ] **Step 6: 跑测试确认通过**
 
-Run: `cargo test -p elysper-harness --lib`
+Run: `cargo test -p uva-harness --lib`
 Expected: PASS。server 侧的测试可能因为「server 不再持久化 Model 事件」而需要调整——
-那是 Task 5 的范围，但**本任务结束时 `cargo test -p elysper-server --lib` 必须仍然绿**：
+那是 Task 5 的范围，但**本任务结束时 `cargo test -p uva-app-server --lib` 必须仍然绿**：
 若红，先在本任务内修好（server 的行为变化是被 `is_durable()` 驱动的，不需要改 server 的代码）。
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add -A crates/elysper-harness crates/elysper-server
+git add -A crates/uva-harness crates/uva-app-server
 git commit -m "feat(harness): one assistant turn is one row; deltas stay live-only"
 ```
 
@@ -759,18 +759,18 @@ git commit -m "feat(harness): one assistant turn is one row; deltas stay live-on
 ### Task 7: context crate 的两个写点
 
 **Files:**
-- Modify: `crates/elysper-context/src/memory/typed.rs`（`repair_session`）
-- Modify: `crates/elysper-context/src/memory/session.rs`（`SessionMemory`）
-- Modify: `crates/elysper-context/src/memory/file/mod.rs:649`（`SessionMemory::new` 的生产调用点）
-- Modify: `crates/elysper-server/src/state/app_state/sessions.rs`（调用点）
+- Modify: `crates/uva-context/src/memory/typed.rs`（`repair_session`）
+- Modify: `crates/uva-context/src/memory/session.rs`（`SessionMemory`）
+- Modify: `crates/uva-context/src/memory/file/mod.rs:649`（`SessionMemory::new` 的生产调用点）
+- Modify: `crates/uva-app-server/src/state/app_state/sessions.rs`（调用点）
 
 **Interfaces:**
 - Consumes: Task 2 的 `LogWriter`。
 - Produces:
   ```rust
-  // crates/elysper-context/src/memory/typed.rs
+  // crates/uva-context/src/memory/typed.rs
   pub async fn repair_session(writer: Arc<LogWriter>) -> Result<(), ...>;
-  // crates/elysper-context/src/memory/session.rs
+  // crates/uva-context/src/memory/session.rs
   impl SessionMemory {
       pub fn new(writer: Arc<LogWriter>) -> Self;
   }
@@ -778,13 +778,13 @@ git commit -m "feat(harness): one assistant turn is one row; deltas stay live-on
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-context/src/memory/` 的既有测试里，把直接 `sink.append(...)` 的写法换成写者；
+`crates/uva-context/src/memory/` 的既有测试里，把直接 `sink.append(...)` 的写法换成写者；
 新增一条断言：`repair_session` 补齐的行带 `seq`，且序号大于日志里已有的最大号
 （它不再自己算 `state.last_seq + 1`——那是第三个序号来源）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p elysper-context --lib`
+Run: `cargo test -p uva-context --lib`
 Expected: FAIL —— 签名还没改。
 
 - [ ] **Step 3: 改两个写点**
@@ -792,18 +792,18 @@ Expected: FAIL —— 签名还没改。
 - `typed.rs:145-148`：`repair_session` 拿写者，补齐行经 `writer.append_nowait(...)` 或
   `writer.repair(closers)`（序号由写者发）。
 - `session.rs:211`：`SessionMemory::append` 改走写者；`SessionMemory::new(sink)` → `new(writer)`。
-- `crates/elysper-context/src/memory/file/mod.rs:649`：`SessionMemory::new` 的生产调用点改传写者。
-- `crates/elysper-server/src/state/app_state/sessions.rs:135`：调用点改传写者。
+- `crates/uva-context/src/memory/file/mod.rs:649`：`SessionMemory::new` 的生产调用点改传写者。
+- `crates/uva-app-server/src/state/app_state/sessions.rs:135`：调用点改传写者。
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p elysper-context --lib && cargo test -p elysper-server --lib`
+Run: `cargo test -p uva-context --lib && cargo test -p uva-app-server --lib`
 Expected: PASS。
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add -A crates/elysper-context crates/elysper-server
+git add -A crates/uva-context crates/uva-app-server
 git commit -m "refactor(context): memory and repair write through the session writer"
 ```
 
@@ -812,7 +812,7 @@ git commit -m "refactor(context): memory and repair write through the session wr
 ### Task 8: web 的历史投影认 `assistant_message` 行
 
 **Files:**
-- Modify: `elysper-web/src/lib/session-to-messages.ts`
+- Modify: `uva-web/src/lib/session-to-messages.ts`
 - Test: 无自动化测试套件（本仓按 `AGENTS.md` §4.2 不保留前端 e2e；验证用 Playwright MCP 驱动真实前端）
 
 **Interfaces:**
@@ -822,7 +822,7 @@ git commit -m "refactor(context): memory and repair write through the session wr
 
 - [ ] **Step 1: 改 `applyHistoryEntry`**
 
-`elysper-web/src/lib/session-to-messages.ts`：
+`uva-web/src/lib/session-to-messages.ts`：
 
 - 常量区（`:95-96`）加 `const EVENT_ASSISTANT_MESSAGE = 'assistant_message';`。
 - `applyHistoryEntry`（`:524`）加一个分支：`assistant_message` 行的 `data` 是一整条
@@ -838,7 +838,7 @@ Expected: PASS（`tsc --noEmit` + `eslint` + `prettier --check` 全绿）。
 
 - [ ] **Step 3: 用 Playwright MCP 验真实前端**
 
-起 `npm run dev` + `cargo run -p elysper-server`，打开 chat 页：
+起 `npm run dev` + `cargo run -p uva-app-server`，打开 chat 页：
 
 1. 发一条消息，让假 provider 回一段多 token 的文本。
 2. 刷新页面 → 历史投影必须显示**一条**完整的 assistant 消息（不是碎片、不是空）。
@@ -849,7 +849,7 @@ Expected: PASS（`tsc --noEmit` + `eslint` + `prettier --check` 全绿）。
 - [ ] **Step 4: 提交**
 
 ```bash
-git add elysper-web/src/lib/session-to-messages.ts
+git add uva-web/src/lib/session-to-messages.ts
 git commit -m "feat(web): history projection reads the assistant_message row"
 ```
 
@@ -862,10 +862,10 @@ git commit -m "feat(web): history projection reads the assistant_message row"
 ```bash
 cargo +nightly fmt --all
 make ci
-cargo test -p elysper-session --lib
-cargo test -p elysper-harness --lib
-cargo test -p elysper-server --lib
-cargo test -p elysper-context --lib
+cargo test -p uva-session --lib
+cargo test -p uva-harness --lib
+cargo test -p uva-app-server --lib
+cargo test -p uva-context --lib
 ```
 
 - [x] **不变量逐条核对**（对应 §8 的 I1–I15；测试已在各任务里写）

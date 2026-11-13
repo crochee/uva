@@ -4,7 +4,7 @@
 
 **Goal:** `ui-bundle` 行从「一串无主组件」升级为**声明插槽的 UI 树**：UI 装载器在激活阶段装配「声明 + 注册」（Effect 语义：注册即返回句柄、drop 即回滚；未声明插槽注册、重复声明已占用插槽、`one` 槽超基数 → 激活直接失败），**两个宿主各渲染一次同一棵树**（浏览器 = DOM、终端 = ratatui）⇒ TUI 因此可扩展。v1 永不执行远端 JS/CSS。
 
-**Architecture:** 装载器住在 app-server（新模块 `crates/elysper-app-server/src/ui/tree.rs`）：装配期读 `[ui]` 行 → `UiTree`（插槽表 + 注册表，全部由可撤销句柄持有）。`AppState` 从持 `Vec<UiSchema>` 改为持 `UiTree` —— HMR 换树 = drop 旧树 = 全量回滚。`ui/schema` 的响应在既有 `schemas` 之外**新增**顶层 `slots`（wire 只增不改）。浏览器侧（`elysper-web/src/components/ui-schema/`）：新增唯一取数 store 与 `SlotRegion`，只在 kind 注册表（`panel` / `list` / `key-value`）内渲染，未知 kind 走既有 `UnknownKind` 占位。终端侧（`crates/elysper-tui`）：定义自己的 wire DTO + ratatui kind 渲染器（D18：共享止于 wire 契约，呈现各写各的）。**核心一行不动**：`ui.*` 服务键的拒绝点已存在（`profile/mod.rs::build_one` → `ProfileError::NamespaceViolation`），本轮只钉测试与文档交叉引用。
+**Architecture:** 装载器住在 app-server（新模块 `crates/uva-app-server/src/ui/tree.rs`）：装配期读 `[ui]` 行 → `UiTree`（插槽表 + 注册表，全部由可撤销句柄持有）。`AppState` 从持 `Vec<UiSchema>` 改为持 `UiTree` —— HMR 换树 = drop 旧树 = 全量回滚。`ui/schema` 的响应在既有 `schemas` 之外**新增**顶层 `slots`（wire 只增不改）。浏览器侧（`uva-web/src/components/ui-schema/`）：新增唯一取数 store 与 `SlotRegion`，只在 kind 注册表（`panel` / `list` / `key-value`）内渲染，未知 kind 走既有 `UnknownKind` 占位。终端侧（`crates/uva-tui`）：定义自己的 wire DTO + ratatui kind 渲染器（D18：共享止于 wire 契约，呈现各写各的）。**核心一行不动**：`ui.*` 服务键的拒绝点已存在（`profile/mod.rs::build_one` → `ProfileError::NamespaceViolation`），本轮只钉测试与文档交叉引用。
 
 **Tech Stack:** Rust（stable 通道）、serde 1.0（workspace 已带 `derive`，`Cargo.toml:142`）、serde_json 1.0、thiserror 2.0（`UiError` 既有）、ratatui 0.29（workspace，`default-features = false, features = ["crossterm"]`）、React 19 + TypeScript + Vite、Playwright MCP（AGENTS.md §4.2 的验证通道，**不建测试套件**）
 
@@ -12,15 +12,15 @@
 
 ## Global Constraints
 
-- **核心一行不动**：`crates/elysper-kernel/**`、`crates/elysper-core/**` 零改动。`ui.` 边界的判定函数
-  `namespace_allows` / `UI_PREFIX` / `Namespace` 已存在（`crates/elysper-kernel/src/scope.rs:15-39`），
+- **核心一行不动**：`crates/uva-kernel/**`、`crates/uva-core/**` 零改动。`ui.` 边界的判定函数
+  `namespace_allows` / `UI_PREFIX` / `Namespace` 已存在（`crates/uva-kernel/src/scope.rs:15-39`），
   本轮**不改**，只消费。
 - **命名空间边界（既有强制点，本轮写清并钉测试）**——两条边界并列，不要合并：
-  1. **核心装载器拒绝任何 `ui.*` 服务键**：`crates/elysper-app-server/src/profile/mod.rs::build_one`
+  1. **核心装载器拒绝任何 `ui.*` 服务键**：`crates/uva-app-server/src/profile/mod.rs::build_one`
      （对 `manifest.provides.iter().chain(manifest.inject.iter())` 逐键检查 `starts_with(UI_PREFIX)`，
      约 `:306-313`）→ 返回 **`ProfileError::NamespaceViolation`**（`profile/model.rs:189`，
      文案 ``plugin `{id}` declares core-side service `{key}`; `ui.` keys are reserved for the
-     frontend loader``）。既有钉子：`crates/elysper-app-server/tests/profile.rs:465`。
+     frontend loader``）。既有钉子：`crates/uva-app-server/tests/profile.rs:465`。
   2. **UI 装载器拒绝 `ui.` 之外的行 id**：`ui/schema.rs::project`（`namespace_allows(Namespace::Ui,
      &entry.id)`）→ **`UiError::NamespaceViolation`**。既有钉子：`ui/schema.rs` 的
      `ui_loader_rejects_core_key` 测试（随 Task 1 迁往 `ui/tree/tests.rs`）。
@@ -37,8 +37,8 @@
   字段（既有 `reject_executable` 的 `FORBIDDEN` 表，`ui/schema.rs:222-237`）；Task 1 把拒绝范围从
   「行 config 顶层」扩到「行 config 顶层 + 每个 slot 声明 + 每个 component 对象」。
 - **错误处理**：`UiError` 沿用 `thiserror`（现状，`ui/schema.rs:46`），不引 `anyhow` 进这个模块。
-- **前端路径事实**：前端在仓库根的 **`elysper-web/`**（本刀任务描述里的 `crates/elysper-web/` 不存在）。
-- **前端不建测试套件**（AGENTS.md §4.2）：不写 `*.test.ts`、不建 `elysper-web/tests/`、不写任何
+- **前端路径事实**：前端在仓库根的 **`uva-web/`**（本刀任务描述里的 `crates/uva-web/` 不存在）。
+- **前端不建测试套件**（AGENTS.md §4.2）：不写 `*.test.ts`、不建 `uva-web/tests/`、不写任何
   playwright spec 文件；验证 = Playwright MCP 驱动真实浏览器 + 页面内
   `await import('/src/...')` 断言。注意 §4.2 的两个陷阱（后台 tab 的 `visibilityState === 'hidden'`
   会让 app 标 Offline；隐藏 tab 里 `requestAnimationFrame` 永不触发）。
@@ -47,13 +47,13 @@
   lib 依赖，本轮不回焊）。
 - **测试布局门禁**（`make check-test-layout`，`TEST_BLOCK_LIMIT=400`、`TEST_BLOCK_BASELINE=0`，
   即**不允许**新增 ≥300 行的内联测试块）：新模块的测试放同级 `tests.rs`
-  （`ui/tree/tests.rs`、`crates/elysper-tui/src/ui_schema/tests.rs`；ratatui 断言进既有
+  （`ui/tree/tests.rs`、`crates/uva-tui/src/ui_schema/tests.rs`；ratatui 断言进既有
   `src/render/tests.rs`）。
 - **依赖**：TUI 新增 `serde.workspace = true`（root `Cargo.toml:142` 已带 `features = ["derive"]`，
   `dep.workspace = true` 继承）；其余零新依赖、零 feature 变化。
 - 每次提交前：`cargo +nightly fmt --all` +
   `cargo clippy --all-targets --all-features --tests --all -- -D warnings`。
-- 测试按 crate 分批：`cargo test -p elysper-app-server`、`cargo test -p elysper-tui`
+- 测试按 crate 分批：`cargo test -p uva-app-server`、`cargo test -p uva-tui`
   （**禁止** `cargo test --workspace`，AGENTS.md §3.3）。
 - 不 push 远程仓库。
 
@@ -66,7 +66,7 @@
    `AppState::reload_profile`（`state/app_state/mod.rs:467` 起）同样 `map_err(...)?` 后**拒绝换树**。
    两个入口都要有测试：坏行 ⇒ boot 失败 / reload 报错且旧树保留。
 2. **drop 即回滚**。`AppState.ui_tree` 换树时旧 `UiTree` drop ⇒ 声明与注册**全部**撤销。句柄语义照
-   kernel `EffectHandle`（`crates/elysper-kernel/src/effect.rs`：clone 共享守卫，最后一个 drop 才
+   kernel `EffectHandle`（`crates/uva-kernel/src/effect.rs`：clone 共享守卫，最后一个 drop 才
    回收）。做错的症状：HMR 后 `components_in` 读到两代注册的叠加。钉一条「换树后旧插槽内容不可见」
    的测试（Task 2）。
 3. **wire 兼容**。`schemas` 的形状、每行一条、装配顺序都不能变；`routes/ui.rs` 既有测试先迁移到用
@@ -83,17 +83,17 @@
 ### Task 1: UI 装载器 —— 插槽表、可撤销句柄与激活失败
 
 **Files:**
-- Create: `crates/elysper-app-server/src/ui/tree.rs`
-- Create: `crates/elysper-app-server/src/ui/tree/tests.rs`
-- Modify: `crates/elysper-app-server/src/ui/mod.rs`（声明 `pub mod tree;`，模块文档写清三个命名空间强制点）
-- Modify: `crates/elysper-app-server/src/ui/schema.rs`（`UiError` 加 3 个变体；行级装载逻辑迁出到 `tree.rs`）
+- Create: `crates/uva-app-server/src/ui/tree.rs`
+- Create: `crates/uva-app-server/src/ui/tree/tests.rs`
+- Modify: `crates/uva-app-server/src/ui/mod.rs`（声明 `pub mod tree;`，模块文档写清三个命名空间强制点）
+- Modify: `crates/uva-app-server/src/ui/schema.rs`（`UiError` 加 3 个变体；行级装载逻辑迁出到 `tree.rs`）
 
 **Interfaces:**
-- Consumes: `crate::profile::{Entry, RuntimeKind}`、`elysper::kernel::{Namespace, UI_PREFIX, namespace_allows}`、`schema.rs` 的 `UiSchema` / `UiComponent` / `UiError`
+- Consumes: `crate::profile::{Entry, RuntimeKind}`、`uva::kernel::{Namespace, UI_PREFIX, namespace_allows}`、`schema.rs` 的 `UiSchema` / `UiComponent` / `UiError`
 - Produces: `load_ui_tree`（boot 与 HMR 的激活入口）、`UiTree` / `SlotDecl` / `SlotInfo` / `Cardinality` / `SlotHandle` / `ComponentHandle`
 
 ```rust
-// crates/elysper-app-server/src/ui/tree.rs（公开面；私有实现细节注释说明）
+// crates/uva-app-server/src/ui/tree.rs（公开面；私有实现细节注释说明）
 pub use super::schema::{UiComponent, UiError, UiSchema};
 
 /// How many components one slot accepts.
@@ -238,13 +238,13 @@ config = { version = 1, components = [
 
 - [ ] **Step 1: 写失败的测试**
 
-`crates/elysper-app-server/src/ui/tree/tests.rs`（`tree.rs` 尾部声明 `#[cfg(test)] mod tests;`）。
+`crates/uva-app-server/src/ui/tree/tests.rs`（`tree.rs` 尾部声明 `#[cfg(test)] mod tests;`）。
 把 `schema.rs` 既有内联测试（`ui_loader_rejects_core_key` / `unknown_schema_component_falls_back`
 / `ui_loader_rejects_a_non_ui_runtime` / `ui_loader_rejects_an_executable_payload` /
 `an_empty_config_is_an_empty_schema`，`ui/schema.rs:265-364`）**原样迁来**，再新增：
 
 ```rust
-use elysper::kernel::RuntimeKind;
+use uva::kernel::RuntimeKind;
 use serde_json::json;
 
 use super::{Cardinality, SlotDecl, UiTree, load_ui_tree};
@@ -284,7 +284,7 @@ fn schemas_are_grouped_by_row_in_assembly_order() { /* … */ }
 
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-app-server --lib ui::tree`
+Run: `cargo test -p uva-app-server --lib ui::tree`
 Expected: FAIL（``file not found for module `tree` ``，编译错误）
 
 - [ ] **Step 3: 实现 `tree.rs` 并迁移 `schema.rs`**
@@ -327,12 +327,12 @@ Expected: FAIL（``file not found for module `tree` ``，编译错误）
 
 - [ ] **Step 4: 跑本模块测试，确认通过**
 
-Run: `cargo test -p elysper-app-server --lib ui::`
+Run: `cargo test -p uva-app-server --lib ui::`
 Expected: PASS（迁移的 5 条 + 新增 10 条全绿）
 
 - [ ] **Step 5: 跑 crate lib 全量，确认没有迁移遗漏**
 
-Run: `cargo test -p elysper-app-server --lib`
+Run: `cargo test -p uva-app-server --lib`
 Expected: PASS
 
 - [ ] **Step 6: 格式与 lint**
@@ -343,7 +343,7 @@ Expected: 无输出（0 warning）
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/elysper-app-server/src/ui
+git add crates/uva-app-server/src/ui
 git commit -m "feat(ui): slot declarations with revocable handles; activation fails on unknown or occupied slots"
 ```
 
@@ -352,19 +352,19 @@ git commit -m "feat(ui): slot declarations with revocable handles; activation fa
 ### Task 2: `ui/schema` 扩 `slots`，`AppState` 换持 `UiTree`
 
 **Files:**
-- Modify: `crates/elysper-app-server/src/routes/ui.rs`
-- Modify: `crates/elysper-app-server/src/state/app_state/mod.rs`
-- Modify: `crates/elysper-app-server/src/state/app_state/boot.rs`
-- Modify: `crates/elysper-app-server/src/state/app_state/for_test.rs`
-- Modify: `crates/elysper-app-server/src/state/tests/reload.rs`
-- Modify: `crates/elysper-app-server/tests/profile.rs`
+- Modify: `crates/uva-app-server/src/routes/ui.rs`
+- Modify: `crates/uva-app-server/src/state/app_state/mod.rs`
+- Modify: `crates/uva-app-server/src/state/app_state/boot.rs`
+- Modify: `crates/uva-app-server/src/state/app_state/for_test.rs`
+- Modify: `crates/uva-app-server/src/state/tests/reload.rs`
+- Modify: `crates/uva-app-server/tests/profile.rs`
 
 **Interfaces:**
 - Consumes: Task 1 的 `UiTree` / `SlotInfo` / `load_ui_tree`
 - Produces: `ui/schema` 响应 `{ slots: [...], schemas: [...] }`；`AppState.ui_tree: RwLock<UiTree>`
 
 ```rust
-// crates/elysper-app-server/src/routes/ui.rs
+// crates/uva-app-server/src/routes/ui.rs
 pub struct UiSchemaResponse {
     /// The slots this deployment's `[ui]` rows declare, in declaration order.
     pub slots: Vec<crate::ui::tree::SlotInfo>,
@@ -425,7 +425,7 @@ async fn a_bad_ui_segment_is_rejected_and_the_old_tree_stays() {
 }
 ```
 
-3. `crates/elysper-app-server/tests/profile.rs` 新增（`segment_of` 的回归钉子）：
+3. `crates/uva-app-server/tests/profile.rs` 新增（`segment_of` 的回归钉子）：
 
 ```rust
 #[test]
@@ -438,7 +438,7 @@ fn a_ui_bundle_row_never_reaches_the_core_loader() {
 
 - [ ] **Step 2: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-app-server --lib routes::ui state::tests::reload`
+Run: `cargo test -p uva-app-server --lib routes::ui state::tests::reload`
 Expected: FAIL（`ui_tree` 字段不存在 / `slots` 成员不存在，编译错误）
 
 - [ ] **Step 3: 实现**
@@ -455,16 +455,16 @@ Expected: FAIL（`ui_tree` 字段不存在 / `slots` 成员不存在，编译错
 - `state/app_state/for_test.rs:256-257`：`ui_schemas: RwLock::new(Vec::new())` →
   `ui_tree: RwLock::new(crate::ui::tree::UiTree::new())`。
 - 删除 Task 1 Step 3 保留的 `load_ui_manifest` 薄包装（若有）：
-  `grep -rn "load_ui_manifest" crates/elysper-app-server/src` 应零命中。
+  `grep -rn "load_ui_manifest" crates/uva-app-server/src` 应零命中。
 
 - [ ] **Step 4: 跑受影响测试，确认通过**
 
-Run: `cargo test -p elysper-app-server --lib routes::ui state::tests::reload`
+Run: `cargo test -p uva-app-server --lib routes::ui state::tests::reload`
 Expected: PASS
 
 - [ ] **Step 5: 跑本 crate 全量（含 tests/ 目录）**
 
-Run: `cargo test -p elysper-app-server`
+Run: `cargo test -p uva-app-server`
 Expected: PASS（`tests/profile.rs`、`tests/stdio_roundtrip.rs` 等全绿）
 
 - [ ] **Step 6: 激活失败的负路径冒烟（不起浏览器）**
@@ -479,7 +479,7 @@ entries = [
   ] } },
 ]
 EOF
-cargo run -q -p elysper-app-server -- --directory "$tmp" --profile "$tmp/bad.toml" core </dev/null
+cargo run -q -p uva-app-server -- --directory "$tmp" --profile "$tmp/bad.toml" core </dev/null
 ```
 
 Expected: 进程**退出非 0**，stderr 含 `registers into slot` 与 `which no row declares`
@@ -493,7 +493,7 @@ Run: `cargo +nightly fmt --all && cargo clippy --all-targets --all-features --te
 Expected: 无输出
 
 ```bash
-git add crates/elysper-app-server
+git add crates/uva-app-server
 git commit -m "feat(ui): serve the assembled slot tree; AppState holds UiTree and HMR swaps it atomically"
 ```
 
@@ -502,14 +502,14 @@ git commit -m "feat(ui): serve the assembled slot tree; AppState holds UiTree an
 ### Task 3: 浏览器宿主 —— 单一 store、`SlotRegion` 与两个放置点
 
 **Files:**
-- Modify: `elysper-web/src/api/ui-schema.ts`
-- Create: `elysper-web/src/components/ui-schema/store.ts`
-- Create: `elysper-web/src/components/ui-schema/SlotRegion.tsx`
-- Create: `elysper-web/src/components/ui-schema/UnplacedSlots.tsx`
-- Modify: `elysper-web/src/components/chat/SessionSidePanel.tsx`
-- Modify: `elysper-web/src/pages/SessionDetailPage.tsx`
-- Modify: `elysper-web/src/components/ui-schema/ui-schema.css`
-- Delete: `elysper-web/src/components/ui-schema/UiSchemaPanel.tsx`
+- Modify: `uva-web/src/api/ui-schema.ts`
+- Create: `uva-web/src/components/ui-schema/store.ts`
+- Create: `uva-web/src/components/ui-schema/SlotRegion.tsx`
+- Create: `uva-web/src/components/ui-schema/UnplacedSlots.tsx`
+- Modify: `uva-web/src/components/chat/SessionSidePanel.tsx`
+- Modify: `uva-web/src/pages/SessionDetailPage.tsx`
+- Modify: `uva-web/src/components/ui-schema/ui-schema.css`
+- Delete: `uva-web/src/components/ui-schema/UiSchemaPanel.tsx`
 
 **Interfaces:**
 - Consumes: `api/client.ts` 的 `api.get`（`'GET /api/v1/ui/schema' → ui/schema` 映射已存在，**不动**）、
@@ -517,7 +517,7 @@ git commit -m "feat(ui): serve the assembled slot tree; AppState holds UiTree an
 - Produces: `store.ts`（唯一取数方）、`SlotRegion`（按 slot id 渲染）、`UnplacedSlots`（未放置桶）
 
 ```ts
-// elysper-web/src/components/ui-schema/store.ts —— 纯 TS，不 import React
+// uva-web/src/components/ui-schema/store.ts —— 纯 TS，不 import React
 export type UiSchemaState =
   | { status: 'idle' | 'loading' | 'error'; slots: never[]; schemas: never[]; error: string | null }
   | { status: 'ready'; slots: UiSlot[]; schemas: UiSchema[]; error: null };
@@ -575,7 +575,7 @@ export interface UiSchemaResponse {
 
 - [ ] **Step 1: 扩 API 类型**
 
-按上面的块改 `elysper-web/src/api/ui-schema.ts`（文件头注释补一句 `slots` 的来源）。
+按上面的块改 `uva-web/src/api/ui-schema.ts`（文件头注释补一句 `slots` 的来源）。
 
 - [ ] **Step 2: 写 store**
 
@@ -593,20 +593,20 @@ export interface UiSchemaResponse {
 - `SessionSidePanel.tsx` / `SessionDetailPage.tsx` 按放置表接线。
 - 删除 `UiSchemaPanel.tsx`；`ui-schema.css` 补 `slot-region` 与分组的少量样式
   （复用 `nt-uischema__*` 既有类，别起新视觉体系）。
-- 确认无残留引用：`grep -rn "UiSchemaPanel" elysper-web/src` 零命中。
+- 确认无残留引用：`grep -rn "UiSchemaPanel" uva-web/src` 零命中。
 
 - [ ] **Step 4: 前端门禁**
 
 Run: `make check-web`
 Expected: `tsc --noEmit` + `eslint` + `prettier --check` 全过（0 错误）
 
-Run: `cd elysper-web && npm run build`
+Run: `cd uva-web && npm run build`
 Expected: 构建成功退出 0（无 TS / rollup 错误）
 
 - [ ] **Step 5: 起真实后端（带插槽的 profile）**
 
 ```bash
-tmp=$(mktemp -d /tmp/elysper-knife8.XXXXXX)
+tmp=$(mktemp -d /tmp/uva-knife8.XXXXXX)
 cat > "$tmp/profile.toml" <<'EOF'
 [ui]
 entries = [
@@ -623,7 +623,7 @@ entries = [
   ] } },
 ]
 EOF
-cargo run -q -p elysper-app-server -- --directory "$tmp" --profile "$tmp/profile.toml" serve --port 8080
+cargo run -q -p uva-app-server -- --directory "$tmp" --profile "$tmp/profile.toml" serve --port 8080
 ```
 
 Expected: 网关起来，`curl -s localhost:8080/readyz` 最终 200（core 宣布 ready 后）；
@@ -631,7 +631,7 @@ Expected: 网关起来，`curl -s localhost:8080/readyz` 最终 200（core 宣�
 
 - [ ] **Step 6: Playwright MCP 验证（AGENTS.md §4.2，不写 spec 文件）**
 
-1. 另开终端 `cd elysper-web && npm run dev`（Vite 5173，`vite.config.ts` 已代理 `/rpc` ws 与
+1. 另开终端 `cd uva-web && npm run dev`（Vite 5173，`vite.config.ts` 已代理 `/rpc` ws 与
    `/readyz` 到 8080）。
 2. **先处理后台 tab 陷阱**：用 `browser_run_code_unsafe` 在导航前
    `page.addInitScript(...)` 把 `document.visibilityState` 固定为 `'visible'`、`hidden` 为
@@ -667,7 +667,7 @@ Expected: 全部断言为真。
 - [ ] **Step 7: 提交**
 
 ```bash
-git add elysper-web/src
+git add uva-web/src
 git commit -m "feat(web): SlotRegion renders the declared slots; one store fetches ui/schema for every region"
 ```
 
@@ -676,23 +676,23 @@ git commit -m "feat(web): SlotRegion renders the declared slots; one store fetch
 ### Task 4: 终端宿主 —— wire DTO、`RequestKind::UiSchema` 与 ratatui 渲染
 
 **Files:**
-- Create: `crates/elysper-tui/src/ui_schema.rs`
-- Create: `crates/elysper-tui/src/ui_schema/tests.rs`
-- Modify: `crates/elysper-tui/src/lib.rs`（`pub mod ui_schema;`）
-- Modify: `crates/elysper-tui/src/transport.rs`（`RequestKind::UiSchema` + `Request::ui_schema()`）
-- Modify: `crates/elysper-tui/src/app.rs`（`Action::FetchUiSchema`、`App.ui` 字段、`apply_ready`、`apply_success`）
-- Modify: `crates/elysper-tui/src/app/tests.rs`
-- Create: `crates/elysper-tui/src/render/ui_slots.rs`
-- Modify: `crates/elysper-tui/src/render.rs`（布局 + `mod ui_slots;`）
-- Modify: `crates/elysper-tui/src/render/tests.rs`
-- Modify: `crates/elysper-tui/Cargo.toml`
+- Create: `crates/uva-tui/src/ui_schema.rs`
+- Create: `crates/uva-tui/src/ui_schema/tests.rs`
+- Modify: `crates/uva-tui/src/lib.rs`（`pub mod ui_schema;`）
+- Modify: `crates/uva-tui/src/transport.rs`（`RequestKind::UiSchema` + `Request::ui_schema()`）
+- Modify: `crates/uva-tui/src/app.rs`（`Action::FetchUiSchema`、`App.ui` 字段、`apply_ready`、`apply_success`）
+- Modify: `crates/uva-tui/src/app/tests.rs`
+- Create: `crates/uva-tui/src/render/ui_slots.rs`
+- Modify: `crates/uva-tui/src/render.rs`（布局 + `mod ui_slots;`）
+- Modify: `crates/uva-tui/src/render/tests.rs`
+- Modify: `crates/uva-tui/Cargo.toml`
 
 **Interfaces:**
 - Consumes: `ui/schema` 的响应形状（Task 2 定的 wire；D18 ⇒ TUI 自己定义 DTO，不引 app-server lib）
 - Produces: 终端的 UI 树投影与渲染入口（`chat.sidebar` = 右列，`session.detail.extensions` = 底部块）
 
 ```rust
-// crates/elysper-tui/src/ui_schema.rs —— 纯数据，无 I/O
+// crates/uva-tui/src/ui_schema.rs —— 纯数据，无 I/O
 use serde::Deserialize;
 
 /// The slots this build places. Slot ids are host-agnostic (D25): the
@@ -784,7 +784,7 @@ pub(crate) fn extensions_height(components: &[&UiComponent]) -> u16;
 
 - [ ] **Step 1: Cargo 依赖**
 
-`crates/elysper-tui/Cargo.toml` 的 `[dependencies]` 加（注释说明：wire DTO 的反序列化）：
+`crates/uva-tui/Cargo.toml` 的 `[dependencies]` 加（注释说明：wire DTO 的反序列化）：
 
 ```toml
 # The `ui/schema` wire DTOs deserialize through serde's derive.
@@ -852,7 +852,7 @@ fn session_extensions_render_below_the_transcript() {
 
 - [ ] **Step 3: 跑测试，确认失败**
 
-Run: `cargo test -p elysper-tui`
+Run: `cargo test -p uva-tui`
 Expected: FAIL（`ui_schema` 模块不存在 / `RequestKind::UiSchema` 不存在，编译错误）
 
 - [ ] **Step 4: 实现**
@@ -865,7 +865,7 @@ UI 树，D25；slot id 与浏览器同源）。
 
 - [ ] **Step 5: 跑本 crate 测试，确认通过**
 
-Run: `cargo test -p elysper-tui`
+Run: `cargo test -p uva-tui`
 Expected: PASS（既有 reducer / render / transport 测试 + 新增全绿）
 
 - [ ] **Step 6: 终端手工冒烟（同一份 profile ⇒ 两个宿主拿到同一棵树）**
@@ -873,9 +873,9 @@ Expected: PASS（既有 reducer / render / transport 测试 + 新增全绿）
 沿用 Task 3 Step 5 的 `$tmp/profile.toml`：
 
 ```bash
-cargo build -p elysper-app-server
-ELYSPER_APP_SERVER=target/debug/elysper-app-server \
-  cargo run -p elysper-tui -- --directory "$tmp" --profile "$tmp/profile.toml"
+cargo build -p uva-app-server
+UVA_APP_SERVER=target/debug/uva-app-server \
+  cargo run -p uva-tui -- --directory "$tmp" --profile "$tmp/profile.toml"
 ```
 
 Expected: 对话视图右侧出现 `Notes` 面板列（`chat.sidebar`）；未知 kind 显示 `? weather-card`；
@@ -887,7 +887,7 @@ Run: `cargo +nightly fmt --all && cargo clippy --all-targets --all-features --te
 Expected: 无输出
 
 ```bash
-git add crates/elysper-tui
+git add crates/uva-tui
 git commit -m "feat(tui): render the shared slot tree — chat.sidebar as a column, extensions under the transcript"
 ```
 
@@ -896,15 +896,15 @@ git commit -m "feat(tui): render the shared slot tree — chat.sidebar as a colu
 ### Task 5: 收口 —— 文档、CHANGELOG 与全量门禁
 
 **Files:**
-- Modify: `crates/elysper-app-server/README.md`（`[ui]` 段落，`:189-193`）
-- Modify: `crates/elysper-tui/README.md`
+- Modify: `crates/uva-app-server/README.md`（`[ui]` 段落，`:189-193`）
+- Modify: `crates/uva-tui/README.md`
 - Modify: `CHANGELOG.md`（`[Unreleased]`）
 
 **Interfaces:**
 - Consumes: Task 1–4 的全部产物
 - Produces: 与代码一致的入库文档；`make ci` 全绿
 
-- [ ] **Step 1: 改 `crates/elysper-app-server/README.md` 的 `[ui]` 段**
+- [ ] **Step 1: 改 `crates/uva-app-server/README.md` 的 `[ui]` 段**
 
 把 `:189-193` 那段扩写为（保持中文、同样的短段落风格）：
 
@@ -921,7 +921,7 @@ git commit -m "feat(tui): render the shared slot tree — chat.sidebar as a colu
 装载器拒绝 `script` / `scripts` / `javascript` / `stylesheet` / `css` 字段。
 ```
 
-- [ ] **Step 2: 改 `crates/elysper-tui/README.md`**
+- [ ] **Step 2: 改 `crates/uva-tui/README.md`**
 
 新增一小节（放在传输 / 渲染说明之后，风格照邻居）：终端也有一棵 UI 树（D25）—— 每代 core
 `ready` 后取一次 `ui/schema`，`chat.sidebar` 渲染为对话右侧列、`session.detail.extensions`
@@ -942,7 +942,7 @@ git commit -m "feat(tui): render the shared slot tree — chat.sidebar as a colu
 
 - [ ] **Step 4: 分批跑两个 crate 的测试**
 
-Run: `cargo test -p elysper-app-server && cargo test -p elysper-tui`
+Run: `cargo test -p uva-app-server && cargo test -p uva-tui`
 Expected: 两个 crate 全部 passed
 
 - [ ] **Step 5: 全量门禁**
@@ -955,6 +955,6 @@ Expected: 全绿（`check-test-layout` 不新增 ≥300 行内联块；`check-cl
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/elysper-app-server/README.md crates/elysper-tui/README.md CHANGELOG.md
+git add crates/uva-app-server/README.md crates/uva-tui/README.md CHANGELOG.md
 git commit -m "docs: the slot tree contract — one ui/schema, two hosts, effect-scoped registrations"
 ```
