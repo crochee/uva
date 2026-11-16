@@ -21,9 +21,10 @@
 //!    `SessionEvent::Step` inline, any future schema change
 //!    touches every site. The builder is the single
 //!    canonicalisation point.
-//! 3. **Frontend codegen** — `KNOWN_SESSION_EVENT_TYPES` exposes
-//!    the *type* tags; this module exposes the *payload* shape
-//!    so the OpenAPI generator can describe each event.
+//! 3. **Frontend codegen** — the app-server contract catalog turns
+//!    `KNOWN_SESSION_EVENT_TYPES` into the `SessionEventType` union
+//!    `uva-web` generates; these builders pin the *payload* shape
+//!    each tag carries on the wire.
 //! 4. **Replay-friendliness** — `fold_surface` /
 //!    `interrupted_turn_closers` already understand the
 //!    `data`-as-`Value` envelope; builders produce the exact
@@ -50,6 +51,9 @@ pub fn step_start(turn_idx: u32, step_idx: u32) -> SessionEvent {
             "turn": turn_idx,
             "step": step_idx,
         }),
+        kind: Some("start".to_string()),
+        turn: Some(u64::from(turn_idx)),
+        step: Some(u64::from(step_idx)),
     }
 }
 
@@ -65,6 +69,9 @@ pub fn step_end(turn_idx: u32, step_idx: u32, action: &str) -> SessionEvent {
             "step": step_idx,
             "action": action,
         }),
+        kind: Some("end".to_string()),
+        turn: Some(u64::from(turn_idx)),
+        step: Some(u64::from(step_idx)),
     }
 }
 
@@ -79,6 +86,8 @@ pub fn turn_start(turn_idx: u32) -> SessionEvent {
             "kind": "start",
             "turn": turn_idx,
         }),
+        kind: Some("start".to_string()),
+        turn: Some(u64::from(turn_idx)),
     }
 }
 
@@ -94,6 +103,8 @@ pub fn turn_end(turn_idx: u32, reason: &str) -> SessionEvent {
             "turn": turn_idx,
             "reason": reason,
         }),
+        kind: Some("end".to_string()),
+        turn: Some(u64::from(turn_idx)),
     }
 }
 
@@ -174,6 +185,24 @@ pub fn tool_dispatch(
     }
 }
 
+/// Build the `ToolOutput` row written for one streamed chunk.
+///
+/// `chunk` is the text the tool produced in this slice — one row per
+/// chunk, in the order the chunks arrived. The row is **log-only**:
+/// it is the durable half of the live `ToolProgress` event, so a
+/// reload replays the progress a client already saw; the settled
+/// `tool_result` row stays the model's copy.
+#[must_use]
+pub fn tool_output(call_id: &str, tool: &str, chunk: &str) -> SessionEvent {
+    SessionEvent::ToolOutput {
+        seq: 0,
+        ts: String::new(),
+        data: serde_json::json!({ "output": chunk }),
+        call_id: Some(call_id.to_string()),
+        tool: Some(tool.to_string()),
+    }
+}
+
 /// Build the `RequestSnapshot` row written before a model request.
 #[must_use]
 pub fn request_snapshot(
@@ -210,6 +239,8 @@ pub fn turn_suspended(pending: Vec<String>) -> SessionEvent {
             "status": "suspended",
             "pending": pending,
         }),
+        kind: Some("suspended".to_string()),
+        turn: None,
     }
 }
 
@@ -223,6 +254,9 @@ pub fn step_end_suspended() -> SessionEvent {
             "phase": "end",
             "status": "suspended",
         }),
+        kind: Some("end".to_string()),
+        turn: None,
+        step: None,
     }
 }
 
@@ -236,6 +270,8 @@ pub fn turn_end_suspended() -> SessionEvent {
             "phase": "end",
             "reason": "suspended",
         }),
+        kind: Some("end".to_string()),
+        turn: None,
     }
 }
 
@@ -289,6 +325,10 @@ pub fn subagent_enter(
             "depth": depth,
             "agent_name": agent_name,
         }),
+        child_session_id: Some(child_session_id.to_string()),
+        parent_session_id: Some(parent_session_id.to_string()),
+        agent_name: Some(agent_name.to_string()),
+        depth: Some(u64::from(depth)),
     }
 }
 
@@ -308,6 +348,9 @@ pub fn subagent_exit(
             "depth": depth,
             "status": status,
         }),
+        child_session_id: Some(child_session_id.to_string()),
+        depth: Some(u64::from(depth)),
+        status: Some(status.to_string()),
     }
 }
 
@@ -330,6 +373,8 @@ pub fn request_header(
             "model": model,
             "tools_hash": tools_hash,
         }),
+        provider: Some(provider.to_string()),
+        model: Some(model.to_string()),
     }
 }
 
@@ -418,6 +463,7 @@ pub fn user_message(data: Value, source: Option<&str>) -> SessionEvent {
         data,
         source: source.map(str::to_string),
         surface_op: None,
+        attachments: Vec::new(),
     }
 }
 
@@ -435,13 +481,7 @@ pub fn round_trip(event: &SessionEvent) -> Option<SessionEvent> {
 /// that are not structural boundaries.
 #[must_use]
 pub fn structural_kind(event: &SessionEvent) -> Option<&str> {
-    let data = match event {
-        SessionEvent::Step { data, .. }
-        | SessionEvent::Turn { data, .. }
-        | SessionEvent::Iteration { data, .. } => data,
-        _ => return None,
-    };
-    data.get("kind").and_then(Value::as_str)
+    event.boundary_kind()
 }
 
 #[cfg(test)]
@@ -649,6 +689,7 @@ mod tests {
             ("request_header", request_header("p", "m", "h", "initial")),
             ("usage", usage(1, 1, 2, None, None, None)),
             ("sandbox_mode", sandbox_mode("workspace-write")),
+            ("tool_output", tool_output("c1", "shell", "half")),
         ];
         for (name, event) in cases {
             let restored = round_trip(&event)

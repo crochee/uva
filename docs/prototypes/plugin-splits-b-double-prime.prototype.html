@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>原型 · B″ 落地后的架构 / 界面 / 交互顺序</title>
+<style>
+  :root { --bg:#0e1116; --panel:#141821; --panel2:#181d26; --line:#272d3a; --fg:#e6e9f0;
+          --muted:#8a8f9c; --accent:#4a9eda; --ok:#3fb984; --warn:#d9a441; --bad:#e06c6c;
+          --hook:#7aa2f7; --appr:#bb9af7; --sub:#9ece6a; --vocab:#e0af68; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.6 -apple-system,"Segoe UI","Noto Sans CJK SC",sans-serif; }
+  .wrap { max-width:1500px; margin:0 auto; padding:22px 20px 60px; }
+  h1 { font-size:21px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 16px; font-size:13px; max-width:120ch; }
+  .proto { display:inline-block; font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+           color:#d9a441; border:1px solid #4a3f22; background:#241f12; border-radius:4px;
+           padding:2px 7px; vertical-align:3px; margin-left:8px; }
+
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin:0 0 14px; position:sticky; top:0;
+          background:var(--bg); padding:8px 0; border-bottom:1px solid var(--line); z-index:5; }
+  .tabs button { background:var(--panel2); color:var(--muted); border:1px solid var(--line);
+                 border-radius:7px; padding:6px 13px; font-size:13px; cursor:pointer; }
+  .tabs button.on { color:var(--fg); border-color:#2f5a8c; background:#16202c; }
+  .view { display:none; }
+  .view.on { display:block; }
+
+  .band { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+          padding:12px 14px; margin-bottom:10px; }
+  .band > .bt { font-size:12px; letter-spacing:.08em; text-transform:uppercase;
+                color:var(--muted); margin-bottom:10px; }
+  .legend { display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:var(--muted); margin-bottom:10px; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+
+  /* 架构图 */
+  .arch { display:grid; grid-template-columns:repeat(6,1fr); gap:8px; }
+  .arch .node { border:1px solid var(--line); border-radius:8px; background:var(--panel2);
+                padding:8px 10px; font-size:12.5px; text-align:center; position:relative; }
+  .arch .node b { display:block; font-size:13px; }
+  .arch .node span { color:var(--muted); font-size:11.5px; line-height:1.45; display:block; }
+  .arch .node.hookc { border-color:#33487d; background:#151b2b; }
+  .arch .node.apprc { border-color:#4a3a6e; background:#191527; }
+  .arch .node.subc  { border-color:#3c5530; background:#141c12; }
+  .arch .node.vocabc{ border-color:#5e4a28; background:#1d1810; }
+  .arch .node.dead  { opacity:.45; border-style:dashed; }
+  .arch .layer { grid-column:1/-1; font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+                 color:var(--muted); margin-top:6px; border-top:1px dashed var(--line); padding-top:8px; }
+  .arch .note { grid-column:1/-1; color:var(--muted); font-size:12px; }
+  .dep { color:var(--muted); font-size:12px; margin-top:8px; }
+  .dep code { color:#9fd6d8; }
+
+  /* 界面稿 */
+  .ui { display:grid; grid-template-columns:1.75fr 1fr; gap:12px; align-items:start; }
+  @media (max-width:1080px){ .ui { grid-template-columns:1fr; } }
+  .chat { border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:14px; }
+  .msg { margin:0 0 12px; }
+  .msg .who { font-size:11px; color:var(--muted); letter-spacing:.06em; margin-bottom:3px; }
+  .bubble { border:1px solid var(--line); border-radius:8px; background:var(--panel2); padding:8px 11px; }
+  .tool { border:1px solid #2c3a2a; border-radius:8px; background:#121a10; padding:9px 11px; }
+  .tool .t { font-size:12px; color:var(--ok); margin-bottom:6px; }
+  .tool .t .elapsed { color:var(--muted); float:right; }
+  .l1 { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.8px; color:#b9d8a8;
+        white-space:pre; line-height:1.55; }
+  .l1 .dim { color:#5d7050; }
+  .card { border:1px solid #2f5a8c; border-radius:8px; background:#121a26; padding:9px 11px; margin-top:8px; }
+  .card .t { font-size:12.5px; margin-bottom:4px; }
+  .card .link { color:var(--accent); font-size:12px; }
+  .side { border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:12px; }
+  .side h4 { margin:0 0 8px; font-size:13px; }
+  .roster { border-collapse:collapse; width:100%; font-size:12px; }
+  .roster th,.roster td { text-align:left; padding:5px 6px; border-bottom:1px solid var(--line); }
+  .roster th { color:var(--muted); font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.05em; }
+  .st { display:inline-block; padding:1px 7px; border-radius:9px; font-size:11px; }
+  .st.running{ background:#16321f; color:#3fb984; border:1px solid #24523a; }
+  .st.idle   { background:#1c2a3a; color:#7aa2f7; border:1px solid #2b4059; }
+  .st.parked { background:#2b2517; color:#d9a441; border:1px solid #4a3f22; }
+  .st.aborted{ background:#321818; color:#e06c6c; border:1px solid #522c2c; }
+
+  /* 时序 */
+  .flow { border:1px solid var(--line); border-radius:10px; background:var(--panel);
+          padding:14px 16px; margin-bottom:12px; }
+  .flow h3 { margin:0 0 3px; font-size:15px; }
+  .flow .cap { color:var(--muted); font-size:12.5px; margin-bottom:12px; }
+  .step { display:flex; gap:0; align-items:stretch; flex-wrap:wrap; }
+  .step .s { flex:1 1 150px; border:1px solid var(--line); border-radius:8px;
+             background:var(--panel2); padding:9px 11px; min-width:148px; }
+  .step .s .who { font-size:10.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+  .step .s .what { font-size:12.8px; margin-top:2px; line-height:1.5; }
+  .step .s.key { border-color:#2f5a8c; background:#16202c; }
+  .step .s.gate{ border-color:#5a4a2a; background:#201c14; }
+  .step .s.bad { border-color:#522c2c; background:#241414; }
+  .step .s.child{ border-color:#3c5530; background:#141c12; }
+  .flow .rows { margin-top:12px; border-top:1px dashed var(--line); padding-top:10px; }
+  .flow .rows .rt { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin-bottom:6px; }
+  .log { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.8px; line-height:1.7; }
+  .log .side-p { color:#7aa2f7; } .log .side-c { color:#9ece6a; }
+  .log .dim { color:#5c6370; }
+
+  /* 自由把玩 */
+  .play { display:grid; grid-template-columns:1.15fr 1fr; gap:12px; align-items:start; }
+  @media (max-width:1080px){ .play { grid-template-columns:1fr; } }
+  .btns button { background:#1a2433; color:var(--fg); border:1px solid #2f5a8c; border-radius:7px;
+                 padding:7px 12px; font-size:12.8px; cursor:pointer; margin:0 6px 8px 0; }
+  .btns button:hover { background:#20304a; }
+  .btns button.warn { border-color:#4a3f22; background:#241f12; }
+  .btns button.bad { border-color:#522c2c; background:#241414; }
+  .btns button:disabled { opacity:.35; cursor:default; }
+  .changed { animation:none; border-left:3px solid var(--accent); }
+  .scn { margin-top:6px; }
+  .scn .stab { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+  .scn .stab button { font-size:12px; padding:4px 10px; background:var(--panel2); color:var(--muted);
+                      border:1px solid var(--line); border-radius:6px; cursor:pointer; }
+  .scn .stab button.on { color:var(--fg); border-color:#2f5a8c; background:#16202c; }
+  .scn .desc { color:var(--muted); font-size:12.5px; margin-bottom:8px; }
+  .scn .steps button { display:block; width:100%; text-align:left; margin-bottom:5px; }
+  .scn .steps button.done { opacity:.4; }
+  .hint { color:var(--warn); font-size:12px; min-height:18px; margin:4px 0 10px; }
+  .tocallout { color:var(--accent); font-size:12.5px; margin-top:8px; min-height:16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>B″ 落地之后 <span class="proto">原型 · 一次性</span></h1>
+  <p class="sub">
+    回答的问题：<b>hook 契约下沉 + 子代理档三（删 seam、词汇下沉、控制面、冷唤醒）+ 三层可见性 + 审批独立
+    全部实现后，crate 架构、界面与交互顺序长什么样？这套状态模型在真实操作序列下是否自洽？</b>
+    对应设计稿 <code>docs/design/2026-11-15-plugin-crate-splits-design.md</code>（§11 已全部裁定）。
+    本页可双击离线打开；「自由把玩」页签里下面板的纯逻辑模块（子代理生命周期 + hook 仲裁）将来可整体搬进真代码。
+  </p>
+
+  <div class="tabs" id="tabs">
+    <button data-v="arch" class="on">① 架构</button>
+    <button data-v="ui">② 界面</button>
+    <button data-v="seq-spawn">③ 时序 · 派生与可见性</button>
+    <button data-v="seq-hook">④ 时序 · hook 仲裁与审批</button>
+    <button data-v="seq-ctrl">⑤ 时序 · 控制面（steer/打断/冷唤醒）</button>
+    <button data-v="play">⑥ 自由把玩</button>
+  </div>
+
+  <!-- ================= ① 架构 ================= -->
+  <div class="view on" id="v-arch">
+    <div class="band">
+      <div class="bt">落地后的 crate 分层（颜色 = 这次改动的四条轴）</div>
+      <div class="legend">
+        <span><i style="background:#33487d"></i>hook 轴（契约下沉）</span>
+        <span><i style="background:#4a3a6e"></i>审批轴（独立）</span>
+        <span><i style="background:#3c5530"></i>子代理轴（档三：删 seam）</span>
+        <span><i style="background:#5e4a28"></i>词汇轴（下沉）</span>
+        <span><i style="background:#272d3a"></i>原有不动</span>
+      </div>
+      <div class="arch">
+        <div class="layer">宿主 / 表面（不在此设计内改动）</div>
+        <div class="node"><b>uva-app-server</b><span>装配 · 线协议 · follow 帧</span></div>
+        <div class="node"><b>uva-tui</b><span>终端表面</span></div>
+        <div class="node hookc"><b>uva-hook-plugins</b><span>reflection / redact / traffic-light</span></div>
+        <div class="node subc"><b>uva-tool-task</b><span>task 工具（普通 Tool）+ control 模块<br/>list / message / interrupt</span></div>
+        <div class="node subc"><b>（第三方委派者）</b><span>与左邻同层：不依赖 harness</span></div>
+        <div class="node"><b>docs/examples/<br/>hook-only-consumer</b><span>外部插件样板（独立 crate）</span></div>
+
+        <div class="layer">循环（变薄：子代理代码归零）</div>
+        <div class="node hookc"><b>uva-hook</b><span>Hook/Gate/transformer trait<br/>解耦 HookContext（无 sink）<br/>7 个挂载点键 · HookRegistry · 仲裁</span></div>
+        <div class="node" style="grid-column:span 4"><b>uva-harness（纯循环）</b>
+          <span>ReActAgent + Seams 分发器（构造 HookPayload → 跑注册表 → 翻译裁决）；Host 保留为内部 typed 注册表。
+          <b style="color:var(--bad)">DelegatingTool / DelegationCall / Delegators / AgentEvent::Agent —— 已删除</b></span></div>
+
+        <div class="layer">词汇（自 harness 下沉，路径经 re-export 保持）</div>
+        <div class="node vocabc" style="grid-column:span 2"><b>uva-agent</b><span>Agent trait · AgentInput · ChannelInbox/RunInbox<br/>AgentRegistry（peer 目录）· SubagentWriters</span></div>
+        <div class="node vocabc" style="grid-column:span 2"><b>uva-events</b><span>AgentEvent · SystemEvent · AgentMeta<br/>（Agent 变体已删）</span></div>
+        <div class="node apprc"><b>uva-approval</b><span>词汇表 + 决策 + ApprovalPlugin<br/>ApprovalGate（P2 后迁入）</span></div>
+        <div class="node hookc"><b>uva-kernel</b><span>Waterfall · EffectHandle · mount_all<br/>AGENT_LOOP_INJECTS +&nbsp;"hooks"</span></div>
+
+        <div class="layer">基座（不动）</div>
+        <div class="node"><b>uva-steering</b><span>HookEvent / HookDecision 词汇</span></div>
+        <div class="node"><b>uva-tool</b><span>Tool trait · Context(+cancel 字段) · Risk · ToolOutput</span></div>
+        <div class="node"><b>uva-session</b><span>32 行 tag · writer（tool_output 新增）</span></div>
+        <div class="node"><b>uva-provider</b><span>模型适配</span></div>
+        <div class="node"><b>uva-core</b><span>CancelToken · Spawner · Semaphore · Registry</span></div>
+        <div class="node"><b>uva-policy-plugins</b><span>（reflection 已迁出）</span></div>
+
+        <div class="note">
+          关键不变量：<b>harness 之下没有子代理代码</b>；
+          <code>uva-tool-task</code> 的依赖树里没有 <code>uva-harness</code>（门禁
+          <code>check-hook-external.sh</code> 同样断言样板 crate）；
+          全部冻结名经「合并 use 树 re-export」保路径，唯一离开的三个名字是删 seam 带走的
+          <code>DelegatingTool / DelegationCall / AgentMeta</code>。
+        </div>
+      </div>
+      <div class="dep">
+        依赖方向（自上而下，单向无环）：表面 → <code>uva-hook-plugins / uva-tool-task</code> →
+        <code>uva-hook / uva-agent</code> → <code>uva-events / uva-approval / uva-kernel</code> →
+        <code>uva-steering / uva-tool / uva-session</code> → <code>uva-core</code>。
+        <code>uva-harness</code> 依赖 <code>uva-hook / uva-agent / uva-events / uva-approval</code>，无人回指。
+      </div>
+    </div>
+  </div>
+
+  <div class="view" id="v-ui">
+    <div class="band">
+      <div class="bt">会话页（web）—— 三层可见性同屏</div>
+      <div class="ui">
+        <div class="chat">
+          <div class="msg"><div class="who">用户</div>
+            <div class="bubble">评审一下 hooks 模块的并发问题，另派一个子代理去看审批流程。</div></div>
+          <div class="msg"><div class="who">助手</div>
+            <div class="bubble">派出两个子代理：<b>LikeTapir</b>（评审并发）与 <b>MonetaryPinniped</b>（梳理审批）。</div></div>
+
+          <div class="msg"><div class="who">工具调用 · task（L1 工具块进度）</div>
+            <div class="tool">
+              <div class="t">task × 2 <span class="elapsed">运行 41s</span></div>
+              <div class="l1">[<span class="dim">01J8…A1</span>] running  LikeTapir        读 guard.rs:444 apply_guard_pipeline
+[<span class="dim">01J8…A1</span>] running  LikeTapir        写笔记 · 3 个疑点
+[<span class="dim">01J8…A2</span>] running  MonetaryPinniped  追 approval/respond 映射链
+[<span class="dim">01J8…A2</span>] idle     MonetaryPinniped  完成 · 结论 2 条（点开看全程）
+[<span class="dim">01J8…A1</span>] running  LikeTapir        汇总中…</div>
+              <div class="card">
+                <div class="t">子代理 MonetaryPinniped · 已完成</div>
+                <div class="link">打开子会话 01J8…A2 →</div>
+                <div style="color:var(--muted);font-size:12px;margin-top:3px;">
+                  L2：点击进入子会话 = follow 它的全程（子会话是真源）；本卡片由 tool_result 行带 child id 生成。</div>
+              </div>
+            </div></div>
+
+          <div class="msg"><div class="who">hook_block（外部插件拦截，行由 harness 落）</div>
+            <div class="bubble" style="border-color:#4a3f22;background:#1c1710;">
+              <span style="color:var(--warn)">traffic-light</span>：工具 <code>shell</code> 被拒 ——
+              risk=high 且策略为 block。理由：rm -rf 命中高危模式。</div></div>
+
+          <div class="msg"><div class="who">审批（approval/request 通知 → 卡片）</div>
+            <div class="bubble" style="border-color:#4a3a6e;background:#171226;">
+              <b>需要批准</b>：shell · risk=high · 参数指纹 sha256:9f2a…
+              <span style="color:var(--muted);font-size:12px;">（allow / deny / reject / cancel —— 答复走 approval/respond → sessions/resume）</span></div></div>
+        </div>
+
+        <div class="side">
+          <h4>子代理名册（L3 · P6/P7）</h4>
+          <table class="roster">
+            <tr><th>代理</th><th>状态</th><th>当前</th><th></th></tr>
+            <tr><td>LikeTapir</td><td><span class="st running">running</span></td><td>汇总中</td><td></td></tr>
+            <tr><td>MonetaryPinniped</td><td><span class="st idle">idle</span></td><td>完成·2 结论</td><td><span style="color:var(--accent);font-size:11.5px;">追问</span></td></tr>
+            <tr><td>WrongMoose</td><td><span class="st parked">parked</span></td><td>7 分钟前空闲</td><td><span style="color:var(--accent);font-size:11.5px;">唤醒</span></td></tr>
+            <tr><td>IcyTiger</td><td><span class="st aborted">aborted</span></td><td>被用户打断</td><td></td></tr>
+          </table>
+          <p style="color:var(--muted);font-size:12px;margin:10px 0 0;">
+            四态来自 P6 注册表；「追问 / 唤醒」即 §6.8 的 <code>message</code>（idle 追问、parked 冷唤醒）。
+            名册是独立一层——父页工具块（L1）只给摘要，全程点进子会话（L2）。</p>
+          <h4 style="margin-top:14px;">这页没变的</h4>
+          <p style="color:var(--muted);font-size:12px;margin:0;">
+            会话树仍滤掉子会话（入口是名册与委派卡）；JSON-RPC 方法名不变；
+            「hook_block / 审批卡」在档三之前就长这样——本稿把它们放到同一屏只为看全四条轴。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= ③ 派生与可见性 ================= -->
+  <div class="view" id="v-seq-spawn">
+    <div class="flow">
+      <h3>派生：task 工具（普通 Tool）起一个子代理</h3>
+      <div class="cap">档三后的完整链路。要点：<b>父事件流里没有子事件</b>——子代理的细节只落自己的会话；父页看到的是工具块的 Progress 摘要。</div>
+      <div class="step">
+        <div class="s"><div class="who">模型</div><div class="what">tool_use: task<br/>{agent:"reviewer", task:"…"}</div></div>
+        <div class="s key"><div class="who">ToolRegistry</div><div class="what">普通分发：定义/曝光/restriction/mode 全走现成机制（委派特例已不存在）</div></div>
+        <div class="s child"><div class="who">task 工具</div><div class="what">mint child_id（派发前）→ 解析 peer → Semaphore 取许可（每会话 8）</div></div>
+        <div class="s child"><div class="who">SubagentWriters</div><div class="what">开子会话：写 <code>subagent_enter(child,parent,depth,agent)</code> + 派发 prompt</div></div>
+        <div class="s child"><div class="who">agent.run(input, cancel)</div><div class="what">cancel 来自 <code>uva_tool::Context.cancel</code>（Q7a）；内联驱动子 run</div></div>
+        <div class="s key"><div class="who">L1 汇报</div><div class="what">子代理每步 → 工具 <code>Progress{child_id,status,当前活动}</code>（~150ms 合并）</div></div>
+      </div>
+      <div class="rows">
+        <div class="rt">落行（谁写什么）</div>
+        <div class="log">
+父会话：<span class="dim">tool_call(task) → tool_output(L1 摘要,live-only) → tool_result(带 "[subagent session: 01J8…A1]")</span>
+子会话：<span class="side-c">subagent_enter → user_message(派发词) → assistant/tool_* … → subagent_exit(status)</span>
+<span class="dim">父侧不写 enter/exit（Q9a）；dsh 的 settle-notice 等价物就是父侧 tool_result 行。</span>
+        </div>
+      </div>
+    </div>
+    <div class="flow">
+      <h3>可见性：三层各取所需</h3>
+      <div class="step">
+        <div class="s key"><div class="who">L1 工具块</div><div class="what">Progress → ToolProgress → live 帧；LiveTurn <b>追加不结算</b>（P5 修复后），重载由 tool_output 行重放</div></div>
+        <div class="s key"><div class="who">L2 子会话</div><div class="what">sessions/follow 按 id 订阅子会话 = 全保真；委派卡/名册带链接</div></div>
+        <div class="s"><div class="who">L3 名册</div><div class="what">P6 注册表四态 + 状态推送；P4′ 期间 list 工具用日志扫描兜底</div></div>
+        <div class="s bad"><div class="who">已删除</div><div class="what">AgentEvent::Agent(meta, inner) 包装 + SubagentRouter 的路由半边——通道不存在了</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= ④ hook 仲裁 ================= -->
+  <div class="view" id="v-seq-hook">
+    <div class="flow">
+      <h3>一次工具调用穿过挂载点（tool/pre-execute）</h3>
+      <div class="cap">外部插件与内部 typed 注册共用一条 waterfall、同一张合法性表（Termin于五点合法，沿 HookEvent::accepts）。</div>
+      <div class="step">
+        <div class="s"><div class="who">模型</div><div class="what">tool_use: shell {command:"rm -rf /"}</div></div>
+        <div class="s key"><div class="who">uva-hook 注册表</div><div class="what">外部中间件先跑：构造 <code>HookPayload{HookEvent, HookContext(state,cancel)}</code> —— context 已无 sink</div></div>
+        <div class="s key"><div class="who">仲裁折叠</div><div class="what">HookDecision 逐个吸收：首个 <b>Block 短路</b>；<b>Ask 收集理由</b>；无裁决则放行</div></div>
+        <div class="s gate"><div class="who">deny-only 终审 guard</div><div class="what">只有拒绝没有放行 —— 顺序无法把拒绝翻回（dsh 单调规则）</div></div>
+        <div class="s gate"><div class="who">审批门</div><div class="what">policy.requires_approval(risk=high)=true → Ask → 写 approval_asked + turn_suspended + ResumeToken</div></div>
+        <div class="s bad"><div class="who">若被拒</div><div class="what">harness 写 hook_block 行（行由 harness 落，Q/A 缺口收口）→ tool_result(is_error)</div></div>
+      </div>
+      <div class="rows">
+        <div class="rt">裁决词汇（不新造）</div>
+        <div class="log">
+Allow | Block{reason} | Ask{reason} | <span class="side-p">ReplaceParams（llm/request 专用）</span> | Terminate —— 出参改写不在此列
+改写出参 = ResultTransformer(&mut ToolOutput) → 溯源行 <span class="side-c">tool_result_transformed{transformers, before/after 哈希}</span>（provenance, not reconciliation）
+<span class="dim">入参改写：不存在这一档（裁定 Q 前三问-1 / §6.2.2）——args 在 dispatch 哈希、tool_call 展示、审批哈希三处落定，改写即分叉。</span>
+        </div>
+      </div>
+    </div>
+    <div class="flow">
+      <h3>审批答复回路（与档三无关，但同屏看全）</h3>
+      <div class="step">
+        <div class="s"><div class="who">表面</div><div class="what">审批卡：allow / deny</div></div>
+        <div class="s"><div class="who">app-server</div><div class="what">approval/respond → sessions/resume + ResumeToken（覆盖/重放检测）</div></div>
+        <div class="s key"><div class="who">harness resume</div><div class="what">align_decisions 按 id 绑定 → 写 approval_decided → <b>重跑 guard</b>（执行的必是被哈希的那个调用）</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= ⑤ 控制面 ================= -->
+  <div class="view" id="v-seq-ctrl">
+    <div class="flow">
+      <h3>message：三种目标态，一条工具</h3>
+      <div class="cap">Q13(b)：已结束的子代理也能被唤起续聊。冷唤醒不依赖 P6 停放——它只是「用既有子会话的 writer 再跑一轮」。</div>
+      <div class="step">
+        <div class="s"><div class="who">模型</div><div class="what">agents/message {id, text}</div></div>
+        <div class="s child"><div class="who">目标 running</div><div class="what">写入其 ChannelInbox 发送端 → steer（机制已有："the run's steer channel"）</div></div>
+        <div class="s child"><div class="who">目标 idle（在内存）</div><div class="what">追问 → 同一 writer 再跑一轮</div></div>
+        <div class="s key"><div class="who">目标已结束（冷唤醒）</div><div class="what">读子日志头取 agent_name → 解析 peer → 子会话 writer 再跑；control 模块持句柄表</div></div>
+      </div>
+    </div>
+    <div class="flow">
+      <h3>interrupt 与生命周期</h3>
+      <div class="step">
+        <div class="s"><div class="who">模型</div><div class="what">agents/interrupt {id}</div></div>
+        <div class="s child"><div class="who">control 模块</div><div class="what">触发该子保留的 cancel token → 当前 run 终止 → idle（可续聊）</div></div>
+        <div class="s"><div class="who">TTL 5 分钟</div><div class="what">idle → parked（工件与子会话留盘，内存释放）</div></div>
+        <div class="s key"><div class="who">message / 名册唤醒</div><div class="what">parked → idle → 续聊（omp revive / dsh cold-resume 同形）</div></div>
+        <div class="s bad"><div class="who">aborted</div><div class="what">硬终止（用户打断/预算断），终态；子会话仍可读</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= ⑥ 自由把玩 ================= -->
+  <div class="view" id="v-play">
+    <div class="band">
+      <div class="bt">自由把玩 —— 子代理生命周期 + 控制面（纯状态机，页面只是壳）</div>
+      <div class="hint" id="hint">随便按。状态面板每次点击后全量重绘；非法操作会告诉你为什么不合法。</div>
+      <div class="play">
+        <div>
+          <div class="btns" id="freebtns"></div>
+          <div class="scn">
+            <div class="stab" id="scntabs"></div>
+            <div class="desc" id="scndesc"></div>
+            <div class="btns steps" id="scnsteps"></div>
+            <div class="tocallout" id="callout"></div>
+          </div>
+        </div>
+        <div>
+          <div id="statepanel"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+ * 纯逻辑模块（可搬走）：子代理生命周期 + 控制面 + hook 仲裁
+ * 无 DOM、无 document。页面只调用它，它不碰页面。
+ * ===================================================================== */
+const Subagents = (() => {
+  const initial = () => ({
+    seq: 0,
+    children: {},            // id -> {id,name,agent,status,activity,ageMs,revived,artifacts:[],steps:0}
+    parentRows: [],          // 父会话的行（只有 tool_*，没有 enter/exit —— Q9a）
+    childRows: {},           // id -> [行]（子会话是真源）
+    ttlMs: 5*60*1000,
+  });
+  const mint = (s) => { s.seq += 1; return "01J8…A" + s.seq; };
+  const child = (s, id) => { if (!s.children[id]) throw new Error("没有这个子代理：" + id); return s.children[id]; };
+  const plog = (s, r) => { s.parentRows.push(r); };
+  const clog = (s, id, r) => { (s.childRows[id] ||= []).push(r); };
+
+  function spawn(s, {name, agent, task}) {
+    const id = mint(s);
+    s.children[id] = { id, name: name || ("Sub-" + s.seq), agent: agent || "reviewer",
+      status: "running", activity: "启动中", ageMs: 0, revived: false, steps: 0,
+      artifacts: [id + ".jsonl"] };
+    clog(s, id, "subagent_enter(" + id + ", parent, depth+1, " + (agent||"reviewer") + ")");
+    clog(s, id, "user_message(派发词)");
+    plog(s, "tool_call(task " + (name||("Sub-"+s.seq)) + ")");
+    plog(s, "tool_output(L1 摘要 · " + id + " running)  [live-only]");
+    return { ok: true, note: id + " 起跑；父侧只有 tool_call/tool_output，没有 enter/exit" };
+  }
+  function step(s, id, activity) {
+    const c = child(s, id);
+    if (c.status !== "running") return { ok: false, note: "只有 running 的子代理会推进（当前 " + c.status + "）" };
+    c.steps += 1; c.activity = activity || ("第 " + c.steps + " 步");
+    plog(s, "tool_output(L1 摘要 · " + id + " " + c.activity + ")  [live-only]");
+    return { ok: true, note: "子会话继续写；父侧只多一行 L1 摘要" };
+  }
+  function finish(s, id, ok = true) {
+    const c = child(s, id);
+    if (c.status !== "running") return { ok: false, note: "不在 running，无法完成" };
+    c.status = "idle"; c.activity = ok ? "完成" : "完成(带错误)"; c.ageMs = 0;
+    c.artifacts.push(id + ".md");
+    clog(s, id, "subagent_exit(" + (ok ? "completed" : "error") + ")");
+    plog(s, 'tool_result("…[subagent session: ' + id + ']")');
+    return { ok: true, note: "idle（在内存）——TTL 5 分钟后停放；父侧以 tool_result 收口" };
+  }
+  function message(s, id) {
+    const c = child(s, id);
+    if (c.status === "running") { clog(s, id, "steer(来自父)"); c.activity = "收到 steer"; return { ok: true, note: "running → steer：写进它的 ChannelInbox，本步后生效" }; }
+    if (c.status === "idle")    { c.status = "running"; c.ageMs = 0; clog(s, id, "user_message(追问)"); return { ok: true, note: "idle → 追问：同一 writer 再跑一轮" }; }
+    if (c.status === "parked")  { c.status = "running"; c.ageMs = 0; c.revived = true; c.activity = "冷唤醒 · 新一轮"; clog(s, id, "user_message(冷唤醒) → run"); return { ok: true, note: "parked → 冷唤醒：读子日志头 agent_name → 解析 peer → 子 writer 再跑一轮（Q13b）" }; }
+    return { ok: false, note: "aborted 是终态，不能 message（子会话仍可读）" };
+  }
+  function interrupt(s, id) {
+    const c = child(s, id);
+    if (c.status !== "running") return { ok: false, note: "只有 running 能被打断" };
+    c.status = "idle"; c.activity = "被打断"; c.ageMs = 0;
+    clog(s, id, "interrupt → run 终止");
+    return { ok: true, note: "interrupt ≠ 杀死：停在当前 run，仍可续聊（dsh 同语义）" };
+  }
+  function kill(s, id) {
+    const c = child(s, id);
+    if (c.status === "aborted") return { ok: false, note: "已是终态" };
+    c.status = "aborted"; c.activity = "硬终止";
+    clog(s, id, "subagent_exit(aborted)");
+    return { ok: true, note: "aborted 终态；子会话与工件留盘可读" };
+  }
+  function tick(s, ms = 60*1000) {
+    for (const c of Object.values(s.children)) {
+      if (c.status === "idle") {
+        c.ageMs += ms;
+        if (c.ageMs >= s.ttlMs) { c.status = "parked"; c.activity = "停放(" + Math.round(c.ageMs/60000) + "min 空闲)"; clog(s, c.id, "parked(工件留盘)"); }
+      }
+    }
+    return { ok: true, note: "时间 +"+(ms/60000)+" 分钟：只有 idle 会老化 → parked" };
+  }
+  const reduce = (s, a) => {
+    const st = structuredClone(s);
+    let r;
+    switch (a.type) {
+      case "spawn":     r = spawn(st, a); break;
+      case "step":      r = step(st, a.id, a.activity); break;
+      case "finish":    r = finish(st, a.id); break;
+      case "message":   r = message(st, a.id); break;
+      case "interrupt": r = interrupt(st, a.id); break;
+      case "kill":      r = kill(st, a.id); break;
+      case "tick":      r = tick(st, a.ms); break;
+      default: r = { ok: false, note: "未知操作" };
+    }
+    return { state: r.ok ? st : s, note: r.note, ok: r.ok };
+  };
+  return { initial, reduce };
+})();
+
+/* hook 仲裁（纯）：折叠 HookDecision，先到先 Block，Ask 收集，deny-only 终审 */
+const HookArbiter = (() => {
+  const arbitrate = (decisions) => {
+    let blockedBy = null; const asks = [];
+    for (const d of decisions) {
+      if (d.k === "Block") { blockedBy = d.who; break; }        // 首个 Block 短路
+      if (d.k === "Ask") asks.push(d.reason);
+      if (d.k === "Terminate") return { decision: "Terminate", reason: d.reason };
+    }
+    if (blockedBy) return { decision: "Block", blockedBy };
+    if (asks.length) return { decision: "Ask", asks };
+    return { decision: "Allow" };
+  };
+  return { arbitrate };
+})();
+
+/* =====================================================================
+ * 页面壳（一次性）：渲染 + 按钮 + 引导
+ * ===================================================================== */
+const $ = (id) => document.getElementById(id);
+document.querySelectorAll("#tabs button").forEach(b => b.addEventListener("click", () => {
+  document.querySelectorAll("#tabs button").forEach(x => x.classList.remove("on"));
+  document.querySelectorAll(".view").forEach(x => x.classList.remove("on"));
+  b.classList.add("on"); $("v-" + b.dataset.v).classList.add("on");
+}));
+
+let S = Subagents.initial();
+let note = "";
+
+function render() {
+  const kids = Object.values(S.children);
+  const roster = kids.length ? kids.map(c =>
+    `<tr><td>${c.name}<div style="color:var(--muted);font-size:11px;">${c.id}${c.revived?" · 冷唤醒过":""}</div></td>` +
+    `<td><span class="st ${c.status}">${c.status}</span></td>` +
+    `<td style="color:var(--muted);">${c.activity}</td>` +
+    `<td style="color:var(--muted);font-size:11px;">${c.artifacts.join("<br/>")}</td></tr>`).join("")
+    : `<tr><td colspan="4" style="color:var(--muted);">还没有子代理 —— 按「派生一个」</td></tr>`;
+  const parent = S.parentRows.length
+    ? S.parentRows.map(r => `<div>${r}</div>`).join("")
+    : `<div class="dim">（空）父会话只会有 tool_call / tool_output / tool_result —— 没有 enter/exit</div>`;
+  const childLog = kids.length
+    ? kids.map(c => `<div class="side-c" style="margin-top:6px;">${c.id}：</div>` +
+        (S.childRows[c.id]||[]).map(r => `<div class="side-c">&nbsp;&nbsp;${r}</div>`).join("")).join("")
+    : `<div class="dim">（空）子会话是真源：enter/exit、派发词、steer、全程</div>`;
+  $("statepanel").innerHTML = `
+    <div class="band"><div class="bt">子代理注册表（P6 形状 · 每 click 全量重绘）</div>
+      <table class="roster"><tr><th>代理</th><th>状态</th><th>当前</th><th>工件</th></tr>${roster}</table></div>
+    <div class="band"><div class="bt">父会话行（Q9a：结算记录=tool_result）</div><div class="log">${parent}</div>
+      <div class="log" style="margin-top:8px;">${childLog}</div></div>
+    <div class="band"><div class="bt">hook 仲裁演示（静态一行：同一折叠规则）</div>
+      <div class="log">${
+        JSON.stringify(HookArbiter.arbitrate([
+          {k:"Allow"}, {k:"Ask", reason:"高危命令"}, {k:"Allow"}
+        ])) } → approval_asked + turn_suspended</div>
+      <div class="log">${
+        JSON.stringify(HookArbiter.arbitrate([
+          {k:"Allow"}, {k:"Block", who:"traffic-light"}, {k:"Allow"}
+        ])) } → harness 写 hook_block 行</div></div>`;
+  $("hint").textContent = note || "随便按。";
+  drawFree(); drawScenario();
+}
+
+function fire(a, n) { const r = Subagents.reduce(S, a); S = r.state; note = (r.ok ? "✓ " : "✗ ") + r.note; render(); }
+
+function drawFree() {
+  const kids = Object.values(S.children);
+  const sel = kids.length ? kids[0].id : null;
+  const b = (label, a, cls="") => `<button class="${cls}" onclick='fire(${JSON.stringify(a)})'>${label}</button>`;
+  let h = b("派生一个", {type:"spawn", name:"Sub-"+(S.seq+1), agent:"reviewer"}, "");
+  if (sel) {
+    h += b("推进(" + kids[0].name + ")", {type:"step", id:sel, activity:"读代码"})
+       + b("完成(" + kids[0].name + ")", {type:"finish", id:sel})
+       + b("message(" + kids[0].name + ")", {type:"message", id:sel})
+       + b("interrupt(" + kids[0].name + ")", {type:"interrupt", id:sel}, "warn")
+       + b("硬终止(" + kids[0].name + ")", {type:"kill", id:sel}, "bad");
+  }
+  h += b("时间 +1 分钟", {type:"tick", ms:60000}, "warn");
+  $("freebtns").innerHTML = h;
+}
+
+const SCENARIOS = [
+  { name: "顺利一圈", desc: "派生 → 推进 → 完成 → 追问 → 停放 → 冷唤醒。看父侧行始终只有 tool_*。",
+    steps: [
+      {label:"① 派生 LikeTapir", a:{type:"spawn", name:"LikeTapir"}},
+      {label:"② 推进两步", a:{type:"step", id:"@first", activity:"读 guard.rs"}},
+      {label:"③ 再推一步", a:{type:"step", id:"@first", activity:"写笔记"}},
+      {label:"④ 完成 → idle", a:{type:"finish", id:"@first"}},
+      {label:"⑤ message(idle) = 追问 → running", a:{type:"message", id:"@first"}},
+      {label:"⑥ 再完成", a:{type:"finish", id:"@first"}},
+      {label:"⑦ 时间 +6 分钟 → parked", a:{type:"tick", ms:6*60000}},
+      {label:"⑧ message(parked) = 冷唤醒", a:{type:"message", id:"@first"}},
+    ],
+    watch: "第⑤步与第⑧步用的是同一个按钮：message 按**目标态**决定行为——这正是 Q13(b) 的含义。" },
+  { name: "打断与硬终止", desc: "interrupt 停当前 run 但可续聊；kill 才是终态。试着对 aborted 再 message。",
+    steps: [
+      {label:"① 派生", a:{type:"spawn", name:"WrongMoose"}},
+      {label:"② 推进", a:{type:"step", id:"@first"}},
+      {label:"③ interrupt → idle（可续聊）", a:{type:"interrupt", id:"@first"}},
+      {label:"④ message(idle) 续聊成功", a:{type:"message", id:"@first"}},
+      {label:"⑤ kill → aborted", a:{type:"kill", id:"@first"}},
+      {label:"⑥ message(aborted) —— 会被拒绝", a:{type:"message", id:"@first"}},
+    ],
+    watch: "第⑥步是故意安排的非法操作：模型会得到错误结果，而不是挂起。" },
+  { name: "并发与深度", desc: "连派三个，看每会话 8 的许可与深度上限只是工具内部检查（本壳未建模深度，注释说明）。",
+    steps: [
+      {label:"① 派生 A", a:{type:"spawn", name:"A"}},
+      {label:"② 派生 B", a:{type:"spawn", name:"B"}},
+      {label:"③ 派生 C", a:{type:"spawn", name:"C"}},
+      {label:"④ C 完成", a:{type:"finish", id:"@last"}},
+      {label:"⑤ B 推进", a:{type:"step", id:"@mid"}},
+    ],
+    watch: "许可/深度在真实现里由 task 工具自查（uva_core::sync::Semaphore，每会话 8；深度 3）。" },
+];
+let scnIdx = 0, scnStep = 0;
+function drawScenario() {
+  $("scntabs").innerHTML = SCENARIOS.map((s,i) =>
+    `<button class="${i===scnIdx?"on":""}" onclick="scnIdx=${i};scnStep=0;S=Subagents.initial();note='';render()">${s.name}</button>`).join("");
+  const sc = SCENARIOS[scnIdx];
+  $("scndesc").textContent = sc.desc;
+  $("scnsteps").innerHTML = sc.steps.map((st,i) =>
+    `<button class="${i<scnStep?"done":""}" ${i!==scnStep?"disabled":""}
+      onclick='scnFire(${JSON.stringify(st.a)}, ${JSON.stringify(sc.watch)})'>${st.label}</button>`).join("");
+}
+function scnFire(a, watch) {
+  const aid = a.id === "@first" ? Object.keys(S.children)[0]
+            : a.id === "@last"  ? Object.keys(S.children).slice(-1)[0]
+            : a.id === "@mid"   ? Object.keys(S.children)[Math.floor(Object.keys(S.children).length/2)]
+            : a.id;
+  fire({...a, id: aid});
+  scnStep += 1; $("callout").textContent = watch || ""; drawScenario();
+}
+render();
+</script>
+</body>
+</html>

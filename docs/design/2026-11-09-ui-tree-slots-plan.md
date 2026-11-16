@@ -6,7 +6,7 @@
 
 **Architecture:** 装载器住在 app-server（新模块 `crates/uva-app-server/src/ui/tree.rs`）：装配期读 `[ui]` 行 → `UiTree`（插槽表 + 注册表，全部由可撤销句柄持有）。`AppState` 从持 `Vec<UiSchema>` 改为持 `UiTree` —— HMR 换树 = drop 旧树 = 全量回滚。`ui/schema` 的响应在既有 `schemas` 之外**新增**顶层 `slots`（wire 只增不改）。浏览器侧（`uva-web/src/components/ui-schema/`）：新增唯一取数 store 与 `SlotRegion`，只在 kind 注册表（`panel` / `list` / `key-value`）内渲染，未知 kind 走既有 `UnknownKind` 占位。终端侧（`crates/uva-tui`）：定义自己的 wire DTO + ratatui kind 渲染器（D18：共享止于 wire 契约，呈现各写各的）。**核心一行不动**：`ui.*` 服务键的拒绝点已存在（`profile/mod.rs::build_one` → `ProfileError::NamespaceViolation`），本轮只钉测试与文档交叉引用。
 
-**Tech Stack:** Rust（stable 通道）、serde 1.0（workspace 已带 `derive`，`Cargo.toml:142`）、serde_json 1.0、thiserror 2.0（`UiError` 既有）、ratatui 0.29（workspace，`default-features = false, features = ["crossterm"]`）、React 19 + TypeScript + Vite、Playwright MCP（AGENTS.md §4.2 的验证通道，**不建测试套件**）
+**Tech Stack:** Rust（stable 通道）、serde 1.0（workspace 已带 `derive`，`Cargo.toml:142`）、serde_json 1.0、thiserror 2.0（`UiError` 既有）、ratatui 0.29（workspace，`default-features = false, features = ["crossterm"]`）、React 19 + TypeScript + Vite、Playwright MCP（AGENTS.md §4.2 的验证通道，**不建 e2e 套件**；当时；现行边界见 ADR 0001）
 
 **Spec:** `docs/design/2026-11-09-desktop-frontend-tree-design.md` —— §6.1「UI 树（两个宿主共用，D25）」、§7 的 D25 / D26 / D32 / D38 / D18、§8 的刀 8 与刀序图（刀 7 → 刀 8）、§2 的 N2 / N5 / N9；Axiom 参考 A6（容器不是插件，内容是插件）/ A7（`docs/superpowers/specs/2026-11-08-axiom-harness-reference.md`，本地规划层）
 
@@ -40,7 +40,8 @@
 - **前端路径事实**：前端在仓库根的 **`uva-web/`**（本刀任务描述里的 `crates/uva-web/` 不存在）。
 - **前端不建测试套件**（AGENTS.md §4.2）：不写 `*.test.ts`、不建 `uva-web/tests/`、不写任何
   playwright spec 文件；验证 = Playwright MCP 驱动真实浏览器 + 页面内
-  `await import('/src/...')` 断言。注意 §4.2 的两个陷阱（后台 tab 的 `visibilityState === 'hidden'`
+  `await import('/src/...')` 断言。（当时；现行边界见 ADR 0001：纯函数单元测试用 vitest，
+  文件放 `uva-web/tests/`，随 `check-web` 跑；e2e 套件仍不建。）注意 §4.2 的两个陷阱（后台 tab 的 `visibilityState === 'hidden'`
   会让 app 标 Offline；隐藏 tab 里 `requestAnimationFrame` 永不触发）。
 - **D18：不共享呈现**：浏览器与终端各自实现 kind 渲染器；两个宿主共享的只有 `ui/schema` 的
   响应形状。TUI 因此**自己定义** Deserialize DTO，不引 app-server 的 lib 类型（刀 2 计划摘掉这条
@@ -629,7 +630,7 @@ cargo run -q -p uva-app-server -- --directory "$tmp" --profile "$tmp/profile.tom
 Expected: 网关起来，`curl -s localhost:8080/readyz` 最终 200（core 宣布 ready 后）；
 浏览器 WS 上的 `ui/schema` 会同时带回 `slots`（3 个）与 `schemas`（2 行）。
 
-- [ ] **Step 6: Playwright MCP 验证（AGENTS.md §4.2，不写 spec 文件）**
+- [ ] **Step 6: Playwright MCP 验证（AGENTS.md §4.2，不写 spec 文件）**（当时；现行边界见 ADR 0001）
 
 1. 另开终端 `cd uva-web && npm run dev`（Vite 5173，`vite.config.ts` 已代理 `/rpc` ws 与
    `/readyz` 到 8080）。

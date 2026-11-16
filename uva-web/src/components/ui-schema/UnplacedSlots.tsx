@@ -9,7 +9,7 @@
 
 import { useEffect, useSyncExternalStore, type JSX } from 'react';
 
-import type { UiComponent } from '../../api/ui-schema';
+import type { UiComponent } from '../../api/catalog';
 import { Section } from '../ui/visual';
 import { UiSchemaRenderer } from './UiSchemaRenderer';
 import { getSnapshot, refresh, subscribe, unplacedComponents } from './store';

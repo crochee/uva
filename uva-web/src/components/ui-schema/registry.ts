@@ -7,7 +7,7 @@
  */
 
 import type { ComponentType } from 'react';
-import type { UiComponent } from '../../api/ui-schema';
+import type { UiComponent } from '../../api/catalog';
 import { KeyValueKind, ListKind, PanelKind, UnknownKind } from './kinds';
 
 export interface RendererProps {

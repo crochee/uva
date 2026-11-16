@@ -5,25 +5,21 @@ use async_trait::async_trait;
 use futures::{Stream, channel::mpsc};
 use uva_context::ContextManager;
 use uva_core::{agent::AgentDescriptor, registry::RegistryItem};
+use uva_events::AgentEvent;
 use uva_provider::ModelProvider;
-use uva_session::LogWriter;
+use uva_session::SessionLog;
 use uva_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
 
 use crate::{
     AgentCaps,
-    agent::{
-        AgentRuntime,
-        ReasoningStrategy,
-        re_act::delegation::{DelegatingTool, Delegators},
-    },
-    events::AgentEvent,
+    agent::{AgentRuntime, ReasoningStrategy},
     input::AgentInput,
     prompt::PromptContext,
     seams::Seams,
 };
 
-/// Concrete [`Agent`](crate::agent::Agent) implementing the ReAct loop. Holds an [`AgentCaps`] bundle; per-run state (cancel +
-/// `subagent_depth`) comes from each [`Agent::run`](crate::agent::Agent::run) call's `input` and `cancel`.
+/// Concrete [`Agent`](crate::agent::Agent) implementing the ReAct loop. Holds an [`AgentCaps`] bundle; per-run state (cancel)
+/// comes from each [`Agent::run`](crate::agent::Agent::run) call's `input` and `cancel`.
 pub struct ReActAgent {
     /// Immutable capability bundle; every setter rewrites one field, and
     /// `Clone` is cheap because every field holds an `Arc`.
@@ -85,19 +81,14 @@ impl crate::agent::Agent for ReActAgent {
         cancel: Arc<dyn uva_core::CancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
         let (tx, rx) = mpsc::unbounded::<AgentEvent>();
-        // Per-run overrides win: a delegated child's input names
-        // the child session's writer and carries the writer
-        // source for its own children; otherwise the agent's
-        // configured handles apply. Both live on the runtime's
-        // caps so the loop and its delegating tools see them.
+        // Per-run override wins: a delegated child's input names the
+        // child session's writer; otherwise the agent's configured
+        // handle applies. It lives on the runtime's caps so the loop
+        // sees it.
         let log_writer = input
             .log_writer
             .clone()
             .or_else(|| self.caps.env.log_writer.clone());
-        let subagent_writers = input
-            .subagent_writers
-            .clone()
-            .or_else(|| self.caps.env.subagent_writers.clone());
         let sink = crate::agent::sink::EventSink::with_capacity(
             Arc::new(tx),
             log_writer.clone(),
@@ -105,11 +96,9 @@ impl crate::agent::Agent for ReActAgent {
         );
         let mut caps = self.caps.clone();
         caps.env.log_writer = log_writer;
-        caps.env.subagent_writers = subagent_writers;
         let runtime = AgentRuntime {
             caps: Arc::new(caps),
             cancel,
-            subagent_depth: input.subagent_depth,
         };
         let strategy = Arc::clone(&runtime.caps.strategy);
         let spawner = Arc::clone(&runtime.caps.env.spawner);
@@ -232,27 +221,29 @@ impl ReActAgent {
         }
     }
 
-    /// Install a delegating tool. Returns `Err` with the name when a
-    /// delegator the agent already installed advertises it — same-name
-    /// dispatch has no defined precedence.
+    /// Install the deployment's external hook registry.
     ///
-    /// A host-registered delegator joins the same table at run start. The
-    /// precedence is by source, not chronological: the agent's own installs
-    /// are merged first, then the host's rows in registration order, and the
-    /// first owner of a name keeps it. A host row registered before the agent
-    /// is built therefore still loses to `with_delegator`; the same delegator
-    /// installed both ways leaves one entry; a name only the host owns is
-    /// dispatched normally.
-    pub fn with_delegator(
+    /// The registry is the contract crate's revocable external
+    /// surface: registers on one of the seven mount points, returns a
+    /// handle, and dropping the handle withdraws the registration.
+    /// Its registrations dispatch *before* the host's typed ones on
+    /// every pass, through the same arbitration — the first `Block`
+    /// short-circuits, `Ask`s collect from both surfaces, and a
+    /// `Block` at `tool/pre-execute` still makes the loop write the
+    /// durable `hook_block` row.
+    ///
+    /// A deployment normally reaches this method through the
+    /// `agentLoop` factory, which resolves the mounted `hooks`
+    /// service; a consumer assembling the agent by hand installs the
+    /// registry here.
+    #[must_use]
+    pub fn with_hook_registry(
         mut self,
-        tool: Arc<dyn DelegatingTool>,
-    ) -> Result<Self, String> {
-        let installed = Delegators::from_installed(&self.caps.tools.delegators);
-        if let Some(taken) = installed.conflict(&tool.definitions()) {
-            return Err(taken);
-        }
-        self.caps.tools.delegators.push(tool);
-        Ok(self)
+        registry: uva_hook::HookRegistry,
+    ) -> Self {
+        self.caps.control.seams =
+            self.caps.control.seams.clone().with_hook_registry(registry);
+        self
     }
 
     #[must_use]
@@ -297,7 +288,7 @@ impl ReActAgent {
     #[must_use]
     pub fn with_approval_policy(
         mut self,
-        policy: crate::agent::approval::ApprovalPolicy,
+        policy: uva_approval::ApprovalPolicy,
     ) -> Self {
         self.caps.control.approval = policy;
         self
@@ -316,24 +307,8 @@ impl ReActAgent {
     /// at every step boundary — the only moment the run waits for
     /// the disk. Without a writer the run keeps no structural log.
     #[must_use]
-    pub fn with_log_writer(mut self, writer: Arc<LogWriter>) -> Self {
+    pub fn with_log_writer(mut self, writer: Arc<dyn SessionLog>) -> Self {
         self.caps.env.log_writer = Some(writer);
-        self
-    }
-
-    /// Install the writer source for delegated children.
-    ///
-    /// The loop hands the source to the `task` delegator, which
-    /// resolves each child's session writer before starting the
-    /// child run — so the child's harness writes its model facts
-    /// into the child's own session log. Without one, this
-    /// agent's children stream live but persist nothing.
-    #[must_use]
-    pub fn with_subagent_writers(
-        mut self,
-        writers: Arc<dyn crate::input::SubagentWriters>,
-    ) -> Self {
-        self.caps.env.subagent_writers = Some(writers);
         self
     }
 

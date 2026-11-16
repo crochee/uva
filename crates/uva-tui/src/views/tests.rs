@@ -669,7 +669,8 @@ fn chat_ops_send_the_registered_params_from_the_palette() {
         last_seq: 3,
         pending: Vec::new(),
         request_snapshot_hash: String::new(),
-        last_message_id: Some("msg-2".to_string()),
+        // The rated row's ordinal — the row's identity in the log.
+        last_message_id: Some("7".to_string()),
     };
     let mut catalog = Catalog::new();
     catalog.open_palette();
@@ -686,6 +687,6 @@ fn chat_ops_send_the_registered_params_from_the_palette() {
     assert_eq!(requests[0].kind, RequestKind::Catalog("chat/feedback"));
     assert_eq!(
         requests[0].params,
-        json!({ "message_id": "msg-2", "thumbs_up": true, "session_id": "s1" })
+        json!({ "message_id": "7", "thumbs_up": true, "session_id": "s1" })
     );
 }

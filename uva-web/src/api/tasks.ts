@@ -1,20 +1,23 @@
 /**
- * Tasks API client — sub-agent delegations.
+ * Tasks domain client — sub-agent delegations.
  *
- * Backend wires a join endpoint (`GET /api/v1/tasks`) that
- * scans recent sessions' `Agent` envelopes server-side and
- * flattens them into one list. The endpoint is keyset-paginated
- * like the rest of the v1 surface: `next_cursor` names the
- * delegation the next page starts after, and the list is ordered
- * newest-first.
+ * `tasks/list` scans recent sessions' `Agent` envelopes server-side
+ * and flattens them into one list. It is keyset-paginated like every
+ * other list method: `next_cursor` names the delegation the next
+ * page starts after, and the list is ordered newest-first.
  *
  * A delegation's id is `<parentSessionId>:<childSessionId>` — the
  * pair that names it. It is stable for the delegation's whole
- * life, so a URL built from it survives a refresh.
+ * life, so a URL built from it survives a refresh. Both methods are
+ * registered by `crates/uva-app-server/src/rpc/methods/automation.rs`.
  */
-
-import { api } from './client';
+import { rpc } from './rpc';
 import type { List, TaskDelegation } from './types';
+
+const METHOD = {
+  list: 'tasks/list',
+  get: 'tasks/get',
+} as const;
 
 export interface TaskListOptions {
   /** Page size hint. The server clamps to [1, 100]. */
@@ -24,20 +27,19 @@ export interface TaskListOptions {
 }
 
 export const tasksApi = {
-  /** GET /api/v1/tasks — one page of delegations, newest first. */
-  list: (opts: TaskListOptions = {}, signal?: AbortSignal): Promise<List<TaskDelegation>> => {
-    const params = new URLSearchParams();
-    if (opts.limit !== undefined) params.set('limit', String(opts.limit));
-    if (opts.cursor) params.set('cursor', opts.cursor);
-    const query = params.toString();
-    return api.get<List<TaskDelegation>>(
-      query ? `/api/v1/tasks?${query}` : '/api/v1/tasks',
+  /** `tasks/list` — one page of delegations, newest first. */
+  list: (opts: TaskListOptions = {}, signal?: AbortSignal): Promise<List<TaskDelegation>> =>
+    rpc.request<List<TaskDelegation>>(
+      METHOD.list,
+      {
+        ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+        ...(opts.cursor ? { cursor: opts.cursor } : {}),
+      },
       signal,
-    );
-  },
+    ),
 
-  /** GET /api/v1/tasks/{id} — fetch one delegation by its
-   *  synthetic `<parentSessionId>:<childSessionId>` id. */
+  /** `tasks/get` — fetch one delegation by its synthetic
+   * `<parentSessionId>:<childSessionId>` id. */
   get: (id: string, signal?: AbortSignal): Promise<TaskDelegation> =>
-    api.get<TaskDelegation>(`/api/v1/tasks/${encodeURIComponent(id)}`, signal),
+    rpc.request<TaskDelegation>(METHOD.get, { id }, signal),
 };

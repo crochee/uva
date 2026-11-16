@@ -10,22 +10,20 @@ use async_trait::async_trait;
 use futures::channel::mpsc;
 use uva_context::AgentState;
 use uva_core::CancelToken;
+use uva_events::AgentEvent;
 use uva_steering::{HookDecision, HookEvent, RequestParams};
 use uva_tool::ToolOutput;
 
-use crate::{
-    agent::{
-        host::{
-            Gate,
-            Hook,
-            HookContext,
-            Host,
-            RequestTransformer,
-            ResultTransformer,
-        },
-        sink::EventSink,
+use crate::agent::{
+    host::{
+        Gate,
+        Hook,
+        HookContext,
+        Host,
+        RequestTransformer,
+        ResultTransformer,
     },
-    events::AgentEvent,
+    sink::EventSink,
 };
 
 // An observer that counts its own calls.
@@ -146,7 +144,6 @@ impl Fixture {
     fn ctx(&self) -> HookContext<'_> {
         HookContext {
             state: &self.state,
-            events: &self.sink,
             cancel: &self.cancel,
         }
     }
@@ -296,7 +293,7 @@ async fn a_dispatch_calls_every_enabled_observer() {
     }));
 
     let arbitration = host
-        .dispatch_hooks(&before_tool_event(), &fixture.ctx())
+        .dispatch_hooks(&before_tool_event(), &fixture.ctx(), &fixture.sink)
         .await;
     assert_eq!(arbitration.decision, HookDecision::Allow);
     assert_eq!(first_calls.load(Ordering::SeqCst), 1);
@@ -310,14 +307,14 @@ async fn an_observer_registered_after_a_dispatch_is_seen_by_the_next_one() {
     let fixture = Fixture::new();
     let mut host = Host::new();
     let late_calls = Arc::new(AtomicUsize::new(0));
-    host.dispatch_hooks(&before_tool_event(), &fixture.ctx())
+    host.dispatch_hooks(&before_tool_event(), &fixture.ctx(), &fixture.sink)
         .await;
     let _late = host.hook(Arc::new(CountingObserver {
         name: "late",
         calls: Arc::clone(&late_calls),
         panic: false,
     }));
-    host.dispatch_hooks(&before_tool_event(), &fixture.ctx())
+    host.dispatch_hooks(&before_tool_event(), &fixture.ctx(), &fixture.sink)
         .await;
     assert_eq!(late_calls.load(Ordering::SeqCst), 1);
 }
@@ -396,7 +393,7 @@ async fn a_panicking_observer_is_disabled_after_the_dispatch_that_hit_it() {
     }));
 
     let first = host
-        .dispatch_hooks(&before_tool_event(), &fixture.ctx())
+        .dispatch_hooks(&before_tool_event(), &fixture.ctx(), &fixture.sink)
         .await;
     // The dispatch in flight ran to the end: the observer behind the
     // panicking one was still consulted.
@@ -404,7 +401,7 @@ async fn a_panicking_observer_is_disabled_after_the_dispatch_that_hit_it() {
     assert_eq!(after_calls.load(Ordering::SeqCst), 1);
 
     // The next dispatch skips the disabled observer.
-    host.dispatch_hooks(&before_tool_event(), &fixture.ctx())
+    host.dispatch_hooks(&before_tool_event(), &fixture.ctx(), &fixture.sink)
         .await;
     assert_eq!(broken_calls.load(Ordering::SeqCst), 1);
     assert_eq!(after_calls.load(Ordering::SeqCst), 2);

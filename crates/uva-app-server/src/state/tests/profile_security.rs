@@ -22,12 +22,12 @@ async fn state(dir: &Path) -> AppState {
     // The capability path needs a profile document configured — without
     // one it refuses before it ever reaches the file system, and the
     // test would pass without exercising anything.
-    state.profile_store = Some(ProfileStore {
+    state.assembly.set_store(Some(ProfileStore {
         bundle: None,
         doc: dir.join("profile.toml"),
         home: None,
         overlay: None,
-    });
+    }));
     state
 }
 

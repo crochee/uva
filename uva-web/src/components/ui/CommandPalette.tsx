@@ -7,8 +7,10 @@ import { useCursorList } from '../../hooks/useCursorList';
 import { isEditableTarget } from '../../hooks/useKeyboardShortcuts';
 import { shortId } from '../../lib/short-id';
 import { SETTINGS_NAV_SECTIONS } from '../../settings/sections';
-import { api } from '../../api/client';
-import type { AgentDetail, List, SearchHit, SessionSummary } from '../../api/types';
+import { agentsApi } from '../../api/agents';
+import { searchApi } from '../../api/search';
+import { sessionsApi } from '../../api/sessions';
+import type { AgentDetail, SearchHit, SessionSummary } from '../../api/types';
 import './CommandPalette.css';
 
 /**
@@ -139,7 +141,7 @@ function searchHitPath(hit: SearchHit): string | null {
 }
 
 /** Map server hits to palette commands, grouped by domain. The
- *  hits arrive best-first from `GET /api/v1/search`; each keeps
+ *  hits arrive best-first from `search/all`; each keeps
  *  its score so the in-group order matches the backend's
  *  ranking.
  *
@@ -255,11 +257,17 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
   // it stops existing when they close it. `useCursorList` aborts
   // whatever is in flight on unmount, so a fast open/close cannot
   // leak a request or land a response after the close.
-  const sessions = useCursorList<SessionSummary>('/api/v1/sessions');
-  const agents = useCursorList<AgentDetail>('/api/v1/agents');
+  const sessions = useCursorList<SessionSummary>(
+    (cursor, signal) => sessionsApi.list({ ...(cursor ? { cursor } : {}) }, signal),
+    'palette:sessions',
+  );
+  const agents = useCursorList<AgentDetail>(
+    (cursor, signal) => agentsApi.list({ ...(cursor ? { cursor } : {}) }, signal),
+    'palette:agents',
+  );
 
   // Server-side cross-domain search: once the user types, the
-  // palette queries `GET /api/v1/search` (the same engine the
+  // palette queries `search/all` (the same engine the
   // agent's `search` tool uses) instead of fuzzy-filtering the
   // two idle lists — so tools, skills, memory and MCP tools
   // become jump targets too. Debounced; the previous request is
@@ -277,11 +285,8 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
       if (searchAbortRef.current) searchAbortRef.current.abort();
       const controller = new AbortController();
       searchAbortRef.current = controller;
-      api
-        .get<List<SearchHit>>(
-          `/api/v1/search?q=${encodeURIComponent(trimmedQuery)}&limit=10`,
-          controller.signal,
-        )
+      searchApi
+        .all(trimmedQuery, { limit: 10 }, controller.signal)
         .then((response) => {
           if (searchAbortRef.current === controller) {
             setServerHits(response.data);
@@ -349,7 +354,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
       commands: entries
         .slice()
         // `Array.prototype.sort` is stable, so equal scores keep the
-        // server's ordering (best-first from `/api/v1/search`).
+        // server's ordering (best-first from `search/all`).
         .sort((a, b) => b.score - a.score)
         .slice(0, limit)
         .map((entry) => entry.command),

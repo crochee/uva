@@ -157,12 +157,11 @@ mod tests {
             Arc::new(FakeProvider::new(vec![])),
             Arc::new(ToolRegistry::new()),
             PathBuf::from("/tmp"),
-            uva::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
+            uva::agent::DEFAULT_SYSTEM_PROMPT.to_string(),
         );
         let controller = SessionController::spawn(
             "alice",
             "lane-1",
-            manager.sink("alice", "lane-1"),
             manager.writer("alice", "lane-1"),
             deps,
             idle,

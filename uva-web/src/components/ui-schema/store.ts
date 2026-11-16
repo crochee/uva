@@ -11,7 +11,7 @@
  * assertable from the page console.
  */
 
-import { uiSchemaApi, type UiComponent, type UiSchema, type UiSlot } from '../../api/ui-schema';
+import { catalogApi, type UiComponent, type UiSchema, type UiSlot } from '../../api/catalog';
 
 /** The projection plus its fetch lifecycle. */
 export type UiSchemaState =
@@ -62,8 +62,8 @@ export function refresh(signal?: AbortSignal): void {
   if (snapshot.status === 'idle') {
     publish({ status: 'loading', slots: [], schemas: [], error: null });
   }
-  uiSchemaApi
-    .get(signal)
+  catalogApi
+    .uiSchema(signal)
     .then((response) => {
       inFlight = false;
       publish({ status: 'ready', slots: response.slots, schemas: response.schemas, error: null });

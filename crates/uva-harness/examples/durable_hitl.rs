@@ -298,7 +298,7 @@ async fn main() {
             input: json!({}),
         }]));
     let agent = ReActAgent::new(first, Arc::clone(&registry))
-        .with_log_writer(Arc::clone(&writer));
+        .with_log_writer(writer.clone());
     let mut stream = agent
         .run(
             AgentInput::text("deploy"),
@@ -333,7 +333,7 @@ async fn main() {
     let provider: Arc<dyn ModelProvider> =
         Arc::clone(&second) as Arc<dyn ModelProvider>;
     let resumed = ReActAgent::new(provider, Arc::clone(&registry))
-        .with_log_writer(Arc::clone(&writer));
+        .with_log_writer(writer.clone());
     let mut stream = resumed
         .run(
             AgentInput::text("continue").resume_approving_all(resume),

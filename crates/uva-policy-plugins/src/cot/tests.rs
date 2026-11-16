@@ -137,7 +137,6 @@ fn runtime(
     StrategyAgentRuntime {
         caps: Arc::new(caps),
         cancel,
-        subagent_depth: 0,
     }
 }
 

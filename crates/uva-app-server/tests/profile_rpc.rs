@@ -1,13 +1,14 @@
 //! End-to-end acceptance for the profile lifecycle cut.
 //!
 //! Spawns the real core binary over a temp workspace whose
-//! `profile.toml` switches the `tool-todo` row off and delegates the
-//! `eval` row to the `skill-checks` judge provided by the `skills`
-//! row. Drives the four acceptance behaviours over the stdio wire: the
-//! off row is visible with a reason, turning it on mounts the
-//! capability and broadcasts `profile/changed`, a row that cannot
-//! mount reports `failed` and leaves the document byte-identical, and
-//! turning it off removes the capability again.
+//! `.agents/profile.toml` — the project's configuration layer —
+//! switches the `tool-todo` row off and delegates the `eval` row to
+//! the `skill-checks` judge provided by the `skills` row. Drives the
+//! four acceptance behaviours over the stdio wire: the off row is
+//! visible with a reason, turning it on mounts the capability and
+//! broadcasts `profile/changed`, a row that cannot mount reports
+//! `failed` and leaves the document byte-identical, and turning it
+//! off removes the capability again.
 
 use std::{
     io::{BufRead, BufReader, Read as _, Write},
@@ -29,10 +30,11 @@ const NATIVE_IDS: &[&str] = &[
     "search",
     "session-store",
     "sandbox",
-    "subagent-backend",
+    "tool-task",
     "context-compactor",
     "approval",
     "skills",
+    "hooks",
     "agent-loop",
     "mcp",
     "eval",
@@ -56,8 +58,11 @@ impl Core {
             .arg("--directory")
             .arg(workspace)
             // Isolate the global layout: no developer home-patch or
-            // user skills leak into the acceptance run.
-            .env("HOME", workspace)
+            // user skills leak into the acceptance run. The home
+            // lives beside the workspace, not inside it — the
+            // workspace's own configuration layer holds the profile
+            // document, and the two layers must stay distinct.
+            .env("HOME", workspace.join("home"))
             .env_remove("UVA_HOME_PROFILE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -193,7 +198,7 @@ default_model = "demo-model"
         }
     }
     std::fs::write(
-        temp.path().join("profile.toml"),
+        agents.join("profile.toml"),
         format!("hmr = false\n\n[core]\nentries = [\n{rows}]\n"),
     )
     .expect("the profile document");
@@ -219,7 +224,7 @@ fn todo_tool(registry: &Value) -> bool {
 #[test]
 fn the_profile_transaction_survives_the_stdio_wire() {
     let temp = workspace();
-    let doc = temp.path().join("profile.toml");
+    let doc = temp.path().join(".agents").join("profile.toml");
     let mut core = Core::spawn(temp.path());
     core.await_ready();
 

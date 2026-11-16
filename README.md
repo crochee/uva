@@ -101,7 +101,7 @@ The crate docs of `uva` are the assembly tutorial (`cargo doc -p uva --open`); t
                                        ▼
                 ┌────────────────────────────────────────┐
                 │     uva-harness: ReAct loop            │
-                │  (Agent + DelegatingTool + strategy)   │
+                │  (Agent + tool registry + strategy)   │
                 └─────────────────────┬──────────────────┘
                                       ▼
                 ┌────────────────────────────────────────┐
@@ -113,16 +113,17 @@ The crate docs of `uva` are the assembly tutorial (`cargo doc -p uva --open`); t
 
 ## Workspace
 
-25 workspace members under `crates/`, plus `desktop/` (a Tauri shell, its own workspace) and `uva-web/` (the React front-end).
+31 workspace members under `crates/`, plus `desktop/` (a Tauri shell, its own workspace) and `uva-web/` (the React front-end).
 
 | Layer | Crates |
 |---|---|
 | Foundation | `uva-core` · `uva-core-tokio` |
 | Paradigms | `uva-provider` · `uva-tool` · `uva-context` · `uva-steering` · `uva-session` · `uva-skill` |
-| Plugins | `uva-tool-plugins` · `uva-policy-plugins` |
+| Approval | `uva-approval` |
+| Plugins | `uva-tool-plugins` · `uva-tool-task` · `uva-policy-plugins` · `uva-hook-plugins` |
 | Assembly | `uva-kernel` · `uva-runtime` |
-| Runtime | `uva-harness` |
-| Domain crates | `uva-search` · `uva-scheduler` · `uva-eval` · `uva-attachment` · `uva-test-support` |
+| Runtime | `uva-events` · `uva-agent` · `uva-hook` · `uva-harness` |
+| Domain crates | `uva-search` · `uva-scheduler` · `uva-eval` · `uva-attachment` · `uva-mcp` · `uva-telemetry` · `uva-test-support` |
 | Hosts | `uva-app-server` · `uva-tui` · `uva-gateway` · `uva-mcp-server` |
 | Facade | `uva` |
 

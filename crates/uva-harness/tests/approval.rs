@@ -18,17 +18,18 @@ use serde_json::json;
 use uva_context::AgentState;
 use uva_core::{AtomicCancelToken, CancelToken};
 use uva_harness::{
+    ApprovalGate,
+    ApprovalPlugin,
     ApprovalPolicy,
     ApprovalRequest,
     EventSink,
     HookContext,
     Host,
+    KEY_APPROVAL,
     ResumeDecision,
     ResumeStatus,
     ResumeToken,
     Suspension,
-    agent::approval::Risk,
-    approval_plugin::{ApprovalGate, ApprovalPlugin, KEY_APPROVAL},
     seams::Seams,
 };
 use uva_kernel::{
@@ -39,6 +40,7 @@ use uva_kernel::{
     mount_all,
 };
 use uva_steering::HookDecision;
+use uva_tool::Risk;
 
 /// Classifies a call for the gate. The real host derives this from the
 /// `tools` registry (`Tool::risk`); the test fixes it so the policy,
@@ -73,7 +75,6 @@ impl Fixture {
     fn ctx(&self) -> HookContext<'_> {
         HookContext {
             state: &self.state,
-            events: &self.sink,
             cancel: &self.cancel,
         }
     }
@@ -103,6 +104,7 @@ async fn approval_denies_on_timeout() {
     let arbitration = seams
         .tool_pre(
             &fixture.ctx(),
+            &fixture.sink,
             "shell",
             "c1",
             &json!({"command": "rm -rf /"}),
@@ -199,7 +201,13 @@ async fn approval_allows_low_risk() {
     let fixture = Fixture::new();
 
     let arbitration = seams
-        .tool_pre(&fixture.ctx(), "read", "c2", &json!({"path": "a.txt"}))
+        .tool_pre(
+            &fixture.ctx(),
+            &fixture.sink,
+            "read",
+            "c2",
+            &json!({"path": "a.txt"}),
+        )
         .await;
     assert!(
         arbitration.asks.is_empty(),

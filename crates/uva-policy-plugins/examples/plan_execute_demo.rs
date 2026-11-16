@@ -107,7 +107,6 @@ fn runtime(provider: Arc<dyn ModelProvider>) -> AgentRuntime {
     AgentRuntime {
         caps: Arc::new(caps),
         cancel: Arc::new(uva_core::AtomicCancelToken::default()),
-        subagent_depth: 0,
     }
 }
 

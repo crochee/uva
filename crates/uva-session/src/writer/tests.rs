@@ -243,6 +243,24 @@ async fn rows_reach_the_sink_only_at_the_flush() {
     assert_eq!(stored_seqs(&sink).await, vec![1]);
 }
 
+/// The close is part of the durability promise: it flushes first, so a
+/// row the writer accepted is readable even though the caller never
+/// called `flush`.
+#[tokio::test]
+async fn close_flushes_the_rows_it_accepted() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = LogWriter::new(sink.clone(), Arc::new(SystemClock));
+    writer.append(json!({"type": "Model"})).await.unwrap();
+
+    writer.close(SessionEndReason::Completed).await.unwrap();
+
+    assert_eq!(
+        stored_seqs(&sink).await,
+        vec![1],
+        "close lands the queued row before it closes the log"
+    );
+}
+
 /// The payload bound lives at the log boundary, not in a
 /// constructor: a `plugin` row assembled through the public variant
 /// literal is capped on every ingress path, because variant fields
@@ -291,6 +309,47 @@ async fn the_writer_bounds_a_plugin_row_built_by_hand() {
     let second = &rows[1];
     assert_eq!(second["kind"], json!("unnamed"));
     assert_eq!(second["payload"], json!({"ok": true}));
+}
+
+/// A streaming tool's burst of chunks is one bounded row, and the
+/// tail survives: the log does not grow with the tool's output rate,
+/// and a reload still replays the newest bytes.
+#[tokio::test]
+async fn a_tool_output_burst_is_one_bounded_tail_row() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = LogWriter::new(sink.clone(), Arc::new(SystemClock));
+
+    let chunk = "0123456789abcdef".repeat(1024);
+    let chunks = 16u64;
+    for _ in 0..chunks {
+        writer.append_event_nowait(&crate::tool_output("c1", "shell", &chunk));
+    }
+    writer.flush().await.unwrap();
+
+    let rows = sink.read().await.expect("read");
+    let output_rows: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "tool_output")
+        .collect();
+    assert_eq!(output_rows.len(), 1, "the burst is one row");
+    let text = output_rows[0]["data"]["output"]
+        .as_str()
+        .expect("the chunk is text");
+    let stored = serde_json::to_string(text).expect("serialises");
+    assert!(
+        stored.len() <= crate::events::MAX_TOOL_OUTPUT_BYTES,
+        "the row is bounded: {}",
+        stored.len()
+    );
+    assert!(
+        text.ends_with(&chunk[chunk.len() - 64..]),
+        "the tail window keeps the newest chunk"
+    );
+    assert_eq!(
+        output_rows[0]["data"]["original_bytes"].as_u64(),
+        Some(chunk.len() as u64 * chunks),
+        "the row says how much output it stands for"
+    );
 }
 
 /// The writer owns the session's log, so the log is read through it:

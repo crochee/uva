@@ -14,10 +14,11 @@
 use std::{path::PathBuf, sync::Arc};
 
 use uva::{
+    agent::{AgentRegistry, PromptContext},
     context::ContextManager,
-    harness::{AgentRegistry, PromptContext, ReasoningStrategy},
+    harness::ReasoningStrategy,
     provider::traits::ModelProvider,
-    session::{Compactor, LogWriter},
+    session::{Compactor, SessionLog},
     tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy},
 };
 
@@ -47,13 +48,7 @@ pub struct AgentRunConfig {
     pub agent_registry: Option<Arc<AgentRegistry>>,
     /// The session's one writer: the agent's structural boundary
     /// events go into it.
-    pub log_writer: Option<Arc<LogWriter>>,
-    /// Writer source resolving the log writer of a session a
-    /// delegated child runs in. The run factory installs it on
-    /// the agent, so the `task` delegator hands each child its
-    /// own session's writer and the child's harness writes its
-    /// model facts there.
-    pub subagent_writers: Option<Arc<dyn uva::harness::SubagentWriters>>,
+    pub log_writer: Option<Arc<dyn SessionLog>>,
     /// The deployment's host: the steering policy (guards / hooks /
     /// hints / tracker) plus the plugins installed at boot. The run
     /// factory passes a clone to the agent it builds, so the policy
@@ -63,7 +58,7 @@ pub struct AgentRunConfig {
     pub host: Option<uva::harness::Host>,
     /// The mounted `agentLoop` factory; the run's deployment-level
     /// knobs (strategy, restriction, context manager, compactor,
-    /// spawner, delegators) resolve through it. The server always
+    /// spawner) resolve through it. The server always
     /// wires it (session creation fails when the service is parked or
     /// unloaded); `None` is the embedder/test shape and builds the
     /// agent directly from this config.

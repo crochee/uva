@@ -17,7 +17,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt, channel::mpsc, future::BoxFuture};
+use futures::{Stream, StreamExt, channel::mpsc};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use uva_context::AgentState;
@@ -26,7 +26,6 @@ use uva_harness::{
     Agent,
     AgentEvent,
     AgentInput,
-    DelegatingTool,
     EventSink,
     PromptContext,
     PromptSection,
@@ -68,7 +67,6 @@ use uva_provider::{
     ModelProvider,
     ProviderConfig,
     Role,
-    ToolDefinition,
     ToolUse,
 };
 use uva_steering::{HookDecision, HookEvent, RequestParams};
@@ -379,21 +377,6 @@ impl Gate for LaterGate {
     }
 }
 
-struct NoopDelegator;
-
-impl DelegatingTool for NoopDelegator {
-    fn definitions(&self) -> Vec<ToolDefinition> {
-        Vec::new()
-    }
-
-    fn execute(
-        &self,
-        _call: uva_harness::DelegationCall<'_>,
-    ) -> BoxFuture<'static, ToolOutput> {
-        Box::pin(async { ToolOutput::text("never runs") })
-    }
-}
-
 struct DropProbe(Arc<AtomicUsize>);
 
 impl Drop for DropProbe {
@@ -460,12 +443,10 @@ fn run_config(
         ),
         prompt_context: Arc::new(PromptContext::default()),
         max_iterations: 8,
-        delegators: Vec::new(),
         tool_surface: None,
         strategy: None,
         tool_restriction: None,
         log_writer: None,
-        subagent_writers: None,
         context_manager: None,
         compactor: None,
         host: Some(host),
@@ -498,14 +479,9 @@ fn registry_with_echo() -> (Arc<ToolRegistry>, Arc<FakeTool>) {
 
 fn seam_context<'a>(
     state: &'a AgentState,
-    sink: &'a EventSink,
     cancel: &'a Arc<dyn CancelToken>,
 ) -> HookContext<'a> {
-    HookContext {
-        state,
-        events: sink,
-        cancel,
-    }
+    HookContext { state, cancel }
 }
 
 fn probe_sink() -> (EventSink, mpsc::UnboundedReceiver<AgentEvent>) {
@@ -825,10 +801,12 @@ async fn llm_request_and_result_transformers() {
     let state = AgentState::with_window(4_096);
     let (sink, _rx) = probe_sink();
     let cancel: Arc<dyn CancelToken> = Arc::new(CancellationToken::new());
-    let ctx = seam_context(&state, &sink, &cancel);
+    let ctx = seam_context(&state, &cancel);
 
     let mut params = RequestParams::from_request(&CompletionRequest::default());
-    seams.llm_request(&ctx, "scripted", &mut params).await;
+    seams
+        .llm_request(&ctx, &sink, "scripted", &mut params)
+        .await;
     assert_eq!(
         params.temperature,
         Some(0.25),
@@ -849,18 +827,12 @@ async fn llm_request_and_result_transformers() {
 // --- scoped lists, unload, ordering -----------------------------------
 
 #[test]
-fn tools_and_delegators_are_seam_scoped() {
+fn tools_are_seam_scoped() {
     let mut host = Host::new();
     let _tool = host.tool(Arc::new(FakeTool::new("seam-tool", "x")));
-    let _delegator = host.delegator(Arc::new(NoopDelegator));
     let seams = Seams::new(host);
 
     assert_eq!(seams.tools().len(), 1, "the tool comes from the seam");
-    assert_eq!(
-        seams.delegators().len(),
-        1,
-        "the delegator comes from the seam"
-    );
 }
 
 #[test]
@@ -933,9 +905,11 @@ async fn registrations_run_in_order_and_short_circuit_stops_later() {
     let state = AgentState::with_window(4_096);
     let (sink, _rx) = probe_sink();
     let cancel: Arc<dyn CancelToken> = Arc::new(CancellationToken::new());
-    let ctx = seam_context(&state, &sink, &cancel);
+    let ctx = seam_context(&state, &cancel);
 
-    let arbitration = seams.tool_pre(&ctx, "echo", "call-1", &json!({})).await;
+    let arbitration = seams
+        .tool_pre(&ctx, &sink, "echo", "call-1", &json!({}))
+        .await;
 
     assert!(
         matches!(arbitration.decision, HookDecision::Block { .. }),

@@ -144,7 +144,7 @@ async fn a_steer_row_is_in_the_next_request_but_not_the_current_tool_batch() {
         Arc::clone(&provider) as Arc<dyn uva_provider::traits::ModelProvider>,
         registry,
     )
-    .with_log_writer(Arc::clone(&writer));
+    .with_log_writer(writer.clone());
     let mut stream = agent
         .run(
             AgentInput::text("start").with_inbox(inbox),

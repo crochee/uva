@@ -51,6 +51,7 @@ jobs:
             ./scripts/check-host-capabilities.sh
             ./scripts/check-harness-docs.sh
             ./scripts/check-harness-shape.sh
+            ./scripts/check-hook-external.sh
             ./scripts/check-kernel-deps.sh
             ./scripts/check-plugin-shape.sh
             ./scripts/check-pub-surface-strict.sh
@@ -59,6 +60,8 @@ jobs:
             ./scripts/check-publishable.sh
             ./scripts/check-single-writer.sh
             ./scripts/check-stdout.sh
+            ./scripts/check-web-contract.sh
+            ./scripts/check-web-methods.sh
             ./scripts/verify-harness-e2e.sh
           # SC1091 (sourced file not found) is irrelevant: the gate
           # scripts do not source anything. SC2086 (unquoted globbing)

@@ -13,7 +13,11 @@ use uva::provider::{Content, ContentPart, Role, TextContent};
 
 use super::{
     super::{AgentEvent, AgentInput, SessionOp, SessionState},
-    support::{RecordingFactory, make_manager_and_controller},
+    support::{
+        RecordingFactory,
+        make_manager_and_controller,
+        wait_for_log_row,
+    },
 };
 
 /// Regression: the second prompt submitted to the same session
@@ -360,6 +364,256 @@ async fn resumed_history_shows_the_durable_compaction_checkpoint() {
     );
 }
 
+/// A log the strict fold refuses must not cost the run its history.
+///
+/// The strict fold refuses a compaction whose citation does not name
+/// the rows its span covers — a compaction written in the old
+/// coordinates, say. The run used to swallow that refusal and start
+/// from an **empty** history: the whole conversation was lost, which
+/// is worse than the situation the refusal replaced. The run now
+/// falls back to the lenient fold, which skips the refused
+/// compaction and replays the span it shadowed — so the model sees
+/// the history the log actually supports.
+#[tokio::test]
+async fn a_log_that_does_not_fold_strictly_still_seeds_the_run_with_its_history()
+ {
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
+    let factory: Arc<dyn super::super::RunStreamFactory> =
+        Arc::new(RecordingFactory::new(
+            Arc::clone(&calls),
+            vec![AgentEvent::Model(ContentPart::Text(TextContent {
+                text: "ack".to_string(),
+                cache_control: None,
+            }))],
+            vec![],
+        ));
+    let (controller, manager, _temp) =
+        make_manager_and_controller(Duration::from_secs(60), factory).await;
+
+    // Prime the log with two turns and a compaction that cites the
+    // wrong rows: the span [0, 1) covers the user turn (seq 1), but
+    // the citation names seq 2 — the assistant turn. The strict fold
+    // refuses it; the lenient fold skips it and replays the span.
+    let sink = manager.sink("alice", "s1");
+    sink.alloc_seq();
+    sink.append(&serde_json::json!({
+        "type": "UserInput",
+        "seq": 1,
+        "data": {"text": "hello"},
+    }))
+    .await
+    .unwrap();
+    sink.alloc_seq();
+    sink.append(&serde_json::json!({
+        "type": "Model",
+        "seq": 2,
+        "data": {"type": "text", "text": "working"},
+    }))
+    .await
+    .unwrap();
+    sink.alloc_seq();
+    sink.append(&serde_json::json!({
+        "type": "compaction",
+        "seq": 3,
+        "ts": "2026-09-12T00:00:00Z",
+        "surface_op": {"start": 0, "end": 1, "source_event_seqs": [2]},
+        "data": {"summary": "compacted turn"},
+    }))
+    .await
+    .unwrap();
+
+    controller
+        .submit(SessionOp::Prompt {
+            content: "carry on".to_string(),
+            priority: 1,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while calls.lock().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the run factory was not invoked in time");
+    let recorded = calls.lock();
+    let history = &recorded[0].history;
+    let flattened = format!("{history:?}");
+    assert!(
+        flattened.contains("hello"),
+        "the run must still see the conversation the log holds; got {flattened}"
+    );
+    assert!(
+        flattened.contains("working"),
+        "the replayed span must reach the model; got {flattened}"
+    );
+}
+
+/// A refused fold must be visible to the client — and visible once.
+///
+/// The session's log is the client's view of the session: a refusal
+/// the client cannot see is a refusal it cannot act on, because the
+/// run looks like any other. The run records the refusal as a
+/// `warning` row, once per session: the refusal belongs to the
+/// *log*, not to the run, so a later run that is refused the same
+/// way must not write the fact again.
+///
+/// The row does not move the surface either. `warning` is not one of
+/// the row kinds the fold projects, so the history the model sees is
+/// the history the log had before the row landed.
+#[tokio::test]
+async fn a_refused_fold_is_recorded_once_in_the_session_log() {
+    let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
+    let factory: Arc<dyn super::super::RunStreamFactory> =
+        Arc::new(RecordingFactory::new(
+            Arc::clone(&calls),
+            vec![AgentEvent::Model(ContentPart::Text(TextContent {
+                text: "ack".to_string(),
+                cache_control: None,
+            }))],
+            vec![AgentEvent::Model(ContentPart::Text(TextContent {
+                text: "ack again".to_string(),
+                cache_control: None,
+            }))],
+        ));
+    let (controller, manager, _temp) =
+        make_manager_and_controller(Duration::from_secs(60), factory).await;
+
+    // Prime the log with two turns and a compaction that cites the
+    // wrong rows: the span [0, 1) covers the user turn (seq 1), but
+    // the citation names seq 2 — the assistant turn. The strict fold
+    // refuses it.
+    let sink = manager.sink("alice", "s1");
+    sink.alloc_seq();
+    sink.append(&serde_json::json!({
+        "type": "UserInput",
+        "seq": 1,
+        "data": {"text": "hello"},
+    }))
+    .await
+    .unwrap();
+    sink.alloc_seq();
+    sink.append(&serde_json::json!({
+        "type": "Model",
+        "seq": 2,
+        "data": {"type": "text", "text": "working"},
+    }))
+    .await
+    .unwrap();
+    sink.alloc_seq();
+    sink.append(&serde_json::json!({
+        "type": "compaction",
+        "seq": 3,
+        "ts": "2026-09-12T00:00:00Z",
+        "surface_op": {"start": 0, "end": 1, "source_event_seqs": [2]},
+        "data": {"summary": "compacted turn"},
+    }))
+    .await
+    .unwrap();
+
+    controller
+        .submit(SessionOp::Prompt {
+            content: "carry on".to_string(),
+            priority: 1,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while calls.lock().is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the run factory was not invoked in time");
+
+    // The refusal is in the log, naming its kind and saying why.
+    let rows = wait_for_log_row(&manager, FOLD_REFUSAL_KIND).await;
+    let warnings: Vec<_> =
+        rows.iter().filter(|row| is_fold_refusal(row)).collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the refusal is recorded once; log: {rows:?}"
+    );
+    let data = warnings[0]
+        .get("data")
+        .expect("the warning row carries its data");
+    assert_eq!(
+        data.get("kind").and_then(serde_json::Value::as_str),
+        Some(FOLD_REFUSAL_KIND),
+        "the row names the refusal's kind"
+    );
+    let message = data
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    assert!(!message.is_empty(), "the row says why the fold was refused");
+
+    // The row is log-only: the surface the model sees is the surface
+    // the log had without it.
+    let without: Vec<serde_json::Value> = rows
+        .iter()
+        .filter(|row| !is_fold_refusal(row))
+        .cloned()
+        .collect();
+    let folded_with = uva::session::fold_log_surface(&rows);
+    let folded_without = uva::session::fold_log_surface(&without);
+    assert_eq!(
+        folded_with.messages, folded_without.messages,
+        "a warning row must not change the folded surface"
+    );
+    assert_eq!(
+        folded_with.surface_seqs, folded_without.surface_seqs,
+        "a warning row must not renumber the surface"
+    );
+
+    // A second run is refused the same way — and writes no second
+    // row: the refusal is a property of the log.
+    controller
+        .submit(SessionOp::Prompt {
+            content: "carry on again".to_string(),
+            priority: 1,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while calls.lock().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the second run was not invoked in time");
+    // The fold happens before the factory is invoked, so the second
+    // run has already been refused by the time its input is
+    // recorded. Give the row a moment to land, then count.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let rows = sink.read().await.unwrap();
+    let warnings = rows.iter().filter(|row| is_fold_refusal(row)).count();
+    assert_eq!(
+        warnings, 1,
+        "the refusal is recorded once per session, not once per run; \
+         log: {rows:?}"
+    );
+}
+
+/// The `kind` slug the run records a refused fold under.
+///
+/// Spelled out here on purpose: the slug is a contract with the
+/// client, so the test pins its value instead of importing the
+/// constant the run uses — a slug that changed under the test would
+/// change the contract without changing the test.
+const FOLD_REFUSAL_KIND: &str = "strict_fold_refused";
+
+/// Whether the row is the warning that records a refused fold.
+fn is_fold_refusal(row: &serde_json::Value) -> bool {
+    row.get("type").and_then(serde_json::Value::as_str) == Some("warning")
+        && row
+            .get("data")
+            .and_then(|data| data.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            == Some(FOLD_REFUSAL_KIND)
+}
+
 /// A sink that counts the whole-log reads.
 struct CountingSink {
     inner: Arc<dyn uva::session::SessionSink>,
@@ -466,7 +720,6 @@ async fn a_turn_on_an_unchanged_log_reads_nothing() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink) as Arc<dyn uva::session::SessionSink>,
         manager.writer("alice", "s1"),
         deps,
         Duration::from_secs(60),

@@ -1,0 +1,30 @@
+[package]
+name = "uva-approval"
+description = "Approval capability for uva: the held-call vocabulary, the log-derived decision functions, and the kernel plugin that publishes the stance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+# `Risk` is the tool crate's own vocabulary: a tool declares its own
+# risk, the policy here only reads it.
+uva-tool.workspace = true
+# The open set, the resume token and the coverage check derive from
+# `SessionEvent` rows — a uva-specific shape (dsh's approval package
+# needs no session log; ours does, and that is deliberate).
+uva-session.workspace = true
+# `ApprovalPlugin` implements the kernel's `Plugin` trait.
+uva-kernel.workspace = true

@@ -1,15 +1,16 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 pub use uva_core::Error;
+use uva_core::{AtomicCancelToken, CancelToken};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Execution context passed to every tool invocation.
 ///
 /// Carries session identity (for output-spill attribution), the
-/// workspace root (for path confinement), and the output
-/// truncation config.
+/// workspace root (for path confinement), the output truncation
+/// config, and the run's cancellation token.
 ///
 /// What a call may *touch* is not here: a process-running tool
 /// owns its own execution policy (`uva-tool-plugins`'s `shell`
@@ -23,12 +24,39 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// host-layer business. A tool that scopes by user reads it from
 /// its own configuration or from host-supplied routing facts,
 /// never from this struct.
-#[derive(Debug, Clone)]
+///
+/// # Cancellation
+///
+/// [`cancel`](Self::cancel) is the run's authority for "stop":
+/// the agent loop installs the token it received for the run
+/// before dispatching a call, and a tool that starts work of its
+/// own — the `task` tool driving a child run is the in-repo
+/// example — hands the token down instead of inventing a second
+/// cancellation channel. A context built by hand
+/// ([`Context::new`](Self::new) /
+/// [`Context::default`](Context::default)) carries a fresh token
+/// that is never cancelled.
+#[derive(Clone)]
 pub struct Context {
     pub session_id: String,
     pub workspace_root: PathBuf,
     /// Output truncation configuration. Default: 50 KiB / 2000 lines.
     pub output_bound: crate::truncate::OutputBound,
+    /// This run's cancellation token. Never cancelled by default;
+    /// the host installs the run's own token with
+    /// [`Context::with_cancel`].
+    pub cancel: Arc<dyn CancelToken>,
+}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("session_id", &self.session_id)
+            .field("workspace_root", &self.workspace_root)
+            .field("output_bound", &self.output_bound)
+            .field("cancel", &self.cancel.is_cancelled())
+            .finish()
+    }
 }
 
 impl Default for Context {
@@ -37,17 +65,36 @@ impl Default for Context {
             session_id: String::new(),
             workspace_root: PathBuf::new(),
             output_bound: crate::truncate::OutputBound::default(),
+            cancel: AtomicCancelToken::shared(),
         }
     }
 }
 
 impl Context {
+    /// Build a context for `workspace_root`, keyed to `session_id`
+    /// (output-spill attribution and per-session tool bookkeeping).
+    ///
+    /// The cancellation token starts uncancelled; the host chains the
+    /// run's own with [`Context::with_cancel`].
     pub fn new(session_id: String, workspace_root: PathBuf) -> Self {
         Self {
             session_id,
             workspace_root,
             output_bound: crate::truncate::OutputBound::default(),
+            cancel: AtomicCancelToken::shared(),
         }
+    }
+
+    /// Chain the run's cancellation token.
+    ///
+    /// The loop calls this on the one context it builds per run, so
+    /// every tool dispatch observes the run's own token. A tool that
+    /// starts nested work passes the same token on; a tool that only
+    /// computes does not need to read it.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: Arc<dyn CancelToken>) -> Self {
+        self.cancel = cancel;
+        self
     }
 }
 

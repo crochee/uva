@@ -43,6 +43,43 @@ impl Context {
             inner: self.inner.isolate(name),
         }
     }
+    /// Derive a child context isolating `name` under a supplied scope
+    /// label.
+    ///
+    /// Branches that reuse one label share a single implementation
+    /// slot for that name; the label is opaque and copyable, so a host
+    /// can hand the same label to otherwise separate branches.
+    pub fn isolate_with(
+        &self,
+        name: impl Into<String>,
+        label: cordis::Isolation,
+    ) -> Context {
+        Self {
+            inner: self.inner.isolate_with(name, label),
+        }
+    }
+
+    /// Allocate a globally unique isolation label.
+    pub fn new_isolation(&self) -> cordis::Isolation {
+        self.inner.new_isolation()
+    }
+
+    /// Derive a child context carrying `config` as the intercept
+    /// configuration for the service `name`.
+    ///
+    /// Entries stack ancestor-to-descendant; a service reads them with
+    /// [`Context::intercepts`](cordis::Context::intercepts) through
+    /// [`Context::inner`](Self::inner).
+    pub fn intercept_value(
+        &self,
+        name: impl Into<String>,
+        config: serde_json::Value,
+    ) -> Context {
+        Self {
+            inner: self.inner.intercept(name.into(), config),
+        }
+    }
+
 
     /// Provide a shared service.
     ///

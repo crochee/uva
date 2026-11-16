@@ -1,7 +1,7 @@
 //! Runtime-agnostic AI agent harness: the [`ReActAgent`] loop, the
-//! [`ReasoningStrategy`] seam that swaps it, the [`DelegatingTool`]
-//! seam, and the [`AgentRegistry`] multi-agent catalog. See
-//! `README.md` for the tour and `SEAMS.md` for the integration map.
+//! [`ReasoningStrategy`] seam that swaps it, and the
+//! [`AgentRegistry`] multi-agent catalog. See `README.md` for the tour
+//! and `SEAMS.md` for the integration map.
 //!
 //! # The seam rule
 //!
@@ -62,23 +62,33 @@
 //!
 //! # The two public layers
 //!
-//! The crate root re-exports a curated facade of 64 names. That
+//! The crate root re-exports a curated facade of 61 names. That
 //! facade is the promised surface: depend on it, and a release will
 //! not move your names.
 //!
-//! The crate is public further down too — under `uva_harness::agent::…`
-//! and `uva_harness::events::…`, plus the `plugin` module (the
-//! `agentLoop` kernel service) and the `seams` module (the loop's
-//! interception keys). The `agent` and `events` deep paths hold 57
-//! names the facade does not promise on its own: 53 of them are facade
-//! names at their defining path, so 56 are names the facade does not
-//! carry — plus `Risk`, re-exported from `uva-tool` into the public
-//! `agent::approval` module, which has no path of its own inside the
-//! harness. None of these names is promised: they may move or change in
-//! any release.
+//! The crate is public further down too — under `uva_harness::agent::…`,
+//! `uva_harness::events::…` (a re-export of the event vocabulary that
+//! lives in `uva-events`) and `uva_harness::seams::…` (the mount-point
+//! keys re-exported from `uva-hook`), plus the `plugin` module (the
+//! `agentLoop` kernel service) and the `seams` module itself (the
+//! loop's interception keys). The deep paths hold 21 names the facade
+//! does not promise on its own: 22 of the 36 public paths rustdoc
+//! records under `agent` are facade names at their defining path, so
+//! 14 are names the facade does not carry, and the seven mount-point
+//! keys re-exported from `uva-hook` into `seams` are the one
+//! cross-crate deep-only set — 21 in all. The approval vocabulary (the
+//! old `agent::approval` module, and `Risk` re-exported from
+//! `uva-tool`) moved to `uva-approval`; the event vocabulary moved to
+//! `uva-events`; the agent vocabulary (`Agent`, `AgentInput`, the steer
+//! inboxes, the peer registry, the child-session writer source and the
+//! prompt manifest) moved to `uva-agent`. Every one of them arrives
+//! here through the crate-root use tree, and none of these names is
+//! promised: they may move or change in any release.
 
 pub mod agent;
-/// The `approval` kernel service and the `tool/pre-execute` gate over it.
+/// The `tool/pre-execute` gate over the `approval` service (the
+/// service, the policy and the decision functions live in
+/// `uva-approval`).
 pub mod approval_plugin;
 pub mod events;
 mod input;
@@ -88,32 +98,57 @@ mod prompt;
 /// The four loop interception seams, by their kernel keys.
 pub mod seams;
 
-pub use agent::{
-    Agent,
-    AgentCaps,
-    AgentDescriptor,
-    AgentEntry,
-    AgentRegistry,
-    AgentRuntime,
-    DEFAULT_MAX_ITERATIONS,
-    DelegatingTool,
-    DelegationCall,
-    EventSink,
-    EventStream,
-    ReActAgent,
-    ReActStrategy,
-    ReasoningStrategy,
-    StrategyRegistry,
-    approval::{
+pub use crate::{
+    agent::{
+        Agent,
+        AgentCaps,
+        AgentDescriptor,
+        AgentEntry,
+        AgentRegistry,
+        AgentRuntime,
+        DEFAULT_MAX_ITERATIONS,
+        EventSink,
+        EventStream,
+        ReActAgent,
+        ReActStrategy,
+        ReasoningStrategy,
+        StrategyRegistry,
+        descriptor::default_descriptor,
+        host::{
+            Arbitration,
+            Diagnostic,
+            DiagnosticKind,
+            Gate,
+            Hook,
+            HookContext,
+            Host,
+            Plugin,
+            PluginHandle,
+            PromptSection,
+            Registration,
+            RequestTransformer,
+            ResultTransformer,
+        },
+        strategy::{
+            prepare_messages_for_shot,
+            single_shot_request,
+            single_shot_request_shared,
+        },
+    },
+    approval_plugin::{
+        ApprovalGate,
         ApprovalMode,
+        ApprovalPlugin,
         ApprovalPolicy,
         ApprovalRequest,
         GrantKey,
         GrantScope,
+        KEY_APPROVAL,
         ResumeCoverageError,
         ResumeDecision,
         ResumeStatus,
         ResumeToken,
+        RiskOf,
         Suspension,
         align_decisions,
         check_coverage,
@@ -123,35 +158,7 @@ pub use agent::{
         suspended_segment,
         workspace_hash,
     },
-    descriptor::default_descriptor,
-    host::{
-        Arbitration,
-        Diagnostic,
-        DiagnosticKind,
-        Gate,
-        Hook,
-        HookContext,
-        Host,
-        Plugin,
-        PluginHandle,
-        PromptSection,
-        Registration,
-        RequestTransformer,
-        ResultTransformer,
-    },
-    strategy::{
-        prepare_messages_for_shot,
-        single_shot_request,
-        single_shot_request_shared,
-    },
+    events::{AgentEvent, SessionEndReason, SystemEvent, WarningKind},
+    input::{AgentInput, ChannelInbox, RunInbox, SubagentWriters},
+    prompt::{DEFAULT_SYSTEM_PROMPT, PromptContext},
 };
-pub use approval_plugin::{ApprovalGate, ApprovalPlugin, KEY_APPROVAL, RiskOf};
-pub use events::{
-    AgentEvent,
-    AgentMeta,
-    SessionEndReason,
-    SystemEvent,
-    WarningKind,
-};
-pub use input::{AgentInput, ChannelInbox, RunInbox, SubagentWriters};
-pub use prompt::{DEFAULT_SYSTEM_PROMPT, PromptContext};

@@ -75,6 +75,7 @@ pub mod jsonl;
 pub mod ledger_key;
 pub mod log;
 pub mod log_surface;
+/// The in-memory session registry: ids, owners, sinks and writers.
 pub mod manager;
 pub mod operation;
 /// The `sessions` service: [`SessionStorePlugin`] builds the registry
@@ -134,6 +135,7 @@ pub use events::{
 };
 pub use history::{
     HistoryError,
+    ProvenancedHistory,
     derive_history,
     surface_message,
     surface_to_messages,
@@ -223,6 +225,7 @@ pub use typed_event_builders::{
     subagent_enter,
     subagent_exit,
     tool_dispatch,
+    tool_output,
     turn_end,
     turn_end_suspended,
     turn_start,

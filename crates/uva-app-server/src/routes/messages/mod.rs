@@ -58,10 +58,11 @@
 //!    history the run sees and a client that edits its own history is
 //!    honoured rather than shadowed by a stale transcript;
 //! 2. the request's earlier messages are written into that session's
-//!    sink as `{"type":"Message"}` rows — the fold's lossless envelope
-//!    (`uva::session::fold_log_surface`), which the run task projects
-//!    back into `AgentInput::history` with their real roles, including
-//!    tool calls and results;
+//!    sink as the typed row each role names — `user_message` /
+//!    `assistant_message` / `tool_result`, carrying the fold's lossless
+//!    `Message` envelope (`uva::session::fold_log_surface`) — which the
+//!    run task projects back into `AgentInput::history` with their real
+//!    roles, including tool calls and results;
 //! 3. the final user turn is dispatched through the same
 //!    [`SessionOp::PromptMulti`] the chat surface uses, and the response
 //!    is folded from the same event broadcast that
@@ -628,15 +629,46 @@ async fn seed_history(
         anyhow::anyhow!("flush seeded session history: {error}")
     })
 }
-/// Append one canonical message as the fold's lossless `Message`
-/// envelope.
+/// Append one canonical message as the typed row its role names.
+///
+/// The client's earlier turns are a full role-bearing list, so the row
+/// tag has to carry the role: a tag-keyed consumer (the web UI's
+/// projection) turns every `user_message` row into a user bubble, and
+/// wrapping an assistant turn in one rendered the client's answer as a
+/// user turn. `data` stays the same lossless `Message` envelope the
+/// role-aware fold reads, exactly as before.
+///
+/// User and System both land as `user_message` — that is the role the
+/// model and the fold see for an inline system prompt, and the existing
+/// seeding path already writes the `system` field as one.
 async fn append_message(
     writer: &Arc<uva::session::LogWriter>,
     message: Message,
 ) -> anyhow::Result<()> {
-    let row = json!({ "type": "Message", "data": message });
+    use uva::{provider::Role, session::SessionEvent};
+
+    let role = message.role;
+    let data = serde_json::to_value(&message)
+        .map_err(|error| anyhow::anyhow!("seed session history: {error}"))?;
+    let event = match role {
+        Role::User | Role::System => uva::session::user_message(data, None),
+        Role::Assistant => SessionEvent::AssistantMessage {
+            seq: 0,
+            ts: String::new(),
+            data,
+            surface_op: None,
+        },
+        Role::Tool => SessionEvent::ToolResult {
+            seq: 0,
+            ts: String::new(),
+            data,
+            is_error: false,
+            tool_call_id: message.tool_call_id,
+            surface_op: None,
+        },
+    };
     writer
-        .append(row)
+        .append_event(&event)
         .await
         .map(|_| ())
         .map_err(|error| anyhow::anyhow!("seed session history: {error}"))
@@ -960,6 +992,50 @@ mod tests {
         assert_eq!(
             anthropic_error_type("invalid_request"),
             error_type::INVALID_REQUEST
+        );
+    }
+    /// Seeded history keeps each message's role in the row *tag*, not
+    /// only inside the payload: the model-context fold is role-aware, but
+    /// tag-keyed readers are not. The web UI turns every `user_message`
+    /// row into a user bubble, so wrapping an assistant turn in one
+    /// rendered the client's answer as a user turn (and could make it
+    /// "the user's prompt").
+    #[tokio::test]
+    async fn seeded_history_keeps_each_messages_role() {
+        use uva::session::{LogWriter, SessionSink};
+
+        let sink = Arc::new(uva::session::in_memory::InMemorySessionSink::new(
+            "seed-roles",
+        ));
+        let writer = Arc::new(LogWriter::new(
+            sink.clone(),
+            Arc::new(uva::core::SystemClock),
+        ));
+        append_message(&writer, Message::user("hello"))
+            .await
+            .expect("the user turn seeds");
+        append_message(&writer, Message::assistant("hi"))
+            .await
+            .expect("the assistant turn seeds");
+        append_message(&writer, Message::tool("ok", "call-1"))
+            .await
+            .expect("the tool result seeds");
+        writer.flush().await.expect("the seeded rows flush");
+
+        let rows = sink.read().await.expect("the rows read back");
+        let tags: Vec<&str> =
+            rows.iter().filter_map(|row| row["type"].as_str()).collect();
+        assert_eq!(
+            tags,
+            ["user_message", "assistant_message", "tool_result"],
+            "each role gets its own typed row: {rows:?}"
+        );
+        assert_eq!(rows[1]["data"]["role"], json!("assistant"));
+        assert_eq!(rows[2]["data"]["role"], json!("tool"));
+        assert_eq!(
+            rows[2]["tool_call_id"],
+            json!("call-1"),
+            "the tool result still answers the call it names"
         );
     }
 }

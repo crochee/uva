@@ -2,16 +2,14 @@
 
 use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
+use uva_approval::ApprovalRequest;
 use uva_context::AgentState;
+use uva_events::WarningKind;
 use uva_provider::ToolUse;
 use uva_steering::{Action, GuardOutcome, HookDecision};
-use uva_tool::ToolOutput;
+use uva_tool::{Risk, ToolOutput};
 
-use super::{ReActLoop, tools};
-use crate::{
-    agent::approval::{ApprovalRequest, Risk},
-    events::WarningKind,
-};
+use super::{ReActLoop, step};
 
 /// The [`Cow`](std::borrow::Cow) arm is what lets the empty-guard path
 /// skip the per-call `ToolUse` clone.
@@ -52,30 +50,9 @@ pub(super) async fn gate_tool(
     this: &ReActLoop,
     call: &ToolUse,
     state: &AgentState,
-    policy: &crate::agent::approval::ApprovalPolicy,
+    policy: &uva_approval::ApprovalPolicy,
 ) -> GateDecision {
     let tool_name = call.name.as_str();
-    // A delegated high-risk call has no parent/child approval route
-    // yet, so it is refused rather than run unapproved or held for a
-    // resume the parent cannot complete.
-    if delegator_risk(this, call) == Some(Risk::High) {
-        return GateDecision::Respond(deny_with_event(
-            this,
-            "delegated high-risk",
-            call,
-            state,
-            format!(
-                "delegated high-risk call `{}` blocked: child approval \
-                 routing is not available",
-                call.name
-            ),
-            format!(
-                "[blocked by policy] `{}` is a high-risk delegated call \
-                 and cannot be approved at this level",
-                call.name
-            ),
-        ));
-    }
     // Seam 0 + steering seam 1—the agent's tool restriction,
     // then the hooks' BeforeToolExecute veto.
     let mut gate_asks = false;
@@ -155,7 +132,7 @@ pub(super) async fn execute_gated(
     // here is the effective one, so the approved arguments are the
     // executed arguments.
     let effective_call = call;
-    let mut result = tools::dispatch_tool_call(
+    let mut result = step::dispatch_tool_call(
         this,
         effective_call,
         &effective_call.name,
@@ -298,7 +275,13 @@ async fn pre_execution_veto(
         this.caps
             .control
             .seams
-            .tool_pre(&ctx, tool_name, call.id.as_str(), &call.input)
+            .tool_pre(
+                &ctx,
+                &this.sink,
+                tool_name,
+                call.id.as_str(),
+                &call.input,
+            )
             .await
     };
     match arbitration.decision {
@@ -319,7 +302,7 @@ async fn pre_execution_veto(
                 .caps
                 .control
                 .seams
-                .tool_post(&ctx, tool_name, call.id.as_str(), true)
+                .tool_post(&ctx, &this.sink, tool_name, call.id.as_str(), true)
                 .await;
             return Some(PreDecision::Respond(denied));
         }
@@ -397,23 +380,13 @@ pub(super) fn arguments_hash(input: &serde_json::Value) -> String {
 }
 
 // The risk the tool declares for this call. A registry tool answers
-// from its input (the shell can tell `ls` from `rm`); a delegator
-// only has its annotations. A missing tool is unknown.
+// from its input (the shell can tell `ls` from `rm`). A missing tool
+// is unknown.
 pub(super) fn risk_of(this: &ReActLoop, call: &ToolUse) -> Risk {
-    if let Some(delegator) = this.delegators.get(&call.name) {
-        return Risk::from_annotations(delegator.annotations());
-    }
     let Some(entry) = this.caps.tools.registry.get(&call.name) else {
         return Risk::Unknown;
     };
     entry.tool_instance().risk(&call.input)
-}
-
-// A delegator's declared risk, `None` when no delegator owns the name.
-pub(super) fn delegator_risk(this: &ReActLoop, call: &ToolUse) -> Option<Risk> {
-    this.delegators
-        .get(&call.name)
-        .map(|tool| Risk::from_annotations(tool.annotations()))
 }
 
 // The tool's idempotence hint, used with `risk_of` to decide whether
@@ -440,9 +413,6 @@ fn annotations_of(
     this: &ReActLoop,
     call: &ToolUse,
 ) -> Option<uva_tool::ToolAnnotations> {
-    if let Some(delegator) = this.delegators.get(&call.name) {
-        return delegator.annotations();
-    }
     this.caps
         .tools
         .registry
@@ -469,21 +439,37 @@ pub(super) fn apply_guard_pipeline<'a>(
             guard,
             reason,
             severity,
-        } => Verdict::Denied(deny_with_event(
-            this,
-            "guard",
-            call,
-            state,
-            format!(
-                "guard `{guard}` ({}) denied `{}`: {reason}",
-                severity.as_str(),
-                action.summary(),
-            ),
-            format!(
-                "[blocked by guard `{guard}` ({})] {reason}",
-                severity.as_str(),
-            ),
-        )),
+        } => {
+            // A guard veto is a policy block: the `hook_block` row is
+            // the fact. It lands with the veto's tool result at the
+            // next flush — mid-run, while the session is still going
+            // — and every `follow` client reads it off the log, so
+            // the live timeline and the reloaded one show the same
+            // notice. The live `Warning{Guard}` this path once
+            // published said the same veto in a different vocabulary
+            // and was rendered by no surface, so the row replaced it;
+            // the severity it carried still rides the model-facing
+            // message below and the structured log line here.
+            this.sink
+                .append_hook_block(&guard, &reason, &call.name, &call.id);
+            warn!(
+                guard = %guard,
+                severity = %severity.as_str(),
+                tool_name = %call.name,
+                tool_use_id = %call.id,
+                "execute_tool_inner: tool call denied by guard"
+            );
+            Verdict::Denied(denied(
+                this,
+                &call.name,
+                call,
+                state,
+                format!(
+                    "[blocked by guard `{guard}` ({})] {reason}",
+                    severity.as_str(),
+                ),
+            ))
+        }
     }
 }
 
@@ -504,6 +490,7 @@ async fn notify_after_hooks(
             .seams
             .tool_post(
                 &ctx,
+                &this.sink,
                 tool_name,
                 call_id,
                 result.is_error.unwrap_or(false),

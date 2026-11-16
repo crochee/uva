@@ -5,7 +5,15 @@ use std::{path::Path, sync::Arc};
 use serde_json::json;
 
 use crate::{
-    profile::{ChangeState, ProfileAction, ProfileStore, RowEdit},
+    api::v1::profile::{ProfileEnabled, ProfileSegment},
+    profile::{
+        ChangeState,
+        EnableCheck,
+        Enabled,
+        ProfileAction,
+        ProfileStore,
+        RowEdit,
+    },
     rpc::RpcRuntime,
     state::AppState,
 };
@@ -25,6 +33,55 @@ fn store(doc: &Path) -> ProfileStore {
     }
 }
 
+/// The read model: the settings page's data source. The rows are
+/// typed, so a renamed field is a compile error rather than a wire
+/// surprise.
+#[tokio::test]
+async fn the_rows_are_typed_and_findable_by_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path()).await;
+    let rows = state.profile_rows();
+    assert!(rows.iter().any(|row| row.id == "skills"));
+    let row = state.profile_row("skills").expect("the skills row");
+    assert_eq!(row.id, "skills");
+    assert_eq!(row.segment, ProfileSegment::Core);
+    assert_eq!(row.status, "mounted");
+    assert!(
+        state.profile_row("nobody").is_none(),
+        "an unknown id has no row"
+    );
+}
+
+/// A row the assembly skipped says why, and a delegated enablement
+/// keeps the check the plugin answers.
+#[tokio::test]
+async fn a_skipped_row_reports_its_reason_and_its_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(dir.path()).await;
+    {
+        let mut profile = state.assembly.raw_mut();
+        let row = profile
+            .core
+            .iter_mut()
+            .find(|row| row.id == "skills")
+            .expect("the skills row");
+        row.enabled = Enabled::Check(EnableCheck {
+            service: "skills".to_owned(),
+            check: "present".to_owned(),
+            arg: json!("writing"),
+        });
+    }
+    let row = state.profile_row("skills").expect("the skills row");
+    assert!(
+        row.status.starts_with("off: "),
+        "a skipped row says why: {row:?}"
+    );
+    assert!(
+        matches!(row.enabled, ProfileEnabled::Check(_)),
+        "a delegated row keeps its check: {row:?}"
+    );
+}
+
 #[tokio::test]
 async fn applied_commits_the_document_and_broadcasts() {
     let dir = tempfile::tempdir().unwrap();
@@ -32,7 +89,7 @@ async fn applied_commits_the_document_and_broadcasts() {
     let (runtime, mut receiver) = RpcRuntime::channel();
     state.rpc = Arc::new(runtime);
     let doc = dir.path().join("profile.toml");
-    state.profile_store = Some(store(&doc));
+    state.assembly.set_store(Some(store(&doc)));
 
     let outcome = state
         .profile_apply(
@@ -49,7 +106,7 @@ async fn applied_commits_the_document_and_broadcasts() {
     assert_eq!(
         state
             .assembly
-            .read()
+            .current()
             .find("skills")
             .expect("skills is mounted")
             .config,
@@ -74,7 +131,7 @@ async fn a_no_op_write_does_not_broadcast() {
     let (runtime, mut receiver) = RpcRuntime::channel();
     state.rpc = Arc::new(runtime);
     let doc = dir.path().join("profile.toml");
-    state.profile_store = Some(store(&doc));
+    state.assembly.set_store(Some(store(&doc)));
 
     let edit = ProfileAction::Edit(RowEdit::SetConfig {
         id: "skills".to_owned(),
@@ -96,7 +153,7 @@ async fn failed_leaves_the_document_and_the_tree_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = state(dir.path()).await;
     let doc = dir.path().join("profile.toml");
-    state.profile_store = Some(store(&doc));
+    state.assembly.set_store(Some(store(&doc)));
     let before = state.plugin_state("model-adapter");
 
     let outcome = state
@@ -134,10 +191,10 @@ async fn overridden_writes_nothing_when_a_higher_layer_owns_the_field() {
     let doc = dir.path().join("profile.toml");
     let mut path = store(&doc);
     path.home = Some(home);
-    state.profile_store = Some(path);
+    state.assembly.set_store(Some(path));
     let before = state
         .assembly
-        .read()
+        .current()
         .find("skills")
         .expect("skills is mounted")
         .config
@@ -157,7 +214,7 @@ async fn overridden_writes_nothing_when_a_higher_layer_owns_the_field() {
     assert_eq!(
         state
             .assembly
-            .read()
+            .current()
             .find("skills")
             .expect("skills is mounted")
             .config,
@@ -171,7 +228,7 @@ async fn a_changed_mcp_row_reports_restart_required() {
     let dir = tempfile::tempdir().unwrap();
     let mut state = state(dir.path()).await;
     let doc = dir.path().join("profile.toml");
-    state.profile_store = Some(store(&doc));
+    state.assembly.set_store(Some(store(&doc)));
 
     let outcome = state
         .profile_apply(

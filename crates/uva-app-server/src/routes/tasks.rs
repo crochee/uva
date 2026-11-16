@@ -3,7 +3,7 @@
 //! recent sessions server-side and returning one flat list of
 //! `TaskDelegation` records.
 //!
-//! The `task` tool is model-facing (`uva-tool-plugins`); since
+//! The `task` tool is model-facing (`uva-tool-task`); since
 //! delegated children run in their **own sessions** (see
 //! `crate::session::subagent_router`), the delegation's record
 //! lives in the child's own log: it opens with a
@@ -17,18 +17,21 @@
 //! - `GET /api/v1/tasks`             — list delegations across recent sessions
 //! - `GET /api/v1/tasks/{id}`        — fetch one delegation by `parentId:childId`
 //!
-//! A delegation is recorded **twice** in the workspace: the
-//! delegated child's own log opens with the header described above,
-//! and the root parent's log carries a mirror of the same pair so
-//! the parent's transcript can show the delegation. The child's own
-//! log is the one that holds the whole story — the header, the
-//! dispatch prompt, and the closing footer — so it is the one this
-//! route reads, and the mirror is what makes the scan find the
-//! delegation in the first place.
+//! The child's own log is the **only** record of the delegation: the
+//! parent's log keeps the ordinary `tool_call` / `tool_result` rows
+//! and no `subagent_enter` mirror. Finding a delegation therefore
+//! cannot work by scanning the parent's tail — it works by
+//! enumerating the user's sessions and reading each log's **head**,
+//! because the header is the child log's first event. The
+//! enumeration has to cover the sessions the manager's in-memory
+//! index does not hold: a child session is opened through its
+//! writer, and the registry's `writer()` does not register the
+//! session, so only the on-disk directory knows it exists (and the
+//! write of the header made that directory).
 //!
 //! The id names the delegation by the pair that defines it — the
-//! parent that delegated and the child that was delegated to — so
-//! it stays the same for the delegation's whole life. A row offset
+//! parent that delegated and the child that was delegated to — so it
+//! stays the same for the delegation's whole life. A row offset
 //! would not: the child's log grows as the run proceeds, so the
 //! same delegation would answer to a different id on the next
 //! request, and a cursor naming it would no longer find it.
@@ -36,10 +39,15 @@
 use std::{collections::HashSet, sync::Arc};
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uva::session::SessionEvent;
 
-use super::helpers::paginate;
+use super::{
+    helpers::paginate,
+    sessions::{is_ephemeral_session, unregistered_session_ids},
+};
 use crate::{
     api::{
         List,
@@ -57,7 +65,7 @@ const TASK_SORT_WHITELIST: &[&str] = &["started_at"];
 
 /// `TaskDelegation` — one delegation, flattened for the frontend.
 /// Wire shape mirrors `uva-web/src/api/types.ts::TaskDelegation`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskDelegation {
     /// Synthetic id `<parentSessionId>:<childSessionId>` — survives a
     /// refresh, and names one delegation for good (see
@@ -73,13 +81,15 @@ pub struct TaskDelegation {
     pub status: String,
 }
 
-/// Cap on the fan-out: how many recent sessions to scan. Keeps a
-/// workspace with thousands of sessions from exhausting the
+/// Cap on the fan-out: how many recent sessions one scan reads. Keeps
+/// a workspace with thousands of sessions from exhausting the
 /// request budget from this page.
+///
+/// The window is **newest first** (see [`recent_session_ids`]): a
+/// cap is only safe when the rows it can drop are the ones nobody is
+/// looking for, and a delegation that just started is the row this
+/// page exists to show.
 const TASK_SCAN_LIMIT: usize = 50;
-
-/// How many rows of each session's log the scan reads.
-const TASK_SCAN_ROWS: usize = 256;
 
 /// `GET /api/v1/tasks` — server-side scan.
 ///
@@ -156,49 +166,42 @@ pub async fn get_task(
 /// delegation they record. Sessions that fail to load are silently
 /// skipped — a partial result is better than nothing on this
 /// read-only page.
+///
+/// A delegation's record is the **child's** log, and the child's log
+/// opens with the header — so discovery reads each candidate's head,
+/// not its tail. The candidates are the user's sessions from both
+/// sources: the manager's registry, and the sessions directory (a
+/// child session lives only on disk until some other surface opens
+/// it).
 pub(crate) async fn scan_recent_sessions(
     state: &AppState,
     user_id: &str,
     limit: usize,
 ) -> Vec<TaskDelegation> {
-    let sessions = match state.session_manager.list_all().await {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    // The delegation a marker row describes, keyed by the child it
-    // names. A delegation is recorded twice — the child's own log
-    // opens with its header, and the root parent's log carries a
-    // mirror — so the same child arrives from two sessions and
-    // would otherwise be listed twice.
+    // The delegation a header row describes, keyed by the child it
+    // names. One delegation is one log — the child's own — but a log
+    // written by an older build may still hold the parent's mirror,
+    // and the same child would then be discovered twice.
     //
-    // The marker row is kept alongside the child: it is the fallback
+    // The header row is kept alongside the child: it is the fallback
     // record for a delegation whose own log cannot be read, so the
     // delegation is still listed rather than silently dropped.
     let mut candidates: Vec<(String, Value)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    for session in sessions.into_iter().take(limit) {
-        let sink = state.session_manager.sink(user_id, &session.id);
-        // Bounded read: the delegation rows live at the turn
-        // boundaries, so the tail window carries them without paying
-        // for a whole session's history per candidate.
-        let raw = match sink.read_tail(TASK_SCAN_ROWS).await {
-            Ok(v) => v,
-            Err(_) => continue,
+    for session_id in recent_session_ids(state, user_id, limit).await {
+        let sink = state.session_manager.sink(user_id, &session_id);
+        // Bounded head read: the delegation header is the child
+        // log's first event, so one head read answers the whole
+        // question. A tail window could not — the header is the log's
+        // first row, and a child log grows past any fixed window.
+        let Ok(Some(head)) = sink.read_head().await else {
+            continue;
         };
-        for row in &raw {
-            if row.get("type").and_then(Value::as_str) != Some("subagent_enter")
-            {
-                continue;
-            }
-            let Some(child_id) = row
-                .pointer("/data/child_session_id")
-                .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            if seen.insert(child_id.to_string()) {
-                candidates.push((child_id.to_string(), row.clone()));
-            }
+        let Some(child_id) = delegation_child(&head) else {
+            continue;
+        };
+        if seen.insert(child_id.clone()) {
+            candidates.push((child_id, head));
         }
     }
     // Each delegation's own record lives in the child's log, which
@@ -221,11 +224,12 @@ pub(crate) async fn scan_recent_sessions(
                 // a delegation: the parent's mirror says so. The
                 // record degrades — no prompt, no end — rather than
                 // the delegation vanishing from the list.
-                let parent_id = marker
-                    .pointer("/data/parent_session_id")
-                    .and_then(Value::as_str)
+                let parent_id = SessionEvent::from_value(&marker)
+                    .and_then(|event| {
+                        event.delegation_parent().map(str::to_string)
+                    })
                     .unwrap_or_default();
-                to_delegation(parent_id, &child_id, &marker, None, "")
+                to_delegation(&parent_id, &child_id, &marker, None, "")
             });
         if listed.insert(delegation.id.clone()) {
             out.push(delegation);
@@ -234,11 +238,82 @@ pub(crate) async fn scan_recent_sessions(
     out
 }
 
+/// The child a session's **first** event names, when that first event
+/// is the delegation header.
+///
+/// The reader is deliberately narrow: the delegation header opens a
+/// child session, so a session whose first event is not one is not a
+/// delegation this route can describe — and reading any further
+/// would let an ordinary session's later row masquerade as one.
+fn delegation_child(head: &Value) -> Option<String> {
+    let event = SessionEvent::from_value(head)?;
+    if !matches!(event, SessionEvent::SubagentEnter { .. }) {
+        return None;
+    }
+    event.delegation_child().map(str::to_string)
+}
+
+/// The user's sessions, newest first, capped at `limit`.
+///
+/// Two sources, because either alone misses the sessions this page
+/// exists to find:
+///
+/// - the manager's in-memory index holds the sessions this process
+///   created (`create_with_user`);
+/// - the user's sessions directory holds every session the user has,
+///   including delegated children, which are opened through their
+///   writer and never registered.
+async fn recent_session_ids(
+    state: &AppState,
+    user_id: &str,
+    limit: usize,
+) -> Vec<String> {
+    let mut ids: Vec<String> = state
+        .session_manager
+        .list_all()
+        .await
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .filter(|session| {
+                    session.user_id == user_id
+                        && !is_ephemeral_session(&session.id)
+                })
+                .map(|session| session.id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let registered: HashSet<String> = ids.iter().cloned().collect();
+    // The directory listing is blocking `std::fs`, so it rides the
+    // blocking pool like every other disk scan on the runtime.
+    let root = state.session_manager.sessions_root().to_path_buf();
+    let scan_user = user_id.to_string();
+    let on_disk = tokio::task::spawn_blocking(move || {
+        unregistered_session_ids(&root, &scan_user, &registered)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
+    ids.extend(on_disk);
+    ids.sort();
+    ids.dedup();
+    // Session ids are ULIDs: their lexicographic order is their
+    // creation order. Reversing it makes the cap a **newest-first**
+    // window, so the delegation that just started is never the row
+    // the budget drops.
+    ids.reverse();
+    ids.truncate(limit);
+    ids
+}
+
 /// One delegation, read from the child's own log.
 ///
 /// The child's log opens with the `subagent_enter` header naming the
 /// delegation and closes with the matching `subagent_exit` footer;
-/// the dispatch prompt is the child's first `UserInput` row. A log
+/// the dispatch prompt is the child's first `user_message` row (or the
+/// legacy `UserInput` envelope an older log holds). A log
 /// that holds no such header describes no delegation of this parent
 /// to this child.
 ///
@@ -249,29 +324,50 @@ fn delegation_of_child(
     rows: &[Value],
     child_id: &str,
 ) -> Option<TaskDelegation> {
-    let enter = rows.iter().find(|row| {
-        row.get("type").and_then(Value::as_str) == Some("subagent_enter")
-            && row
-                .pointer("/data/child_session_id")
-                .and_then(Value::as_str)
-                == Some(child_id)
+    let (enter, marker) = rows.iter().find_map(|row| {
+        let event = SessionEvent::from_value(row)?;
+        if !matches!(event, SessionEvent::SubagentEnter { .. }) {
+            return None;
+        }
+        if event.delegation_child() != Some(child_id) {
+            return None;
+        }
+        Some((event, row))
     })?;
-    let parent_id = enter
-        .pointer("/data/parent_session_id")
-        .and_then(Value::as_str)?;
+    let parent_id = enter.delegation_parent()?;
     let exit = find_exit(rows, child_id);
     let prompt = rows
         .iter()
         .find(|row| {
-            row.get("type").and_then(Value::as_str) == Some("UserInput")
+            // The typed `user_message` this build writes, or the
+            // legacy `UserInput` envelope an older log holds — the
+            // same two-tag rule every prompt reader uses.
+            matches!(
+                row.get("type").and_then(Value::as_str),
+                Some("user_message" | "UserInput")
+            )
         })
-        .and_then(|row| row.pointer("/data/text").and_then(Value::as_str))
+        .and_then(|row| {
+            // The typed row carries a provider `Message` — decode it
+            // back and ask for its text. A log from before the typed
+            // writer kept `{"text": …}` in the payload instead.
+            row.get("data").and_then(|data| {
+                serde_json::from_value::<uva::provider::Message>(data.clone())
+                    .ok()
+                    .and_then(|message| message.content.extract_text())
+                    .or_else(|| {
+                        data.get("text")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+            })
+        })
         .unwrap_or_default()
         .to_string();
     Some(to_delegation(
         parent_id,
         child_id,
-        enter,
+        marker,
         exit.as_ref(),
         &prompt,
     ))
@@ -330,11 +426,10 @@ fn started_at(delegation: &TaskDelegation) -> Option<DateTime<Utc>> {
 fn find_exit(rows: &[Value], child_id: &str) -> Option<Value> {
     rows.iter()
         .find(|row| {
-            row.get("type").and_then(Value::as_str) == Some("subagent_exit")
-                && row
-                    .pointer("/data/child_session_id")
-                    .and_then(Value::as_str)
-                    == Some(child_id)
+            SessionEvent::from_value(row).is_some_and(|event| {
+                matches!(event, SessionEvent::SubagentExit { .. })
+                    && event.delegation_child() == Some(child_id)
+            })
         })
         .cloned()
 }
@@ -387,291 +482,38 @@ fn to_delegation(
     exit: Option<&Value>,
     prompt: &str,
 ) -> TaskDelegation {
-    let str_at = |pointer: &str| {
-        enter
-            .pointer(pointer)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    };
+    let enter_event = SessionEvent::from_value(enter);
+    let agent = enter_event
+        .as_ref()
+        .and_then(|event| event.delegation_agent())
+        .map(str::to_string)
+        .unwrap_or_else(|| "unknown".into());
+    let depth = enter_event
+        .as_ref()
+        .and_then(|event| event.delegation_depth())
+        .unwrap_or(0) as u32;
+    let status = exit.and_then(|row| {
+        SessionEvent::from_value(row)
+            .and_then(|event| event.delegation_status().map(str::to_string))
+    });
     TaskDelegation {
         id: delegation_id(parent_id, child_id),
         parent_session_id: parent_id.to_string(),
         child_session_id: Some(child_id.to_string()),
-        parent_depth: enter
-            .pointer("/data/depth")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32,
-        agent: str_at("/data/agent_name").unwrap_or_else(|| "unknown".into()),
+        parent_depth: depth,
+        agent,
         prompt: prompt.to_string(),
         started_at: enter.get("ts").and_then(Value::as_str).map(str::to_string),
         finished_at: exit
             .and_then(|row| row.get("ts").and_then(Value::as_str))
             .map(str::to_string),
-        status: match exit {
-            Some(row) => {
-                exit_status(row.pointer("/data/status").and_then(Value::as_str))
-            }
-            None => "running".to_string(),
+        status: match (&status, exit) {
+            (Some(raw), _) => exit_status(Some(raw.as_str())),
+            (None, Some(_)) => exit_status(None),
+            (None, None) => "running".to_string(),
         },
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use super::*;
-
-    /// A hermetic `AppState` for the tasks route.
-    async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("temp workspace");
-        let sessions = uva::session::manager::SessionRegistry::new(
-            dir.path().join("sessions"),
-        );
-        let state =
-            AppState::for_test(sessions, dir.path().to_path_buf()).await;
-        (Arc::new(state), dir)
-    }
-
-    /// Record one delegation the way the router does: the child's
-    /// own log opens with the `subagent_enter` header and the
-    /// dispatch prompt, and the root parent's log carries the mirror
-    /// of the same pair.
-    async fn seed_delegation(
-        state: &AppState,
-        user: &str,
-        parent: &str,
-        child: &str,
-        prompt: &str,
-        finished: bool,
-    ) {
-        state
-            .session_manager
-            .create_with_user(parent.to_string(), user.to_string())
-            .await
-            .expect("the parent session exists");
-        let parent_sink = state.session_manager.sink(user, parent);
-        let header = serde_json::json!({
-            "type": "subagent_enter",
-            "seq": 1,
-            "ts": "2026-11-07T00:00:00Z",
-            "data": {
-                "child_session_id": child,
-                "parent_session_id": parent,
-                "depth": 1,
-                "agent_name": "coder",
-            },
-        });
-        parent_sink
-            .append(&header)
-            .await
-            .expect("the parent's mirror row is appended");
-
-        let child_sink = state.session_manager.sink(user, child);
-        child_sink
-            .append(&header)
-            .await
-            .expect("the child's header is appended");
-        child_sink
-            .append(&serde_json::json!({
-                "type": "UserInput",
-                "seq": 2,
-                "ts": "2026-11-07T00:00:01Z",
-                "data": { "text": prompt },
-            }))
-            .await
-            .expect("the child's prompt is appended");
-        if finished {
-            child_sink
-                .append(&serde_json::json!({
-                    "type": "subagent_exit",
-                    "seq": 3,
-                    "ts": "2026-11-07T00:00:02Z",
-                    "data": { "child_session_id": child, "depth": 1, "status": "completed" },
-                }))
-                .await
-                .expect("the child's footer is appended");
-        }
-    }
-
-    /// The list is paginated: a page asks for what it shows, and a
-    /// page with more to show says so.
-    ///
-    /// The route used to scan and return every delegation it found —
-    /// no cursor, no limit — so a busy workspace answered with a list
-    /// as long as the scan.
-    #[tokio::test]
-    async fn the_task_list_is_paginated() {
-        let (state, _dir) = test_state().await;
-        let user = state.default_user_id().to_string();
-        seed_delegation(&state, &user, "s1", "c1", "first", true).await;
-        seed_delegation(&state, &user, "s2", "c2", "second", true).await;
-        seed_delegation(&state, &user, "s3", "c3", "third", true).await;
-
-        let page = list_tasks(
-            Arc::clone(&state),
-            PageQuery {
-                limit: Some(2),
-                cursor: None,
-                sort: None,
-            },
-        )
-        .await
-        .expect("the list");
-
-        assert_eq!(page.data.len(), 2, "the page holds the asked-for rows");
-        assert!(
-            page.next_cursor.is_some(),
-            "a page with more to show says so: {page:?}"
-        );
-        assert_eq!(page.total, Some(3), "the total names the whole scan");
-    }
-
-    /// The cursor names a delegation, not a row offset, so the next
-    /// page resumes where the first stopped.
-    ///
-    /// The id used to embed the row's position in the scan's tail
-    /// window. That position moves as the child's log grows — the
-    /// delegation that answered to `parent:3` answered to
-    /// `parent:4` after one more row landed — so the second page
-    /// found no row with the cursor's id and came back empty.
-    #[tokio::test]
-    async fn the_cursor_resumes_after_the_first_page() {
-        let (state, _dir) = test_state().await;
-        let user = state.default_user_id().to_string();
-        seed_delegation(&state, &user, "s1", "c1", "first", true).await;
-        seed_delegation(&state, &user, "s2", "c2", "second", true).await;
-        seed_delegation(&state, &user, "s3", "c3", "third", true).await;
-
-        let first = list_tasks(
-            Arc::clone(&state),
-            PageQuery {
-                limit: Some(2),
-                cursor: None,
-                sort: None,
-            },
-        )
-        .await
-        .expect("the first page");
-        let cursor =
-            first.next_cursor.clone().expect("a cursor to resume from");
-
-        // The child's log grows — the delegation's own transcript
-        // gains a row — and the id must not move with it.
-        let child_sink = state.session_manager.sink(&user, "c3");
-        child_sink
-            .append(&serde_json::json!({
-                "type": "assistant_message",
-                "seq": 4,
-                "ts": "2026-11-07T00:00:03Z",
-                "data": { "role": "assistant" },
-            }))
-            .await
-            .expect("the child log grows");
-
-        let second = list_tasks(
-            Arc::clone(&state),
-            PageQuery {
-                limit: Some(2),
-                cursor: Some(cursor),
-                sort: None,
-            },
-        )
-        .await
-        .expect("the second page");
-
-        assert_eq!(
-            second.data.len(),
-            1,
-            "the second page holds what the first left: {second:?}"
-        );
-        assert!(
-            second.next_cursor.is_none(),
-            "the last page says so: {second:?}"
-        );
-    }
-
-    /// One delegation is listed once, however many logs record it.
-    ///
-    /// The delegation lives in the child's log and is mirrored in the
-    /// root parent's log. The scan reads both, so without the
-    /// dedup the same delegation was listed twice — once per log that
-    /// mentions it.
-    #[tokio::test]
-    async fn one_delegation_is_listed_once() {
-        let (state, _dir) = test_state().await;
-        let user = state.default_user_id().to_string();
-        seed_delegation(&state, &user, "s1", "c1", "only", true).await;
-
-        let page = list_tasks(
-            Arc::clone(&state),
-            PageQuery {
-                limit: Some(50),
-                cursor: None,
-                sort: None,
-            },
-        )
-        .await
-        .expect("the list");
-
-        assert_eq!(
-            page.data.len(),
-            1,
-            "the delegation is listed once: {page:?}"
-        );
-        assert_eq!(
-            page.data[0].id, "s1:c1",
-            "the id names the delegation by its pair"
-        );
-    }
-
-    /// The id the list hands out is the id the detail route
-    /// resolves.
-    #[tokio::test]
-    async fn the_listed_id_resolves_to_its_delegation() {
-        let (state, _dir) = test_state().await;
-        let user = state.default_user_id().to_string();
-        seed_delegation(&state, &user, "s1", "c1", "the prompt", true).await;
-
-        let page = list_tasks(
-            Arc::clone(&state),
-            PageQuery {
-                limit: Some(50),
-                cursor: None,
-                sort: None,
-            },
-        )
-        .await
-        .expect("the list");
-        let id = page.data[0].id.clone();
-
-        let one = get_task(Arc::clone(&state), id)
-            .await
-            .expect("the delegation");
-
-        assert_eq!(one.id, page.data[0].id, "the same delegation");
-        assert_eq!(one.prompt, "the prompt", "the prompt comes with it");
-        assert_eq!(one.status, "succeeded", "and so does the status");
-    }
-
-    /// A delegation that has not finished yet says so.
-    #[tokio::test]
-    async fn an_unfinished_delegation_is_running() {
-        let (state, _dir) = test_state().await;
-        let user = state.default_user_id().to_string();
-        seed_delegation(&state, &user, "s1", "c1", "in flight", false).await;
-
-        let page = list_tasks(
-            Arc::clone(&state),
-            PageQuery {
-                limit: Some(50),
-                cursor: None,
-                sort: None,
-            },
-        )
-        .await
-        .expect("the list");
-
-        assert_eq!(page.data[0].status, "running", "no footer, no end");
-    }
-}
+mod tests;

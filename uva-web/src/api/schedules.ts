@@ -1,13 +1,13 @@
 /**
- * Schedules API client — `uva-scheduler` domain.
+ * Schedules domain client — `uva-scheduler` surface.
  *
  * Wire shape follows `crates/uva-scheduler/src/job.rs::Job`.
- * The list endpoint returns a tight `ScheduleSummary` row; the
- * detail endpoint flattens the full `Job` so every field is at
- * the top level of the response.
+ * The list method returns a tight `ScheduleSummary` row; the detail
+ * method flattens the full `Job` so every field is at the top level
+ * of the response. The six methods are registered by
+ * `crates/uva-app-server/src/rpc/methods/automation.rs`.
  */
-
-import { api } from './client';
+import { rpc } from './rpc';
 import type {
   CreateScheduleRequest,
   List,
@@ -17,29 +17,38 @@ import type {
   UpdateScheduleRequest,
 } from './types';
 
+const METHOD = {
+  list: 'schedules/list',
+  get: 'schedules/get',
+  create: 'schedules/create',
+  patch: 'schedules/patch',
+  remove: 'schedules/delete',
+  tick: 'schedules/tick',
+} as const;
+
 export const schedulesApi = {
-  /** `GET /api/v1/schedules` — list all scheduled jobs. */
+  /** `schedules/list` — every scheduled job. */
   list: (signal?: AbortSignal): Promise<List<ScheduleSummary>> =>
-    api.get<List<ScheduleSummary>>('/api/v1/schedules', signal),
+    rpc.request<List<ScheduleSummary>>(METHOD.list, undefined, signal),
 
-  /** `GET /api/v1/schedules/{id}` — single job detail. */
+  /** `schedules/get` — single job detail. */
   get: (id: string, signal?: AbortSignal): Promise<Schedule> =>
-    api.get<Schedule>(`/api/v1/schedules/${encodeURIComponent(id)}`, signal),
+    rpc.request<Schedule>(METHOD.get, { id }, signal),
 
-  /** `POST /api/v1/schedules` — register a new schedule. */
+  /** `schedules/create` — register a new schedule. */
   create: (req: CreateScheduleRequest, signal?: AbortSignal): Promise<Schedule> =>
-    api.post<Schedule>('/api/v1/schedules', req, signal),
+    rpc.request<Schedule>(METHOD.create, req, signal),
 
-  /** `PATCH /api/v1/schedules/{id}` — pause / resume / update payload. */
+  /** `schedules/patch` — pause / resume / update payload. */
   update: (id: string, req: UpdateScheduleRequest, signal?: AbortSignal): Promise<Schedule> =>
-    api.patch<Schedule>(`/api/v1/schedules/${encodeURIComponent(id)}`, req, signal),
+    rpc.request<Schedule>(METHOD.patch, { id, ...req }, signal),
 
-  /** `DELETE /api/v1/schedules/{id}` — remove the job and its on-disk file. */
+  /** `schedules/delete` — remove the job and its on-disk file. */
   remove: (id: string, signal?: AbortSignal): Promise<void> =>
-    api.del(`/api/v1/schedules/${encodeURIComponent(id)}`, signal),
+    rpc.request<void>(METHOD.remove, { id }, signal),
 
-  /** `POST /api/v1/schedules/{id}/tick` — drive a single tick and
-   *  return the fired jobs (debug / "fire now" affordance). */
+  /** `schedules/tick` — drive a single tick and return the fired
+   * jobs (debug / "fire now" affordance). */
   tick: (id: string, signal?: AbortSignal): Promise<ScheduleTick> =>
-    api.post<ScheduleTick>(`/api/v1/schedules/${encodeURIComponent(id)}/tick`, {}, signal),
+    rpc.request<ScheduleTick>(METHOD.tick, { id }, signal),
 };

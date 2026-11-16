@@ -64,7 +64,6 @@ uva-harness::AgentDescriptor
 uva-harness::AgentEntry
 uva-harness::AgentEvent
 uva-harness::AgentInput
-uva-harness::AgentMeta
 uva-harness::AgentRegistry
 uva-harness::AgentRuntime
 uva-harness::ApprovalGate
@@ -76,8 +75,6 @@ uva-harness::Arbitration
 uva-harness::ChannelInbox
 uva-harness::DEFAULT_MAX_ITERATIONS
 uva-harness::DEFAULT_SYSTEM_PROMPT
-uva-harness::DelegatingTool
-uva-harness::DelegationCall
 uva-harness::Diagnostic
 uva-harness::DiagnosticKind
 uva-harness::EventSink
@@ -255,6 +252,7 @@ uva-session::OrphanedCompaction
 uva-session::PRUNED_TOOL_RESULT
 uva-session::ParkedPromptRecovery
 uva-session::PlannedCompaction
+uva-session::ProvenancedHistory
 uva-session::RepairReport
 uva-session::ReplaceRange
 uva-session::ResolvedReplace
@@ -332,6 +330,7 @@ uva-session::subagent_exit
 uva-session::surface_message
 uva-session::surface_to_messages
 uva-session::tool_dispatch
+uva-session::tool_output
 uva-session::touched_target
 uva-session::try_fold_log_surface
 uva-session::turn_end

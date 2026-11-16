@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uva_core::SystemClock;
 use uva_provider::{Content, ContentPart, ImageContent, Role};
 use uva_session::{LogWriter, in_memory::InMemorySessionSink};
-use uva_tool::ToolRegistry;
+use uva_tool::{Context, StreamOutput, Tool, ToolOutput, ToolRegistry};
 
 use super::super::{support::*, *};
 
@@ -434,5 +434,128 @@ pub(super) async fn a_writer_backed_prune_warns_once_per_run() {
         user_turns(&captured[1]),
         first_turns,
         "re-deriving and re-pruning must send the same history every pass"
+    );
+}
+
+/// A streamed chunk is durable, not only live.
+///
+/// The dispatch writes the call's streamed chunks as `tool_output`
+/// rows between the call's `tool_dispatch` row and its terminal
+/// `tool_result` row, so a reload replays what the running client
+/// saw. Chunks that arrive before a flush merge into one row — the
+/// writer holds one pending row per call — which is why the two
+/// chunks here are one row carrying both. The row stays log-only:
+/// the model reads the settled result, not the preview.
+pub(super) async fn streamed_chunks_land_as_tool_output_rows() {
+    use serde_json::json;
+    use uva_provider::ToolUse;
+
+    struct Streamer;
+
+    #[async_trait::async_trait]
+    impl Tool for Streamer {
+        fn name(&self) -> &str {
+            "streamer"
+        }
+
+        fn description(&self) -> &str {
+            "yields two chunks"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &Context,
+        ) -> ToolOutput {
+            ToolOutput::text("first second")
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _input: serde_json::Value,
+            _ctx: &'a Context,
+        ) -> std::pin::Pin<
+            Box<dyn futures::Stream<Item = StreamOutput> + Send + 'a>,
+        > {
+            Box::pin(futures::stream::iter(vec![
+                StreamOutput::Progress(ToolOutput::text("first ")),
+                StreamOutput::Progress(ToolOutput::text("second")),
+                StreamOutput::Result(ToolOutput::text("first second")),
+            ]))
+        }
+    }
+
+    let sink = Arc::new(InMemorySessionSink::new("log"));
+    let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
+    writer
+        .append(json!({"type": "UserInput", "data": { "text": "stream" }}))
+        .await
+        .expect("seed the host's user row");
+    writer.flush().await.expect("flush the seeded row");
+
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![ToolUse {
+            id: "call_stream".to_string(),
+            name: "streamer".to_string(),
+            input: json!({}),
+        }]),
+        done_chunk("done"),
+    ]));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(Streamer)));
+    let log = Arc::clone(&writer);
+    let agent = ReActAgent::new(
+        Arc::clone(&provider) as Arc<dyn uva_provider::ModelProvider>,
+        registry,
+    )
+    .with_log_writer(log);
+    let mut stream = agent
+        .run(
+            AgentInput::text("stream"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while stream.next().await.is_some() {}
+    writer.flush().await.expect("flush the run's rows");
+
+    let rows = writer.read().await.expect("read the session log");
+    let types: Vec<&str> =
+        rows.iter().filter_map(|row| row["type"].as_str()).collect();
+    let chunks: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "tool_output")
+        .collect();
+    assert_eq!(
+        chunks.len(),
+        1,
+        "chunks that arrive before a flush are one row: {types:?}"
+    );
+    assert_eq!(chunks[0]["data"]["output"], "first second");
+    assert_eq!(chunks[0]["call_id"], "call_stream");
+    assert_eq!(chunks[0]["tool"], "streamer");
+    assert!(
+        chunks[0]["data"]["original_bytes"].is_null(),
+        "a row that fits its window records no cut: {:?}",
+        chunks[0]["data"]
+    );
+    let dispatch = types
+        .iter()
+        .position(|kind| *kind == "tool_dispatch")
+        .expect("the call's dispatch row");
+    let first = types
+        .iter()
+        .position(|kind| *kind == "tool_output")
+        .expect("the chunk's row");
+    let result = types
+        .iter()
+        .position(|kind| *kind == "tool_result")
+        .expect("the settled result row");
+    assert!(
+        dispatch < first && first < result,
+        "the chunks sit between dispatch and result: {types:?}"
     );
 }

@@ -5,7 +5,7 @@
  * fallback instead of throwing during render.
  */
 
-import type { UiComponent } from '../../api/ui-schema';
+import type { UiComponent } from '../../api/catalog';
 import { FALLBACK_KIND, KINDS } from './registry';
 
 export function UiSchemaRenderer({ component }: { component: UiComponent }) {

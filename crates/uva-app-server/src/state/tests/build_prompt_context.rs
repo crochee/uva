@@ -35,13 +35,21 @@ async fn skills_context(root: &std::path::Path) -> (Context, MountHandle) {
     (ctx, mounted)
 }
 
+/// The mounted `skills` service, as the assembly hands it over.
+fn skills_service(ctx: &Context) -> Option<Arc<uva::skill::SkillRegistry>> {
+    ctx.get::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
+        .ok()
+        .flatten()
+}
+
 #[tokio::test]
 async fn build_prompt_context_with_no_skills_dir_omits_skills_block() {
     let _home = ScopedHome::new();
     let dir = tempfile::tempdir().unwrap();
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(!out.contains("<available_skills>"));
@@ -71,7 +79,8 @@ async fn build_prompt_context_sorts_skills_alphabetically() {
     );
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     let apple = out.find("<name>apple</name>").expect("apple in prompt");
@@ -89,7 +98,8 @@ async fn build_prompt_context_drops_tools_from_assembled_text() {
     // `tools` channel.
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(!out.contains("<available_tools>"));
@@ -106,7 +116,8 @@ async fn build_prompt_context_drops_malformed_skill_md() {
     write_skill_md(dir.path(), "broken", "no delimiters\n");
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(
@@ -126,7 +137,8 @@ async fn build_prompt_context_with_valid_frontmatter_uses_description() {
     );
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(
@@ -148,7 +160,8 @@ async fn build_prompt_context_falls_back_to_body_when_description_missing() {
     );
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(out.contains("<name>nodoc</name>"));
@@ -174,7 +187,8 @@ async fn build_prompt_context_skips_dirs_without_skill_md() {
     );
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(out.contains("<name>valid</name>"));
@@ -207,7 +221,8 @@ async fn build_prompt_context_includes_user_skills_from_home() {
 
     let pc = {
         let (ctx, _mounted) = skills_context(dir.path()).await;
-        build_prompt_context(&ctx, &empty_registry(), "agent").await
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await
     };
     let out = pc.assemble(&empty_descriptor());
     assert!(
@@ -233,7 +248,9 @@ async fn unloading_skill_plugin_removes_the_available_skills_block() {
     );
 
     let (ctx, mut mounted) = skills_context(dir.path()).await;
-    let before = build_prompt_context(&ctx, &empty_registry(), "agent").await;
+    let before =
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await;
     assert!(
         before
             .assemble(&empty_descriptor())
@@ -242,7 +259,9 @@ async fn unloading_skill_plugin_removes_the_available_skills_block() {
     );
 
     assert!(mounted.dispose_plugin("skills"));
-    let after = build_prompt_context(&ctx, &empty_registry(), "agent").await;
+    let after =
+        build_prompt_context(skills_service(&ctx), &empty_registry(), "agent")
+            .await;
     assert!(
         !after
             .assemble(&empty_descriptor())

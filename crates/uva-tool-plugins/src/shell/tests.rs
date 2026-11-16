@@ -471,3 +471,143 @@ fn parameters_schema_is_self_consistent() {
         "additional fields must be rejected to match serde_json::from_value"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Streaming: a long command's output reaches the client while it runs
+// ---------------------------------------------------------------------------
+
+/// Drain one tool stream into the chunks it announced and the one
+/// output it settled with.
+///
+/// The contract under test is `Tool::stream`'s: any number of
+/// `Progress` items, then exactly one `Result`, never the other way
+/// round. Yielding the result after progress is what makes the
+/// progress a preview rather than a second answer.
+async fn drain<S>(mut stream: S) -> (Vec<String>, Vec<ToolOutput>)
+where
+    S: futures::Stream<Item = StreamOutput> + Unpin,
+{
+    use futures::StreamExt;
+    let mut chunks = Vec::new();
+    let mut results = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            StreamOutput::Progress(out) => {
+                assert!(
+                    results.is_empty(),
+                    "a tool stream yielded progress after its result"
+                );
+                chunks.push(text_of(&out));
+            }
+            StreamOutput::Result(out) => results.push(out),
+        }
+    }
+    (chunks, results)
+}
+
+/// A command whose output exceeds one pipe read streams in chunks:
+/// the 8 KiB reader blocks are the natural slices, so a 18 KiB
+/// output is announced more than once before the command exits.
+#[tokio::test]
+async fn a_long_command_streams_chunks_before_its_result() {
+    let tool = ShellTool::new();
+    let ctx = make_context();
+    let stream = Box::pin(
+        tool.stream(json!({"command": "seq -f 'line-%04g' 1 1500"}), &ctx),
+    );
+    let (chunks, results) = drain(stream).await;
+
+    assert!(
+        chunks.len() >= 2,
+        "15 KiB of output must arrive in more than one chunk, got {}: {chunks:?}",
+        chunks.len()
+    );
+    assert_eq!(results.len(), 1, "exactly one terminal output");
+    let streamed = chunks.concat();
+    assert_eq!(
+        streamed.lines().count(),
+        1500,
+        "the chunks are the command's stdout, nothing dropped: {:?} .. {:?} ({} chunks, {} bytes)",
+        streamed.lines().next(),
+        streamed.lines().last(),
+        chunks.len(),
+        streamed.len()
+    );
+    assert_eq!(streamed.lines().next(), Some("line-0001"));
+    assert!(
+        streamed.trim_end().lines().last() == Some("line-1500"),
+        "the last line arrives before the command settles: {streamed:?}"
+    );
+    let rendered = text_of(&results[0]);
+    assert!(
+        rendered.contains(&streamed),
+        "the settled output carries the streamed stdout: {rendered}"
+    );
+    assert!(
+        rendered.trim_end().ends_with("[exit code: 0]"),
+        "the settled output still carries the exit marker: {rendered}"
+    );
+}
+
+/// Stderr streams too: a command that reports progress on stderr is
+/// not silent until it exits.
+#[tokio::test]
+async fn stderr_chunks_reach_the_stream() {
+    let tool = ShellTool::new();
+    let ctx = make_context();
+    let stream = Box::pin(
+        tool.stream(json!({"command": "seq -f 'line-%04g' 1 1500 >&2"}), &ctx),
+    );
+    let (chunks, results) = drain(stream).await;
+
+    assert!(
+        chunks.len() >= 2,
+        "stderr streams in more than one chunk, got {}: {chunks:?}",
+        chunks.len()
+    );
+    assert!(
+        chunks.iter().any(|chunk| chunk.contains("line-1500")),
+        "stderr is part of the streamed output: {chunks:?}"
+    );
+    assert_eq!(results.len(), 1);
+    assert!(text_of(&results[0]).contains("line-1500"));
+}
+
+/// A silent command still settles exactly once — with no progress at
+/// all. The dispatcher must never wait for a chunk that will not come.
+#[tokio::test]
+async fn a_silent_command_streams_no_chunks_and_one_result() {
+    let tool = ShellTool::new();
+    let ctx = make_context();
+    let stream = Box::pin(tool.stream(json!({"command": "true"}), &ctx));
+    let (chunks, results) = drain(stream).await;
+
+    assert!(chunks.is_empty(), "no output, no chunks: {chunks:?}");
+    assert_eq!(results.len(), 1);
+    assert!(text_of(&results[0]).trim_end().ends_with("[exit code: 0]"));
+}
+
+/// Streaming does not change what a failing command means: a
+/// non-zero exit is data, its marker is last, and the result is not
+/// an error.
+#[tokio::test]
+async fn a_failing_command_streams_and_settles_with_its_marker() {
+    let tool = ShellTool::new();
+    let ctx = make_context();
+    let stream = Box::pin(
+        tool.stream(json!({"command": "echo boom >&2; exit 3"}), &ctx),
+    );
+    let (chunks, results) = drain(stream).await;
+
+    assert!(
+        chunks.iter().any(|chunk| chunk.contains("boom")),
+        "the failure's output streams as it happens: {chunks:?}"
+    );
+    assert_eq!(results.len(), 1);
+    assert_ne!(results[0].is_error, Some(true));
+    assert!(
+        text_of(&results[0]).trim_end().ends_with("[exit code: 3]"),
+        "the marker stays last: {}",
+        text_of(&results[0])
+    );
+}

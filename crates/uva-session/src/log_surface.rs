@@ -5,8 +5,8 @@
 //!
 //! [`fold_surface`] folds *typed*
 //! [`SessionEvent`]s. A production log is a mix: structural rows are
-//! typed, message rows are the legacy `{"type":"UserInput"}` /
-//! `{"type":"Model"}` envelopes the controller persisted before the
+//! typed, message rows are the legacy `UserInput` / `Model`
+//! envelopes the controller persisted before the
 //! typed layer existed, and compaction checkpoints are typed rows on
 //! top of both. The resume path that rebuilds a session's message
 //! list reads that mixture as one stream, so this module is that
@@ -16,7 +16,14 @@
 //!   every message-producing row (typed or legacy) to the
 //!   `uva_provider::Message` wire shape, stamps each with its
 //!   **log ordinal** as its seq, and applies the
-//!   [`SurfaceOp::Replace`] op carried by a `compaction` row.
+//!   [`SurfaceOp::Replace`] op carried by a `compaction` row. The
+//!   surface it returns is in the **model-visible** order: a user
+//!   turn that lands while a tool call is unanswered waits for the
+//!   result that answers it (see
+//!   [`crate::surface::ModelOrder`]). A compaction's `start` /
+//!   `end` are positions in that order, and the fold refuses a
+//!   replace whose citation does not name the rows its span
+//!   covers.
 //! - [`SurfaceLedger`] is the incremental twin of that projection:
 //!   the run's writer records every row it appends, and a compaction
 //!   checkpoint asks the ledger where the rows it is about to shadow
@@ -33,6 +40,11 @@
 //! real earlier rows — no sequence numbers are invented on either
 //! side.
 //!
+//! The citation is also tied to the span: `source_event_seqs[i]` is
+//! the seq of the surface row at `start + i`. A range that names the
+//! right rows in the wrong coordinates would otherwise pass every
+//! other check and shadow the wrong rows.
+//!
 //! One log, one numbering: a log whose every event row carries a
 //! `seq` is read by those values ([`log_is_stamped`] decides, once
 //! per log), and a log that carries none — an old one — falls back to
@@ -46,7 +58,9 @@
 //! checkpoint degrades to "replay the shadowed span" instead of
 //! aborting a resume. [`try_fold_log_surface`] is the strict
 //! variant for consumers that want the violation surfaced (the
-//! typed projection does).
+//! typed projection does). A compaction that meets a user turn the
+//! fold still holds back is refused the same way: the surface is not
+//! final yet, so its positions do not mean what the range says.
 
 use std::sync::Arc;
 
@@ -55,19 +69,15 @@ use serde_json::Value;
 use uva_provider::{Content, ContentPart, Message, Role};
 
 use crate::{
-    events::{ReplaceRange, SessionEvent, SurfaceOp},
+    events::{SessionEvent, SurfaceOp},
     ledger_key,
-    surface::{FoldError, FoldedSurface, fold_surface, validate_replace},
+    surface::{
+        FoldError,
+        FoldedSurface,
+        fold::{RowKind, SurfaceFold, SurfaceRow, calls_of},
+        fold_surface,
+    },
 };
-
-/// Which typed event variant a surface row projects to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SurfaceKind {
-    User,
-    Assistant,
-    Tool,
-    Compaction,
-}
 
 /// One raw log row projected onto the surface vocabulary.
 enum LogRow {
@@ -76,7 +86,7 @@ enum LogRow {
     /// makes or the call it answers; `None` for a row that carries
     /// neither), and how it joins the surface.
     Surface {
-        kind: SurfaceKind,
+        kind: RowKind,
         payload: Value,
         key: Option<String>,
         op: SurfaceOp,
@@ -84,14 +94,6 @@ enum LogRow {
     /// Log-only, malformed, or unrecognised — no surface
     /// contribution.
     Ignored,
-}
-
-/// How a validated op applies to a surface.
-enum Applied {
-    /// Append the new row at the tail.
-    Append,
-    /// Replace `[start, end)` with the new row.
-    Replace { start: usize, end: usize },
 }
 
 /// Classify one raw row.
@@ -126,43 +128,6 @@ fn row_op(row: &Value) -> SurfaceOp {
             serde_json::from_value::<SurfaceOp>(value.clone()).ok()
         })
         .unwrap_or_else(SurfaceOp::append)
-}
-
-/// Validate `op` against the current surface and report how it
-/// applies.
-///
-/// This is the single gate the fold, the typed converter, and the
-/// ledger share, so all three accept and reject exactly the same
-/// ops.
-fn plan_op(
-    op: &SurfaceOp,
-    surface_len: usize,
-    max_surface_seq: u64,
-    self_seq: u64,
-) -> Result<Applied, FoldError> {
-    match op {
-        SurfaceOp::AppendString(_) => Ok(Applied::Append),
-        SurfaceOp::Replace {
-            start,
-            end,
-            source_event_seqs,
-        } => {
-            validate_replace(
-                self_seq,
-                ReplaceRange {
-                    start: *start,
-                    end: *end,
-                    source_event_seqs,
-                },
-                surface_len,
-                max_surface_seq,
-            )?;
-            Ok(Applied::Replace {
-                start: *start,
-                end: *end,
-            })
-        }
-    }
 }
 
 /// Typed message row: `data` is the message payload.
@@ -234,16 +199,16 @@ fn role_of(tag: &str) -> Option<Role> {
 }
 
 /// Map a provider role onto the typed surface variant.
-fn kind_of(role: Role) -> SurfaceKind {
+fn kind_of(role: Role) -> RowKind {
     match role {
-        Role::User | Role::System => SurfaceKind::User,
-        Role::Tool => SurfaceKind::Tool,
-        _ => SurfaceKind::Assistant,
+        Role::User | Role::System => RowKind::User,
+        Role::Tool => RowKind::Tool,
+        _ => RowKind::Assistant,
     }
 }
 
-/// `{"type":"Message","data":<Message>}` — the lossless
-/// `SessionMemory` envelope.
+/// The lossless `SessionMemory` envelope: the legacy `Message` tag
+/// with a whole provider [`Message`] as its payload.
 fn classify_message_envelope(row: &Value) -> LogRow {
     let Some(data) = row.get("data").cloned() else {
         return LogRow::Ignored;
@@ -265,20 +230,17 @@ fn classify_message_envelope(row: &Value) -> LogRow {
     }
 }
 
-/// `{"type":"UserInput","data":{"text":…}}` — the controller's
-/// user-prompt envelope.
+/// The controller's user-prompt envelope: the legacy `UserInput` tag
+/// with the turn's text under `data`.
 fn classify_user_input(row: &Value) -> LogRow {
     match row
         .get("data")
         .and_then(|data| data.get("text"))
         .and_then(Value::as_str)
     {
-        Some(text) => message_row(
-            Message::user(text),
-            SurfaceKind::User,
-            None,
-            row_op(row),
-        ),
+        Some(text) => {
+            message_row(Message::user(text), RowKind::User, None, row_op(row))
+        }
         None => {
             tracing::warn!(
                 target: "uva.session",
@@ -324,7 +286,7 @@ fn classify_part(part: ContentPart, op: SurfaceOp) -> LogRow {
                 ..Message::default()
             };
             let key = ledger_key::key_of(&message);
-            message_row(message, SurfaceKind::Assistant, key, op)
+            message_row(message, RowKind::Assistant, key, op)
         }
         ContentPart::ToolUse(tool_use) => {
             let message = Message {
@@ -333,7 +295,7 @@ fn classify_part(part: ContentPart, op: SurfaceOp) -> LogRow {
                 ..Message::default()
             };
             let key = ledger_key::key_of(&message);
-            message_row(message, SurfaceKind::Assistant, key, op)
+            message_row(message, RowKind::Assistant, key, op)
         }
         ContentPart::ToolResult(tool_result) => {
             let call_id = tool_result.tool_use_id.clone();
@@ -347,7 +309,7 @@ fn classify_part(part: ContentPart, op: SurfaceOp) -> LogRow {
                 ..Message::default()
             };
             let key = ledger_key::key_of(&message);
-            message_row(message, SurfaceKind::Tool, key, op)
+            message_row(message, RowKind::Tool, key, op)
         }
         ContentPart::Image(_)
         | ContentPart::Audio(_)
@@ -361,7 +323,7 @@ fn classify_part(part: ContentPart, op: SurfaceOp) -> LogRow {
 fn classify_fallback_payload(row: &Value, data: &Value) -> LogRow {
     let op = row_op(row);
     if let Some(text) = data.get("text").and_then(Value::as_str) {
-        return message_row(Message::user(text), SurfaceKind::User, None, op);
+        return message_row(Message::user(text), RowKind::User, None, op);
     }
     let key = data
         .get("call_id")
@@ -371,7 +333,7 @@ fn classify_fallback_payload(row: &Value, data: &Value) -> LogRow {
         Some(key) => {
             let message = Message::tool(Content::text(data.to_string()), key);
             let key = ledger_key::key_of(&message);
-            message_row(message, SurfaceKind::Tool, key, op)
+            message_row(message, RowKind::Tool, key, op)
         }
         None => LogRow::Ignored,
     }
@@ -386,7 +348,7 @@ fn classify_compaction(row: &Value) -> LogRow {
     };
     let payload = compaction_payload(row);
     LogRow::Surface {
-        kind: SurfaceKind::Compaction,
+        kind: RowKind::Compaction,
         payload,
         key: None,
         op,
@@ -454,7 +416,7 @@ fn compaction_payload(row: &Value) -> Value {
 /// Serialize a normalised message into a surface row.
 fn message_row(
     message: Message,
-    kind: SurfaceKind,
+    kind: RowKind,
     key: Option<String>,
     op: SurfaceOp,
 ) -> LogRow {
@@ -535,10 +497,9 @@ pub fn log_tail_seq(rows: &[Value]) -> u64 {
 }
 
 /// Walk `rows` in order and return the folded surface, skipping any
-/// replacement that does not validate.
+/// row that does not validate.
 fn fold_lenient(rows: &[Value]) -> FoldedSurface {
-    let mut surface = FoldedSurface::empty();
-    let mut max_surface_seq: u64 = 0;
+    let mut fold = SurfaceFold::<Value>::new();
     // One log, one numbering: a stamped log reads each row's own
     // `seq`, an unstamped one counts positions. Deciding per row
     // would mix the two schemes and produce duplicate ordinals.
@@ -555,32 +516,35 @@ fn fold_lenient(rows: &[Value]) -> FoldedSurface {
         }
         positional += 1;
         let seq = row_seq(row, stamped, positional);
-        let LogRow::Surface { payload, op, .. } = classify_row(row) else {
+        let LogRow::Surface {
+            kind, payload, op, ..
+        } = classify_row(row)
+        else {
             continue;
         };
-        match plan_op(&op, surface.len(), max_surface_seq, seq) {
-            Ok(Applied::Append) => {
-                surface.messages.push(payload);
-                surface.surface_seqs.push(seq);
-                max_surface_seq = max_surface_seq.max(seq);
-            }
-            Ok(Applied::Replace { start, end }) => {
-                surface.messages.splice(start..end, [payload]);
-                surface.surface_seqs.splice(start..end, [seq]);
-                max_surface_seq = max_surface_seq.max(seq);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "uva.session",
-                    seq,
-                    %error,
-                    "log surface: ignoring an unresolvable replace; the \
-                     shadowed span is replayed"
-                );
-            }
+        let calls = calls_of(kind, &payload);
+        if let Err(error) = fold.apply(SurfaceRow {
+            seq,
+            kind,
+            payload,
+            op,
+            calls,
+        }) {
+            tracing::warn!(
+                target: "uva.session",
+                seq,
+                %error,
+                "log surface: ignoring an unresolvable row; the shadowed \
+                 span is replayed"
+            );
         }
     }
-    surface
+    fold.finish();
+    let (messages, surface_seqs) = fold.into_parts();
+    FoldedSurface {
+        messages,
+        surface_seqs,
+    }
 }
 
 /// Fold a raw session log into the model-visible surface.
@@ -670,20 +634,25 @@ fn surface_events_from_log(rows: &[Value]) -> Vec<SessionEvent> {
             // `source` is a row annotation, not part of the model
             // surface: the fold projects what the model saw, and
             // what the model saw is the message.
-            SurfaceKind::User => SessionEvent::UserMessage {
+            RowKind::User => SessionEvent::UserMessage {
                 seq,
                 ts,
                 data: payload,
                 source: None,
                 surface_op: Some(op),
+                // The projection carries the surface payload, not
+                // the row's envelope annotations: attachment refs
+                // ride the log row for a transcript reader, and the
+                // model never saw them.
+                attachments: Vec::new(),
             },
-            SurfaceKind::Assistant => SessionEvent::AssistantMessage {
+            RowKind::Assistant => SessionEvent::AssistantMessage {
                 seq,
                 ts,
                 data: payload,
                 surface_op: Some(op),
             },
-            SurfaceKind::Tool => SessionEvent::ToolResult {
+            RowKind::Tool => SessionEvent::ToolResult {
                 seq,
                 ts,
                 data: payload,
@@ -692,9 +661,10 @@ fn surface_events_from_log(rows: &[Value]) -> Vec<SessionEvent> {
                 // run reads back is the transcript, not the row's
                 // metadata.
                 is_error: false,
+                tool_call_id: None,
                 surface_op: Some(op),
             },
-            SurfaceKind::Compaction => SessionEvent::Compaction {
+            RowKind::Compaction => SessionEvent::Compaction {
                 seq,
                 ts,
                 data: payload,
@@ -776,6 +746,15 @@ pub enum MappingGap {
 /// [`resolve`](Self::resolve) answers with a span and seqs the
 /// durable fold will reproduce.
 ///
+/// The tail is provisional until the run ends. The ledger never
+/// releases a user turn the order is still holding back — a tool call
+/// that was never answered — while the durable fold releases it when
+/// the log ends. So the ledger holds one row fewer than the fold
+/// does for such a turn, and [`resolve`](Self::resolve) cannot map
+/// it: the answer it gives for a turn the fold would have released
+/// is [`MappingGap::UnknownKey`]. A caller that needs the fold's own
+/// answer must fold the log, not ask the ledger for its tail.
+///
 /// Interior mutability (`Mutex`) because the writer, the checkpoint,
 /// and the flush share one ledger behind an `Arc`.
 #[derive(Debug, Default)]
@@ -785,14 +764,9 @@ pub struct SurfaceLedger {
 
 #[derive(Debug, Default)]
 struct LedgerState {
-    slots: Vec<LedgerSlot>,
-    max_surface_seq: u64,
-}
-
-#[derive(Debug, Clone)]
-struct LedgerSlot {
-    seq: u64,
-    key: Option<String>,
+    /// The surface the ledger indexes: one slot per row, in the
+    /// order the next LLM pass sees them.
+    fold: SurfaceFold<Option<String>>,
 }
 
 impl SurfaceLedger {
@@ -812,26 +786,30 @@ impl SurfaceLedger {
     /// and the fold in step.
     pub fn record(&self, seq: u64, row: &Value) {
         let mut state = self.state.lock();
-        let LogRow::Surface { key, op, .. } = classify_row(row) else {
+        let LogRow::Surface {
+            kind,
+            payload,
+            key,
+            op,
+        } = classify_row(row)
+        else {
             return;
         };
-        let slot = LedgerSlot { seq, key };
-        match plan_op(&op, state.slots.len(), state.max_surface_seq, seq) {
-            Ok(Applied::Append) => state.slots.push(slot),
-            Ok(Applied::Replace { start, end }) => {
-                state.slots.splice(start..end, [slot]);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "uva.session",
-                    seq,
-                    %error,
-                    "surface ledger: ignoring an unresolvable replace"
-                );
-                return;
-            }
+        let calls = calls_of(kind, &payload);
+        if let Err(error) = state.fold.apply(SurfaceRow {
+            seq,
+            kind,
+            payload: key,
+            op,
+            calls,
+        }) {
+            tracing::warn!(
+                target: "uva.session",
+                seq,
+                %error,
+                "surface ledger: ignoring an unresolvable row"
+            );
         }
-        state.max_surface_seq = state.max_surface_seq.max(seq);
     }
 
     /// Map a compaction's shadowed-row keys onto the current
@@ -865,11 +843,12 @@ impl SurfaceLedger {
                 return Err(MappingGap::MissingKey { position });
             };
             let mut matches = state
-                .slots
+                .fold
+                .rows()
                 .iter()
                 .enumerate()
-                .filter(|(_, slot)| slot.key.as_deref() == Some(key));
-            let Some((index, slot)) = matches.next() else {
+                .filter(|(_, slot_key)| slot_key.as_deref() == Some(key));
+            let Some((index, _)) = matches.next() else {
                 return Err(MappingGap::UnknownKey {
                     key: key.to_string(),
                 });
@@ -880,7 +859,7 @@ impl SurfaceLedger {
                 });
             }
             positions.push(index);
-            seqs.push(slot.seq);
+            seqs.push(state.fold.seqs()[index]);
         }
         let (Some(&start), Some(&last)) = (positions.first(), positions.last())
         else {
@@ -904,7 +883,7 @@ impl SurfaceLedger {
     /// Number of surface rows currently indexed.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.state.lock().slots.len()
+        self.state.lock().fold.rows().len()
     }
 
     /// `true` when no surface row has been recorded.
@@ -918,244 +897,4 @@ impl SurfaceLedger {
 pub type SharedSurfaceLedger = Arc<SurfaceLedger>;
 
 #[cfg(test)]
-mod tests {
-    use serde_json::{Value, json};
-
-    use super::{
-        fold_log_surface,
-        log_is_stamped,
-        log_tail_seq,
-        surface_events_from_log,
-        try_fold_log_surface,
-    };
-    use crate::jsonl::SessionMetadataHeader;
-
-    /// The sink's metadata header exactly as the writer emits it.
-    fn header() -> Value {
-        serde_json::to_value(SessionMetadataHeader::fresh("s1"))
-            .expect("the header serialises")
-    }
-
-    /// A log whose first line is the sink's metadata header, then the
-    /// same event rows as the headerless form.
-    fn headered(events: &[Value]) -> Vec<Value> {
-        let mut rows = vec![header()];
-        rows.extend_from_slice(events);
-        rows
-    }
-
-    fn plain_events() -> Vec<Value> {
-        vec![
-            json!({"type": "UserInput", "data": {"text": "hello"}}),
-            json!({"type": "Model", "data": {"type": "text", "text": "hi"}}),
-        ]
-    }
-
-    /// The header is not a row: it contributes no surface entry and,
-    /// critically, consumes no ordinal. Numbering slice positions
-    /// instead would put every folded seq one ahead of the
-    /// `stream_index` the sink assigned that same event.
-    #[test]
-    fn a_metadata_header_does_not_shift_surface_seqs() {
-        let bare = fold_log_surface(&plain_events());
-        let with_header = fold_log_surface(&headered(&plain_events()));
-
-        assert_eq!(
-            with_header.messages, bare.messages,
-            "the header contributes nothing to the surface",
-        );
-        assert_eq!(
-            with_header.surface_seqs,
-            vec![1, 2],
-            "seqs must count events, not slice positions",
-        );
-        assert_eq!(with_header.surface_seqs, bare.surface_seqs);
-    }
-
-    /// The strict and lenient folds must agree on numbering, or a
-    /// caller that switches between them (`try_fold_log_surface` is
-    /// the error-surfacing variant) would see different seqs for the
-    /// same log.
-    #[test]
-    fn strict_and_lenient_folds_agree_on_headered_seqs() {
-        let rows = headered(&plain_events());
-        let lenient = fold_log_surface(&rows);
-        let strict = try_fold_log_surface(&rows).expect("the log folds");
-
-        assert_eq!(strict.surface_seqs, vec![1, 2]);
-        assert_eq!(strict.surface_seqs, lenient.surface_seqs);
-        assert_eq!(strict.messages, lenient.messages);
-    }
-
-    /// The typed projection carries the same event-only ordinals, so
-    /// feeding it to `fold_surface` reproduces the raw fold.
-    #[test]
-    fn typed_projection_skips_the_header_ordinal() {
-        let rows = headered(&plain_events());
-        let events = surface_events_from_log(&rows);
-        let seqs: Vec<u64> = events
-            .iter()
-            .map(|event| match event {
-                crate::events::SessionEvent::UserMessage { seq, .. }
-                | crate::events::SessionEvent::AssistantMessage {
-                    seq, ..
-                }
-                | crate::events::SessionEvent::ToolResult { seq, .. }
-                | crate::events::SessionEvent::Compaction { seq, .. } => *seq,
-                other => panic!("unexpected projection: {other:?}"),
-            })
-            .collect();
-
-        assert_eq!(seqs, vec![1, 2]);
-    }
-
-    /// A compaction `Replace` cites the source seqs the durable
-    /// checkpoint resolved, and those come from the sink's own
-    /// numbering (header-excluded). The header therefore must not
-    /// shift the fold's `max_surface_seq`, or the provenance check
-    /// would be comparing two different seq spaces.
-    #[test]
-    fn compaction_provenance_resolves_identically_with_a_header() {
-        let events = vec![
-            json!({"type": "UserInput", "data": {"text": "hello"}}),
-            json!({"type": "Model", "data": {"type": "text", "text": "working"}}),
-            json!({
-                "type": "compaction",
-                "ts": "2026-09-25T00:00:00Z",
-                "data": {"summary": "condensed"},
-                "surface_op": {
-                    "start": 1,
-                    "end": 2,
-                    "source_event_seqs": [2],
-                },
-            }),
-        ];
-
-        let bare = fold_log_surface(&events);
-        let with_header = fold_log_surface(&headered(&events));
-
-        assert_eq!(
-            with_header.surface_seqs, bare.surface_seqs,
-            "the header must not shift the compaction's own seq either",
-        );
-        assert_eq!(
-            with_header.surface_seqs,
-            vec![1, 3],
-            "the replace leaves the user row at 1 and lands at 3",
-        );
-        assert_eq!(with_header.messages, bare.messages);
-    }
-
-    /// A stamped log carries each row's own ordinal, and the fold
-    /// must read it: two writers' rows can interleave in the file,
-    /// so the row's position is not its ordinal.
-    #[test]
-    fn a_stamped_log_uses_the_rows_own_ordinals() {
-        let rows = vec![
-            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
-            json!({"type": "Model", "seq": 9, "data": {"type": "text", "text": "b"}}),
-        ];
-        let folded = fold_log_surface(&rows);
-        assert_eq!(folded.surface_seqs, vec![7, 9]);
-    }
-
-    /// An old log carries no `seq` field at all: its fold stays
-    /// exactly what it was — the row's position among the event rows.
-    #[test]
-    fn an_unstamped_log_keeps_positional_ordinals() {
-        let rows = vec![
-            json!({"type": "Model", "data": {"type": "text", "text": "a"}}),
-            json!({"type": "Model", "data": {"type": "text", "text": "b"}}),
-        ];
-        let folded = fold_log_surface(&rows);
-        assert_eq!(folded.surface_seqs, vec![1, 2]);
-    }
-
-    /// A log that mixes stamped and unstamped rows falls back to
-    /// positional counting for every row: mixing the two schemes
-    /// row by row would produce duplicate ordinals.
-    #[test]
-    fn a_mixed_log_falls_back_to_positional_ordinals() {
-        let rows = vec![
-            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
-            json!({"type": "Model", "data": {"type": "text", "text": "b"}}),
-        ];
-        let folded = fold_log_surface(&rows);
-        assert_eq!(
-            folded.surface_seqs,
-            vec![1, 2],
-            "no mixing: one log, one numbering"
-        );
-    }
-
-    /// The strict fold reads the same ordinals as the lenient one: a
-    /// caller that switches between them must not see a different
-    /// sequence space.
-    #[test]
-    fn the_strict_fold_reads_the_same_ordinals() {
-        let rows = vec![
-            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
-            json!({"type": "Model", "seq": 9, "data": {"type": "text", "text": "b"}}),
-        ];
-        let strict = try_fold_log_surface(&rows).expect("the log folds");
-        assert_eq!(strict.surface_seqs, vec![7, 9]);
-        assert_eq!(strict.surface_seqs, fold_log_surface(&rows).surface_seqs);
-    }
-
-    /// The metadata header is not an event row: the stamped-log
-    /// decision skips it, so a headered stamped log is stamped and
-    /// the header consumes no ordinal.
-    #[test]
-    fn a_metadata_header_does_not_shift_a_stamped_log() {
-        let events = vec![
-            json!({"type": "Model", "seq": 7, "data": {"type": "text", "text": "a"}}),
-            json!({"type": "Model", "seq": 9, "data": {"type": "text", "text": "b"}}),
-        ];
-        let with_header = fold_log_surface(&headered(&events));
-        assert_eq!(with_header.surface_seqs, vec![7, 9]);
-    }
-
-    /// The decision is per log, not per row — one log, one numbering.
-    #[test]
-    fn the_stamped_decision_is_per_log() {
-        let stamped = json!({
-            "type": "Model",
-            "seq": 7,
-            "data": {"type": "text", "text": "a"},
-        });
-        let unstamped = json!({
-            "type": "Model",
-            "data": {"type": "text", "text": "a"},
-        });
-
-        assert!(log_is_stamped(std::slice::from_ref(&stamped)));
-        assert!(!log_is_stamped(std::slice::from_ref(&unstamped)));
-        assert!(
-            !log_is_stamped(&[stamped.clone(), unstamped.clone()]),
-            "one unstamped row makes the whole log unstamped"
-        );
-        assert!(
-            log_is_stamped(&headered(std::slice::from_ref(&stamped))),
-            "the header is not an event row"
-        );
-        assert!(!log_is_stamped(&headered(std::slice::from_ref(&unstamped))));
-    }
-
-    #[test]
-    fn log_tail_seq_numbers_rows_like_the_fold() {
-        let first =
-            json!({"type": "UserInput", "data": {"text": "a"}, "seq": 1});
-        let second = json!({"type": "Model", "data": {"text": "b"}, "seq": 2});
-        assert_eq!(log_tail_seq(&[]), 0, "an empty log has tail 0");
-        assert_eq!(log_tail_seq(std::slice::from_ref(&first)), 1);
-        assert_eq!(log_tail_seq(&[first, second]), 2);
-        assert_eq!(
-            log_tail_seq(&headered(&[json!({
-                "type": "UserInput",
-                "data": {"text": "a"},
-            })])),
-            1,
-            "an unstamped log counts event rows and the header is not one"
-        );
-    }
-}
+mod tests;

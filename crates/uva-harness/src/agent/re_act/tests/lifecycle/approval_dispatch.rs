@@ -1,6 +1,6 @@
-//! Dispatch-intent safety: a high-risk delegated call is blocked, a
-//! non-read-only call records its intent before it runs, and a
-//! dispatch row that cannot be flushed stops the call.
+//! Dispatch-intent safety: a non-read-only call records its intent
+//! before it runs, and a dispatch row that cannot be flushed stops
+//! the call.
 
 use std::sync::{
     Arc,
@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
+use uva_approval::{ApprovalMode, ApprovalPolicy};
 use uva_core::SystemClock;
 use uva_session::{
     LogWriter,
@@ -19,54 +20,12 @@ use uva_session::{
     SessionSnapshot,
     in_memory::InMemorySessionSink,
 };
-use uva_tool::{ToolAnnotations, ToolOutput, ToolRegistry};
 
 use super::{
     super::{support::*, *},
     approval::*,
 };
-use crate::{
-    DelegatingTool,
-    DelegationCall,
-    ReActAgent,
-    agent::approval::{ApprovalMode, ApprovalPolicy},
-};
-
-struct DangerousDelegator {
-    runs: Arc<AtomicUsize>,
-}
-
-impl DelegatingTool for DangerousDelegator {
-    fn definitions(&self) -> Vec<uva_provider::ToolDefinition> {
-        vec![uva_provider::ToolDefinition {
-            name: "delegate".to_string(),
-            description: "delegate".to_string(),
-            input_schema: json!({"type": "object"}),
-            cache_control: None,
-            annotations: None,
-        }]
-    }
-
-    fn annotations(&self) -> Option<ToolAnnotations> {
-        Some(ToolAnnotations {
-            read_only_hint: Some(false),
-            destructive_hint: Some(true),
-            idempotent_hint: Some(false),
-            open_world_hint: Some(false),
-        })
-    }
-
-    fn execute(
-        &self,
-        _call: DelegationCall<'_>,
-    ) -> futures::future::BoxFuture<'static, ToolOutput> {
-        let runs = Arc::clone(&self.runs);
-        Box::pin(async move {
-            runs.fetch_add(1, Ordering::SeqCst);
-            ToolOutput::text("delegated")
-        })
-    }
-}
+use crate::ReActAgent;
 
 // A sink that refuses the dispatch row: the writer's flush fails, and
 // the call must not run without its intent row.
@@ -120,51 +79,6 @@ fn never_policy() -> ApprovalPolicy {
     }
 }
 
-pub(super) async fn a_high_risk_delegated_call_is_blocked() {
-    let runs = Arc::new(AtomicUsize::new(0));
-    let writer = logged_writer().await;
-    let provider = scripted(vec![call("c1", "delegate")]);
-    let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
-        .with_log_writer(writer)
-        .with_delegator(Arc::new(DangerousDelegator {
-            runs: Arc::clone(&runs),
-        }))
-        .expect("the delegator installs");
-    let mut stream = agent
-        .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
-        .await;
-    let mut events = Vec::new();
-    while let Some(event) = stream.next().await {
-        events.push(event);
-    }
-
-    assert_eq!(
-        runs.load(Ordering::SeqCst),
-        0,
-        "a high-risk delegated call never runs"
-    );
-    assert!(
-        suspension_of(&events).is_none(),
-        "it is blocked, not suspended: there is no child resume route"
-    );
-    let denial = events
-        .iter()
-        .find_map(|event| match event {
-            AgentEvent::Model(ContentPart::ToolResult(result)) => Some(result),
-            _ => None,
-        })
-        .expect("the block is a model-visible result");
-    assert_eq!(denial.is_error, Some(true));
-    assert!(
-        denial.content.iter().any(|part| matches!(part,
-            ContentPart::Text(text)
-                if text.text.contains("high-risk delegated"))),
-        "the block names the reason: {:?}",
-        denial.content
-    );
-    assert_eq!(end_reason(&events), Some(SessionEndReason::Completed));
-}
-
 pub(super) async fn dispatch_is_recorded_for_high_and_unknown_calls() {
     let runs = Arc::new(AtomicUsize::new(0));
     let plain = Arc::new(ProbeTool {
@@ -180,7 +94,7 @@ pub(super) async fn dispatch_is_recorded_for_high_and_unknown_calls() {
         done_chunk("done"),
     ]));
     let agent = ReActAgent::new(provider, registry)
-        .with_log_writer(Arc::clone(&writer))
+        .with_log_writer(writer.clone())
         .with_approval_policy(never_policy());
     let mut stream = agent
         .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))

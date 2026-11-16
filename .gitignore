@@ -26,7 +26,11 @@ dist
 .worktrees/
 
 # Uva runtime files
-**/.agents/
+**/.agents/*
+# The deployment's own profile document is a project asset, not runtime
+# state: the app server boots with it (it is the document layer the
+# settings surface writes back). Tracked like `.cargo/config.toml`.
+!.agents/profile.toml
 **/.uva/
 # Content-addressed attachment store the server writes at boot
 # (`AttachmentStore::new_fs(workspace_root.join(".attachments"))`).

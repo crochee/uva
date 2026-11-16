@@ -12,7 +12,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use parking_lot::Mutex;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use uva_provider::{
@@ -23,14 +22,10 @@ use uva_provider::{
     StreamChunk,
     ToolUse,
 };
-use uva_tool::{ToolOutput, ToolRegistry};
+use uva_tool::ToolRegistry;
 
 use super::{support::*, *};
-use crate::{
-    Agent,
-    agent::re_act::delegation::{DelegatingTool, DelegationCall},
-    input::AgentInput,
-};
+use crate::{Agent, input::AgentInput};
 
 // -- check 6: one provider-config read per run -------------------------
 
@@ -225,54 +220,4 @@ async fn a_manager_that_freezes_nothing_never_detaches_a_prefetch() {
          frozen slice must return before the prefetch spawns one \
          more (got {spawns:?} spawns)",
     );
-}
-
-// -- check 11: with_delegator rejects duplicates -----------------------
-
-struct SharedName {
-    seen: Arc<Mutex<Vec<String>>>,
-}
-
-impl DelegatingTool for SharedName {
-    fn definitions(&self) -> Vec<uva_provider::ToolDefinition> {
-        vec![uva_provider::ToolDefinition {
-            name: "shared".to_string(),
-            description: "shared".to_string(),
-            input_schema: json!({"type": "object"}),
-            cache_control: None,
-            annotations: None,
-        }]
-    }
-
-    fn execute(
-        &self,
-        call: DelegationCall<'_>,
-    ) -> futures::future::BoxFuture<'static, ToolOutput> {
-        self.seen.lock().push(call.call.id.clone());
-        Box::pin(async { ToolOutput::text("done") })
-    }
-}
-
-#[test]
-fn two_delegators_advertising_one_name_are_rejected() {
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let first: Arc<dyn DelegatingTool> = Arc::new(SharedName {
-        seen: Arc::clone(&seen),
-    });
-    let second: Arc<dyn DelegatingTool> = Arc::new(SharedName {
-        seen: Arc::clone(&seen),
-    });
-
-    let agent = ReActAgent::new(
-        Arc::new(uva_provider::traits_stub::ModelProviderStub::new()),
-        Arc::new(ToolRegistry::new()),
-    )
-    .with_delegator(first)
-    .expect("the first install must be accepted");
-    let err = match agent.with_delegator(second) {
-        Ok(_) => panic!("a duplicate advertised name must be rejected"),
-        Err(name) => name,
-    };
-
-    assert_eq!(err, "shared", "the conflicting name must reach the caller");
 }

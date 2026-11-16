@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 use uva::{
+    agent::AgentRegistry,
     attachment::{AttachmentStore, KEY_ATTACHMENTS},
     eval::{EvalRunner, KEY_EVAL},
-    harness::{AgentRegistry, ApprovalPolicy, DelegatingTool},
+    harness::ApprovalPolicy,
     mcp::{KEY_MCP, McpSupervisor},
     provider::traits::ModelProvider,
     scheduler::{KEY_SCHEDULER, SchedulerService},
@@ -51,6 +52,13 @@ fn services(root: &std::path::Path) -> Arc<BootServices> {
     Arc::new(BootServices {
         tool_registry: Arc::clone(&tools),
         agent_registry: Arc::clone(&agents),
+        subagent_writers: Arc::new(
+            crate::session::subagent_router::SubagentWriterSlot::new(),
+        ),
+        session_index: Arc::new(
+            crate::session::session_index::SessionIndexSlot::new(),
+        ),
+        usage: Arc::new(crate::state::UsageMetrics::default()),
         plugin_host: uva::harness::Host::new(),
     })
 }
@@ -102,10 +110,11 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
         "memory",
         "session-store",
         "sandbox",
-        "subagent-backend",
+        "tool-task",
         "context-compactor",
         "approval",
         "skills",
+        "hooks",
         "agent-loop",
         "mcp",
         "eval",
@@ -117,7 +126,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
             "the boot profile is missing `{expected}`: {ids:?}"
         );
     }
-    assert_eq!(ids.len(), 21, "no duplicate rows: {ids:?}");
+    assert_eq!(ids.len(), 22, "no duplicate rows: {ids:?}");
 }
 
 #[tokio::test]
@@ -194,8 +203,10 @@ async fn mounts_the_native_set_through_the_kernel() {
         uva::tool_shell::KEY_SANDBOX,
     )
     .expect("sandbox");
+    ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
+        .expect("hooks");
 
-    assert_eq!(handle.len(), 21);
+    assert_eq!(handle.len(), 22);
     assert!(handle.plugin_state("skills").is_some());
 }
 
@@ -229,6 +240,51 @@ async fn an_explicit_profile_mounts_only_the_rows_it_names() {
             .is_none(),
         "an omitted row is not mounted"
     );
+}
+
+/// The `hooks` row is optional: a profile that omits it, and one that
+/// switches it `Off`, both mount the loop. The kernel validates
+/// `inject` keys statically and refuses the whole group, so a `hooks`
+/// edge in `AGENT_LOOP_INJECTS` would fail boot for every profile
+/// document written before the row existed — with no way into the
+/// settings page that could have switched it back on.
+#[tokio::test]
+async fn a_profile_without_the_hooks_row_still_mounts_the_loop() {
+    for off in [false, true] {
+        let dir = tempdir().expect("tempdir");
+        let (services, extras) = boot_services(dir.path());
+        let mut profile = profile_with_catalogue();
+        if off {
+            let row = profile
+                .core
+                .iter_mut()
+                .find(|entry| entry.id == "hooks")
+                .expect("the native set has hooks");
+            row.enabled = crate::profile::Enabled::Off;
+        } else {
+            profile.core.retain(|entry| entry.id != "hooks");
+        }
+        let shape = if off { "off" } else { "absent" };
+        let (ctx, _handle) = mount_profile(
+            Arc::clone(&services),
+            &profile,
+            SharedClock::system(),
+            extras,
+        )
+        .unwrap_or_else(|error| {
+            panic!("the `{shape}` hooks row still mounts: {error}")
+        });
+        ctx.require::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
+            uva::harness::plugin::KEY_AGENT_LOOP,
+        )
+        .expect("agentLoop");
+        assert!(
+            ctx.get::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
+                .expect("read hooks")
+                .is_none(),
+            "no external registry when the hooks row is {shape}"
+        );
+    }
 }
 
 /// A profile row whose `config` is a `ModelAdapterConfig` builds
@@ -328,7 +384,7 @@ async fn disposing_skills_withdraws_the_service_and_its_tool() {
 
 /// The profile the `agent-loop` row's own test mounts: the rows the
 /// loop injects (`tools`, `sessions`, `llm`, `llm.default`,
-/// `subagents`) plus the loop itself.
+/// `subagents`, `hooks`) plus the loop itself.
 fn agent_loop_profile(config: serde_json::Value) -> crate::profile::Profile {
     let mut profile = profile_with_catalogue();
     profile.core.retain(|entry| {
@@ -337,7 +393,8 @@ fn agent_loop_profile(config: serde_json::Value) -> crate::profile::Profile {
             "tool-registry"
                 | "model-adapter"
                 | "session-store"
-                | "subagent-backend"
+                | "tool-task"
+                | "hooks"
         )
     });
     profile.core.push(crate::profile::Entry {
@@ -426,10 +483,10 @@ fn an_empty_agent_loop_row_config_leaves_the_loop_unconfigured() {
 }
 
 /// The `agent-loop` row mounts with the profile's own config, and the
-/// delegation backend the `subagent-backend` row publishes is the
-/// service the loop consumes.
+/// `tool-task` row's tool is an ordinary registry entry — the `task`
+/// tool every run dispatches like any other tool.
 #[tokio::test]
-async fn the_subagent_backend_publishes_the_delegator_the_loop_consumes() {
+async fn the_task_row_registers_the_task_tool_and_the_loop_mounts() {
     let dir = tempdir().expect("tempdir");
     let (services, extras) = boot_services(dir.path());
     let (ctx, handle) = mount_profile(
@@ -440,25 +497,29 @@ async fn the_subagent_backend_publishes_the_delegator_the_loop_consumes() {
         SharedClock::system(),
         extras,
     )
-    .expect("the loop mounts over the backend");
+    .expect("the loop mounts over the tool brick");
 
-    let backend = ctx
-        .require::<Arc<dyn DelegatingTool>>(uva::tool_task::KEY_SUBAGENTS)
-        .expect("the subagent row publishes the backend");
-    let definitions = backend.definitions();
+    let tools = ctx
+        .require::<ToolRegistry>(KEY_TOOLS)
+        .expect("the tools service");
     assert!(
-        definitions.iter().any(|tool| tool.name == "task"),
-        "the published backend is the `task` delegator: {definitions:?}"
+        tools.contains("task"),
+        "the tool-task row files `task` in the registry"
     );
+    for name in ["agents_list", "agents_message", "agents_interrupt"] {
+        assert!(
+            tools.contains(name),
+            "the tool-task row files the control tool `{name}` in the registry"
+        );
+    }
 
-    // The loop mounts *after* the backend: the `agentLoop` service
-    // exists, which it only does when the `subagents` inject edge
-    // resolved.
     ctx.require::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
         uva::harness::plugin::KEY_AGENT_LOOP,
     )
-    .expect("the loop mounted after the backend");
-    assert_eq!(handle.len(), 5, "the profile's five rows are mounted");
+    .expect("the loop mounts without a delegation service");
+    ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
+        .expect("the hooks row publishes the registry the loop injects");
+    assert_eq!(handle.len(), 6, "the profile's six rows are mounted");
 }
 
 /// The `search` row mounts with **its own** session index: the boot's

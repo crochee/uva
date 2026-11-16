@@ -161,11 +161,11 @@ async fn test_events_are_persisted_and_broadcast() {
     // log by the run itself, through the session's writer — one
     // `assistant_message` row per turn (the fake factory mimics
     // the harness's write). The prompt's `parked_prompt` row, the
-    // `park_consumed` row that spends it, and the turn's
-    // `UserInput` envelope are the run task's own appends. The
+    // `park_consumed` row that spends it, and the turn's typed
+    // `user_message` row are the run task's own appends. The
     // `request_header` is the harness's row (the fake factory runs
     // no harness), so the JSONL holds exactly four records here:
-    // the park, its consumption, this run's `UserInput`, and the
+    // the park, its consumption, this run's prompt, and the
     // `assistant_message` row the factory wrote.
     assert_eq!(
         persisted.len(),
@@ -182,8 +182,8 @@ async fn test_events_are_persisted_and_broadcast() {
         "the run spends the park it started from"
     );
     assert!(
-        persisted.iter().any(|e| type_of(e) == "UserInput"),
-        "UserInput envelope from the prompt handler should be persisted"
+        persisted.iter().any(|e| type_of(e) == "user_message"),
+        "the turn's typed prompt row should be persisted"
     );
     assert!(
         persisted.iter().any(|e| type_of(e) == "assistant_message"),

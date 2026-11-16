@@ -30,8 +30,8 @@ async fn state() -> (AppState, tempfile::TempDir) {
 async fn hmr_remounts_only_the_changed_plugin() {
     let (state, _dir) = state().await;
     let eval_before = state
-        .kernel
-        .require::<EvalRunner>(KEY_EVAL)
+        .assembly
+        .service::<EvalRunner>(KEY_EVAL)
         .expect("the fixture mounts eval");
 
     let mut next = state.current_profile();
@@ -59,8 +59,8 @@ async fn hmr_remounts_only_the_changed_plugin() {
     // The untouched consumer keeps the allocation the fixture mounted:
     // a reload did not re-register it.
     let eval_after = state
-        .kernel
-        .require::<EvalRunner>(KEY_EVAL)
+        .assembly
+        .service::<EvalRunner>(KEY_EVAL)
         .expect("eval stays mounted");
     assert!(
         Arc::ptr_eq(&eval_before, &eval_after),
@@ -80,12 +80,12 @@ async fn hmr_remounts_only_the_changed_plugin() {
 async fn a_second_write_does_not_remount_the_world() {
     let (mut state, dir) = state().await;
     let doc = dir.path().join("profile.toml");
-    state.profile_store = Some(crate::profile::ProfileStore {
+    state.assembly.set_store(Some(crate::profile::ProfileStore {
         bundle: None,
         doc: doc.clone(),
         home: None,
         overlay: None,
-    });
+    }));
 
     let first = state
         .profile_apply(
@@ -173,8 +173,8 @@ async fn a_round_trip_over_an_unrepresentable_null_is_not_a_change() {
 async fn hmr_model_adapter_change_cascades_to_agent_loop() {
     let (state, _dir) = state().await;
     let loop_before = state
-        .kernel
-        .require::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
+        .assembly
+        .service::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
             uva::harness::plugin::KEY_AGENT_LOOP,
         )
         .expect("the fixture mounts agent-loop");
@@ -216,8 +216,8 @@ async fn hmr_model_adapter_change_cascades_to_agent_loop() {
     );
 
     let loop_after = state
-        .kernel
-        .require::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
+        .assembly
+        .service::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
             uva::harness::plugin::KEY_AGENT_LOOP,
         )
         .expect("agent-loop is mounted again");
@@ -227,8 +227,8 @@ async fn hmr_model_adapter_change_cascades_to_agent_loop() {
     );
 
     let llm = state
-        .kernel
-        .require::<crate::state::ProviderCatalogue>(uva::provider::KEY_LLM)
+        .assembly
+        .service::<crate::state::ProviderCatalogue>(uva::provider::KEY_LLM)
         .expect("llm is mounted again");
     assert_eq!(
         llm.default_provider_name(),
@@ -250,18 +250,13 @@ async fn hmr_removes_and_readds_a_row() {
         .expect("the removal applies");
     assert_eq!(diff.removed, vec!["eval".to_owned()]);
     assert!(
-        state
-            .kernel
-            .get::<EvalRunner>(KEY_EVAL)
-            .expect("read eval")
-            .is_none(),
+        state.assembly.service::<EvalRunner>(KEY_EVAL).is_none(),
         "the removed service is withdrawn"
     );
     assert!(
         state
-            .kernel
-            .get::<uva::attachment::AttachmentStore>(KEY_ATTACHMENTS)
-            .expect("read attachments")
+            .assembly
+            .service::<uva::attachment::AttachmentStore>(KEY_ATTACHMENTS)
             .is_some(),
         "a sibling stays mounted"
     );
@@ -281,11 +276,7 @@ async fn hmr_removes_and_readds_a_row() {
         .expect("the addition applies");
     assert_eq!(diff.added, vec!["eval".to_owned()]);
     assert!(
-        state
-            .kernel
-            .get::<EvalRunner>(KEY_EVAL)
-            .expect("read eval")
-            .is_some(),
+        state.assembly.service::<EvalRunner>(KEY_EVAL).is_some(),
         "the added row is mounted"
     );
 }
@@ -330,12 +321,10 @@ async fn hmr_provider_swap_reaches_new_runs_only() {
         descriptor: uva::harness::default_descriptor("swap".into()),
         prompt_context: Arc::clone(&prompt_context),
         max_iterations: 1,
-        delegators: Vec::new(),
         tool_surface: None,
         strategy: None,
         tool_restriction: None,
         log_writer: None,
-        subagent_writers: None,
         context_manager: None,
         compactor: None,
         host: None,
@@ -451,12 +440,10 @@ async fn disposing_model_adapter_parks_the_agent_loop() {
         descriptor: uva::harness::default_descriptor("recover".into()),
         prompt_context,
         max_iterations: 1,
-        delegators: Vec::new(),
         tool_surface: None,
         strategy: None,
         tool_restriction: None,
         log_writer: None,
-        subagent_writers: None,
         context_manager: None,
         compactor: None,
         host: None,
@@ -544,8 +531,8 @@ async fn removing_the_provider_row_parks_the_loop_and_fails_loudly() {
 async fn hmr_off_reports_a_restart_without_touching_the_mount() {
     let (state, _dir) = state().await;
     let eval_before = state
-        .kernel
-        .require::<EvalRunner>(KEY_EVAL)
+        .assembly
+        .service::<EvalRunner>(KEY_EVAL)
         .expect("the fixture mounts eval");
     // The fixture's built-in profile starts with HMR off; turn it on
     // first so the next change is a real "hot reload is disabled" case.
@@ -569,8 +556,8 @@ async fn hmr_off_reports_a_restart_without_touching_the_mount() {
     assert!(diff.restart_required);
     assert!(state.current_profile().hmr, "the old profile is kept");
     let eval_after = state
-        .kernel
-        .require::<EvalRunner>(KEY_EVAL)
+        .assembly
+        .service::<EvalRunner>(KEY_EVAL)
         .expect("eval stays mounted");
     assert!(Arc::ptr_eq(&eval_before, &eval_after));
 }
@@ -637,12 +624,17 @@ async fn enabled_false_unmounts_the_row_and_keeps_it_in_the_profile() {
         "the disabled row is not mounted"
     );
     assert!(
-        state.assembly.read().find("skills").is_none(),
+        state.assembly.current().find("skills").is_none(),
         "the effective assembly drops the row"
     );
     assert!(
-        state.profile.read().find("skills").is_some(),
+        state.assembly.raw().find("skills").is_some(),
         "the raw profile keeps the row for the settings page"
+    );
+    assert!(
+        state.current_profile().find("skills").is_some(),
+        "the re-resolve base is the raw declaration: passing the \
+         effective set back would drop the row for good"
     );
 }
 
@@ -701,14 +693,13 @@ async fn judge_flip_reads_as_a_presence_change() {
     let mut manifest =
         PluginManifest::new("test-judge", PLUGIN_PROTOCOL_VERSION);
     manifest.provides.push("test-judge".to_owned());
-    let _judge_mount = uva::kernel::mount_all(
-        &state.kernel,
-        &[Arc::new(JudgePlugin {
+    let _judge_mount = state
+        .assembly
+        .mount_for_test(&[Arc::new(JudgePlugin {
             manifest,
             flag: Arc::clone(&flag),
-        }) as Arc<dyn KernelPlugin>],
-    )
-    .expect("the fixture mounts the judge");
+        }) as Arc<dyn KernelPlugin>])
+        .expect("the fixture mounts the judge");
 
     let mut next = state.current_profile();
     next.hmr = true;
@@ -853,7 +844,7 @@ async fn a_reload_waits_for_the_write_transaction() {
     let next = state.current_profile();
 
     // Hold the writer the way a write transaction does.
-    let guard = state.profile_write.lock().await;
+    let guard = state.assembly.writer().lock().await;
     let mut reload = Box::pin(state.reload_profile(next));
     assert!(
         tokio::time::timeout(

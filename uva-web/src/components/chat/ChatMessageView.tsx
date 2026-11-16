@@ -501,6 +501,44 @@ function safeParseObject(raw: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * One durable `warning` row, rendered in place in the timeline: a
+ * single muted line with the warning accent, in the compaction
+ * marker's non-bubble family. The fact it reports (a refused strict
+ * fold, an accepted resume drift) outlives the turn it landed in, so
+ * it is transcript content — a toast would hide it again.
+ */
+function WarningNotice({ text }: { text: string }): JSX.Element {
+  return (
+    <div className="nt-chat__warning" data-testid="warning-notice">
+      <span className="nt-chat__warning-glyph" aria-hidden>
+        ⚠
+      </span>
+      <span className="nt-chat__warning-text">{text}</span>
+    </div>
+  );
+}
+
+/**
+ * One durable `hook_block` row, rendered in place in the timeline: a
+ * single muted line with the block accent, in the warning notice's
+ * non-bubble family.
+ *
+ * It is not the `warning` notice and does not share its segment
+ * type: a warning is a lifecycle fact about the session (a refused
+ * fold, an accepted drift), while a hook block is a policy that
+ * refused a tool call. The reader tells them apart, so the page
+ * draws them apart — the glyph and the accent say "something was
+ * blocked here", not "the session had a problem".
+ */
+function HookBlockNotice({ text }: { text: string }): JSX.Element {
+  return (
+    <div className="nt-chat__hook-block" data-testid="hook-block-notice">
+      <span className="nt-chat__hook-block-text">{text}</span>
+    </div>
+  );
+}
+
 const SegmentView = memo(function SegmentView({
   segment,
   now,
@@ -546,6 +584,14 @@ const SegmentView = memo(function SegmentView({
 
   if (segment.type === 'compaction') {
     return <CompactionMarker info={segment.compaction ?? { summary: segment.content }} />;
+  }
+
+  if (segment.type === 'warning') {
+    return <WarningNotice text={segment.content} />;
+  }
+
+  if (segment.type === 'hook_block') {
+    return <HookBlockNotice text={segment.content} />;
   }
 
   const isCollapsible =
@@ -755,6 +801,10 @@ export interface ChatMessageViewItem {
   segments: MessageSegment[];
   status?: string;
   isStreaming?: boolean;
+  /** The ordinal of the assistant row this message came from — that
+   *  row's `seq`, in decimal. The `chat/feedback` target; absent
+   *  for a message no assistant row opened (the live projection). */
+  ordinal?: number;
 }
 
 /**

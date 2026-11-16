@@ -2,6 +2,7 @@
 
 pub mod controller;
 pub mod lane;
+pub mod session_index;
 pub mod subagent_router;
 
 pub use lane::{DefaultLane, LaneError, SessionLane};

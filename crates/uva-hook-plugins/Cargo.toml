@@ -1,0 +1,63 @@
+[package]
+name = "uva-hook-plugins"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT OR Apache-2.0"
+description = "The shipped hook plugins: reflection, result redaction and risk-graded traffic light — one module and one feature per hook."
+homepage.workspace = true
+documentation.workspace = true
+
+[features]
+default = []
+# One feature per hook implementation. A feature opens exactly that
+# module and the dependencies only that hook needs. The built-in
+# steering guards are not here: they live in `uva-steering::guards`
+# and the loop installs them once at boot.
+reflection = [
+  "dep:uva-core",
+  "dep:uva-context",
+  "dep:uva-provider",
+  "dep:uva-steering",
+  "dep:uva-tool",
+  "dep:uva-hook",
+  "dep:parking_lot",
+  "dep:serde",
+  "dep:serde_json",
+]
+redact = ["dep:uva-tool", "dep:uva-hook", "dep:serde_json"]
+traffic-light = ["dep:uva-tool", "dep:uva-hook", "dep:serde_json"]
+
+[dependencies]
+async-trait.workspace = true
+# --- per-hook, optional ---
+uva-core = { workspace = true, optional = true }
+uva-context = { workspace = true, optional = true }
+uva-provider = { workspace = true, optional = true }
+uva-steering = { workspace = true, optional = true }
+uva-tool = { workspace = true, optional = true }
+uva-hook = { workspace = true, optional = true }
+parking_lot = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+chrono.workspace = true
+serde_json.workspace = true
+uva-core.workspace = true
+uva-provider = { workspace = true, default-features = false }
+uva-context.workspace = true
+uva-tool.workspace = true
+uva-hook.workspace = true
+uva-session.workspace = true
+uva-test-support.workspace = true
+# The integration tests drive the real loop to prove the provenance
+# row and the `hook_block` row the loop owns (the plugin crate itself
+# never depends on the harness).
+uva-harness.workspace = true
+
+[[example]]
+name = "reflection_demo"
+required-features = ["reflection"]

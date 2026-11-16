@@ -13,6 +13,7 @@ fn surface_event(seq: u64, message: &Message) -> SessionEvent {
         data,
         source: None,
         surface_op: Some(SurfaceOp::append()),
+        attachments: Vec::new(),
     }
 }
 
@@ -278,6 +279,8 @@ fn request_header_drift_drops_the_anchor() {
             seq: 3,
             ts: "2026-09-12T00:00:00Z".to_string(),
             data: json!({"reason": "change"}),
+            provider: None,
+            model: None,
         },
     ];
     let mut meter = TokenMeter::new();

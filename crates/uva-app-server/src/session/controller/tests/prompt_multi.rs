@@ -113,7 +113,7 @@ async fn test_prompt_multi_round_trip_carries_parts() {
 }
 
 /// A multimodal turn MUST persist its typed text as a
-/// `UserInput` row.
+/// `user_message` row.
 ///
 /// `PromptMulti` parks the whole payload in `parts`, so the
 /// pre-existing `if !prompt.is_empty()` guard saw an empty prompt
@@ -126,7 +126,7 @@ async fn test_prompt_multi_round_trip_carries_parts() {
 /// image bytes would bloat the JSONL); only the text is
 /// durable.
 #[tokio::test]
-async fn test_prompt_multi_persists_its_text_as_a_user_input_row() {
+async fn test_prompt_multi_persists_its_text_as_a_user_message_row() {
     let calls = Arc::new(Mutex::new(Vec::<AgentInput>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(RecordingFactory::new(
@@ -185,9 +185,16 @@ async fn test_prompt_multi_persists_its_text_as_a_user_input_row() {
         "the multimodal prompt's text must be persisted; log:\n{body}"
     );
     assert!(
-        body.lines().any(|l| l.contains("\"type\":\"UserInput\"")),
-        "a UserInput row must be written for a multimodal turn; \
+        body.lines()
+            .any(|l| l.contains("\"type\":\"user_message\"")),
+        "a typed user_message row must be written for a multimodal turn; \
          log:\n{body}"
+    );
+    // The turn's payloads ride the row as re-readable refs — a chip
+    // needs the kind and the name, and the bytes stay in the store.
+    assert!(
+        body.contains("\"kind\":\"image\""),
+        "the row records a ref for the image part; log:\n{body}"
     );
     // And the bytes stay out of the durable log.
     assert!(

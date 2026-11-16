@@ -1,30 +1,21 @@
-//! The ReAct loop's run state machine: the loop struct and the per-iteration order (checkpoint → sample → commit → dispatch).
+//! The ReAct loop's run state machine: the loop struct and the run-level order (repair → open → iterate → finalize).
 mod compaction;
 mod finalize;
 mod guard;
 mod hooks;
-mod prepare;
 mod resume;
-mod suspend;
-
-pub(super) mod sample;
-pub(super) mod tools;
+pub(super) mod step;
 
 use std::sync::Arc;
 
-use tracing::{info, warn};
-use uva_provider::ToolUse;
+use tracing::info;
+use uva_events::SessionEndReason;
 use uva_steering::HookDecision;
 
-use super::{
-    delegation::Delegators,
-    panic::isolate,
-    state::{RunState, SampleOutcome, Step},
-};
+use super::{state::RunState, transcript::Transcript};
 use crate::{
     AgentCaps,
     agent::{caps::AgentRuntime, sink::EventSink},
-    events::{SessionEndReason, SystemEvent, WarningKind},
     prompt::PromptContext,
 };
 
@@ -43,15 +34,6 @@ pub(crate) struct ReActLoop {
     /// run, not this one.
     pub(super) prompt_context: Arc<PromptContext>,
     pub(super) run: RunState,
-    /// Every delegator the loop dispatches, indexed by the names it is
-    /// advertised under: built once per run from the agent's own installs
-    /// and its host's registrations, so dispatch is one table hit.
-    pub(super) delegators: Delegators,
-    /// Every delegator's advertised definitions, collected once per run:
-    /// the fingerprint and the projection's compose step share this one
-    /// build.
-    pub(super) delegator_defs: Arc<Vec<uva_provider::ToolDefinition>>,
-    pub(super) delegator_fingerprint: u64,
     /// Built once so a tool call does not pay a `PathBuf` clone per
     /// dispatch.
     pub(super) ctx: uva_tool::Context,
@@ -62,11 +44,11 @@ pub(crate) struct ReActLoop {
     /// The run's steer channel: messages the host made durable while
     /// the run was in flight, drained at the top of every iteration.
     pub(super) inbox: Option<Arc<dyn crate::input::RunInbox>>,
-    /// Whether this run opened a turn that finalize must close. A
-    /// suspension writes its own `turn_end_suspended`, and a resumed
-    /// run reopens the turn from the log, so the ordinary `turn_end`
-    /// is written only when this run's own start is still open.
-    pub(super) turn_open: bool,
+    /// The run's turn bookkeeping. Owned by the step module: it opens
+    /// (here, for a fresh run), reopens (in the resume) and closes
+    /// (in finalize) through the named operations, so the flag never
+    /// crosses files.
+    pub(in crate::agent::re_act::r#loop) turn: step::TurnState,
 }
 
 impl ReActLoop {
@@ -77,35 +59,23 @@ impl ReActLoop {
         sink: EventSink,
         prompt_context: Arc<PromptContext>,
     ) -> Self {
-        let mut delegators = Delegators::default();
-        for tool in &caps.tools.delegators {
-            delegators.merge(Arc::clone(tool));
-        }
-        for tool in caps.control.seams.delegators() {
-            delegators.merge(tool);
-        }
-        let delegator_defs = delegators.definitions();
-        let delegator_fingerprint =
-            super::projection::tool_names_hash(&delegator_defs);
         let ctx = uva_tool::Context::new(
             String::new(),
             caps.env.workspace_root.clone(),
-        );
+        )
+        .with_cancel(Arc::clone(&run.cancel));
         let workspace_hash =
-            crate::agent::approval::workspace_hash(&caps.env.workspace_root);
+            uva_approval::workspace_hash(&caps.env.workspace_root);
         Self {
             caps,
             cfg,
             prompt_context,
             run,
-            delegators,
-            delegator_defs: Arc::new(delegator_defs),
-            delegator_fingerprint,
             ctx,
             workspace_hash,
             sink,
             inbox: None,
-            turn_open: false,
+            turn: step::TurnState::default(),
         }
     }
 
@@ -113,24 +83,10 @@ impl ReActLoop {
         self.sink.emit_typed(event);
     }
 
-    pub(crate) fn emit_step_start(&self, step_idx: u32) {
-        self.emit_typed(uva_session::step_start(TURN_ORDINAL, step_idx));
-    }
-
-    pub(crate) fn emit_step_end_action(
-        &self,
-        step_idx: u32,
-        action: &'static str,
-    ) {
-        self.emit_typed(uva_session::step_end(TURN_ORDINAL, step_idx, action));
-    }
-
-    /// The execution mode a call's name declares: a delegator's own mode,
-    /// else the registry's per-name mode.
+    /// The execution mode a call's name declares: the registry's
+    /// per-name mode.
     pub(super) fn execution_mode(&self, name: &str) -> uva_tool::ExecutionMode {
-        self.delegators
-            .mode(name)
-            .unwrap_or_else(|| self.caps.tools.registry.execution_mode(name))
+        self.caps.tools.registry.execution_mode(name)
     }
 
     pub(crate) fn cancelled(&self, reason: &str) -> bool {
@@ -151,9 +107,6 @@ impl ReActLoop {
     }
 }
 
-/// One `agent.run()` call is one turn, so the turn ordinal is always 0.
-pub(super) const TURN_ORDINAL: u32 = 0;
-
 pub(crate) async fn drive_from_runtime(
     runtime: AgentRuntime,
     sink: &EventSink,
@@ -162,28 +115,28 @@ pub(crate) async fn drive_from_runtime(
     let cfg = runtime.caps.model.provider.model_config();
     let model_hint = runtime.caps.model.descriptor.model_hint.clone();
     let cancel = Arc::clone(&runtime.cancel);
-    let subagent_depth = runtime.subagent_depth;
     let agent_state = uva_context::AgentState::from_config(&cfg);
-    let run_state = RunState::seed(
-        cancel,
-        subagent_depth,
-        Arc::new(Vec::new()),
-        agent_state,
-    )
-    .with_model_hint(model_hint);
+    let run_state = RunState::seed(cancel, Transcript::empty(), agent_state)
+        .with_model_hint(model_hint);
     // The run's manifest, snapshotted here and nowhere later: this is
     // the boundary that makes a plugin's prompt section visible from
     // the next run on, and keeps the prompt byte-stable inside this one.
     let prompt_context = runtime
         .caps
         .run_prompt_context(input.prompt_context.as_ref());
-    let loop_ = ReActLoop::from_caps(
+    let mut loop_ = ReActLoop::from_caps(
         runtime.caps,
         cfg,
         run_state,
         sink.clone(),
         prompt_context,
     );
+    // The tool context's session identity is the caller's `thread_id`
+    // when the run belongs to a durable thread: tools that keep
+    // per-session state (the `task` tool's child bookkeeping) or
+    // attribute spilled output read it there. A session-less run
+    // keeps the empty id `Context::new` starts with.
+    loop_.ctx.session_id = input.thread_id.clone().unwrap_or_default();
     drive(loop_, input).await;
 }
 
@@ -224,9 +177,8 @@ pub(super) async fn drive(
     // own turn, so the repair cannot close a turn this run wrote.
     if let Err(reason) = repair_tail(&this).await {
         let cancel = Arc::clone(&this.run.cancel);
-        let depth = this.run.subagent_depth;
         return this
-            .drive_finalize(RunState::failed(cancel, depth, reason), false)
+            .drive_finalize(RunState::failed(cancel, reason), false)
             .await;
     }
     // The turn boundary. One run is one turn: the start must be in the
@@ -235,17 +187,15 @@ pub(super) async fn drive(
     // resume reopens the turn it continues and would otherwise write a
     // second start.
     if input.resume.is_none() {
-        this.emit_typed(uva_session::turn_start(TURN_ORDINAL));
-        this.turn_open = true;
+        this.turn.open(&this.sink);
     }
     // The run's first boundary: the host queued this run's prompt
     // before it invoked the agent, and setup writes rows of its own.
     // Both are on disk before the first model call.
     if let Err(reason) = this.flush_log().await {
         let cancel = Arc::clone(&this.run.cancel);
-        let depth = this.run.subagent_depth;
         return this
-            .drive_finalize(RunState::failed(cancel, depth, reason), false)
+            .drive_finalize(RunState::failed(cancel, reason), false)
             .await;
     }
     // 1. Setup, the request envelope and the resume check.
@@ -297,22 +247,14 @@ async fn open_session(
         Ok(session) => session,
         Err(reason) => {
             let cancel = Arc::clone(&this.run.cancel);
-            let depth = this.run.subagent_depth;
-            return Err(Box::new(RunState::failed(cancel, depth, reason)));
+            return Err(Box::new(RunState::failed(cancel, reason)));
         }
     };
-    let offered = super::projection::offered_tools(
-        &this.caps,
-        &this.delegator_defs,
-        this.delegator_fingerprint,
-    );
-    let snapshot = prepare::request_snapshot_event(
-        &*this,
-        &offered,
-        &session.system_prompt,
-    );
+    let offered = super::projection::offered_tools(&this.caps);
+    let snapshot =
+        step::request_snapshot_event(&*this, &offered, &session.system_prompt);
     let snapshot_hash =
-        prepare::request_snapshot_hash(&snapshot).unwrap_or_default();
+        step::request_snapshot_hash(&snapshot).unwrap_or_default();
     session.request_snapshot_hash = Some(snapshot_hash.clone());
     if let Err(reason) =
         apply_resume(this, &mut session, input, &snapshot_hash).await
@@ -329,9 +271,9 @@ async fn open_session(
 // iteration budget was exhausted (the only "not our decision" end).
 async fn run_iterations(this: &mut ReActLoop, session: &mut RunState) -> bool {
     for iteration in 0..this.caps.control.max_iterations {
-        let step = drive_one_iteration(this, session, iteration).await;
+        let step = step::run(this, session, iteration).await;
         match step {
-            Step::Continue(_) => {
+            step::Step::Continue(_) => {
                 if let Some(reason) = session.terminate.take() {
                     session.end_reason = SessionEndReason::Error(reason);
                     return false;
@@ -346,6 +288,7 @@ async fn run_iterations(this: &mut ReActLoop, session: &mut RunState) -> bool {
                         .seams
                         .step_post(
                             &ctx,
+                            &this.sink,
                             &this.caps.model.descriptor.name,
                             iteration as u32,
                         )
@@ -357,15 +300,15 @@ async fn run_iterations(this: &mut ReActLoop, session: &mut RunState) -> bool {
                     return false;
                 }
             }
-            Step::Suspended => {
+            step::Step::Suspended => {
                 session.end_reason = SessionEndReason::Suspended;
                 return false;
             }
-            Step::Completed => {
+            step::Step::Completed => {
                 session.end_reason = SessionEndReason::Completed;
                 return false;
             }
-            Step::Failed(reason) => {
+            step::Step::Failed(reason) => {
                 session.end_reason = reason;
                 return false;
             }
@@ -402,294 +345,4 @@ async fn apply_resume(
         .await?;
     }
     Ok(())
-}
-
-async fn drive_one_iteration(
-    this: &mut ReActLoop,
-    session: &mut RunState,
-    iteration: usize,
-) -> Step {
-    // The step boundary, before the model call: the run waits for the
-    // disk here, so the facts the model is about to see are already
-    // on it. The run's own prompt is one of them — the user's
-    // message is durable before the model ever sees it, and a crash
-    // in the window between the prompt and the answer keeps it.
-    if let Err(reason) = this.flush_log().await {
-        return Step::Failed(reason);
-    }
-    let step = iteration_body(this, session, iteration).await;
-    if matches!(step, Step::Suspended) {
-        // The approval rows and the suspended boundary are the
-        // suspension's durability: write them, then the `Suspended`
-        // event (the boundary flushes first).
-        if let Err(reason) = suspend::boundary(this, session).await {
-            return Step::Failed(reason);
-        }
-    } else {
-        this.emit_step_end_action(iteration as u32, step.action());
-    }
-    // The step boundary is where the run waits for the disk: every
-    // row this step produced is durable before the next model call
-    // goes out, so a resume can say "it ran, the result is here".
-    if let Err(reason) = this.flush_log().await {
-        return Step::Failed(reason);
-    }
-    step
-}
-
-async fn iteration_body(
-    this: &mut ReActLoop,
-    session: &mut RunState,
-    iteration: usize,
-) -> Step {
-    // 1. Prepare: counter bump, `iteration_start`, cancel check.
-    if let Some(step) = iteration_start_setup(this, session, iteration).await {
-        return step;
-    }
-    // 2. The run's in-memory transcript is the source of truth: the
-    // log was read once at setup, and every message this loop commits
-    // carries the ordinal its row was written under. A steer the host
-    // made durable while the run was in flight arrives here.
-    drain_inbox(this, session).await;
-    // 3. Compaction sits before the request: plan over the transcript
-    // the loop holds, summarise, write the replace, splice the result
-    // back into the transcript. A summariser failure is not fatal —
-    // the run continues uncompacted.
-    if let Err(reason) = compaction::compact(this, session, iteration).await {
-        return Step::Failed(reason);
-    }
-    // 4. The request: system prompt + durable transcript + this
-    // turn's bytes, then the request-local prune, the runtime
-    // snapshot and the hints. None of it is written back.
-    let request = match this.build_request(session, iteration).await {
-        Ok(request) => request,
-        Err(reason) => return Step::Failed(reason),
-    };
-    this.sink.system(SystemEvent::Progress {
-        message: format!("LLM pass {iteration}"),
-        step: iteration,
-        total: this.caps.control.max_iterations,
-    });
-    // 5. Sample.
-    let sample =
-        match sample_once_or_fail(this, session, &request, iteration).await {
-            Ok(sample) => sample,
-            Err(reason) => return Step::Failed(reason),
-        };
-    // 6. Commit the assistant turn.
-    let SampleOutcome {
-        result,
-        parts,
-        assistant_seq,
-    } = sample;
-    sample::commit_assistant(session, parts, &result, assistant_seq);
-    // 7. Dispatch: the tool batch, or the final-answer path.
-    if !result.tool_calls.is_empty() {
-        handle_tool_calls(this, session, &result, iteration).await
-    } else {
-        handle_final_answer(&result, iteration).await
-    }
-}
-
-// Move the messages the host logged mid-run into the transcript.
-//
-// A user turn may not interleave a `tool_use` and its `tool_result`,
-// so a message that arrives while a batch is open waits in
-// `deferred_user` and is released when the batch commits.
-async fn drain_inbox(this: &ReActLoop, session: &mut RunState) {
-    let Some(inbox) = this.inbox.as_ref() else {
-        return;
-    };
-    let drained = inbox.drain().await;
-    for message in drained {
-        if session.pending_tool_calls.is_empty() {
-            Arc::make_mut(&mut session.messages).push(message);
-            // The host wrote the row; this loop does not know its
-            // ordinal, so the message is never cited as provenance.
-            session.surface_seqs.push(0);
-        } else {
-            session.deferred_user.push(message);
-        }
-    }
-}
-
-async fn iteration_start_setup(
-    this: &mut ReActLoop,
-    session: &mut RunState,
-    iteration: usize,
-) -> Option<Step> {
-    session.agent_state.iteration_count = iteration + 1;
-    for tracker in &this.caps.control.seams.tracker_table() {
-        isolate(
-            &this.sink,
-            WarningKind::Hook,
-            None,
-            "tracker.on_iteration",
-            || {
-                tracker.on_iteration(&session.agent_state);
-            },
-        );
-    }
-    // Emit before the cancel check so a step that never samples
-    // still has its typed boundary.
-    this.emit_step_start(iteration as u32);
-    if this.cancelled("cancelled before LLM call") {
-        info!(
-            iteration,
-            "cancelled before LLM call; ending session with Cancelled"
-        );
-        return Some(Step::Failed(SessionEndReason::Cancelled));
-    }
-    None
-}
-
-/// The provider id a durable row records.
-///
-/// [`uva_provider::ModelConfig::provider`] is the id the
-/// deployment configured; [`uva_provider::ModelProvider::name`]
-/// is the *model* for an OpenAI-compatible implementation, so a row
-/// built from the handle names the model twice and the provider is
-/// unrecoverable from the log. A provider that leaves the id empty
-/// falls back to its own name, so the row is never blank.
-pub(super) fn provider_id<'a>(
-    cfg: &'a uva_provider::ModelConfig,
-    provider: &'a dyn uva_provider::ModelProvider,
-) -> &'a str {
-    if cfg.provider.is_empty() {
-        provider.name()
-    } else {
-        cfg.provider.as_str()
-    }
-}
-
-async fn sample_once_or_fail(
-    this: &ReActLoop,
-    session: &mut RunState,
-    request: &super::state::Transcript,
-    iteration: usize,
-) -> Result<SampleOutcome, SessionEndReason> {
-    // `provider_id` is also baked into the LLM span fields;
-    // the metric wrappers (`record_llm_call` /
-    // `record_llm_latency`) are unconditional no-ops when the
-    // consumer has not enabled OTel, so the same source feeds
-    // both the span and the metric without a feature split.
-    // Both labels borrow `this.cfg`, read once when the loop was
-    // built — no provider call and no `ModelConfig` allocation
-    // per iteration.
-    let provider_id = this.cfg.provider.as_str();
-    let model = this.cfg.name.as_str();
-    let started = std::time::Instant::now();
-    // Destructuring borrow replaces the old `mem::replace` /
-    // `mem::replace` round-trip: one split of `RunState`'s
-    // fields, no throwaway `AgentState` / empty `Arc<Vec<_>>`.
-    let RunState {
-        agent_state,
-        projection,
-        model_hint,
-        ..
-    } = &mut *session;
-    let outcome = sample::sample_once(
-        this,
-        request,
-        agent_state,
-        projection,
-        model_hint.as_ref(),
-        iteration,
-    )
-    .await;
-    let elapsed = started.elapsed().as_secs_f64();
-    uva_telemetry::record_llm_latency(provider_id, model, elapsed);
-    match outcome {
-        Ok(out) => {
-            uva_telemetry::record_llm_call(provider_id, model, "ok");
-            Ok(out)
-        }
-        Err(reason) => {
-            uva_telemetry::record_llm_call(provider_id, model, "error");
-            info!(
-                iteration,
-                ?reason,
-                "sample_once returned Err; ending session"
-            );
-            Err(reason)
-        }
-    }
-}
-
-// ===== iteration routing =============================================
-
-pub(super) async fn handle_final_answer(
-    result: &uva_provider::SamplingResult,
-    iteration: usize,
-) -> Step {
-    info!(
-        iteration,
-        assistant_text_len = result.text.len(),
-        "no tool calls returned by model; ending session with Completed"
-    );
-    Step::Completed
-}
-
-pub(super) async fn handle_tool_calls(
-    this: &mut ReActLoop,
-    session: &mut RunState,
-    result: &uva_provider::SamplingResult,
-    iteration: usize,
-) -> Step {
-    // A length stop means the assistant turn was cut off, so its
-    // tool-call arguments may be silently truncated.
-    if uva_provider::is_length_stop_reason(&result.stop_reason) {
-        return dispatch_truncated_batch(
-            this,
-            session,
-            &result.tool_calls,
-            iteration,
-        )
-        .await;
-    }
-    if !result.tool_calls.is_empty()
-        && this.cancelled("cancelled before tool execution")
-    {
-        info!(
-            iteration,
-            "cancelled before tool execution; ending session with Cancelled"
-        );
-        return Step::Failed(SessionEndReason::Cancelled);
-    }
-    dispatch_execute_tools(this, session, &result.tool_calls, iteration).await
-}
-
-pub(super) async fn dispatch_truncated_batch(
-    this: &ReActLoop,
-    session: &mut RunState,
-    tool_uses: &[ToolUse],
-    iteration: usize,
-) -> Step {
-    warn!(
-        iteration,
-        tool_call_count = tool_uses.len(),
-        "length stop with tool calls; failing the batch instead of executing"
-    );
-    sample::fail_truncated_tool_batch(this, session, tool_uses).await;
-    Step::Continue("tools_truncated")
-}
-
-pub(super) async fn dispatch_execute_tools(
-    this: &mut ReActLoop,
-    session: &mut RunState,
-    tool_uses: &[ToolUse],
-    iteration: usize,
-) -> Step {
-    info!(
-        iteration,
-        tool_call_count = tool_uses.len(),
-        "step 4: executing tool calls returned by LLM"
-    );
-    if let Err(reason) = tools::execute_tools(this, session, tool_uses).await {
-        return Step::Failed(reason);
-    }
-    if !session.pending_approvals.is_empty() {
-        return Step::Suspended;
-    }
-    Step::Continue("tools_complete")
 }

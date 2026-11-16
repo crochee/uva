@@ -436,8 +436,8 @@ async fn a_plain_prompts_turn_does_not_spend_a_park() {
             let rows =
                 manager.sink("alice", "s1").read().await.unwrap_or_default();
             if rows.iter().any(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "a text-only prompt"
+                super::support::prompt_text_of(row).as_deref()
+                    == Some("a text-only prompt")
             }) {
                 return rows;
             }
@@ -503,12 +503,11 @@ async fn a_park_whose_append_failed_is_still_spent_by_its_run() {
     let jsonl = Arc::new(JsonlSessionSink::new("s1", dir.path()));
     let sink: Arc<dyn SessionSink> =
         Arc::new(LyingAppendSink::new(Arc::clone(&jsonl)));
-    let writer =
+    let writer: Arc<dyn uva::session::SessionLog> =
         Arc::new(LogWriter::new(Arc::clone(&sink), Arc::new(SystemClock)));
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink),
         writer,
         test_deps(),
         Duration::from_secs(60),
@@ -549,8 +548,8 @@ async fn a_park_whose_append_failed_is_still_spent_by_its_run() {
     assert_eq!(
         rows.iter()
             .filter(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "the turn that must not run twice"
+                super::support::prompt_text_of(row).as_deref()
+                    == Some("the turn that must not run twice")
             })
             .count(),
         1,
@@ -680,12 +679,11 @@ async fn text_prompt_is_parked_durably_and_survives_a_rebuild() {
     let jsonl = Arc::new(JsonlSessionSink::new("s1", dir.path()));
     let gated = Arc::new(GatedReadSink::blocking(Arc::clone(&jsonl)));
     let sink: Arc<dyn SessionSink> = Arc::clone(&gated) as Arc<dyn SessionSink>;
-    let writer =
+    let writer: Arc<dyn uva::session::SessionLog> =
         Arc::new(LogWriter::new(Arc::clone(&sink), Arc::new(SystemClock)));
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink),
         Arc::clone(&writer),
         test_deps(),
         Duration::from_secs(60),
@@ -768,7 +766,6 @@ async fn text_prompt_is_parked_durably_and_survives_a_rebuild() {
     let rebuilt = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink),
         Arc::clone(&writer),
         test_deps(),
         Duration::from_secs(60),
@@ -793,10 +790,10 @@ async fn text_prompt_is_parked_durably_and_survives_a_rebuild() {
     let rows = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let rows = jsonl.read().await.unwrap_or_default();
-            let turns: Vec<&str> = rows
+            let turns: Vec<String> = rows
                 .iter()
-                .filter(|row| row["type"] == "UserInput")
-                .filter_map(|row| row["data"]["text"].as_str())
+                .filter(|row| super::support::is_prompt_row(row))
+                .filter_map(super::support::prompt_text_of)
                 .collect();
             if turns.len() == 2 {
                 return rows;
@@ -806,10 +803,10 @@ async fn text_prompt_is_parked_durably_and_survives_a_rebuild() {
     })
     .await
     .expect("the rebuilt controller runs both recovered turns");
-    let turns: Vec<&str> = rows
+    let turns: Vec<String> = rows
         .iter()
-        .filter(|row| row["type"] == "UserInput")
-        .filter_map(|row| row["data"]["text"].as_str())
+        .filter(|row| super::support::is_prompt_row(row))
+        .filter_map(super::support::prompt_text_of)
         .collect();
     assert_eq!(
         turns,
@@ -854,12 +851,11 @@ async fn each_queued_text_prompt_becomes_its_own_turn() {
     let jsonl = Arc::new(JsonlSessionSink::new("s1", dir.path()));
     let gated = Arc::new(GatedReadSink::blocking(Arc::clone(&jsonl)));
     let sink: Arc<dyn SessionSink> = Arc::clone(&gated) as Arc<dyn SessionSink>;
-    let writer =
+    let writer: Arc<dyn uva::session::SessionLog> =
         Arc::new(LogWriter::new(Arc::clone(&sink), Arc::new(SystemClock)));
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink),
         Arc::clone(&writer),
         test_deps(),
         Duration::from_secs(60),
@@ -920,7 +916,11 @@ async fn each_queued_text_prompt_becomes_its_own_turn() {
     let rows = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let rows = jsonl.read().await.unwrap_or_default();
-            if rows.iter().filter(|row| row["type"] == "UserInput").count() == 2
+            if rows
+                .iter()
+                .filter(|row| super::support::is_prompt_row(row))
+                .count()
+                == 2
             {
                 return rows;
             }
@@ -929,10 +929,10 @@ async fn each_queued_text_prompt_becomes_its_own_turn() {
     })
     .await
     .expect("both turns land their user rows");
-    let turns: Vec<&str> = rows
+    let turns: Vec<String> = rows
         .iter()
-        .filter(|row| row["type"] == "UserInput")
-        .filter_map(|row| row["data"]["text"].as_str())
+        .filter(|row| super::support::is_prompt_row(row))
+        .filter_map(super::support::prompt_text_of)
         .collect();
     assert_eq!(
         turns,
@@ -1237,7 +1237,6 @@ async fn the_cancelled_state_never_outlives_its_park_consumed_rows() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink) as Arc<dyn uva::session::SessionSink>,
         writer,
         super::support::test_deps(),
         Duration::from_secs(60),
@@ -1349,7 +1348,6 @@ async fn the_cancels_park_spending_does_not_hold_the_steer_gate() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        Arc::clone(&sink) as Arc<dyn uva::session::SessionSink>,
         writer,
         super::support::test_deps(),
         Duration::from_secs(60),

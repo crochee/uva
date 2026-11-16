@@ -36,12 +36,12 @@ The frozen surface is that set of names, per crate:
 | Crate | Frozen names |
 |---|---|
 | `uva-core` | 41 |
-| `uva-context` | 43 |
-| `uva-harness` | 64 |
-| `uva-provider` | 92 |
-| `uva-session` | 121 |
-| `uva-steering` | 43 |
-| `uva-tool` | 48 |
+| `uva-context` | 19 |
+| `uva-harness` | 61 |
+| `uva-provider` | 93 |
+| `uva-session` | 128 |
+| `uva-steering` | 36 |
+| `uva-tool` | 44 |
 
 The full lists are in [The frozen names](#the-frozen-names) below. Every
 entry is spelled exactly as you would write it after the crate name:
@@ -82,6 +82,65 @@ Be explicit about the other side of the promise:
   name stays importable from the crate root, spelled exactly as listed.
   The shapes behind the names (parameters, generics, trait bounds)
   follow ordinary pre-1.0 evolution, recorded in the changelog.
+
+## Recorded shape changes
+
+Signatures evolve under the rule above. The breaking shapes this line
+ships are recorded here, beside the promise they narrow:
+
+- **Three names left the curated surface** (plugin-crate splits, ticket
+  10 — the delegation channel's retirement). `DelegatingTool` (the
+  delegating-tool trait), `DelegationCall` (the call payload it
+  received) and `AgentMeta` (the sub-agent metadata the wrapped
+  `AgentEvent::Agent` variant carried) are **no longer importable**
+  from `uva-harness` — the delegation seam is gone with the channel
+  itself. The delegation capability did not disappear with the names:
+  the `task` tool is an ordinary registry tool in `uva-tool-task`, and
+  it runs a peer agent as a child run without any of the three types.
+  The event vocabulary lost the `AgentEvent::Agent` wrapper variant
+  with them, so a child's events stay in the child's own session
+  stream instead of travelling into the parent's as a wrapped frame.
+  Migration: install `task` through the tool registry (see
+  `uva-tool-task`'s README) and read the child's transcript from the
+  child session.
+
+- **`SubagentWriters::open_child` changed shape** (plugin-crate splits,
+  ticket 10). The method took one `&AgentMeta` argument; it now takes
+  the facts it needs as named arguments — `child_session_id`,
+  `parent_session_id`, `depth`, `agent_name` and `prompt` — because
+  the metadata struct left with the wrapper variant. The *name*
+  `SubagentWriters` stays on the frozen list and its import paths do
+  not move.
+
+- **`HookContext` lost its `events` field** (plugin-crate splits, ADR
+  0004). The context a `Hook`, `Gate`, `RequestTransformer` or
+  `ResultTransformer` sees now carries the run state (`state`) and the
+  cancellation token (`cancel`) only — the sink half is no longer part
+  of the contract, because every out-of-tree registration would have
+  had to name a host-private type. The loop passes its sink explicitly
+  where a dispatch writes the durable `hook_block` veto row (the
+  `Seams` dispatch methods and `Host::dispatch_hooks` gained that
+  argument). The *name* `HookContext` stays on the frozen list and its
+  import paths do not move: `uva-hook` owns the type and `uva-harness`
+  re-exports it from both the crate root and `agent::host`.
+
+- **`uva_tool::Context` gained `cancel`** (plugin-crate splits, ticket
+  08). Every tool dispatch now carries the run's cancellation token
+  (`Arc<dyn CancelToken>`) beside the session id, workspace root and
+  output bound; the loop installs the run's own token before dispatching
+  a call, and a tool that starts nested work (the `task` tool driving a
+  child run) hands it down instead of inventing a second cancellation
+  channel. `Context::new` / `Context::default` still build a context
+  whose token is never cancelled; `Context::with_cancel` is the chained
+  injection point. The *name* `Context` stays on the frozen list and its
+  import paths do not move.
+
+- **`Arbitration` moved to `uva-hook`** (hook registry + gate, ADR
+  0004). The type now lives in the contract crate beside the
+  `HookRegistry` whose dispatch produces it; `uva-harness` re-exports
+  it from both the crate root and `agent::host`, so the frozen name
+  and its import paths do not move. Its shape is unchanged (`decision`
+  + `asks`).
 
 ## How long the promise runs
 
@@ -147,150 +206,155 @@ this once, ship it" leaves a visible mark.
 
 ## The frozen names
 
+
 Sorted per crate; the backticked spelling is the exact import name.
+
+
+The lists below are generated from `scripts/frozen-api/baseline` —
+if a list here disagrees with the baseline, the baseline wins and this
+page is stale. Regenerate the baseline with
+`bash scripts/check-frozen-api.sh --print > scripts/frozen-api/baseline`
+and rewrite these lists in the same change.
+
 
 ### uva-core — 41 names
 
 Runtime seams without a runtime: clock, cancellation, ids, sleep, plus
 small shared registries and text helpers.
 
+
 `AgentDescriptor`, `AgentFilter`, `AtomicCancelToken`, `Blocking`, `BreakerConfig`
 `BreakerObservation`, `BreakerPhase`, `BreakerState`, `CancelToken`, `Clock`
-`Error`, `FixedClock`, `FixedSleeper`, `FullOutputStore`, `IdGen`, `InMemoryFullOutputStore`
-`MAX_LIMIT`, `NameTable`, `Outcome`, `Registry`, `RegistryItem`, `RegistryList`
-`SchemaViolation`, `Sensitive`, `SensitiveData`, `SequenceGenerator`, `SharedClock`
-`SharedIdGen`, `Sleeper`, `SystemClock`, `ThreadBlocking`, `ThreadSleeper`
-`UlidGenerator`, `cap_to_char_boundary`, `paginate_registry_list`, `panic_message`
-`parse_judge_score`, `redact_partial`, `redact_partial_with`, `truncate_chars`
+`Error`, `FixedClock`, `FixedSleeper`, `FullOutputStore`, `IdGen`
+`InMemoryFullOutputStore`, `MAX_LIMIT`, `NameTable`, `Outcome`, `Registry`
+`RegistryItem`, `RegistryList`, `SchemaViolation`, `Sensitive`, `SensitiveData`
+`SequenceGenerator`, `SharedClock`, `SharedIdGen`, `Sleeper`, `SystemClock`
+`ThreadBlocking`, `ThreadSleeper`, `UlidGenerator`, `cap_to_char_boundary`, `paginate_registry_list`
+`panic_message`, `parse_judge_score`, `redact_partial`, `redact_partial_with`, `truncate_chars`
 `validate_against_schema`
 
-### uva-context — 43 names
 
-The context window: managers, memory, DAG summaries, compaction
-settings.
+### uva-context — 19 names
 
-`AgentState`, `CompactionDetails`, `CompactionLifecycle`, `CompactionRecord`
-`CompactionSettings`, `ContextManager`, `DagConfig`, `DagContextManager`
-`DagNode`, `DagStore`, `FileMemory`, `FileMemoryConfig`, `FileMemoryEntry`
-`FileMemoryError`, `InMemoryMemory`, `MAX_MEMORY_INDEX_LINES`, `Memory`, `MemoryEntry`
-`MemoryError`, `MemoryKind`, `MemoryScope`, `NoopContextManager`, `SUMMARY_TAG`
-`SessionMemory`, `SharedContextManager`, `SummariseFn`, `SummarizingContextManager`
-`SummaryId`, `ToolCallArchive`, `ToolCallRecord`, `ToolCallRecordKind`, `TouchedPair`
-`TruncatingContextManager`, `TypedProjectionError`, `UsageMeter`, `ValidationError`
-`KEY_MEMORY`, `MemoryPlugin` — the `memory` kernel plugin's surface
-`events_to_messages`, `repair_session`, `should_compact`, `touched_target`
-`typed_messages_from_sink`
+The context-window policy and the three-tier memory paradigm.
 
-### uva-harness — 64 names
 
-The agent loop: strategies, approval/resume, checkpoints, host hooks,
-events, and the loop's own contract.
+`AgentState`, `ContextManager`, `FileMemory`, `FileMemoryConfig`, `FileMemoryEntry`
+`FileMemoryError`, `InMemoryMemory`, `KEY_MEMORY`, `MAX_MEMORY_INDEX_LINES`, `Memory`
+`MemoryEntry`, `MemoryError`, `MemoryKind`, `MemoryPlugin`, `MemoryScope`
+`NoopContextManager`, `SharedContextManager`, `TruncatingContextManager`, `UsageMeter`
 
-`Agent`, `AgentCaps`, `AgentDescriptor`, `AgentEntry`, `AgentEvent`, `AgentInput`
-`AgentMeta`, `AgentRegistry`, `AgentRuntime`, `ApprovalGate`, `ApprovalMode`
-`ApprovalPlugin`, `ApprovalPolicy`, `ApprovalRequest`, `Arbitration`
-`CheckpointError`, `CheckpointSnapshot`, `Checkpointer`, `DEFAULT_MAX_ITERATIONS`
-`DEFAULT_SYSTEM_PROMPT`, `DelegatingTool`, `DelegationCall`, `Diagnostic`
-`DiagnosticKind`, `EventSink`, `Gate`, `GrantKey`, `GrantScope`, `Hook`, `Host`
-`InMemoryCheckpointer`, `KEY_APPROVAL`, `Plugin`, `PluginHandle`, `PromptContext`
-`PromptSection`, `ReActAgent`, `ReActStrategy`, `ReasoningStrategy`, `Registration`
-`RequestTransformer`, `ResultTransformer`, `ResumeCoverageError`, `ResumeDecision`
-`ResumeStatus`, `ResumeToken`, `RiskOf`, `SessionEndReason`, `StrategyRegistry`
-`SubagentWriters`, `Suspension`, `SystemEvent`, `WarningKind`, `align_decisions`
-`check_coverage`, `default_descriptor`, `latest_request_snapshot_hash`, `may_retry`
-`open_requests`, `prepare_messages_for_shot`, `single_shot_request`, `single_shot_request_shared`
-`suspended_segment`, `workspace_hash`
 
-### uva-provider — 92 names
+### uva-harness — 61 names
+
+The agent loop: strategies, approval/resume, checkpoints, host
+hooks, events, and the loop's own contract.
+
+
+`Agent`, `AgentCaps`, `AgentDescriptor`, `AgentEntry`, `AgentEvent`
+`AgentInput`, `AgentRegistry`, `AgentRuntime`, `ApprovalGate`
+`ApprovalMode`, `ApprovalPlugin`, `ApprovalPolicy`, `ApprovalRequest`, `Arbitration`
+`ChannelInbox`, `DEFAULT_MAX_ITERATIONS`, `DEFAULT_SYSTEM_PROMPT`
+`Diagnostic`, `DiagnosticKind`, `EventSink`, `EventStream`, `Gate`
+`GrantKey`, `GrantScope`, `Hook`, `HookContext`, `Host`
+`KEY_APPROVAL`, `Plugin`, `PluginHandle`, `PromptContext`, `PromptSection`
+`ReActAgent`, `ReActStrategy`, `ReasoningStrategy`, `Registration`, `RequestTransformer`
+`ResultTransformer`, `ResumeCoverageError`, `ResumeDecision`, `ResumeStatus`, `ResumeToken`
+`RiskOf`, `RunInbox`, `SessionEndReason`, `StrategyRegistry`, `SubagentWriters`
+`Suspension`, `SystemEvent`, `WarningKind`, `align_decisions`, `check_coverage`
+`default_descriptor`, `latest_request_snapshot_hash`, `may_retry`, `open_requests`, `prepare_messages_for_shot`
+`single_shot_request`, `single_shot_request_shared`, `suspended_segment`, `workspace_hash`
+
+
+### uva-provider — 93 names
 
 Model providers and everything around a completion: request/response
 types, credentials, retry classification, cache policy, JSON repair.
 
-`AnthropicProfile`, `AnthropicProvider`, `AnthropicStreamContentBlock`, `AnthropicStreamDelta`
-`AnthropicStreamEvent`, `BilledClass`, `BlockAssembler`, `CacheControlMark`
-`CachePolicy`, `CachePolicyApplier`, `CacheScope`, `CacheTtl`, `CompletionRequest`
-`CompletionResponse`, `Content`, `ContentPart`, `ContextOverflowDetector`
-`CredentialError`, `CredentialStatus`, `DEFAULT_ANTHROPIC_CONTEXT_WINDOW`
-`DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS`, `DEFAULT_OPENAI_CONTEXT_WINDOW`, `DEFAULT_OPENAI_MAX_OUTPUT_TOKENS`
-`DEFAULT_STREAM_IDLE_TIMEOUT`, `EMPTY_RESPONSE_MARKER`, `IDLE_TIMEOUT_MARKER`
-`ImageContent`, `ImageDetail`, `KEY_LLM`, `KEY_LLM_DEFAULT`, `MAX_PROVIDER_ERROR_BODY_CHARS`, `Message`
-`MessageCacheStrategy`, `MessageKind`, `ModelAdapterPlugin`, `ModelCapabilities`, `ModelConfig`
-`ModelInfo`, `ModelProvider`, `ModelTier`, `OpenAICompatibleProvider`, `OpenAIProfile`
-`ProviderConfig`, `ProviderEntry`, `ProviderErrorBody`, `ProviderInfo`, `ProviderProfile`
-`ProviderRegistry`, `ProviderResolver`, `ReasoningContent`, `ResourceLink`, `RetryClass`, `RetryConfig`
-`Role`, `SamplingResult`, `StreamChunk`, `StubProfile`, `TextContent`, `TierLimits`
-`TierParseError`, `TokenCounter`, `TokenUsage`, `ToolAnnotations`, `ToolArgsQuality`
-`ToolChoice`, `ToolDefinition`, `ToolResult`, `ToolUse`, `WorkspaceConfig`
-`apply_cache_policy`, `classify`, `classify_error`, `classify_provider_error_body`
-`complete_partial_json`, `completion_to_sampling`, `empty_response_error`
-`estimate_messages_token_count`, `idle_timeout_error`, `is_empty_response_error`
-`is_idle_timeout`, `is_length_stop_reason`, `is_retryable_error`, `is_silent_overflow`
-`normalize_api_key`, `parse_provider_error_body`, `parse_retry_after`, `parse_tool_input`
-`parse_tool_input_logged`, `parse_tool_input_reported`, `parse_tool_input_with_completion`
+
+`AnthropicProfile`, `AnthropicProvider`, `AnthropicStreamContentBlock`, `AnthropicStreamDelta`, `AnthropicStreamEvent`
+`BilledClass`, `BlockAssembler`, `CacheControlMark`, `CachePolicy`, `CachePolicyApplier`
+`CacheScope`, `CacheTtl`, `CompletionRequest`, `CompletionResponse`, `Content`
+`ContentPart`, `ContextOverflowDetector`, `CredentialError`, `CredentialStatus`, `DEFAULT_ANTHROPIC_CONTEXT_WINDOW`
+`DEFAULT_ANTHROPIC_MAX_OUTPUT_TOKENS`, `DEFAULT_OPENAI_CONTEXT_WINDOW`, `DEFAULT_OPENAI_MAX_OUTPUT_TOKENS`, `DEFAULT_STREAM_IDLE_TIMEOUT`, `EMPTY_RESPONSE_MARKER`
+`IDLE_TIMEOUT_MARKER`, `ImageContent`, `ImageDetail`, `KEY_LLM`, `KEY_LLM_DEFAULT`
+`MAX_PROVIDER_ERROR_BODY_CHARS`, `Message`, `MessageCacheStrategy`, `MessageKind`, `ModelAdapterPlugin`
+`ModelCapabilities`, `ModelConfig`, `ModelInfo`, `ModelProvider`, `ModelTier`
+`OpenAICompatibleProvider`, `OpenAIProfile`, `ProviderConfig`, `ProviderEntry`, `ProviderErrorBody`
+`ProviderInfo`, `ProviderProfile`, `ProviderRegistry`, `ProviderResolver`, `ReasoningContent`
+`ResourceLink`, `RetryClass`, `RetryConfig`, `Role`, `SamplingResult`
+`StreamChunk`, `StubProfile`, `TextContent`, `TierLimits`, `TierParseError`
+`TokenCounter`, `TokenUsage`, `ToolAnnotations`, `ToolArgsQuality`, `ToolChoice`
+`ToolDefinition`, `ToolResult`, `ToolUse`, `WorkspaceConfig`, `apply_cache_policy`
+`classify`, `classify_error`, `classify_provider_error_body`, `complete_partial_json`, `completion_to_sampling`
+`empty_response_error`, `estimate_messages_token_count`, `idle_timeout_error`, `is_empty_response_error`, `is_idle_timeout`
+`is_length_stop_reason`, `is_retryable_error`, `is_silent_overflow`, `normalize_api_key`, `parse_provider_error_body`
+`parse_retry_after`, `parse_tool_input`, `parse_tool_input_logged`, `parse_tool_input_reported`, `parse_tool_input_with_completion`
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
-### uva-session — 121 names
 
-The durable ledger: JSONL sink and version header, events, history fold,
-surface ledger, compaction, search, token metering, typed builders.
+### uva-session — 128 names
 
-`AttachmentRefRow`, `BalanceCache`, `CURRENT_SCHEMA_VERSION`, `CompactionCheckpoint`
-`CompactionError`, `CompactionLifecycleOutcome`, `CompactionLifecycleView`
-`CompactionOutcome`, `CompactionPass`, `CompactionPassError`, `CompactionPlan`
-`CompactionPlugin`, `CompactionPluginConfig`, `CompactionRecordView`, `CompactionRef`, `Compactor`
-`ContextPressure`, `DEFAULT_BUS_CAPACITY`
-`DEFAULT_LIMIT`, `DEFAULT_PRUNE_MIN_CHARS`, `DEFAULT_SUMMARY_TIMEOUT`, `EntryHit`
-`FoldError`, `FoldedSurface`, `HistoryError`, `JsonlSessionSearch`, `KEY_COMPACTION`
-`KEY_SESSIONS`, `KNOWN_SESSION_EVENT_TYPES`
-`LogWriter`, `MAX_PLUGIN_KIND_BYTES`, `MAX_PLUGIN_PAYLOAD_BYTES`, `MappingGap`
-`MeasurementBaseline`, `MetaMarker`, `OperationSnapshot`, `OperationState`
-`OrphanedCompaction`, `PRUNED_TOOL_RESULT`, `ParkedPromptRecovery`, `PlannedCompaction`
-`ReplaceRange`, `ResolvedReplace`, `SearchError`, `SearchQuery`, `SessionEndReason`
-`SessionError`, `SessionEvent`, `SessionHit`, `SessionMetadataHeader`, `SessionSearch`
-`SessionSink`, `SessionSnapshot`, `SessionStoreConfig`, `SessionStorePlugin`, `SharedSessionSearch`, `SharedSurfaceLedger`
-`SnapshotBus`, `SnapshotReceiver`, `SummaryCompactor`, `SurfaceLedger`, `SurfaceOp`
-`SurfaceToken`, `TOOL_NOT_STARTED`, `TOOL_OUTCOME_UNKNOWN`, `TURN_INTERRUPTED`
-`TokenBudget`, `TokenMeasurement`, `TokenMeter`, `TokenMeterError`, `TypedEventRecord`
-`UnbalancedCut`, `UsageBuckets`, `approval_asked`, `approval_decided`, `approval_granted`
-`assemble_chunks`, `balanced_cut_at_or_before`, `balanced_message_cut`, `begin_compaction`
-`build_balance_cache`, `compaction_balanced`, `compaction_outcomes`, `derive_history`
-`empty_event_of`, `estimate_message_tokens`, `finish_compaction`, `fold_log_surface`
-`fold_surface`, `interrupted_turn_closers`, `is_metadata_header_row`, `iteration_end`
-`iteration_start`, `jsonl_session_search`, `log_tail_seq`, `modified_at`
-`orphaned_compactions`, `parked_prompts`, `plan_compaction`, `prune_tool_results`
-`request_header`, `request_snapshot`, `round_trip`, `step_end`, `step_end_suspended`
-`step_start`, `structural_kind`, `subagent_enter`, `subagent_exit`, `surface_events_from_log`
-`surface_message`, `surface_to_messages`, `tool_dispatch`, `try_fold_log_surface`
-`turn_end`, `turn_end_suspended`, `turn_start`, `turn_suspended`, `usage`
-`user_message`, `validate_replace_with_balance`
+The durable ledger: JSONL sink and version header, events, history
+fold, surface ledger, compaction, search, token metering, typed builders.
 
-### uva-steering — 43 names
 
-The policy layer: guards, gates, hints, hooks, and output transformers.
+`AttachmentRefRow`, `BalanceCache`, `CURRENT_SCHEMA_VERSION`, `CompactionDetails`, `CompactionError`
+`CompactionLifecycleOutcome`, `CompactionOutcome`, `CompactionPass`, `CompactionPassError`, `CompactionPlan`
+`CompactionPlugin`, `CompactionPluginConfig`, `CompactionRef`, `CompactionSettings`, `Compactor`
+`ContextPressure`, `DEFAULT_BUS_CAPACITY`, `DEFAULT_LIMIT`, `DEFAULT_PRUNE_MIN_CHARS`, `DEFAULT_SUMMARY_TIMEOUT`
+`EntryHit`, `FoldError`, `FoldedSurface`, `HistoryError`, `JsonlSessionSearch`
+`KEY_COMPACTION`, `KEY_SESSIONS`, `KNOWN_SESSION_EVENT_TYPES`, `LogWriter`, `MAX_PLUGIN_KIND_BYTES`
+`MAX_PLUGIN_PAYLOAD_BYTES`, `MappingGap`, `MeasurementBaseline`, `MetaMarker`, `OperationSnapshot`
+`OperationState`, `OrphanedCompaction`, `PRUNED_TOOL_RESULT`, `ParkedPromptRecovery`, `PlannedCompaction`
+`ProvenancedHistory`, `RepairReport`, `ReplaceRange`, `ResolvedReplace`, `SearchError`
+`SearchQuery`, `SessionEndReason`, `SessionError`, `SessionEvent`, `SessionHit`
+`SessionLog`, `SessionMetadataHeader`, `SessionSearch`, `SessionSink`, `SessionSnapshot`
+`SessionStoreConfig`, `SessionStorePlugin`, `SharedSessionSearch`, `SharedSurfaceLedger`, `SnapshotBus`
+`SnapshotReceiver`, `SummaryCompactor`, `SurfaceLedger`, `SurfaceOp`, `SurfaceToken`
+`TOOL_NOT_STARTED`, `TOOL_OUTCOME_UNKNOWN`, `TURN_INTERRUPTED`, `TokenBudget`, `TokenMeasurement`
+`TokenMeter`, `TokenMeterError`, `TouchedPair`, `UnbalancedCut`, `UsageBuckets`
+`ValidationError`, `approval_asked`, `approval_decided`, `approval_granted`, `assemble_chunks`
+`balanced_cut_at_or_before`, `balanced_message_cut`, `begin_compaction`, `build_balance_cache`, `compaction_balanced`
+`compaction_outcomes`, `derive_history`, `empty_event_of`, `estimate_message_tokens`, `finish_compaction`
+`fold_log_surface`, `fold_surface`, `interrupted_turn_closers`, `is_metadata_header_row`, `iteration_end`
+`iteration_start`, `jsonl_session_search`, `log_tail_seq`, `modified_at`, `orphaned_compactions`
+`parked_prompts`, `plan_compaction`, `plan_compaction_from_rows`, `prune_tool_results`, `repair_log`
+`request_header`, `request_snapshot`, `round_trip`, `should_compact`, `step_end`
+`step_end_suspended`, `step_start`, `structural_kind`, `subagent_enter`, `subagent_exit`
+`surface_message`, `surface_to_messages`, `tool_dispatch`, `tool_output`, `touched_target`
+`try_fold_log_surface`, `turn_end`, `turn_end_suspended`, `turn_start`, `turn_suspended`
+`usage`, `user_message`, `validate_replace_with_balance`
 
-`Action`, `AdmissionError`, `BudgetAwareTruncator`, `CATASTROPHIC_SHELL_PATTERNS`
-`ContextBudgetHint`, `Gate`, `GateControl`, `GateState`, `Guard`, `GuardOutcome`
-`GuardResult`, `GuardSeverity`, `Hint`, `HintMessage`, `HintPriority`, `HookDecision`
-`HookEvent`, `HookHandler`, `HookHandlerWithState`, `HookMap`, `InjectionPoint`
-`IterationReminderHint`, `JsonExtractor`, `LoggingHook`, `LoopDetectionGuard`
-`NoopGuard`, `NoopHint`, `NoopOutputTransformer`, `OutputTransformer`, `PromptInjectionGuard`
-`RequestParams`, `ShellDenyGuard`, `Steering`, `ToolBudgetGuard`, `TransformerChain`
-`TruncationHint`, `WorkspaceBoundaryGuard`, `auto`, `event_name`, `for_tier`
-`logging_hook_map`, `run_guards`, `tool_fingerprint`
 
-### uva-tool — 48 names
+### uva-steering — 36 names
+
+The policy layer: guards, gates, hints, hooks, and output
+transformers.
+
+
+`Action`, `AdmissionError`, `BudgetAwareTruncator`, `CATASTROPHIC_SHELL_PATTERNS`, `ContextBudgetHint`
+`Gate`, `GateControl`, `GateState`, `Guard`, `GuardOutcome`
+`GuardResult`, `GuardSeverity`, `Hint`, `HintMessage`, `HintPriority`
+`HookDecision`, `HookEvent`, `InjectionPoint`, `IterationReminderHint`, `JsonExtractor`
+`LoggingHook`, `LoopDetectionGuard`, `NoopGuard`, `NoopHint`, `NoopOutputTransformer`
+`OutputTransformer`, `PromptInjectionGuard`, `RequestParams`, `ShellDenyGuard`, `ToolBudgetGuard`
+`TransformerChain`, `TruncationHint`, `WorkspaceBoundaryGuard`, `event_name`, `run_guards`
+`tool_fingerprint`
+
+
+### uva-tool — 44 names
 
 The tool paradigm: registry, traits, annotations, restriction, surface
 projection.
 
-`AdaptiveRegistry`, `Context`, `DispatchPlan`, `DispatchRefusal`, `ExecutionMode`
-`FULL_OUTPUT_TOOL_NAME`, `GroupError`, `GroupedRegistry`, `KEY_TOOLS`, `MCP_SELF_TOOL_PREFIX`
-`OutputBound`, `OverflowStrategy`, `RegistrationScope`, `RegistrationToken`
-`RenderKind`, `RestrictedRegistry`, `Result`, `RetrieveFullOutputTool`, `Risk`
-`STRUCTURED_OUTPUT_TOOL_NAME`, `SanitizationPolicy`, `StreamOutput`, `SurfacePolicyError`
-`Tool`, `ToolAnnotations`, `ToolCategory`, `ToolDescriptor`, `ToolEntry`
-`ToolExposure`, `ToolFeatures`, `ToolMetadataSnapshot`, `ToolOutput`, `ToolOutputDefinition`
-`ToolProvenance`, `ToolRegistry`, `ToolRegistryPlugin`, `ToolRestriction`, `ToolSchemaBuilder`
-`ToolSurfacePolicy`, `TruncatedBy`, `Visibility`, `bound_output`, `called_tool_names`
-`full_output_tool`, `is_mcp_self_tool`, `project_tool_definitions`, `signal_of`
-`structured_output_tool`
+
+`Context`, `DispatchPlan`, `DispatchRefusal`, `ExecutionMode`, `FULL_OUTPUT_TOOL_NAME`
+`KEY_TOOLS`, `MCP_SELF_TOOL_PREFIX`, `OutputBound`, `OverflowStrategy`, `RegistrationScope`
+`RegistrationToken`, `RenderKind`, `Result`, `RetrieveFullOutputTool`, `Risk`
+`STRUCTURED_OUTPUT_TOOL_NAME`, `SanitizationPolicy`, `StreamOutput`, `SurfacePolicyError`, `Tool`
+`ToolAnnotations`, `ToolCategory`, `ToolDescriptor`, `ToolEntry`, `ToolExposure`
+`ToolFeatures`, `ToolMetadataSnapshot`, `ToolOutput`, `ToolOutputDefinition`, `ToolProvenance`
+`ToolRegistry`, `ToolRegistryPlugin`, `ToolRestriction`, `ToolSchemaBuilder`, `ToolSurfacePolicy`
+`TruncatedBy`, `Visibility`, `bound_output`, `called_tool_names`, `full_output_tool`
+`is_mcp_self_tool`, `project_tool_definitions`, `signal_of`, `structured_output_tool`

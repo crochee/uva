@@ -32,8 +32,6 @@ fn fnv1a_u64(acc: u64, value: u64) -> u64 {
 
 pub(crate) fn tool_definitions(
     caps: &AgentCaps,
-    delegator_defs: &[ToolDefinition],
-    delegator_fingerprint: u64,
     projection: &mut ToolProjectionCache,
 ) -> Arc<Vec<ToolDefinition>> {
     let descriptors = caps.tools.registry.descriptors_cached();
@@ -43,12 +41,7 @@ pub(crate) fn tool_definitions(
             .iter()
             .any(|d| d.exposure == uva_tool::ToolExposure::Deferred),
     );
-    let fp = fingerprint(
-        caps.tools.registry.version(),
-        delegator_defs,
-        delegator_fingerprint,
-        projection,
-    );
+    let fp = fingerprint(caps.tools.registry.version(), projection);
     // The build closure needs `projection` for the called-set
     // and the counter, so the memo lookup borrows `projection`
     // mutably through one reborrow.
@@ -58,50 +51,28 @@ pub(crate) fn tool_definitions(
             &descriptors,
             caps.tools.surface.as_deref(),
             caps.tools.restriction.as_deref(),
-            delegator_defs,
             &projection.called,
         ))
     })
 }
 
 #[inline]
-fn fingerprint(
-    registry_version: u64,
-    delegator_defs: &[ToolDefinition],
-    delegator_fingerprint: u64,
-    cache: &ToolProjectionCache,
-) -> u64 {
+fn fingerprint(registry_version: u64, cache: &ToolProjectionCache) -> u64 {
     let called_fp = if cache.has_deferred {
         cache.called_fingerprint
     } else {
         0
     };
-    compute_fingerprint(
-        registry_version,
-        called_fp,
-        delegator_fingerprint,
-        delegator_defs.len(),
-    )
+    compute_fingerprint(registry_version, called_fp)
 }
 
 /// The tool definitions this run offers the model: the registry's
-/// projection — surface policy and restriction applied — plus every
-/// delegator's definitions. The request header hashes this, so the row
-/// names the tool set the model was offered rather than the registry it
-/// was drawn from. The loop passes the definitions it already built, so
-/// the header and the wire agree on the set.
-pub(crate) fn offered_tools(
-    caps: &AgentCaps,
-    delegator_defs: &[ToolDefinition],
-    delegator_fingerprint: u64,
-) -> Arc<Vec<ToolDefinition>> {
+/// projection — surface policy and restriction applied. The request
+/// header hashes this, so the row names the tool set the model was
+/// offered rather than the registry it was drawn from.
+pub(crate) fn offered_tools(caps: &AgentCaps) -> Arc<Vec<ToolDefinition>> {
     let mut projection = ToolProjectionCache::new();
-    tool_definitions(
-        caps,
-        delegator_defs,
-        delegator_fingerprint,
-        &mut projection,
-    )
+    tool_definitions(caps, &mut projection)
 }
 
 pub(crate) fn tool_names_hash(tools: &[ToolDefinition]) -> u64 {
@@ -116,14 +87,10 @@ pub(crate) fn tool_names_hash(tools: &[ToolDefinition]) -> u64 {
 pub(crate) fn compute_fingerprint(
     registry_version: u64,
     called_fingerprint: u64,
-    delegator_fingerprint: u64,
-    delegator_count: usize,
 ) -> u64 {
     let mut h = FNV_OFFSET;
     h = fnv1a_u64(h, registry_version);
     h = fnv1a_u64(h, called_fingerprint);
-    h = fnv1a_u64(h, delegator_fingerprint);
-    h = fnv1a_u64(h, delegator_count as u64);
     h
 }
 
@@ -232,7 +199,6 @@ pub(crate) fn compose_tool_definitions(
     descriptors: &[uva_tool::ToolDescriptor],
     surface: Option<&uva_tool::ToolSurfacePolicy>,
     restriction: Option<&uva_tool::ToolRestriction>,
-    delegator_defs: &[uva_provider::ToolDefinition],
     called: &HashSet<String>,
 ) -> Vec<uva_provider::ToolDefinition> {
     // The visible-name set is computed once per call and applied
@@ -251,17 +217,7 @@ pub(crate) fn compose_tool_definitions(
         set.retain(|name| !uva_tool::is_mcp_self_tool(name));
         visible = Some(set);
     }
-    let mut defs = uva_tool::project_tool_definitions(
-        descriptors,
-        called,
-        visible.as_ref(),
-    );
-    for def in delegator_defs {
-        if restriction.is_none_or(|r| r.is_relevant(&def.name, false)) {
-            defs.push(def.clone());
-        }
-    }
-    defs
+    uva_tool::project_tool_definitions(descriptors, called, visible.as_ref())
 }
 
 fn visible_names(

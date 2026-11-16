@@ -39,16 +39,21 @@ use std::{path::PathBuf, sync::Arc};
 use serde::Deserialize;
 use serde_json::Value;
 use uva::{
+    agent::AgentRegistry,
+    approval::{ApprovalPlugin, ApprovalPolicy},
     attachment::AttachmentPlugin,
     core::SharedClock,
     eval::EvalPlugin,
-    harness::{ApprovalPlugin, ApprovalPolicy, DelegatingTool, Host},
+    harness::Host,
+    hook::{HookPlugin, HookRegistry},
     kernel::{
         Context,
         MountError,
         MountHandle,
         Plugin as KernelPlugin,
-        mount_all,
+        Realms,
+        mount_all_with,
+        parent_service_available,
     },
     mcp::McpPlugin,
     scheduler::SchedulerPlugin,
@@ -57,25 +62,27 @@ use uva::{
     tool::{ToolRegistry, ToolRegistryPlugin, ToolRestriction},
     tool_scheduler::ScheduleToolPlugin,
     tool_shell::SandboxPlugin,
-    tool_task::SubagentPlugin,
+    tool_task::{TaskTool, TaskToolPlugin},
 };
 
-use crate::profile::{
-    BootContext,
-    Capability,
-    Enabled,
-    Entry,
-    KernelChecks,
-    PluginError,
-    PluginFactories,
-    PluginFactory,
-    PluginManifest,
-    Profile,
-    ProfileError,
-    RuntimeKind,
-    build_plugins,
-    effective,
-    partition_waves,
+use crate::{
+    profile::{
+        BootContext,
+        Capability,
+        Manifest,
+        PluginError,
+        PluginFactories,
+        PluginFactory,
+        PluginManifest,
+        Profile,
+        ProfileError,
+        build_plugins,
+        effective_inject,
+    },
+    session::{
+        session_index::SessionIndexSlot,
+        subagent_router::SubagentWriterSlot,
+    },
 };
 
 /// The containers the boot owns and the rows share.
@@ -95,9 +102,24 @@ pub(crate) struct BootServices {
     /// `tool-registry` row publishes it.
     pub tool_registry: Arc<ToolRegistry>,
     /// The peer-agent registry the `search` row's agent domain reads
-    /// and the `subagent-backend` row's delegator resolves names
-    /// through.
-    pub agent_registry: Arc<uva::harness::AgentRegistry>,
+    /// and the `tool-task` row's tool resolves names through.
+    pub agent_registry: Arc<AgentRegistry>,
+    /// The host's child-session writer source: the `tool-task` row hands
+    /// it to the tool it registers, so a delegated child opens (and
+    /// persists) its own session. The slot is filled immediately after
+    /// the mount, when the `sessions` service exists.
+    pub subagent_writers: Arc<SubagentWriterSlot>,
+    /// The control surface's view of the sessions: the `tool-task`
+    /// row hands the slot to the tool it registers, so the roster can
+    /// be rebuilt from the logs and a cold wake can find the child it
+    /// wakes. The slot is filled immediately after the mount, when the
+    /// `sessions` service exists.
+    pub session_index: Arc<SessionIndexSlot>,
+    /// The deployment's usage counters. The `tool-task` row reports a
+    /// delegated child's tokens and turns here: the child runs on its
+    /// own harness, so its events never reach a session controller and
+    /// would otherwise vanish from `/api/v1/chat/usage`.
+    pub usage: Arc<crate::state::UsageMetrics>,
     /// The deployment's host: the steering policy (guards / hints /
     /// tracker / logging hook) every agent this server builds
     /// receives.
@@ -122,6 +144,14 @@ pub(crate) enum KernelBootError {
     /// The kernel refused the group.
     #[error("native plugin mount: {0}")]
     Mount(#[from] MountError),
+    /// A required row is parked with missing services at boot.
+    #[error("required row `{id}` is parked waiting for services: {missing:?}")]
+    RequiredParked {
+        /// The parked required row.
+        id: String,
+        /// The service keys it still waits for.
+        missing: Vec<String>,
+    },
 }
 
 type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
@@ -135,7 +165,7 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 21] = [
+    const ENTRIES: [&str; 22] = [
         "tool-registry",
         "tool-read",
         "tool-write",
@@ -147,10 +177,11 @@ pub(crate) fn native_profile() -> Profile {
         "search",
         "session-store",
         "sandbox",
-        "subagent-backend",
+        "tool-task",
         "context-compactor",
         "approval",
         "skills",
+        "hooks",
         "agent-loop",
         "mcp",
         "eval",
@@ -161,27 +192,17 @@ pub(crate) fn native_profile() -> Profile {
     Profile {
         core: ENTRIES
             .into_iter()
-            .map(|id| Entry {
-                id: id.to_owned(),
-                runtime: RuntimeKind::Native,
-                config: Value::Null,
-                capabilities: Vec::new(),
-                enabled: crate::profile::Enabled::On,
-            })
+            .map(|id| Manifest::plain(id, id))
             .collect(),
         ui: Vec::new(),
         hmr: false,
     }
 }
 
-/// One boot mount, possibly in two kernel groups.
-///
-/// A profile without delegated enablement checks degenerates to one
-/// group (the pre-two-wave behaviour). With checks, wave 1 holds the
-/// static rows, wave 2 the check rows and their static dependents; each
-/// wave is one ordinary `mount_all` on the same [`Context`].
+/// One boot mount.
 pub(crate) struct MountedProfile {
     groups: Vec<MountHandle>,
+    realms: Arc<Realms>,
 }
 
 impl MountedProfile {
@@ -227,28 +248,23 @@ impl std::fmt::Debug for MountedProfile {
 /// Build the native plugin values and mount them.
 ///
 /// The returned [`Context`] is the isolation scope every service was
-/// registered in; the [`MountedProfile`] owns the groups' effects and
+/// registered in; the [`MountedProfile`] owns the group's effects and
 /// fibers. `AppState` keeps both — the context for consumers
-/// ([`Context::require`]) and the handles for unloading.
+/// ([`Context::require`]) and the handle for unloading.
 ///
 /// The profile is the boot's authoritative core assembly: a row whose
-/// id has no registered factory fails the mount (the kernel vocabulary
-/// for a bad profile), and a row omitted from the profile is not
-/// mounted. [`native_profile`] is the no-profile default.
+/// name has no registered factory fails the mount, a `disabled` row
+/// never builds, and a row omitted from the profile is not mounted.
+/// [`native_profile`] is the no-profile default.
 ///
-/// # The two waves
+/// # Missing dependencies park, they do not fail
 ///
-/// A delegated check (`enabled = { service, check, arg }`) is answered
-/// by a plugin, and that plugin is itself part of this profile — so a
-/// single group could never answer it. Wave 1 mounts the static rows;
-/// the mounted context then answers the checks and wave 2 (the enabled
-/// check rows plus the static rows that inject their services) mounts
-/// on the same context. A check row that fails closed stays out; a
-/// static dependent left with a missing provider fails the wave, which
-/// is the profile's own broken-dependency verdict.
-///
-/// A boot failure is fatal: both waves belong to one process start, so
-/// there is no cross-wave rollback to perform.
+/// dsh semantics: a row whose injected service is missing mounts as a
+/// parked fiber instead of failing the group. After the mount the boot
+/// **audits**: every parked row is reported (its id and the service
+/// keys it still waits for), and only [`REQUIRED_ROWS`] being parked
+/// is fatal — an agent host without its model loop must never look
+/// alive.
 pub(crate) fn mount_profile(
     services: Arc<BootServices>,
     profile: &Profile,
@@ -263,25 +279,81 @@ pub(crate) fn mount_profile(
         .with_blocking(extras.blocking)
         .with_compaction(extras.compaction)
         .with_sessions_dir(extras.sessions_dir);
-    let (mut first, second) = partition_waves(profile, &factories);
-    // Wave 1 never holds a check row; an explicitly-off row is filtered
-    // here (the boot recomputes the effective row set afterwards for
-    // `AppState::assembly` and the UI schema).
-    first.core.retain(|entry| entry.enabled != Enabled::Off);
-    let mut groups = Vec::new();
-    if !first.core.is_empty() {
-        let plugins = build_plugins(&first, &factories, &boot)?;
-        groups.push(mount_all(&context, &plugins)?);
+    let realms = Arc::new(Realms::default());
+    let rows = profile.core_rows();
+    let mounted_rows = build_plugins(profile, &factories, &boot, &realms)?;
+    let pair_rows = mounted_rows
+        .into_iter()
+        .map(|mounted| (mounted.plugin, mounted.row))
+        .collect::<Vec<_>>();
+    let handle = mount_all_with(&context, &realms, &pair_rows)?;
+    audit_pending(&context, &handle, &rows, &factories, profile)?;
+    Ok((context, MountedProfile { groups: vec![handle], realms }))
+}
+
+impl MountedProfile {
+    /// The isolation-label registry the boot mounted with — HMR
+    /// remounts reuse it so a `Shared` label names one scope for the
+    /// process's life.
+    #[must_use]
+    pub(crate) fn realms(&self) -> Arc<Realms> {
+        Arc::clone(&self.realms)
     }
-    if !second.core.is_empty() {
-        let checks = KernelChecks(&context);
-        let enabled = effective(&second, &checks).profile;
-        if !enabled.core.is_empty() {
-            let plugins = build_plugins(&enabled, &factories, &boot)?;
-            groups.push(mount_all(&context, &plugins)?);
+}
+
+/// The rows whose being parked is fatal at boot: without them the
+/// machine must not half-work.
+const REQUIRED_ROWS: [&str; 2] = ["agent-loop", "model-adapter"];
+
+/// Report every parked row and its still-missing service keys; a
+/// parked required row is fatal.
+fn audit_pending(
+    context: &Context,
+    handle: &MountHandle,
+    rows: &[&Manifest],
+    factories: &PluginFactories,
+    profile: &Profile,
+) -> Result<(), KernelBootError> {
+    // Everything the assembly itself provides.
+    let mut provided = std::collections::BTreeSet::new();
+    for row in profile.all_rows() {
+        if let Some(factory) = factories.get(&row.name) {
+            provided.extend(factory.manifest().provides);
         }
     }
-    Ok((context, MountedProfile { groups }))
+    for row in rows {
+        let Some(state) = handle.plugin_state(&row.id) else {
+            continue;
+        };
+        if state != uva::kernel::PluginState::Pending {
+            continue;
+        }
+        let missing: Vec<String> = factories
+            .get(&row.name)
+            .map(|factory| {
+                let manifest = factory.manifest();
+                effective_inject(&manifest.inject, row.inject.as_deref())
+                    .into_iter()
+                    .filter(|key| {
+                        !provided.contains(key.as_str())
+                            && !parent_service_available(context, key)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        tracing::warn!(
+            row = %row.id,
+            missing = ?missing,
+            "the row is parked waiting for services (dsh PENDING)"
+        );
+        if REQUIRED_ROWS.contains(&row.id.as_str()) {
+            return Err(KernelBootError::RequiredParked {
+                id: row.id.clone(),
+                missing,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The factory directory the boot registers, over already-built
@@ -319,7 +391,10 @@ pub(crate) struct BootExtras {
 pub(crate) fn dump_factories() -> PluginFactories {
     native_factories(Arc::new(BootServices {
         tool_registry: Arc::new(ToolRegistry::new()),
-        agent_registry: Arc::new(uva::harness::AgentRegistry::new()),
+        agent_registry: Arc::new(AgentRegistry::new()),
+        subagent_writers: Arc::new(SubagentWriterSlot::new()),
+        session_index: Arc::new(SessionIndexSlot::new()),
+        usage: Arc::new(crate::state::UsageMetrics::default()),
         plugin_host: Host::default(),
     }))
 }
@@ -329,7 +404,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
 fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // Rows the boot constructs: their plugins build the capability in
     // `apply` from the boot context (config only — no containers).
-    const BOOT_SPECS: [(&str, BootMake); 15] = [
+    const BOOT_SPECS: [(&str, BootMake); 16] = [
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-shell", shell_tool_plugin),
@@ -340,18 +415,19 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
         ("context-compactor", compaction_plugin),
         ("approval", approval_plugin),
         ("skills", skill_plugin),
+        ("hooks", hooks_plugin),
         ("mcp", mcp_plugin),
         ("eval", eval_plugin),
         ("scheduler", scheduler_plugin),
         ("schedule-tool", schedule_tool_plugin),
         ("attachments", attachment_plugin),
     ];
-    // Rows bound to the boot's containers: the shared tool registry
-    // and the peer-agent registry the delegator resolves names
-    // through.
+    // Rows bound to the boot's containers: the shared tool registry,
+    // the peer-agent registry the `task` tool resolves names through,
+    // and the host's child-session writer source.
     const SPECS: [(&str, Make); 2] = [
         ("tool-registry", tool_registry_plugin),
-        ("subagent-backend", subagent_plugin),
+        ("tool-task", task_tool_plugin),
     ];
     let mut factories = PluginFactories::new();
     for (id, make) in BOOT_SPECS {
@@ -692,19 +768,42 @@ fn sandbox_plugin(
     )))
 }
 
-/// The `subagent-backend` row's plugin: the delegation backend the
-/// `subagents` service publishes.
+/// The `tool-task` row's plugin: the `task` tool as an ordinary tool
+/// brick.
 ///
-/// The backend is the row's own object: the row reads the peer-agent
-/// **registry** (a container) and builds the delegator over it, so
-/// the boot hands the row a registry instead of a pre-built
-/// delegator.
-fn subagent_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
-    let delegator: Arc<dyn DelegatingTool> =
-        Arc::new(uva::tool_task::TaskDelegator::new(Arc::clone(
-            &services.agent_registry,
-        )));
-    Arc::new(SubagentPlugin::new(delegator))
+/// The tool is the row's own object: the row reads the peer-agent
+/// **registry** and the host's child-session writer source (containers)
+/// and builds a [`TaskTool`] over them; the plugin files it in the
+/// `tools` registry, so exposure, restriction and unload follow the
+/// same path every other tool brick uses.
+fn task_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    let writers: Arc<dyn uva::agent::SubagentWriters> =
+        Arc::clone(&services.subagent_writers)
+            as Arc<dyn uva::agent::SubagentWriters>;
+    let tool = TaskTool::new(Arc::clone(&services.agent_registry))
+        .with_writers(writers)
+        .with_session_index(
+            Arc::clone(&services.session_index)
+                as Arc<dyn uva::tool_task::SessionIndex>,
+        )
+        // A child's tokens and turns are real consumption: the tool
+        // reports them into the same counters `/api/v1/chat/usage`
+        // reads, because the child's own events never reach a
+        // controller.
+        .with_usage(Arc::new(crate::state::DelegatedUsage::new(
+            Arc::clone(&services.usage),
+        )))
+        // The round tail of a dispatch whose future the harness drops
+        // (parent cancelled mid-call) detaches here: the child session
+        // still gets its exit footer and artefact set.
+        .with_spawner(crate::spawner::server_spawner());
+    // The lifecycle parks idle children on its own: the loop runs on
+    // the server's own runtime seams, and the tool brick gives it the
+    // session index (the artefact set's home) above.
+    Arc::new(TaskToolPlugin::new(Arc::new(tool)).with_park_loop(
+        crate::spawner::server_spawner(),
+        crate::spawner::server_sleeper(),
+    ))
 }
 
 fn compaction_plugin(
@@ -731,6 +830,20 @@ fn approval_plugin(
     _boot: &BootContext,
 ) -> Result<Arc<dyn KernelPlugin>, PluginError> {
     Ok(Arc::new(ApprovalPlugin::new(ApprovalPolicy::default())))
+}
+
+/// The `hooks` row's plugin: the deployment's external hook registry.
+///
+/// The registry is the row's own object, published as
+/// `uva_hook::KEY_HOOKS`. The `agent-loop` row resolves it with
+/// `ctx.get` at mount — opportunistically, not as an `inject` edge —
+/// so a profile that omits this row or switches it off still boots.
+/// The table is shared, so a registration added after the row mounts
+/// is visible to every run the loop creates.
+fn hooks_plugin(
+    _boot: &BootContext,
+) -> Result<Arc<dyn KernelPlugin>, PluginError> {
+    Ok(Arc::new(HookPlugin::new(HookRegistry::new())))
 }
 
 fn skill_plugin(
@@ -812,17 +925,19 @@ impl PluginFactory for AgentLoopFactoryEntry {
         let defaults = AgentLoopDefaults {
             // The delegation backend arrives as a service: the
             // runtime's plugin resolves `subagents` and appends it.
-            delegators: Vec::new(),
             tool_surface: None,
             strategy: parsed.strategy,
             tool_restriction: parsed.tool_restriction,
             log_writer: None,
-            subagent_writers: None,
             // The stateless request-level projection, one instance.
             context_manager: Some(Arc::new(TruncatingContextManager)),
             // The deployment's plugin host: the container every
             // `[plugins]` registration lives in.
             host: Some(services.plugin_host.clone()),
+            // The `hooks` row publishes the external registry; the
+            // runtime resolves it with `ctx.get` at mount (optional —
+            // a profile without the row still boots).
+            hooks: None,
             // The server's spawner: a run's detached work executes on
             // the deployment's runtime.
             spawner: Some(crate::spawner::server_spawner()),

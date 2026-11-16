@@ -8,7 +8,6 @@ use futures::{Stream, StreamExt};
 use uva::{
     core::AtomicCancelToken,
     harness::{AgentEvent, AgentInput},
-    tool_task::TaskDelegator,
 };
 
 use crate::agent_run_config::{AgentRunConfig, RunOverrides};
@@ -77,14 +76,10 @@ impl RunStreamFactory for AgentRunStreamFactory {
             max_iterations: config
                 .max_iterations
                 .unwrap_or(uva::harness::DEFAULT_MAX_ITERATIONS),
-            // Sub-agent delegation via the `task` plugin.
-            delegators: registry
-                .map(|r| {
-                    let delegator: Arc<dyn uva::harness::DelegatingTool> =
-                        Arc::new(TaskDelegator::new(Arc::clone(&r)));
-                    vec![delegator]
-                })
-                .unwrap_or_default(),
+            // Delegation is a registry tool (`tool-task`) now: the run
+            // dispatches `task` through the tool registry like every
+            // other tool, so the factory has no delegation-specific
+            // wiring to install.
             tool_surface: config
                 .tool_surface
                 .clone()
@@ -92,7 +87,6 @@ impl RunStreamFactory for AgentRunStreamFactory {
             strategy: overrides.strategy,
             tool_restriction: overrides.tool_restriction,
             log_writer: config.log_writer,
-            subagent_writers: config.subagent_writers.clone(),
             context_manager: overrides.context_manager,
             compactor: overrides.compactor,
             host: config.host.clone(),

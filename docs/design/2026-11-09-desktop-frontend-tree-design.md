@@ -92,7 +92,7 @@ Axiom 终态图有三种投影。uva 今天的状态：
 - **N3** 不做桌面端专属 UI，也不改 TUI 的终端渲染层（桌面与浏览器同一份前端；TUI 仍是 ratatui）。
 - **N4** 不做远程分发 / 插件市场；插件资产只从页面同源的静态服务加载。
 - **N5** 不重写 SPA 的页面结构；插槽只新增区域，不替换既有页面布局。
-- **N6** 不建前端自动化测试套件（AGENTS.md §4.2 家规，见 D7）。
+- **N6** 不建前端自动化测试套件（AGENTS.md §4.2 家规，见 D7）。（当时；现行边界见 ADR 0001：e2e 不建，纯函数单元测试用 vitest 随 `check-web` 跑。）
 - **N7** 不删 TUI 的 ratatui 界面，也不把它降级成"打开浏览器"的启动器。
 - **N8** 不追求"逐像素同款界面"：终端与 DOM 是两种介质，**等价 = 能力可达**，
   呈现各自最优（`adapted` 是合法终态，见 D17）。
@@ -120,7 +120,7 @@ Axiom 终态图有三种投影。uva 今天的状态：
   `check-deny` / `check-publishable` / `check-single-writer` / `check-public-api-runtime` /
   `check-frozen-api`。
 - `uva-kernel` 依赖图不得出现任何 agent / UI / 传输层 crate。
-- AGENTS.md §4.2：**本项目不保留任何前端自动化测试套件**，验证一律用 Playwright MCP
+- AGENTS.md §4.2（当时）：**不保留任何前端自动化测试套件**，验证一律用 Playwright MCP
   驱动浏览器；纯函数按 §4.2 的写法在页面内 `await import('/src/lib/foo.ts')` 断言。
 
 **本轮新增的硬约束（实测事实）**
@@ -147,7 +147,7 @@ Axiom 终态图有三种投影。uva 今天的状态：
   typescript / eslint / prettier；`.github/workflows/rust-quality.yml:177` 是 `node-version: 20`
   （Node 20 没有 TS 类型剥离）；`tsconfig.json` 的 `include` 是 `["src"]` 且没有 `@types/node`
   → 在 `src/` 下放 `*.test.ts` 会同时炸 `tsc --noEmit` 与 CI 的 Node 版本。
-  **这三条合起来直接否掉"前端单测"这条路**（D7）。
+  **这三条合起来直接否掉"前端单测"这条路**（D7）。（当时；现行边界见 ADR 0001：vitest 走 node 环境、测试文件放 `tests/`，`src/` 的 `tsc --noEmit` 边界不变。）
 - **C5 网关已是完整投影面**：`serve` 提供 `/rpc`（WS）、`/livez`、`/readyz`（core 宣布
   `ready` 后才 200）、`/version`、`/metrics`，其余路径 fallback 到 SPA 静态文件
   （`crates/uva-app-server/src/gateway.rs:594`），并以 1s→5s 退避重启 core。
@@ -437,7 +437,7 @@ T1 与 Axiom §7.2 的偏离（Axiom 写的是"TUI 以 stdio JSON-RPC 直连 cor
   且 §4.2 已经给出纯函数的验证方式（页面内 `await import('/src/lib/foo.ts')` 断言）。
   微内核是纯 TS、不 import React，正好落在这条路上。C4 的三条（Node 20 / `tsc --noEmit`
   的 `include` / 无 `@types/node`）也各自否掉了"加测试文件"的每条路。
-  验收改为**Playwright MCP 驱动的页面内断言清单**（见 §8 刀 7）。
+  验收改为**Playwright MCP 驱动的页面内断言清单**（见 §8 刀 7）。（当时；现行边界见 ADR 0001：纯函数单元测试已由 vitest 覆盖，MCP 冒烟仍是端到端那条路。）
 - **D8 spec 收口落两处。** 本地 openspec 层（`web-projection` 的**两条**禁令都改，新增
   `desktop-projection` / `frontend-plugin-tree`）+ 入库文档（本篇、AGENTS.md、CHANGELOG、
   各 crate README）。

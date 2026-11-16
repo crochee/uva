@@ -188,7 +188,7 @@ async fn an_installed_summary_compactor_rewrites_the_transcript() {
     );
 
     let agent = ReActAgent::new(provider, Arc::new(ToolRegistry::new()))
-        .with_log_writer(Arc::clone(&writer))
+        .with_log_writer(writer.clone())
         .with_compactor(compactor);
 
     let reasons = run_to_completion(&agent).await;

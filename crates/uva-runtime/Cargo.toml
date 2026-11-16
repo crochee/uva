@@ -20,18 +20,16 @@ default = []
 uva-context.workspace = true
 uva-core.workspace = true
 uva-harness.workspace = true
+# The `hooks` service's registry: the loop's defaults carry it, so the
+# type is named here directly (the harness re-exports the contract
+# but not the registry, keeping its frozen surface unchanged).
+uva-hook.workspace = true
 uva-kernel.workspace = true
 
 uva-search.workspace = true
 
 uva-session.workspace = true
 uva-tool.workspace = true
-# The delegation backend's service key. The `agent-loop` row consumes
-# the `subagents` service the `subagent-backend` row publishes, so the
-# loop needs the key its owner crate defines — the key never moves
-# into this crate (see the design's "service keys live with their
-# owner" rule).
-uva-tool-plugins = { workspace = true, features = ["task"] }
 uva-policy-plugins = { workspace = true, features = ["budget", "resilience", "cache"] }
 uva-provider = { workspace = true, features = ["anthropic", "openai"] }
 serde.workspace = true

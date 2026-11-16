@@ -415,6 +415,7 @@ mod tests {
             data: serde_json::to_value(Message::user(text)).expect("ser"),
             source: None,
             surface_op: Some(SurfaceOp::append()),
+            attachments: Vec::new(),
         }
     }
 

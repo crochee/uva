@@ -9,17 +9,22 @@ use std::sync::{
 use async_trait::async_trait;
 use futures::{channel::mpsc, future::BoxFuture};
 use serde_json::{Value, json};
+use uva_approval::ApprovalRequest;
 use uva_context::AgentState;
 use uva_core::{AtomicCancelToken, CancelToken, Error, SystemClock};
+use uva_events::AgentEvent;
 use uva_provider::{
     CompletionRequest,
     CompletionResponse,
     Content,
+    ContentPart,
     Message,
     ModelConfig,
     ModelProvider,
     ProviderConfig,
+    Role,
     TokenUsage,
+    ToolUse,
 };
 use uva_session::{
     CompactionError,
@@ -36,11 +41,9 @@ use super::compact;
 use crate::{
     AgentCaps,
     agent::{
-        approval::ApprovalRequest,
-        re_act::{r#loop::ReActLoop, state::RunState},
+        re_act::{r#loop::ReActLoop, state::RunState, transcript::Transcript},
         sink::EventSink,
     },
-    events::AgentEvent,
 };
 
 // --- fixtures --------------------------------------------------------
@@ -172,27 +175,20 @@ async fn test_loop(
     // input, so the seeded log is folded into it here, exactly as
     // `drive_setup` does.
     let rows = writer.read().await.expect("read the seeded log");
-    let history =
-        uva_session::derive_history(&rows).expect("fold the seeded log");
-    let surface_seqs = uva_session::try_fold_log_surface(&rows)
-        .expect("fold the seeded log")
-        .surface_seqs;
+    let history = uva_session::ProvenancedHistory::from_log(&rows)
+        .expect("fold the seeded log");
     // The loop's own `run` is unused by `compact`; the test drives its
     // own copy so it can hold `&ReActLoop` and `&mut RunState` at once.
     let run_for_loop = RunState::seed(
         AtomicCancelToken::shared(),
-        0,
-        Arc::new(history.clone()),
+        Transcript::from_projection(history.clone()),
         AgentState::from_config(&cfg),
-    )
-    .with_surface_seqs(surface_seqs.clone());
+    );
     let run_for_test = RunState::seed(
         AtomicCancelToken::shared(),
-        0,
-        Arc::new(history),
+        Transcript::from_projection(history),
         AgentState::from_config(&cfg),
-    )
-    .with_surface_seqs(surface_seqs);
+    );
     let (tx, rx) = mpsc::unbounded();
     let sink = EventSink::new(Arc::new(tx), Some(writer));
     let prompt_context = caps.run_prompt_context(None);
@@ -295,4 +291,182 @@ async fn a_repeat_pass_over_the_last_summary_makes_no_second_call() {
         "rewriting the summary with nothing new is not progress"
     );
     assert_eq!(rows_with(&writer, "compaction").await.len(), 1);
+}
+
+// A compactor that compacts exactly the span it is told to.
+//
+// The pass's own wiring is under test here — the range it writes and
+// the fold that reads it back — not the summariser's policy.
+struct FixedSpan {
+    range: std::ops::Range<usize>,
+}
+
+impl Compactor for FixedSpan {
+    fn plan(
+        &self,
+        _history: &[Message],
+        _budget: TokenBudget,
+    ) -> Option<CompactionPlan> {
+        Some(CompactionPlan {
+            range: self.range.clone(),
+            shadowed_seqs: Vec::new(),
+            keep_recent: 0,
+            shadowed: Vec::new(),
+            shadowed_tokens: 0,
+        })
+    }
+
+    fn summarize(
+        &self,
+        _plan: &CompactionPlan,
+        _cancel: Arc<dyn CancelToken>,
+    ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
+        Box::pin(async {
+            Ok(CompactionOutcome {
+                summary: "SUMMARY".to_string(),
+                shadowed_seqs: Vec::new(),
+                shadowed_tokens: 0,
+                provider: None,
+                model: None,
+                usage: None,
+            })
+        })
+    }
+}
+
+// A steered run's log: the steer lands while the tool batch is in
+// flight, so its row sits between the assistant's `tool_use` and the
+// result that answers it.
+async fn steered_writer() -> Arc<LogWriter> {
+    let sink = Arc::new(InMemorySessionSink::new("steered"));
+    let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
+    let parts = vec![ContentPart::ToolUse(ToolUse {
+        id: "call-1".into(),
+        name: "read".into(),
+        input: json!({"path": "a.rs"}),
+    })];
+    writer
+        .append(json!({
+            "type": "user_message",
+            "data": Message::user("start"),
+        }))
+        .await
+        .expect("seed the turn");
+    writer
+        .append(json!({
+            "type": "assistant_message",
+            "data": Message::new(Role::Assistant, Content::parts(parts)),
+        }))
+        .await
+        .expect("seed the tool call");
+    writer
+        .append(json!({
+            "type": "user_message",
+            "data": Message::user("steer: focus on the tests"),
+        }))
+        .await
+        .expect("seed the steer");
+    writer
+        .append(json!({
+            "type": "tool_result",
+            "data": Message::tool(Content::text("ok"), "call-1"),
+        }))
+        .await
+        .expect("seed the tool result");
+    writer.flush().await.expect("flush the seeded rows");
+    writer
+}
+
+// The tool calls the messages ask for and the ones they answer.
+fn tool_ids(messages: &[Message]) -> (Vec<String>, Vec<String>) {
+    let mut asked = Vec::new();
+    let mut answered = Vec::new();
+    for message in messages {
+        for part in message.content.iter() {
+            match part {
+                ContentPart::ToolUse(call) => asked.push(call.id.clone()),
+                ContentPart::ToolResult(result) => {
+                    answered.push(result.tool_use_id.clone())
+                }
+                _ => {}
+            }
+        }
+        if let Some(id) = message.tool_call_id.as_ref() {
+            answered.push(id.clone());
+        }
+    }
+    (asked, answered)
+}
+
+// A resumed steered run that compacts must leave a transcript every
+// provider accepts: the `tool_result` that answers the shadowed
+// `tool_use` goes with it, and the steer survives.
+//
+// The run is *resumed*: its transcript comes from the fold, so the
+// range the pass writes is read back in the fold's own coordinates.
+// A fold that read the range in the log's coordinates would shadow
+// the steer instead of the tool result, and the resumed run would
+// carry a `tool_result` no `tool_use` answers.
+#[tokio::test]
+async fn a_resumed_steered_run_compacts_without_orphaning_a_tool_result() {
+    let writer = steered_writer().await;
+    let compactor: Arc<dyn Compactor> = Arc::new(FixedSpan { range: 1..3 });
+    let (loop_, mut session, _events) =
+        test_loop(compactor, Arc::clone(&writer)).await;
+
+    // The seeded fold is in the model-visible order: the steer waits
+    // for the result that answers the open call.
+    assert_eq!(
+        session.transcript.surface_seqs(),
+        &[1, 2, 4, 3],
+        "the resumed transcript is in the model-visible order"
+    );
+
+    compact(&loop_, &mut session, 0)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        rows_with(&writer, "compaction").await.len(),
+        1,
+        "the pass wrote its replace"
+    );
+
+    // The durable log folds to the same surface the live transcript
+    // holds: the tool_use and its result are shadowed, the steer
+    // survives.
+    let rows = writer.read().await.expect("read the log");
+    let surface =
+        uva_session::try_fold_log_surface(&rows).expect("the log folds");
+    // The compaction row is the seventh: four steered rows, the audit
+    // start row, the summary row, then the replace.
+    assert_eq!(surface.surface_seqs, vec![1, 7, 3]);
+    assert_eq!(
+        session.transcript.surface_seqs(),
+        surface.surface_seqs,
+        "the live surface and the resumed one are the same surface"
+    );
+    let (asked, answered) = tool_ids(
+        &surface
+            .messages
+            .iter()
+            .filter_map(uva_session::surface_message)
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        answered.is_empty(),
+        "the shadowed tool_use takes its result with it: {answered:?}"
+    );
+    assert!(asked.is_empty(), "the tool_use is shadowed too");
+
+    // The request the next step assembles carries the same shape.
+    let request = loop_
+        .build_request(&mut session, 1)
+        .await
+        .expect("the request assembles");
+    let (asked, answered) = tool_ids(request.as_ref());
+    assert!(
+        answered.is_empty(),
+        "the request must not carry an orphaned tool result: {answered:?}"
+    );
+    assert!(asked.is_empty());
 }

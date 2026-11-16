@@ -1,0 +1,32 @@
+[package]
+name = "uva-hook-only-consumer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Same posture as `../harness-only-consumer`: the empty `[workspace]`
+# table keeps this crate OUT of the uva workspace, so it compiles as an
+# independent consumer would and its normal dependency tree is its own.
+[workspace]
+
+# The proof: this crate's **normal** dependencies name `uva-hook` and
+# nothing else from uva. The harness is a dev-dependency, because the
+# tests drive a real run — `cargo tree -e normal` here must contain no
+# `uva-harness`, and `scripts/check-hook-external.sh` asserts exactly
+# that.
+#
+# Implementing the traits needs the `async_trait` attribute macro; the
+# contract crate re-exports it (`uva_hook::async_trait`), so a plugin
+# author still writes one dependency line.
+[dependencies]
+uva-hook = { path = "../../../crates/uva-hook" }
+
+[dev-dependencies]
+# Dev-only: the tests drive the harness through one real tool call.
+uva-harness = { path = "../../../crates/uva-harness" }
+uva-core = { path = "../../../crates/uva-core" }
+uva-provider = { path = "../../../crates/uva-provider", default-features = false }
+uva-tool = { path = "../../../crates/uva-tool", default-features = false }
+uva-session = { path = "../../../crates/uva-session" }
+futures = "0.3"
+serde_json = "1"

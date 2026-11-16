@@ -14,7 +14,7 @@ nothing in `uva` is forced on you.
 | Define tools | `uva-tool` | `tool` |
 | Give the agent the offline file and process tools | `uva-tool-plugins` (`read`, `write`, `shell`, `todo`) | `tool-read`, `tool-write`, `tool-shell`, `tool-todo` |
 | Let the agent fetch URLs | `uva-tool-plugins` (`web`) | `tool-web` |
-| Delegate to peer agents | `uva-tool-plugins` (`task`) | `tool-task` |
+| Delegate to peer agents | `uva-tool-task` (`task`) | `tool-task` |
 | Run a ReAct loop | `uva-harness` | `harness` |
 | Have a context window policy | `uva-context` | `context` |
 | Persist session events | `uva-session` | `session` |
@@ -201,7 +201,7 @@ re-enters that feature set.
 | LLM-driven compaction | `SummaryCompactor::new(provider, model).with_settings(settings)` + `.with_compactor(...)`: the session crate owns the one compaction engine, and a context manager only projects the request |
 | The defensive policy | `Host::default_policy(workspace)` instead of `Host::new()` — five guards, three hints, the adaptive tracker and the logging hook |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
-| Multi-agent delegation | `uva-tool-plugins` (`task`): `agent.with_delegator(Arc::new(TaskDelegator::new(peers)))` — the loop then offers the `task` tool |
+| Multi-agent delegation | `uva-tool-task` (`task`): register `TaskTool::new(peers)` in the tool registry — the model then calls `task(agent, prompt)` and the tool runs the peer as a child run |
 | Plugin kernel | add the `kernel` feature and mount a manifest group: `let ctx = uva::kernel::Context::new(); let mounted = uva::kernel::mount_all(&ctx, &[Arc::new(MyPlugin)])?;` — `mounted.dispose_plugin("my-id")` unloads one plugin and parks its consumers; UI extensions are `[ui]` profile rows the frontend renders from `ui/schema`, never remote code |
 | Remote MCP tools the host discovered | `uva-mcp`: pre-register the catalog with `register_mcp_tools(&registry, client, "server", NamingPolicy::Namespaced)` (one local tool per remote tool), or publish the dynamic path with `register_mcp_control_tool(&registry, supervisor)` — the model then lists and calls remote tools itself. Both want the *same instance* the agent loop dispatches from (a `ToolRegistry` clone is a deep copy); the control tool takes it as `&Arc<ToolRegistry>` because it keeps a weak handle to consult the privacy flags later, so a tool the registry marks hidden is neither listed nor callable |
 | Scheduling, model-side | add `tool-scheduler` and share one store: `let store = Arc::new(ScheduleStore::new(dir)); register_scheduler_tool(&registry, SchedulerTool::new(Arc::clone(&store)));` — the host still owns delivery (`Scheduler::new(store).tick(now)`), and a tool-side write (or a `ScheduleStore::load` that ingests another process's rows) reaches the next `tick` / `next_deadline` on its own: the pass sees the store's revision move and rebuilds its wheel. `Scheduler::resync(now)` stays available as the explicit rebuild, for a host that needs the wheel correct between passes |
@@ -284,7 +284,7 @@ use uva::{
 
 The plugin family adds its own modules once you enable the feature —
 `uva::tool_read::ReadTool`, `uva::tool_web::WebFetchTool`,
-`uva::tool_task::TaskDelegator`, and so on:
+`uva::tool_task::TaskTool`, and so on:
 if a name is not in the prelude, the module that owns it has it.
 
 Every `pub use` at the facade's module roots is a lego brick; the

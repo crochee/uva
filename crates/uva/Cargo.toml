@@ -40,6 +40,27 @@ uva-tool-plugins = { workspace = true, optional = true }
 uva-session = { workspace = true, optional = true }
 uva-steering = { workspace = true, optional = true }
 uva-harness = { workspace = true, optional = true }
+# The interception contract under the loop: the four traits, the seven
+# mount-point keys, the revocable `HookRegistry` and the `hooks`
+# kernel plugin. Exposed as its own module for a consumer that wants
+# the contract without the loop; `harness` requires it because the
+# harness's seam layer dispatches the registry.
+uva-hook = { workspace = true, optional = true }
+# The approval capability: vocabulary, decision functions, the
+# `approval` kernel plugin. A layer below the harness (the harness
+# re-exports its names), exposed here as its own module for a
+# consumer that wants the capability without the loop.
+uva-approval = { workspace = true, optional = true }
+# The run-event vocabulary (`AgentEvent` / `SystemEvent` /
+# `WarningKind`) carved out of the harness as its own crate; the
+# harness root re-exports every name, so `uva::harness` paths do
+# not move.
+uva-events = { workspace = true, optional = true }
+# The agent vocabulary (`Agent` / `AgentInput` / the steer inboxes / the
+# peer registry / the child-session writer source / the prompt
+# manifest) carved out of the harness as its own crate; the harness root
+# re-exports every name, so `uva::harness` paths do not move.
+uva-agent = { workspace = true, optional = true }
 # The tokio implementations of the runtime-neutral seams
 # (`TokioSpawner` / `TokioSleeper` / `TokioBlocking`), behind the
 # opt-in `harness-tokio` feature. The feature adds no runtime to a
@@ -59,6 +80,13 @@ uva-eval = { workspace = true, optional = true }
 uva-telemetry = { workspace = true, optional = true }
 uva-test-support = { workspace = true, optional = true }
 uva-policy-plugins = { workspace = true, optional = true }
+# The hook implementations (reflection, result redaction, risk-graded
+# traffic light), one feature per hook. This family sits on the
+# interception contract, not on the loop.
+uva-hook-plugins = { workspace = true, optional = true }
+# The `task` tool as a plain tool: runs a registered peer as a child
+# run. It sits on the agent/event vocabulary, not on the harness.
+uva-tool-task = { workspace = true, optional = true }
 uva-runtime = { workspace = true, optional = true }
 # : opt-in plug-ins in the new round (Tier 1 perf + concurrency).
 # Default-NO for every one so the seven-feature MVP subset stays at zero
@@ -156,13 +184,17 @@ tool-todo = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/todo"]
 # The one tool that talks to the network—the only one that pulls
 # an HTTP client and its transport stack.
 tool-web = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/web"]
-# The multi-agent `task` tool: a synthetic tool that runs a
-# registered peer as a child agent. Offline, but it pulls the agent
-# crate (children run in-process, through the interceptor seam).
+# The multi-agent `task` tool: a plain tool that runs a registered
+# peer as a child agent. Offline; it pulls the agent/event vocabulary
+# and the tool trait, not the harness.
 tool-task = [
-  "dep:uva-tool-plugins", "uva-tool-plugins/task",
-  "harness",
+  "dep:uva-tool-task",
+  "agent",
+  "events",
   "tool",
+  "session",
+  "core",
+  "provider",
 ]
 session = ["dep:uva-session", "core", "provider"]
 steering = ["dep:uva-steering", "core", "context", "provider"]
@@ -174,6 +206,32 @@ harness = [
   "session",
   "steering",
   "tool",
+  "approval",
+  "hook",
+  "agent",
+]
+# The interception contract on its own: the `Hook` / `Gate` /
+# transformer traits, the seven mount-point keys, the revocable
+# `HookRegistry` and the `hooks` kernel plugin. `harness` requires it
+# because the loop's seam layer dispatches the registry first.
+hook = ["dep:uva-hook", "core", "context", "steering", "tool"]
+# The approval capability on its own: for a consumer that wants the
+# vocabulary, the decision functions or the `approval` plugin without
+# the loop. `harness` requires it because the harness crate itself
+# depends on `uva-approval` and re-exports its names.
+approval = ["dep:uva-approval", "tool", "session"]
+# The agent vocabulary on its own: the `Agent` contract, `AgentInput`,
+# the steer inboxes, the peer registry, the child-session writer source
+# and the prompt manifest, for a caller that drives a run without
+# naming the loop. `harness` requires it because the harness crate
+# depends on `uva-agent` and re-exports its names.
+agent = [
+  "dep:uva-agent",
+  "core",
+  "provider",
+  "session",
+  "approval",
+  "events",
 ]
 # --- opt-in pieces ---------------------------------------------------
 skill = ["dep:uva-skill", "core", "tool"]
@@ -299,14 +357,34 @@ strategy-best-of-n = [
   "core",
   "provider",
 ]
+# The reflection hook, now shipped by the hook family (it implements
+# the contract crate's `Hook`). The feature name is unchanged.
 reflection = [
-  "dep:uva-policy-plugins",
-  "uva-policy-plugins/reflection",
+  "dep:uva-hook-plugins",
+  "uva-hook-plugins/reflection",
+  "hook",
   "core",
   "provider",
   "tool",
   "steering",
   "context",
+]
+# Result redaction: a `ResultTransformer` that masks credentials in the
+# tool result before the loop commits it (the loop's
+# `tool_result_transformed` row is the provenance).
+redact = [
+  "dep:uva-hook-plugins",
+  "uva-hook-plugins/redact",
+  "hook",
+  "tool",
+]
+# Risk-graded admission: a `Gate` on `tool/pre-execute` that blocks a
+# call by the tool's own `Risk` (the loop writes the `hook_block` row).
+traffic-light = [
+  "dep:uva-hook-plugins",
+  "uva-hook-plugins/traffic-light",
+  "hook",
+  "tool",
 ]
 budget = [
   "dep:uva-policy-plugins",
@@ -332,6 +410,14 @@ hpc-simd = ["search", "uva-search/simd"]
 # sibling feature. Opt-in because nothing in the default assembly
 # consumes it yet.
 kernel = ["dep:uva-kernel"]
+
+# The run-event vocabulary on its own — `AgentEvent` /
+# `SystemEvent` / `WarningKind` without the loop. The vocabulary lives
+# in `uva-events`; this module re-exports the crate's curated surface.
+# The `harness` feature keeps naming every event at `uva::harness::…`
+# (the harness root re-exports them), so `events` is the
+# direct-vocabulary path, not a requirement.
+events = ["dep:uva-events"]
 
 # The one runtime the facade speaks: `uva-core-tokio`'s three
 # adapters, so a consumer on tokio reaches them through the single

@@ -35,8 +35,9 @@ use uva_context::AgentState;
 use crate::Action;
 
 /// How serious a denial is. Surfaced in the model-facing denial
-/// message and in the `WarningKind::Guard` event so operators can
-/// filter critical policy hits from advisory ones.
+/// message — the `tool_result` the veto becomes, so the severity is
+/// durable with it — and in the loop's structured log line, so
+/// operators can filter critical policy hits from advisory ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum GuardSeverity {
     /// Advisory: the action was denied for hygiene reasons

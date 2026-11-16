@@ -382,6 +382,7 @@ mod tests {
             data: json!({"role": "user", "content": "hi"}),
             source: None,
             surface_op: Some(SurfaceOp::append()),
+            attachments: Vec::new(),
         }
     }
 
@@ -412,6 +413,7 @@ mod tests {
                 "content": "ok"
             }),
             is_error: false,
+            tool_call_id: Some(call_id.to_string()),
             surface_op: Some(SurfaceOp::append()),
         }
     }

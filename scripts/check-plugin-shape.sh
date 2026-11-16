@@ -8,7 +8,7 @@
 #
 # Why this exists: `check-harness-shape` already pins the
 # harness crate's function length / nesting budget; plugin crates
-# (`uva-tool-plugins` / `-policy-plugins` / `-plugin-runtime` plus
+# (`uva-tool-plugins` / `-policy-plugins` / `-hook-plugins` plus
 # `uva-mcp` / `-skill` / `-attachment`) ship one plugin per module
 # directory, and the same long-file drift that motivated the harness
 # budget shows up there too. The gate is intentionally
@@ -30,7 +30,9 @@ cd "$(dirname "$0")/.."
 # the gate. Each root is the leaf crate directory under `crates/`.
 PLUGIN_CRATE_ROOTS=(
   crates/uva-tool-plugins
+  crates/uva-tool-task
   crates/uva-policy-plugins
+  crates/uva-hook-plugins
   crates/uva-mcp
   crates/uva-skill
   crates/uva-attachment

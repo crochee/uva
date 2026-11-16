@@ -140,16 +140,6 @@ pub enum MountError {
         plugins: Vec<String>,
     },
 
-    /// A dependency is neither provided inside the group nor available
-    /// in the parent context.
-    #[error("plugin `{plugin_id}` requires unavailable services: {keys:?}")]
-    MissingDependency {
-        /// The plugin with the unsatisfied declaration.
-        plugin_id: String,
-        /// The service keys that could not be resolved.
-        keys: Vec<String>,
-    },
-
     /// A plugin's `apply` returned an error.
     #[error("plugin `{plugin_id}` failed to start: {source}")]
     ApplyFailed {
@@ -160,9 +150,9 @@ pub enum MountError {
         source: PluginError,
     },
 
-    /// A plugin's fiber settled in a state other than `Active` without
-    /// `apply` reporting an error (for example `Pending` because a
-    /// declared provider never registered the key).
+    /// A plugin's fiber settled in a state other than `Active` or
+    /// `Pending` (the parked state a missing dependency produces)
+    /// without `apply` reporting an error.
     #[error("plugin `{plugin_id}` did not become active (state: {state})")]
     PluginInactive {
         /// The plugin that stayed inactive.

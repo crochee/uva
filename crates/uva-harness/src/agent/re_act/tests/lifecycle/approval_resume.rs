@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+use uva_approval::{ResumeDecision, ResumeStatus, ResumeToken};
 use uva_context::AgentState;
 use uva_steering::{Action, Guard, GuardResult, HookDecision, HookEvent};
 use uva_tool::ToolAnnotations;
@@ -20,10 +21,7 @@ use super::{
 };
 use crate::{
     ReActAgent,
-    agent::{
-        approval::{ResumeDecision, ResumeStatus, ResumeToken},
-        host::{Gate, Host},
-    },
+    agent::host::{Gate, Host},
 };
 
 // A gate that asks for every call: the only way a Low-risk call can
@@ -399,7 +397,7 @@ pub(super) async fn resume_retries_a_low_idempotent_dispatched_call() {
     let mut host = Host::new();
     let _gate = host.gate(Arc::new(AskGate));
     let agent = ReActAgent::new(first, Arc::clone(&registry))
-        .with_log_writer(Arc::clone(&writer))
+        .with_log_writer(writer.clone())
         .with_host(host)
         .expect("bind the host");
     let mut stream = agent
@@ -443,7 +441,7 @@ pub(super) async fn a_host_ask_approves_the_guarded_arguments() {
     let _guard = host.guard(Arc::new(RewriteArgs));
     let first = scripted(vec![call("c1", "echo")]);
     let agent = ReActAgent::new(first, Arc::clone(&registry))
-        .with_log_writer(Arc::clone(&writer))
+        .with_log_writer(writer.clone())
         .with_host(host)
         .expect("bind the host");
     let mut stream = agent
@@ -468,7 +466,7 @@ pub(super) async fn a_host_ask_approves_the_guarded_arguments() {
     let mut resume_host = Host::new();
     let _guard = resume_host.guard(Arc::new(RewriteArgs));
     let resumed_agent = ReActAgent::new(second, registry)
-        .with_log_writer(Arc::clone(&writer))
+        .with_log_writer(writer.clone())
         .with_host(resume_host)
         .expect("bind the host");
     let mut stream = resumed_agent

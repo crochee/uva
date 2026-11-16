@@ -10,12 +10,12 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures::{StreamExt as _, channel::mpsc};
+use uva_events::{AgentEvent, SessionEndReason, SystemEvent};
 use uva_provider::ModelProvider;
 
 use super::*;
 use crate::{
     agent::{caps::AgentRuntime, sink::EventSink},
-    events::{AgentEvent, SessionEndReason, SystemEvent},
     input::AgentInput,
 };
 
@@ -188,7 +188,6 @@ fn a_foreign_strategy_runs_against_the_seam() {
     let runtime = AgentRuntime {
         caps: Arc::new(caps),
         cancel: uva_core::AtomicCancelToken::shared(),
-        subagent_depth: 0,
     };
     let seen = AtomicUsize::new(0);
     futures::executor::block_on(async {
@@ -234,7 +233,6 @@ fn runtime_debug_names_the_agent_and_provider() {
     let runtime = AgentRuntime {
         caps: Arc::new(caps),
         cancel: uva_core::AtomicCancelToken::shared(),
-        subagent_depth: 0,
     };
     let text = format!("{runtime:?}");
     assert!(text.contains("seam"), "{text}");

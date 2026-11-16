@@ -77,13 +77,14 @@ async fn main() -> Result<()> {
         patch: args.patch.clone(),
     };
     if args.dump_config {
+        inputs.warn_retired_document();
         let profile = inputs.resolve()?;
         // The registered factory directory answers every row's
-        // manifest, so the dump prints the `provides` / `inject` the
-        // kernel will actually order and bind.
+        // manifest, so the dump prints the `provides` / effective
+        // `inject` the kernel will actually order and bind.
         // This mode prints the requested document and exits before the
         // JSON-RPC pump starts.
-        print!("{}", dump_profile(&profile)?); // stdout-ok: dump-config
+        print!("{}", dump_profile(&profile)); // stdout-ok: dump-config
         return Ok(());
     }
     let cancel_token = Arc::new(AtomicCancelToken::new());
@@ -134,17 +135,54 @@ struct ProfileInputs {
 }
 
 impl ProfileInputs {
+    /// The document layer's path: the explicit `--profile`, or the
+    /// project's configuration layer.
+    ///
+    /// The default is `<directory>/.agents/profile.toml` — the same
+    /// layer the provider fallback (`<directory>/.agents/config.toml`)
+    /// and the seeded skills live in. The document is generated state
+    /// as much as it is source (the settings surface rewrites it
+    /// whole), so it does not belong in the workspace root, where it
+    /// would be a stray artefact in every source checkout that runs a
+    /// server.
+    fn document_path(&self) -> PathBuf {
+        self.profile.clone().unwrap_or_else(|| {
+            uva_app_server::profile::project_document(&self.directory)
+        })
+    }
+
+    /// Say so when the deployment still carries the retired document.
+    ///
+    /// The document layer moved out of the workspace root into the
+    /// project's configuration layer. A deployment that still has the
+    /// old file would silently boot the built-in assembly, so the
+    /// boot names the file it no longer reads.
+    fn warn_retired_document(&self) {
+        if self.profile.is_some() {
+            return;
+        }
+        let retired = self.directory.join("profile.toml");
+        if retired.is_file() {
+            warn!(
+                path = %retired.display(),
+                "the workspace-root profile document is no longer read; \
+                 the document layer is {}",
+                self.document_path().display()
+            );
+        }
+    }
+
     /// Resolve the profile the CLI asked for.
     ///
     /// Layer order: bundle patch → profile document (else
-    /// `<directory>/profile.toml` when present) → home patch
+    /// `<directory>/.agents/profile.toml` when present) → home patch
     /// (`~/.agents/profile.toml` or `UVA_HOME_PROFILE`, only when
     /// it exists) → the CLI `--patch` overlay. `config.yaml`'s
     /// joins the profile layer, and a duplicate id fails. Absent
     /// optional files are skipped, never errors.
     fn resolve(&self) -> Result<Profile> {
         let profile_path = self.profile.clone().or_else(|| {
-            let default = self.directory.join("profile.toml");
+            let default = self.document_path();
             default.exists().then_some(default)
         });
         let profile = resolve_files(
@@ -159,20 +197,18 @@ impl ProfileInputs {
     /// Every file a change can affect the resolved profile through.
     ///
     /// Paths that do not exist yet are still watched: a profile or
-    /// patch created while the process runs counts as a change on the
-    /// next poll.
+    /// patch created while the process runs counts as a change on
+    /// the next poll.
     /// The transactional write path's layer paths.
     ///
     /// The document layer is the explicit `--profile` or
-    /// `<directory>/profile.toml` (the same default `resolve` reads);
-    /// the other three are whatever the deployment declared.
+    /// `<directory>/.agents/profile.toml` (the same default
+    /// `resolve` reads); the other three are whatever the deployment
+    /// declared.
     fn store(&self) -> uva_app_server::profile::ProfileStore {
         uva_app_server::profile::ProfileStore {
             bundle: self.bundle.clone(),
-            doc: self
-                .profile
-                .clone()
-                .unwrap_or_else(|| self.directory.join("profile.toml")),
+            doc: self.document_path(),
             home: uva_app_server::profile::discover_home_patch(),
             overlay: self.patch.clone(),
         }
@@ -183,11 +219,7 @@ impl ProfileInputs {
         if let Some(bundle) = &self.bundle {
             paths.push(bundle.clone());
         }
-        paths.push(
-            self.profile
-                .clone()
-                .unwrap_or_else(|| self.directory.join("profile.toml")),
-        );
+        paths.push(self.document_path());
         if let Some(explicit) =
             std::env::var_os(uva_app_server::profile::HOME_PATCH_ENV)
         {
@@ -215,6 +247,7 @@ async fn run_core(
     // The resolved profile is the boot's mount source: an explicit
     // core row set is authoritative, a legacy-only document falls back
     // to the built-in native set.
+    inputs.warn_retired_document();
     let profile = inputs.resolve()?;
     info!(
         core_entries = profile.core.len(),
@@ -382,4 +415,55 @@ fn spawn_signal_handlers(cancel_token: Arc<AtomicCancelToken>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The document layer is the project's configuration layer.
+    ///
+    /// The document in `<workspace>/.agents/` is the one the core
+    /// reads and the one the settings surface writes back; the
+    /// workspace-root file it used to be is not read at all.
+    #[test]
+    fn the_document_layer_lives_in_the_project_configuration_layer() {
+        let dir = tempfile::tempdir().expect("a temp workspace");
+        let agents = dir.path().join(".agents");
+        std::fs::create_dir_all(&agents).expect("the configuration layer");
+        std::fs::write(
+            agents.join("profile.toml"),
+            "[core]\nentries = [{ id = \"probe-document-row\", runtime = \
+             \"native\" }]\n",
+        )
+        .expect("the document");
+        std::fs::write(
+            dir.path().join("profile.toml"),
+            "[core]\nentries = [{ id = \"probe-retired-row\", runtime = \
+             \"native\" }]\n",
+        )
+        .expect("the retired document");
+
+        let inputs = ProfileInputs {
+            directory: dir.path().to_path_buf(),
+            config: None,
+            bundle: None,
+            profile: None,
+            patch: None,
+        };
+        let resolved = inputs.resolve().expect("the profile resolves");
+        assert!(
+            resolved.contains("probe-document-row"),
+            "the document in the configuration layer is read: {resolved:?}"
+        );
+        assert!(
+            !resolved.contains("probe-retired-row"),
+            "the retired workspace-root document is not read: {resolved:?}"
+        );
+        assert_eq!(
+            inputs.store().doc,
+            agents.join("profile.toml"),
+            "the write path commits to the document layer"
+        );
+    }
 }

@@ -33,14 +33,35 @@ cd "$(dirname "$0")/.."
 PARADIGM_CRATES=(
   crates/uva-tool
   crates/uva-harness
+  crates/uva-events
+  crates/uva-agent
+  crates/uva-hook
   crates/uva-provider
   crates/uva-core
   crates/uva-context
   crates/uva-steering
   crates/uva-session
+  crates/uva-approval
   crates/uva-tool-plugins
+  crates/uva-tool-task
   crates/uva-policy-plugins
+  crates/uva-hook-plugins
 )
+
+# The count of explicit `pub use` lines in a crate's lib.rs.
+#
+# `grep -c` already prints `0` and exits 1 when nothing matches, so the
+# fallback must be `true`, not `echo 0`: the latter appended a second
+# line, the arithmetic comparison then failed with "arithmetic syntax
+# error" and the `if` underneath read that as "under budget" — a
+# zero-count crate could never be judged at all.
+pub_use_count() {
+  local count
+  if ! count=$(grep -cE '^[[:space:]]*pub use ' "$1" 2>/dev/null); then
+    count=0
+  fi
+  printf '%s' "$count"
+}
 
 # `--print` re-emits the current counts in baseline format, so the
 # Makefile's audit target and this gate can never drift apart.
@@ -48,7 +69,7 @@ if [[ "${1:-}" == "--print" ]]; then
   for crate in "${PARADIGM_CRATES[@]}"; do
     lib_rs="$crate/src/lib.rs"
     [[ -f "$lib_rs" ]] || continue
-    n=$(grep -cE '^[[:space:]]*pub use ' "$lib_rs" 2>/dev/null || echo 0)
+    n=$(pub_use_count "$lib_rs")
     printf '%2d  %s\n' "$n" "$lib_rs"
   done | sort -rn
   exit 0
@@ -77,7 +98,7 @@ for crate in "${PARADIGM_CRATES[@]}"; do
     echo "FAIL: $baseline_file must contain a single integer line count" >&2
     exit 1
   fi
-  current=$(grep -cE '^[[:space:]]*pub use ' "$lib_rs" 2>/dev/null || echo 0)
+  current=$(pub_use_count "$lib_rs")
   checked=$((checked + 1))
   if [[ "$current" -gt "$baseline" ]]; then
     over+=("$current (was $baseline): $lib_rs  -> baseline: $baseline_file")

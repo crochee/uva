@@ -96,7 +96,7 @@
 
 - **决定**：契约的真源是 `docs/interface-contract/contract.yaml`，由 `contract-closure` 扫描后端路由 + 扫描前端调用生成；本轮**不写前端 e2e**。
 - **代价**：前端调用与后端路由的一致性依赖扫描器正确性——这正是 G15 要修的（扫描器本身有缺陷）。
-- **出处**：§3.7（AGENTS.md §4.2「本项目不保留任何前端自动化测试套件」）；`contract-closure/lib/curated.ts:19-24`。
+- **出处**：§3.7（AGENTS.md §4.2 当时「不保留任何前端自动化测试套件」）；`contract-closure/lib/curated.ts:19-24`。
 
 ### D6 — 交付形状：一个分支，五批
 

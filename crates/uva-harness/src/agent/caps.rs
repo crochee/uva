@@ -1,6 +1,7 @@
 //! [`AgentCaps`] (immutable capability bundle owned by the agent) and [`AgentRuntime`] (per-run view passed to strategies). The bundle is grouped into planes so every consumer reads the axis it cares about: [`ModelCaps`] (what to sample), [`ToolCaps`] (what may be called), [`ControlCaps`] (how the loop is steered and bounded), [`EnvCaps`] (where and when it runs).
 use std::{fmt, path::PathBuf, sync::Arc};
 
+use uva_approval::ApprovalPolicy;
 use uva_context::ContextManager;
 use uva_core::{
     CancelToken,
@@ -14,10 +15,7 @@ use uva_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
 
 use crate::{
     ReasoningStrategy,
-    agent::{
-        approval::ApprovalPolicy,
-        re_act::{ReActStrategy, delegation::DelegatingTool},
-    },
+    agent::re_act::ReActStrategy,
     prompt::PromptContext,
     seams::Seams,
 };
@@ -31,15 +29,11 @@ pub struct ModelCaps {
 }
 
 #[derive(Clone)]
-/// What may be called: the registry, the surface policy, the restriction and the agent's own delegators.
+/// What may be called: the registry, the surface policy and the restriction.
 pub struct ToolCaps {
     pub registry: Arc<ToolRegistry>,
     pub surface: Option<Arc<ToolSurfacePolicy>>,
     pub restriction: Option<Arc<ToolRestriction>>,
-    /// The delegating tools the agent installs directly. The loop merges
-    /// each host-registered delegator into the same name-keyed table, so a
-    /// plugin may install either way.
-    pub delegators: Vec<Arc<dyn DelegatingTool>>,
 }
 
 #[derive(Clone)]
@@ -70,13 +64,6 @@ pub struct EnvCaps {
     /// structural rows through it and flushes them at the step
     /// boundary.
     pub log_writer: Option<Arc<dyn SessionLog>>,
-    /// Writer source resolving the log writer of a session a
-    /// delegated child runs in. The loop hands it to delegating
-    /// tools (the `task` delegator), which resolve each child's
-    /// writer before starting the child run. `None` (the
-    /// default) means this agent delegates without persisting
-    /// its children.
-    pub subagent_writers: Option<Arc<dyn crate::input::SubagentWriters>>,
     /// How many live events the run buffers before dropping them.
     /// The durable log is the record; this is the notification
     /// channel's bound.
@@ -114,7 +101,6 @@ impl AgentCaps {
                 registry,
                 surface: None,
                 restriction: None,
-                delegators: Vec::new(),
             },
             control: ControlCaps {
                 max_iterations: crate::agent::re_act::DEFAULT_MAX_ITERATIONS,
@@ -130,7 +116,6 @@ impl AgentCaps {
                 clock: SharedClock::system(),
                 spawner: Arc::new(uva_core::spawn::InlineSpawner),
                 log_writer: None,
-                subagent_writers: None,
                 event_capacity: crate::agent::sink::DEFAULT_EVENT_CAPACITY,
             },
         }
@@ -180,7 +165,6 @@ impl AgentCaps {
 pub struct AgentRuntime {
     pub caps: Arc<AgentCaps>,
     pub cancel: Arc<dyn CancelToken>,
-    pub subagent_depth: usize,
 }
 
 impl fmt::Debug for AgentRuntime {
@@ -190,7 +174,6 @@ impl fmt::Debug for AgentRuntime {
             .field("tools", &self.caps.tools.registry.tool_count())
             .field("agent", &self.caps.model.descriptor.name)
             .field("max_iterations", &self.caps.control.max_iterations)
-            .field("subagent_depth", &self.subagent_depth)
             .finish_non_exhaustive()
     }
 }

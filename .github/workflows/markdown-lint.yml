@@ -7,7 +7,7 @@
 #   - 与 `make fmt-check` / `make check-web` 互不重叠（rustfmt + 前端
 #     prettier）；组成 "rustfmt + prettier + markdownlint" 三件套。
 #
-# scope 决定：显式列举 25 个 crate README + 顶层 CONTRIBUTORS.md（不是
+# scope 决定：显式列举 31 个 crate README + 顶层 CONTRIBUTORS.md（不是
 # glob 排除模式）— 这样新加一个目录不会"无意中"进入 lint 范围，而是
 # 显式决策后才加。这是 rust-lang/tokio 的同一做法。
 #
@@ -53,8 +53,14 @@ jobs:
             crates/uva-kernel/README.md
             crates/uva-tool/README.md
             crates/uva-tool-plugins/README.md
+            crates/uva-tool-task/README.md
             crates/uva-policy-plugins/README.md
+            crates/uva-approval/README.md
             crates/uva-harness/README.md
+            crates/uva-events/README.md
+            crates/uva-agent/README.md
+            crates/uva-hook/README.md
+            crates/uva-hook-plugins/README.md
             crates/uva-telemetry/README.md
             crates/uva-attachment/README.md
             crates/uva-mcp/README.md

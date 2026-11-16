@@ -18,7 +18,7 @@
 //! crate.
 
 mod app_state;
-mod boot;
+pub(crate) mod boot;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -26,6 +26,12 @@ pub(crate) mod tests;
 #[cfg(any(test, feature = "test-utils"))]
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use app_state::catalogue_for_deployment;
+// The boot's row-config seams: the value the boot materializes into a
+// row, and the step that fills an empty row with it. The tests pin
+// both — a deployment's profile row and the server config must not
+// disagree about who owns a row's configuration.
+#[cfg(test)]
+pub(crate) use app_state::materialize_row_config;
 #[cfg(test)]
 pub(crate) use app_state::plugin_tool_registry;
 #[cfg(test)]
@@ -33,18 +39,16 @@ pub(crate) use app_state::seeded_tool_registry;
 pub use app_state::{
     AppState,
     AppliedToolSurface,
+    Assembly,
+    DelegatedUsage,
     HarnessEvalAgent,
     ModelSelectionError,
     ProviderCatalogue,
     UsageMetrics,
     UsageSnapshot,
 };
-// The boot's row-config seams: the value the boot materializes into a
-// row, and the step that fills an empty row with it. The tests pin
-// both — a deployment's profile row and the server config must not
-// disagree about who owns a row's configuration.
 #[cfg(test)]
-pub(crate) use app_state::{agent_loop_row_config, materialize_row_config};
+pub(crate) use boot::agent_loop_row_config;
 
 /// Active session controllers keyed by `(user_id, session_id)`.
 ///

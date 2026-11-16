@@ -1006,7 +1006,7 @@ git commit -m "docs: add the complete agent conversation tutorial"
 | §10 清理与性能 | 1 |
 | §11 验证 | 每个任务的测试 + Task 10/11 |
 
-**Step scan:** every task ends with a test or a gate command and a commit. Cleanup is verified by a shell assertion; UI has no automated test suite by repo policy, so it uses `make check-web` + Playwright MCP.
+**Step scan:** every task ends with a test or a gate command and a commit. Cleanup is verified by a shell assertion; UI keeps no e2e suite (repo policy as of this plan), so it uses `make check-web` + Playwright MCP.
 
 **Type consistency:** `derive_history` is defined in Task 2 and consumed in Task 3; `HistoryProjection` is defined in Task 3 and used in Task 4; `Risk` / `ApprovalRequest` are defined in Task 5 and consumed in Task 7; `HookDecision::Ask` is defined in Task 5 and consumed in Task 7; `Compactor` is defined in Task 8 and consumed in Task 9; `ResumeToken` is defined in Task 7 and consumed in Task 9.
 

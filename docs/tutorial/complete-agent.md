@@ -122,7 +122,7 @@ YAML
 - 未写 `default_provider` 时，`openai` 优先，否则取第一个 provider 名。
   `.agents/config.toml` 是 TOML 的 `ProviderEntry` 形状；把旧
   `config.yaml` 的 legacy 形状（`api_key` / `models[]`）迁移过来时跑
-  `uva-app-server translate --config config.yaml --out profile.toml`，
+  `uva-app-server translate --config config.yaml --out .agents/profile.toml`，
   或手动改写成上面的形状。
 - 旧的 `config.yaml` `providers` / `cache` / `resilience` / `budget` 段
   已不再读取（启动会警告并提示 `translate`）。
@@ -621,7 +621,7 @@ fn assemble(
 要点：
 
 - `Host` 的方法：`observe` / `gate` / `request_transformer` /
-  `result_transformer` / `prompt_section` / `tool` / `delegator`，
+  `result_transformer` / `prompt_section` / `tool`，
   全部返回可撤销的 `Registration`；`install` 把它们打成一个 `PluginHandle`。
 - 名字与核心工具冲突的工具会被拒绝并记一条 `DiagnosticKind::ToolNameConflict`，
   不会覆盖核心工具。
@@ -806,7 +806,7 @@ factories
 同名注册**不会覆盖**：`register` 返回 `ProfileError::DuplicateFactoryId`，
 第二个工厂不被接受——静默覆盖比启动失败更糟。
 
-profile 文件（工作区根的 `profile.toml`，与 §2 同一个部署目录）写一行：
+profile 文件（工作区配置层的 `.agents/profile.toml`，与 §2 同一个部署目录）写一行：
 
 ```toml
 [core]
@@ -1042,13 +1042,17 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 
 公开面分两层：
 
-- **精选面**：crate 根上 re-export 出来的 64 个名字 —— 这是承诺过的稳定面，
+- **精选面**：crate 根上 re-export 出来的 61 个名字 —— 这是承诺过的稳定面，
   依赖它就不会被下一次发布挪走。
-- **深路径**：`uva_harness::agent::…` 与 `uva_harness::events::…`
-  底下只能走深路径才够得到的 57 项。rustdoc 在那两个模块下记录了 109 条
-  公开路径，其中 53 条是门面名字在它们定义处的路径（例如
-  `AgentDescriptor` 定义在 `uva-core`），剩下 56 项；再加上从
-  `uva-tool` 转出来的 `Risk`（它在 harness 里没有自己的路径），共 57 项。
+- **深路径**：`uva_harness::agent::…`、`uva_harness::events::…`
+  （`uva-events` 词汇的 re-export）与 `uva_harness::seams::…`
+  （`uva-hook` 的挂载点键）底下只能靠完整的模块路径够到。rustdoc 在
+  `agent` 模块下记录了 36 条公开路径，其中 22 条是门面名字在它们定义处的
+  路径（例如 `AgentDescriptor` 定义在 `uva-core`），剩下 14 项；再加从
+  `uva-hook` re-export 进 `uva_harness::seams` 的七个挂载点键（跨 crate、
+  不上 crate 根），深路径名字共 21 项。审批词汇整体搬去了 `uva-approval`、
+  事件词汇搬去了 `uva-events`、agent 词汇搬去了 `uva-agent`，都经 crate
+  根的 use 树抵达本 crate。
   深路径上的名字不在承诺内，将来可动。
 
 ---

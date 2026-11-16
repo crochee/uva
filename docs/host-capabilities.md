@@ -40,11 +40,12 @@
 | `search` | 搜索 | 工作区组标题旁的 🔍 | provides search · inject tools, memory | 不挂载，能力与界面同消（D32） |
 | `session-store` | 会话 | 主界面 · 工作区树 | provides sessions · inject — | 不挂载，能力与界面同消（D32） |
 | `sandbox` | 支撑（`tool-shell` 的执行策略） | 无直接界面 | provides sandbox · inject — | 不挂载，能力与界面同消（D32） |
-| `subagent-backend` | 任务 | 设置 · 自动化 | provides subagents · inject — | 不挂载，能力与界面同消（D32） |
+| `tool-task` | 任务 | 设置 · 自动化 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `context-compactor` | 支撑（对话上下文） | 无直接界面 | provides compaction · inject llm.default | 不挂载，能力与界面同消（D32） |
 | `approval` | 对话（审批在对话流应答） | 主界面 · 对话流 | provides approval · inject — | 不挂载，能力与界面同消（D32） |
 | `skills` | 技能（+ 命令） | 设置 · 技能与命令 | provides skills · inject tools | 不挂载，能力与界面同消（D32） |
-| `agent-loop` | 对话（+ 内置默认 agent，D22） | 主界面 · 对话流 | provides agentLoop · inject llm, llm.default, tools, sessions, subagents | boot 失败（`src/state/app_state/boot.rs:445-450`） |
+| `hooks` | Hooks | 设置 · Hooks | provides hooks · inject — | 不挂载，外部拦截注册表缺席（循环仍跑 harness `Host` 的 typed 链，D32） |
+| `agent-loop` | 对话（+ 内置默认 agent，D22） | 主界面 · 对话流 | provides agentLoop · inject llm, llm.default, tools, sessions | boot 失败（`src/state/app_state/boot.rs:445-450`） |
 | `mcp` | MCP | 设置 · MCP | provides mcp · inject — | 不挂载，能力与界面同消（D32） |
 | `eval` | 评测 | 设置 · 自动化 | provides eval · inject — | 不挂载，能力与界面同消（D32） |
 | `scheduler` | 计划 | 设置 · 自动化 | provides scheduler · inject — | 不挂载，能力与界面同消（D32） |
@@ -61,9 +62,9 @@
 | `.agents/tasks/<name>/task.md` | 计划 | 声明文件（what / how often / prompt）；运行时状态在 ScheduleStore | `crates/uva-app-server/src/state/app_state/tasks.rs:5-9` |
 | `.agents/mcp.json` | MCP | `mcpServers` 映射、仅 stdio；插件包内以 `<plugin>/<server>` 命名空间 | `crates/uva-core/src/layout.rs:242-275`、`crates/uva-app-server/README.md:132-135` |
 | `.agents/plugins/<name>/plugin.json` | 插件目录 | 带 manifest 的目录才算插件包（同构子树，可带 `skills/` / `agents/` / `tasks/` / `mcp.json`）；包内定义按 `<plugin>/<name>` 命名空间 | `crates/uva-core/src/layout.rs:277-301` |
-| `.agents/config.toml`（`[providers]`） | 模型 | provider 回退输入（`model-adapter` 行 config 优先） | `crates/uva-app-server/src/main.rs:63-77`、`crates/uva-app-server/src/state/app_state/boot.rs:763-796` |
-| `~/.agents/profile.toml` | （装配层）home patch | 层序里排在 profile 文档之后、CLI overlay 之前（`UVA_HOME_PROFILE` 可指到别处） | `crates/uva-app-server/src/profile/merge.rs:217-231` |
-| `<workspace>/profile.toml` | （装配层）profile 文档 | `--profile` 缺省时的默认位置 | `crates/uva-app-server/src/main.rs:225-237` |
+| `.agents/config.toml`（`[providers]`） | 模型 | provider 回退输入（`model-adapter` 行 config 优先） | `crates/uva-app-server/src/state/app_state/boot.rs:53-58` |
+| `~/.agents/profile.toml` | （装配层）home patch | 层序里排在 profile 文档之后、CLI overlay 之前（`UVA_HOME_PROFILE` 可指到别处） | `crates/uva-app-server/src/profile/merge.rs:233-247` |
+| `<workspace>/.agents/profile.toml` | （装配层）profile 文档 | `--profile` 缺省时的默认位置（工作区的配置层，与 `.agents/config.toml` 同层） | `crates/uva-app-server/src/main.rs:136-151`、`crates/uva-app-server/src/profile/merge.rs:215-230` |
 | `<workspace>/sessions/` | 会话（运行时状态） | durable 真源，不在 `.agents`（布局明文：runtime state 不进定义目录） | `crates/uva-app-server/src/state/app_state/boot.rs:137-140`、`crates/uva-core/src/layout.rs:32-37` |
 
 ## 4. 能力域分节（13 域 × 四要素）
@@ -146,13 +147,20 @@
 ### 4.8 Hooks（hooks）
 
 - **宿主界面落点**：设置 · Hooks（运行方式 + 运行日志；不从别处导入，D24）。
-- **数据来源**：**无目录约定**——挂载的插件行在 harness `Host` 上注册（六条 pass 链上的
-  中间件 + 五个观察点的残余 hooks 表：`before_run` / `after_run` /
-  `before_provider_call` / `on_error` / `on_compaction`）。
-- **谁拥有它**：各提供 hook 的插件行（steering 面）。
-- **缺行时的行为**：无注册 → 分区空态；行禁用 → 其 hook 随 Registration 撤销
+- **数据来源**：**无目录约定**——两个来源经同一仲裁折叠：①`hooks` 行发布的
+  `HookRegistry` 服务（外部/插件 crate 的注册，句柄 drop 即撤）；②harness `Host`
+  上 steering 面的注册（六条 pass 链上的中间件 + 五个观察点的残余 hooks 表：
+  `before_run` / `after_run` / `before_provider_call` / `on_error` /
+  `on_compaction`）。
+- **谁拥有它**：`hooks` 行（provides hooks；`agent-loop` 注入它）与各提供 hook 的
+  插件行（steering 面）。
+- **缺行时的行为**：无注册 → 分区空态；`hooks` 行缺 → 外部注册表缺席，循环只跑
+  `Host` 的 typed 链；行禁用 → 其 hook 随 `Registration` / `HookRegistration` 撤销
   （Drop 句柄同时退出链与表，`host/mod.rs:644-674`）。
-- **现状证据**：`crates/uva-harness/src/agent/host/mod.rs:14-22`、`:644-674`。
+- **现状证据**：`crates/uva-hook/src/plugin.rs:48-90`、
+  `crates/uva-app-server/src/composition/kernel/mod.rs:769-780`、
+  `crates/uva-harness/src/seams/mod.rs:28-60`、
+  `crates/uva-harness/src/agent/host/mod.rs:14-22`、`:644-674`。
 
 ### 4.9 计划（schedules）
 
@@ -171,8 +179,8 @@
 
 - **宿主界面落点**：设置 · 自动化。
 - **数据来源**：会话日志扫描的 delegation 记录（`subagent_enter` / `subagent_exit` 头尾对，
-  以 child 会话日志为准，parent 日志持镜像）。
-- **谁拥有它**：`subagent-backend` 行（provides subagents）。
+  全部以 child 会话日志为准；parent 侧只有带 child id 的 `tool_result`）。
+- **谁拥有它**：`tool-task` 行（把 `task` 工具注册进 `tools`；普通工具，注册表分发）。
 - **缺行时的行为**：无 delegation → 空态；行缺 → 委派能力消失（D32）。
 - **现状证据**：`crates/uva-app-server/src/routes/tasks.rs:1-34`（`tasks/list` /
   `tasks/get`）。

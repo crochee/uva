@@ -69,15 +69,18 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uva::kernel::{Namespace, namespace_allows};
 
 pub use super::schema::{UiComponent, UiError, UiSchema};
-use crate::profile::{Entry, RuntimeKind};
+use crate::profile::Manifest;
 
 /// How many components one slot accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Deserialize, Eq, JsonSchema, PartialEq, Serialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Cardinality {
     /// Exactly one; a second registration fails activation.
@@ -100,7 +103,7 @@ pub struct SlotDecl {
 }
 
 /// The wire projection of one declared slot (`ui/schema`'s `slots`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, JsonSchema, PartialEq, Eq, Serialize)]
 pub struct SlotInfo {
     /// The host-agnostic slot id.
     pub id: String,
@@ -343,7 +346,7 @@ impl std::fmt::Debug for ComponentHandle {
 ///
 /// Returns [`UiError`] naming the first row (or component) that cannot
 /// be activated.
-pub fn load_ui_tree(entries: &[Entry]) -> Result<UiTree, UiError> {
+pub fn load_ui_tree(entries: &[Manifest]) -> Result<UiTree, UiError> {
     let tree = UiTree::new();
     for entry in entries {
         if let Err(error) = load_row(&tree, entry) {
@@ -384,17 +387,17 @@ impl Retained {
     }
 }
 
-fn load_row(tree: &UiTree, entry: &Entry) -> Result<(), UiError> {
+fn load_row(tree: &UiTree, entry: &Manifest) -> Result<(), UiError> {
     if !namespace_allows(Namespace::Ui, &entry.id) {
         return Err(UiError::NamespaceViolation {
             id: entry.id.clone(),
         });
     }
-    if entry.runtime != RuntimeKind::UiBundle {
-        return Err(UiError::WrongRuntime {
-            id: entry.id.clone(),
-            runtime: runtime_name(entry.runtime),
-        });
+    if entry.group {
+        for child in &entry.children {
+            load_row(tree, child)?;
+        }
+        return Ok(());
     }
     let config = match &entry.config {
         Value::Null => {
@@ -452,7 +455,7 @@ fn load_row(tree: &UiTree, entry: &Entry) -> Result<(), UiError> {
 /// Parse one slot declaration, rejecting executable fields on the
 /// declaration object itself.
 fn slot_decl(
-    entry: &Entry,
+    entry: &Manifest,
     index: usize,
     value: &Value,
 ) -> Result<SlotDecl, UiError> {
@@ -502,7 +505,7 @@ fn slot_decl(
     Ok(SlotDecl { id, cardinality })
 }
 
-fn version(entry: &Entry, config: &Map<String, Value>) -> Result<u32, UiError> {
+fn version(entry: &Manifest, config: &Map<String, Value>) -> Result<u32, UiError> {
     match config.get("version") {
         None => Ok(1),
         Some(Value::Number(number)) => number
@@ -522,7 +525,7 @@ fn version(entry: &Entry, config: &Map<String, Value>) -> Result<u32, UiError> {
 }
 
 fn component(
-    entry: &Entry,
+    entry: &Manifest,
     index: usize,
     value: &Value,
 ) -> Result<UiComponent, UiError> {
@@ -551,7 +554,7 @@ fn component(
 }
 
 fn required_string(
-    entry: &Entry,
+    entry: &Manifest,
     object: &Map<String, Value>,
     index: usize,
     field: &str,
@@ -572,7 +575,7 @@ fn required_string(
 /// Reject the fields through which a bundle would ask a host to run
 /// code or apply remote CSS.
 fn reject_executable(
-    entry: &Entry,
+    entry: &Manifest,
     object: &Map<String, Value>,
 ) -> Result<(), UiError> {
     const FORBIDDEN: [&str; 5] =
@@ -595,17 +598,10 @@ fn record_row(tree: &UiTree, owner: &str, version: u32) {
     });
 }
 
-fn invalid(entry: &Entry, message: String) -> UiError {
+fn invalid(entry: &Manifest, message: String) -> UiError {
     UiError::InvalidConfig {
         id: entry.id.clone(),
         message,
-    }
-}
-
-fn runtime_name(runtime: RuntimeKind) -> &'static str {
-    match runtime {
-        RuntimeKind::Native => "native",
-        RuntimeKind::UiBundle => "ui-bundle",
     }
 }
 

@@ -24,15 +24,9 @@ use std::{
 
 use futures::stream;
 use uva::{
+    agent::{Agent, AgentEntry, AgentInput, AgentRegistry},
     core::registry::RegistryItem,
-    harness::{
-        Agent,
-        AgentDescriptor,
-        AgentEntry,
-        AgentEvent,
-        AgentInput,
-        AgentRegistry,
-    },
+    harness::{AgentDescriptor, AgentEvent},
 };
 
 /// A minimal agent that advertises only what the test

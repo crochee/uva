@@ -75,6 +75,22 @@ jobs:
       - name: kernel dependency boundary (no agent / UI crates)
         run: make check-kernel-deps
 
+      # `make ci` also runs the frontend gates (`check-web`: tsc, eslint,
+      # prettier, vitest) and `check-web-contract`, which regenerates the
+      # TypeScript contract from the Rust wire types and diffs it. Both
+      # need Node and the frontend lock's dependencies. The `web` job
+      # still owns the production build.
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: uva-web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: uva-web
+        run: npm ci
+
       # The core's stdout is the JSON-RPC transport: a `println!` in
       # the binary reaches the peer as a non-frame. A dedicated step
       # names the discipline in the log; `make ci` also runs it.
@@ -85,8 +101,9 @@ jobs:
       # errors), the compiled-guide doctests, MVP-dependency gate,
       # kernel-dependency gate, stdout-discipline gate, runtime-free
       # gate, public-API runtime gate, pub-surface ratchet,
-      # claim-language gate, clock ratchet, harness-shape gate, and the
-      # test-layout ratchet.
+      # claim-language gate, clock ratchet, harness-shape gate, the
+      # test-layout ratchet, and the frontend type / lint / unit-test /
+      # generated-contract gates.
       - name: fmt, clippy, rustdoc, dependency + layout + shape invariants
         run: make ci
 
@@ -186,9 +203,11 @@ jobs:
 
       # No browser needed: AGENTS.md §4 requires 0 lint and formatting,
       # and `tsc --noEmit` is what catches an API-shape change on the
-      # Rust side. Frontend behaviour is verified with Playwright MCP
-      # against the running app (AGENTS.md §4.2); there is no browser
-      # suite in CI by design (R72).
+      # Rust side. `vitest run` covers the pure-function unit tests;
+      # everything else (DOM, network, React, real rendering) is
+      # verified with Playwright MCP against the running app
+      # (AGENTS.md §4.2); there is no browser e2e suite in CI by
+      # design (R72).
       - name: types, lint, formatting
         run: make check-web
 

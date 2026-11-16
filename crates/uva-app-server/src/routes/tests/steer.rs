@@ -112,7 +112,6 @@ async fn fixture() -> Fixture {
     let controller = SessionController::spawn(
         user.clone(),
         SESSION,
-        state.session_manager.sink(&user, SESSION),
         state.session_manager.writer(&user, SESSION),
         deps,
         Duration::from_secs(300),
@@ -450,7 +449,7 @@ async fn a_settled_run_queues_the_steer_without_a_pre_appended_row() {
         .iter()
         .filter(|row| {
             row.to_string().contains("focus on the tests")
-                && row["type"] == json!("UserInput")
+                && row["type"] == json!("user_message")
         })
         .collect();
     assert_eq!(
@@ -537,7 +536,7 @@ async fn a_steer_racing_the_settle_is_delivered_exactly_once() {
             assert_eq!(hits[0]["type"], json!("user_message"));
             assert_eq!(hits[0]["source"], json!("steer"));
         }
-        Delivery::Queue => assert_eq!(hits[0]["type"], json!("UserInput")),
+        Delivery::Queue => assert_eq!(hits[0]["type"], json!("user_message")),
     }
 }
 
@@ -616,7 +615,7 @@ async fn a_steer_racing_the_cancel_is_delivered_exactly_once() {
             assert_eq!(hits[0]["type"], json!("user_message"));
             assert_eq!(hits[0]["source"], json!("steer"));
         }
-        Delivery::Queue => assert_eq!(hits[0]["type"], json!("UserInput")),
+        Delivery::Queue => assert_eq!(hits[0]["type"], json!("user_message")),
     }
 }
 

@@ -79,10 +79,11 @@ use crate::{
     SessionEvent,
     SessionSink,
     SurfaceOp,
-    events::bound_plugin_row,
+    events::{bound_plugin_row, bound_tool_output_row, merge_tool_output_row},
     jsonl::is_metadata_header_row,
     log::{RepairReport, SessionLog},
     log_surface::{SurfaceLedger, log_is_stamped, row_seq},
+    sink::SessionEndReason,
 };
 
 #[cfg(test)]
@@ -186,6 +187,17 @@ pub struct LogWriter {
     /// backpressure, but a synchronous callback cannot wait — and a
     /// row that does not fit waits here instead of being dropped.
     spill: Mutex<Vec<StampedRow>>,
+    /// One not-yet-flushed `tool_output` row per tool call.
+    ///
+    /// A streaming tool yields its output at the pipe's rate, and
+    /// every chunk would otherwise be its own row: a command that
+    /// prints a megabyte writes a hundred rows of a few KiB each, and
+    /// those rows are log-only, so compaction never removes them. The
+    /// chunks of one call merge into one pending row (bounded to a
+    /// tail window), and the next flush writes it. The map is keyed by
+    /// the provider's call id, and a drained row leaves a fresh entry
+    /// behind for the chunks that arrive after the flush.
+    pending_tool_output: Mutex<HashMap<String, StampedRow>>,
     /// Serialises the flushes. Two flushes that overlapped would
     /// write their batches in whichever order they won the race, and
     /// the file's order would stop being the ordinal order. The lock
@@ -234,6 +246,7 @@ impl LogWriter {
             tx: AsyncMutex::new(tx),
             rx: Mutex::new(rx),
             spill: Mutex::new(Vec::new()),
+            pending_tool_output: Mutex::new(HashMap::new()),
             flush_lock: AsyncMutex::new(()),
             last_request: RwLock::new(None),
             last_flushed: AtomicU64::new(0),
@@ -360,6 +373,12 @@ impl LogWriter {
     /// being dropped; the next flush writes it. Returns the ordinal
     /// the row was given.
     pub fn append_nowait(&self, value: Value) -> u64 {
+        if let Some(call_id) = tool_output_call(&value) {
+            // A streamed chunk never takes the queue: it merges into
+            // the call's pending row, so the memory bound is the tail
+            // window rather than the tool's output rate.
+            return self.enqueue_tool_output(&call_id, value);
+        }
         match self.tx.try_lock() {
             Some(tx) => self.enqueue(tx, value).0,
             None => {
@@ -376,7 +395,10 @@ impl LogWriter {
                 let seq = self.sink.alloc_seq();
                 let row = StampedRow {
                     seq,
-                    value: self.stamp(seq, bound_plugin_row(value)),
+                    value: self.stamp(
+                        seq,
+                        bound_tool_output_row(bound_plugin_row(value)),
+                    ),
                 };
                 spill.push(row);
                 seq
@@ -480,6 +502,21 @@ impl LogWriter {
         Ok(())
     }
 
+    /// Close the session's log through the backend this writer owns.
+    ///
+    /// The writer is the one handle a run or a controller holds: the
+    /// sink it was built with is the same session's, so the pairing
+    /// that used to be two arguments at a call site is a fact of this
+    /// value instead. The queued rows land before the close, so a
+    /// row the writer accepted is never lost to the close itself.
+    pub async fn close(
+        &self,
+        reason: SessionEndReason,
+    ) -> Result<(), SessionError> {
+        self.flush().await?;
+        self.sink.close(reason).await
+    }
+
     /// Copy rows into THIS session's log as one durable batch.
     ///
     /// A copy is the one operation that must not go through the
@@ -535,7 +572,7 @@ impl LogWriter {
             .into_iter()
             .zip(&seqs)
             .map(|(row, &seq)| {
-                let mut row = bound_plugin_row(row);
+                let mut row = bound_tool_output_row(bound_plugin_row(row));
                 remap_citations(&mut row, &remap);
                 StampedRow {
                     seq,
@@ -656,10 +693,14 @@ impl LogWriter {
         mut tx: MutexGuard<'_, mpsc::Sender<StampedRow>>,
         value: Value,
     ) -> (u64, bool) {
+        if let Some(call_id) = tool_output_call(&value) {
+            return (self.enqueue_tool_output(&call_id, value), false);
+        }
         let seq = self.sink.alloc_seq();
         let row = StampedRow {
             seq,
-            value: self.stamp(seq, bound_plugin_row(value)),
+            value: self
+                .stamp(seq, bound_tool_output_row(bound_plugin_row(value))),
         };
         match tx.try_send(row) {
             Ok(()) => (seq, false),
@@ -672,7 +713,31 @@ impl LogWriter {
         }
     }
 
-    /// Take every buffered row: the spill first, then the queue.
+    /// File one `tool_output` chunk as (or into) the call's pending
+    /// row.
+    ///
+    /// The first chunk of a call reserves the row's ordinal; every
+    /// later chunk appends to the same row under the same ordinal, so
+    /// the sink writes one row where the tool produced a burst.
+    /// Returns the ordinal the row carries.
+    fn enqueue_tool_output(&self, call_id: &str, value: Value) -> u64 {
+        let value = bound_tool_output_row(value);
+        let mut pending = self.pending_tool_output.lock();
+        if let Some(row) = pending.get_mut(call_id) {
+            merge_tool_output_row(&mut row.value, &value);
+            return row.seq;
+        }
+        let seq = self.sink.alloc_seq();
+        let row = StampedRow {
+            seq,
+            value: self.stamp(seq, value),
+        };
+        pending.insert(call_id.to_string(), row);
+        seq
+    }
+
+    /// Take every buffered row: the spill first, then the pending
+    /// tool output, then the queue.
     ///
     /// The queue's sender is locked across the drain. A producer
     /// that has reserved an ordinal but not yet queued its row would
@@ -682,6 +747,8 @@ impl LogWriter {
     async fn drain(&self) -> Vec<StampedRow> {
         let _tx = self.tx.lock().await;
         let mut rows = std::mem::take(&mut *self.spill.lock());
+        let pending = std::mem::take(&mut *self.pending_tool_output.lock());
+        rows.extend(pending.into_values());
         let mut rx = self.rx.lock();
         while let Ok(row) = rx.try_recv() {
             rows.push(row);
@@ -716,6 +783,23 @@ fn stamp_copy(seq: u64, mut value: Value) -> Value {
             json!({"data": value, "seq": seq})
         }
     }
+}
+
+/// The tool call a row streams for, when the row is one streamed
+/// chunk.
+///
+/// The writer merges these rows into one pending row per call; every
+/// other row takes the queue. A `tool_output` row without a call id
+/// cannot be merged with anything, so it takes the queue too — and is
+/// bounded on that path like any other row.
+fn tool_output_call(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("tool_output") {
+        return None;
+    }
+    value
+        .get("call_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// Remap a copied row's `surface_op.source_event_seqs` through the
@@ -761,6 +845,14 @@ impl SessionLog for LogWriter {
         LogWriter::read(self).await
     }
 
+    fn set_ledger(&self, ledger: Arc<SurfaceLedger>) {
+        LogWriter::set_ledger(self, ledger);
+    }
+
+    fn seed_ledger(&self, rows: &[Value]) {
+        LogWriter::seed_ledger(self, rows);
+    }
+
     async fn append_event(
         &self,
         event: &SessionEvent,
@@ -783,6 +875,13 @@ impl SessionLog for LogWriter {
 
     async fn flush(&self) -> Result<(), SessionError> {
         LogWriter::flush(self).await
+    }
+
+    async fn close(
+        &self,
+        reason: SessionEndReason,
+    ) -> Result<(), SessionError> {
+        LogWriter::close(self, reason).await
     }
 
     async fn repair(&self) -> Result<RepairReport, SessionError> {

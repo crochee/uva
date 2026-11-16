@@ -813,7 +813,7 @@ git commit -m "refactor(context): memory and repair write through the session wr
 
 **Files:**
 - Modify: `uva-web/src/lib/session-to-messages.ts`
-- Test: 无自动化测试套件（本仓按 `AGENTS.md` §4.2 不保留前端 e2e；验证用 Playwright MCP 驱动真实前端）
+- Test: `uva-web/tests/session-to-messages.test.ts` 补 `assistant_message` 分支的 vitest 用例（成文时仓内尚无前端单测；现行 §4.2 = 纯函数单测用 vitest 随 `make check-web` 跑，不保留 e2e，渲染验证用 Playwright MCP 驱动真实前端）
 
 **Interfaces:**
 - Consumes: Task 6 产出的 `assistant_message` 行形状
@@ -834,7 +834,7 @@ git commit -m "refactor(context): memory and repair write through the session wr
 - [ ] **Step 2: 跑前端门禁**
 
 Run: `make check-web`
-Expected: PASS（`tsc --noEmit` + `eslint` + `prettier --check` 全绿）。
+Expected: PASS（`tsc --noEmit` + `eslint` + `prettier --check` + `vitest` 全绿）。
 
 - [ ] **Step 3: 用 Playwright MCP 验真实前端**
 

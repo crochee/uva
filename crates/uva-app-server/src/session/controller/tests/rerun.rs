@@ -162,7 +162,7 @@ async fn rerun_prompt_row_shadows_the_turn_it_replaces() {
         .rev()
         .find(|row| {
             row.get("type").and_then(serde_json::Value::as_str)
-                == Some("UserInput")
+                == Some("user_message")
         })
         .expect("the rerun must persist its prompt row");
     let op = serde_json::from_value::<uva::session::SurfaceOp>(
@@ -329,7 +329,7 @@ async fn rerun_without_a_user_turn_appends_plainly() {
         .rev()
         .find(|row| {
             row.get("type").and_then(serde_json::Value::as_str)
-                == Some("UserInput")
+                == Some("user_message")
         })
         .expect("the rerun must persist its prompt row");
     assert!(

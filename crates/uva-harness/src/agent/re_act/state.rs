@@ -1,15 +1,17 @@
-//! Pure types the loop flips between: the transcript, the per-run `RunState`, and the one-shot sample output.
-use std::{collections::HashSet, sync::Arc};
+//! Pure types the loop flips between: the per-run `RunState` and the
+//! one-shot sample output. The transcript — the messages the model
+//! sees and everything that travels with them — lives in
+//! [`super::transcript`]; the per-iteration outcome lives in
+//! [`super::r#loop::step::Step`].
 
+use std::sync::Arc;
+
+use uva_approval::ApprovalPolicy;
 use uva_context::AgentState;
 use uva_core::CancelToken;
-use uva_provider::Message;
+use uva_events::SessionEndReason;
 
-use super::projection::ToolProjectionCache;
-use crate::{agent::approval::ApprovalPolicy, events::SessionEndReason};
-
-/// The live LLM transcript: shared behind an `Arc` so the loop, snapshots and the durable log observe one history without copying it.
-pub(crate) type Transcript = Arc<Vec<Message>>;
+use super::{projection::ToolProjectionCache, transcript::Transcript};
 
 pub(crate) struct RuntimeSnapshotCache {
     pub today: chrono::NaiveDate,
@@ -18,46 +20,24 @@ pub(crate) struct RuntimeSnapshotCache {
 
 pub(crate) struct SampleOutcome {
     pub(crate) result: Arc<uva_provider::SamplingResult>,
-    pub(crate) parts: Vec<uva_provider::ContentPart>,
+    /// The assistant turn's one message — the same value the log row
+    /// serialized. The loop commits it to the transcript unchanged.
+    pub(crate) message: uva_provider::Message,
     /// The ordinal of the `assistant_message` row this pass wrote, or
     /// `0` when the pass produced nothing (and wrote no row).
     pub(crate) assistant_seq: u64,
 }
 
-/// One iteration body did. Each variant carries the `step_end` label
-/// the `uva_session` wire records, so the event and the close
-/// decision cannot drift apart.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Step {
-    Continue(&'static str),
-    Completed,
-    // The batch held high-risk calls; the run ends here and a
-    // resume continues it.
-    Suspended,
-    Failed(SessionEndReason),
-}
-
-impl Step {
-    pub(super) fn action(&self) -> &'static str {
-        match self {
-            Self::Continue(label) => label,
-            Self::Completed => "completed",
-            Self::Suspended => "suspended",
-            Self::Failed(SessionEndReason::Cancelled) => "cancelled",
-            Self::Failed(_) => "failed",
-        }
-    }
-}
-
 /// Per-session state: the live transcript, the per-run scratch + meta
 /// bookkeeping, and the runtime-snapshot cache. The loop flips between
-/// phases by reading and writing this single struct. `cancel` and
-/// `subagent_depth` are fixed for the run; `task` children run at
-/// `subagent_depth + 1`.
+/// phases by reading and writing this single struct. `cancel` is fixed
+/// for the run.
 pub(crate) struct RunState {
     pub(crate) cancel: Arc<dyn CancelToken>,
-    pub(crate) subagent_depth: usize,
-    pub messages: Transcript,
+    /// The run's durable surface: the messages the model sees, the
+    /// ordinal each one was written under, the open tool-call window
+    /// and the user turns that window holds back.
+    pub transcript: Transcript,
     pub agent_state: AgentState,
     pub end_reason: SessionEndReason,
     /// `SystemPrompt`-point hints already injected — at most once per
@@ -68,12 +48,6 @@ pub(crate) struct RunState {
     /// re-reading the shared descriptor each iteration.
     pub model_hint: Option<String>,
     pub runtime_snapshot: Option<RuntimeSnapshotCache>,
-    /// The ordinal of each durable surface message in `messages`,
-    /// index-parallel. A message with no row of its own (an injected
-    /// inbox turn the host already wrote, whose ordinal this loop does
-    /// not know) carries `0` and is never cited as compaction
-    /// provenance.
-    pub surface_seqs: Vec<u64>,
     /// The rows [`drive_setup`](super::loop) read, kept so the resume
     /// check compares the token against the same fold the transcript
     /// came from instead of re-reading the log.
@@ -81,14 +55,6 @@ pub(crate) struct RunState {
     /// The current turn's non-text parts: the log persists a turn's
     /// text but never its bytes, so the request carries them.
     pub attachments: Vec<uva_provider::ContentPart>,
-    /// Tool calls the assistant turn made that have no result yet.
-    /// A user message that arrives while this is non-empty waits in
-    /// [`Self::deferred_user`]: a request may not interleave a user
-    /// turn between a `tool_use` and its `tool_result`.
-    pub pending_tool_calls: HashSet<String>,
-    /// User messages an inbox delivered while a tool batch was open.
-    /// Released in order once the batch commits.
-    pub deferred_user: Vec<Message>,
     pub projection: ToolProjectionCache,
     /// Whether this run already reported a context-manager prune.
     /// A writer-backed run re-derives and re-prunes at every step, but
@@ -104,7 +70,7 @@ pub(crate) struct RunState {
     pub terminate: Option<String>,
     /// The calls a gate held for an approval. The suspension that
     /// asks for them arrives with the approval policy.
-    pub pending_approvals: Vec<crate::agent::approval::ApprovalRequest>,
+    pub pending_approvals: Vec<uva_approval::ApprovalRequest>,
     /// The approval policy this run actually uses: the agent's
     /// configured policy plus the session-scope grants folded from
     /// the log. Held per run so a grant written by a resume is
@@ -131,41 +97,30 @@ impl RunState {
     /// State for a run that ended before its first iteration.
     pub(super) fn failed(
         cancel: Arc<dyn CancelToken>,
-        subagent_depth: usize,
         reason: SessionEndReason,
     ) -> Self {
-        Self::seed(
-            cancel,
-            subagent_depth,
-            Arc::new(Vec::new()),
-            AgentState::with_window(0),
-        )
-        .with_end_reason(reason)
+        Self::seed(cancel, Transcript::empty(), AgentState::with_window(0))
+            .with_end_reason(reason)
     }
 
     /// Canonical constructor: every loop build path goes through this fn. The three optional run facts have identical
     /// types, so they are named builders rather than positional parameters a caller could silently swap.
     pub(super) fn seed(
         cancel: Arc<dyn CancelToken>,
-        subagent_depth: usize,
-        messages: Transcript,
+        transcript: Transcript,
         agent_state: AgentState,
     ) -> Self {
         Self {
             cancel,
-            subagent_depth,
-            messages,
+            transcript,
             agent_state,
             end_reason: SessionEndReason::Completed,
             system_hinted: std::collections::HashSet::new(),
             last_snapshot: None,
             model_hint: None,
             runtime_snapshot: None,
-            surface_seqs: Vec::new(),
             log_rows: Vec::new(),
             attachments: Vec::new(),
-            pending_tool_calls: HashSet::new(),
-            deferred_user: Vec::new(),
             projection: ToolProjectionCache::new(),
             context_pruned: false,
             structured_output: false,
@@ -207,13 +162,6 @@ impl RunState {
         self
     }
 
-    /// Attach the provenance of the initial transcript.
-    #[must_use]
-    pub(super) fn with_surface_seqs(mut self, seqs: Vec<u64>) -> Self {
-        self.surface_seqs = seqs;
-        self
-    }
-
     /// Attach the rows this run's setup read.
     #[must_use]
     pub(super) fn with_log_rows(
@@ -225,8 +173,9 @@ impl RunState {
     }
 
     /// Seed the called-set from the post-resume transcript.
-    pub(crate) fn seed_called_tools(&mut self, messages: &[Message]) {
-        self.projection.seed(messages);
+    pub(crate) fn seed_called_tools(&mut self) {
+        let projection = &mut self.projection;
+        projection.seed(self.transcript.messages());
     }
 }
 
@@ -237,7 +186,7 @@ mod tests {
     use super::*;
 
     fn zero_failed(reason: SessionEndReason) -> RunState {
-        RunState::failed(uva_core::AtomicCancelToken::shared(), 0, reason)
+        RunState::failed(uva_core::AtomicCancelToken::shared(), reason)
     }
 
     #[test]

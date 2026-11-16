@@ -312,3 +312,97 @@ pub(super) async fn cancelled_mid_sequential_batch_tags_undispatched_calls() {
     );
     assert!(unanswered.is_error.unwrap_or(false));
 }
+
+/// The context a tool receives carries the **run's own** cancellation
+/// token, not a fresh one: the loop builds one context per run and
+/// chains `RunState::cancel` into it. A tool that starts nested work
+/// (the `task` tool's child run) reads that field, so the identity is
+/// the propagation guarantee — hand-built contexts stay uncancelled.
+pub(super) async fn dispatched_tools_observe_the_runs_cancel_token() {
+    use std::sync::{Arc as StdArc, Mutex};
+
+    use async_trait::async_trait;
+    use futures::StreamExt;
+    use uva_core::CancelToken;
+    use uva_tool::{Context, Tool, ToolOutput};
+
+    struct TokenProbe(StdArc<Mutex<Option<StdArc<dyn CancelToken>>>>);
+
+    #[async_trait]
+    impl Tool for TokenProbe {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn description(&self) -> &str {
+            "records the cancel token its dispatch carried"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _: serde_json::Value,
+            context: &Context,
+        ) -> ToolOutput {
+            *self.0.lock().expect("lock") =
+                Some(StdArc::clone(&context.cancel));
+            ToolOutput::text("probed")
+        }
+    }
+
+    let provider = Arc::new(ScriptedStreamProvider::new(vec![
+        tool_call_response(vec![ToolUse {
+            id: "call_probe".to_string(),
+            name: "probe".to_string(),
+            input: json!({}),
+        }]),
+        empty_response(),
+    ]));
+    let token: StdArc<dyn CancelToken> = StdArc::new(CancellationToken::new());
+    let seen = StdArc::new(Mutex::new(None));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(TokenProbe(
+        StdArc::clone(&seen),
+    ))));
+
+    let agent = ReActAgent::new(provider, registry);
+    let mut stream = agent
+        .run(AgentInput::text("probe the context"), Arc::clone(&token))
+        .await;
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AgentEvent::Model(ContentPart::ToolResult(_))
+        )),
+        "the probe must have been dispatched"
+    );
+    let observed = seen
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("the tool recorded its context");
+    assert!(
+        StdArc::ptr_eq(&observed, &token),
+        "the dispatched context must hold the run's own token"
+    );
+    assert!(!observed.is_cancelled());
+    token.cancel();
+    assert!(
+        observed.is_cancelled(),
+        "the recorded token is the live run token"
+    );
+    assert!(
+        !Context::new(String::new(), std::path::PathBuf::new())
+            .cancel
+            .is_cancelled(),
+        "a hand-built context starts uncancelled"
+    );
+}

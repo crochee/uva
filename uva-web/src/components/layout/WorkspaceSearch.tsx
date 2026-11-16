@@ -1,8 +1,8 @@
 /**
  * The group-header cross-domain search (🔍).
  *
- * One box, one engine: `GET /api/v1/search` — the same `search/all`
- * method the agent's `search` tool calls, so the sidebar and the model
+ * One box, one engine: `search/all` — the same method the agent's
+ * `search` tool calls, so the sidebar and the model
  * agree on what exists. Hits land on their new homes: sessions open in
  * the conversation; capability domains open the matching settings
  * section (the old catalogue pages are gone, D34). Memory and tool
@@ -15,8 +15,8 @@
  */
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../api/client';
-import type { List, SearchHit } from '../../api/types';
+import { searchApi } from '../../api/search';
+import type { SearchHit } from '../../api/types';
 
 /** Hit cap; the backend clamps to the same ceiling. */
 const SEARCH_LIMIT = 20;
@@ -92,11 +92,8 @@ export function WorkspaceSearch({ collapsed }: { collapsed: boolean }) {
       const controller = new AbortController();
       abortRef.current = controller;
       setSearching(true);
-      api
-        .get<List<SearchHit>>(
-          `/api/v1/search?q=${encodeURIComponent(trimmed)}&limit=${SEARCH_LIMIT}`,
-          controller.signal,
-        )
+      searchApi
+        .all(trimmed, { limit: SEARCH_LIMIT }, controller.signal)
         .then((response) => {
           if (abortRef.current !== controller) return;
           setHits(response.data);

@@ -9,17 +9,12 @@
  * definition is the settings MCP's job (D28), not a switch.
  */
 import { useEffect, useState } from 'react';
-import { api } from '../../api/client';
-import type { AgentDetail, List } from '../../api/types';
+import { agentsApi, type DefaultAgent } from '../../api/agents';
+import type { AgentDetail } from '../../api/types';
 import { EnableToggle } from '../EnableToggle';
 import { RowCard } from '../RowCard';
 import { SettingsCard } from '../SettingsCard';
 import type { SettingsSectionProps } from '../sections';
-
-interface DefaultAgent {
-  name: string;
-  source: string;
-}
 
 export function AgentsSection({ reloadToken }: SettingsSectionProps) {
   const [agents, setAgents] = useState<AgentDetail[] | null>(null);
@@ -29,8 +24,8 @@ export function AgentsSection({ reloadToken }: SettingsSectionProps) {
   useEffect(() => {
     const controller = new AbortController();
     Promise.all([
-      api.get<List<AgentDetail>>('/api/v1/agents?limit=100', controller.signal),
-      api.get<DefaultAgent>('/api/v1/agents/default', controller.signal),
+      agentsApi.list({ limit: 100 }, controller.signal),
+      agentsApi.defaultAgent(controller.signal),
     ])
       .then(([list, fallback]) => {
         setAgents(list.data);
@@ -49,7 +44,7 @@ export function AgentsSection({ reloadToken }: SettingsSectionProps) {
 
   const describe = (agent: AgentDetail): string => {
     const tools = `${agent.tools.length} 个工具`;
-    const model = agent.modelHint ? ` · ${agent.modelHint}` : '';
+    const model = agent.model_hint ? ` · ${agent.model_hint}` : '';
     return agent.description ? `${agent.description} · ${tools}${model}` : `${tools}${model}`;
   };
 

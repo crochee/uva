@@ -1,0 +1,26 @@
+[package]
+name = "uva-events"
+description = "Run-event vocabulary for uva agent runs: AgentEvent, SystemEvent, WarningKind"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# The payload vocabulary the events carry: content parts and the
+# sampling result (`uva-provider`), a tool result (`uva-tool`), the
+# compaction lifecycle outcome (`uva-session`) and the suspension a held
+# call becomes (`uva-approval`). `uva-harness` depends on this crate and
+# re-exports every name, so consumer import paths do not change.
+uva-provider.workspace = true
+uva-tool.workspace = true
+uva-session.workspace = true
+uva-approval.workspace = true

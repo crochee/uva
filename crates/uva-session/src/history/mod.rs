@@ -13,16 +13,23 @@
 //! The projection is pure: the same rows always produce the same
 //! history.
 //!
-//! It is also **pairing-aware**. The log records a turn's tool call
-//! before the tool runs and its result after, so a message that
-//! lands in between — a steer, appended while the batch is in
-//! flight — would sit between an assistant's `tool_use` and the
-//! result that answers it. Every provider rejects that transcript,
-//! and the message would break the very run it steers. The
-//! projection therefore holds a user message back until the pending
-//! tool calls are answered, and releases it after their results.
-
-use std::collections::HashSet;
+//! It is also the one place that knows **which row each message came
+//! from**: [`ProvenancedHistory`] carries the history and its
+//! ordinals together, and [`derive_history`] is that projection with
+//! the ordinals dropped. Two callers cannot derive one list and
+//! number it by another.
+//!
+//! It is also **pairing-aware**, but the pairing rule itself is
+//! not its own: the log records a turn's tool call before the tool
+//! runs and its result after, so a message that lands in between —
+//! a steer, appended while the batch is in flight — would sit
+//! between an assistant's `tool_use` and the result that answers
+//! it. Every provider rejects that transcript, and the message
+//! would break the very run it steers. The **fold** holds such a
+//! user message back until the pending tool calls are answered
+//! ([`crate::surface::ModelOrder`]), so the surface this projection
+//! reads is already in the order the next LLM pass sees; the
+//! projection only decodes it.
 
 use serde_json::Value;
 use uva_provider::{Content, ContentPart, Message, Role};
@@ -42,6 +49,11 @@ pub enum HistoryError {
 }
 
 /// Derive the model history from a raw session log.
+///
+/// The messages alone: [`ProvenancedHistory::from_log`] is the same
+/// projection and keeps the ordinal each message was written under,
+/// so an ordinary caller gets plain messages while a caller that
+/// cites provenance gets the pairing.
 ///
 /// Rows are folded by [`try_fold_log_surface`], which accepts the
 /// typed rows and the legacy envelopes alike, skips the sink's
@@ -65,15 +77,99 @@ pub enum HistoryError {
 /// do not validate and [`HistoryError::Decode`] when a folded
 /// payload is neither a message nor a compaction summary.
 pub fn derive_history(rows: &[Value]) -> Result<Vec<Message>, HistoryError> {
-    let surface = try_fold_log_surface(rows)?;
-    let mut projection = SurfaceProjection::default();
-    for payload in &surface.messages {
-        let message = decode_message(payload)?;
-        projection.push(message);
-    }
-    Ok(projection.finish())
+    Ok(ProvenancedHistory::from_log(rows)?.into_messages())
 }
 
+/// The model-visible history of a session log, together with the
+/// ordinal of the row each message was written under.
+///
+/// [`derive_history`] is this projection with the ordinals dropped.
+/// Both come from the one fold, so the two lists cannot disagree:
+/// entry `i` of [`Self::ordinals`] is always the row entry `i` of
+/// [`Self::messages`] was read from. The fold already put the
+/// history in the model-visible order — a steer that lands between a
+/// `tool_use` and its `tool_result` is released after the result,
+/// and carries its own ordinal to its new position — so a caller
+/// that cites rows (a compaction's `Replace`) names the rows it
+/// really shadows.
+#[derive(Debug, Clone)]
+pub struct ProvenancedHistory {
+    // The messages, in the order the model sees them.
+    messages: Vec<Message>,
+    // The log ordinal of each message, index-parallel with
+    // `messages`.
+    ordinals: Vec<u64>,
+    // Whether each message is exactly one folded surface row.
+    one_message_per_row: bool,
+}
+
+impl ProvenancedHistory {
+    /// Project a raw session log onto the model-visible history and
+    /// the ordinal each message was written under.
+    ///
+    /// The fold, the decoding and the pairing rule are exactly
+    /// [`derive_history`]'s, because both are this function: rows the
+    /// fold cannot prove are an error, and a payload that is neither a
+    /// message nor a compaction summary fails the whole projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError::Fold`] when the log's surface rewrites
+    /// do not validate and [`HistoryError::Decode`] when a folded
+    /// payload is neither a message nor a compaction summary.
+    pub fn from_log(rows: &[Value]) -> Result<Self, HistoryError> {
+        let surface = try_fold_log_surface(rows)?;
+        let mut projection = SurfaceProjection::default();
+        for (payload, seq) in surface.messages.iter().zip(&surface.surface_seqs)
+        {
+            projection.push(decode_message(payload)?, *seq);
+        }
+        let one_message_per_row = !projection.merged;
+        let (messages, ordinals) = projection.into_parts();
+        Ok(Self {
+            messages,
+            ordinals,
+            one_message_per_row,
+        })
+    }
+
+    #[must_use]
+    /// The messages, in the order the model sees them.
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    #[must_use]
+    /// The log ordinal of each message, index-parallel with
+    /// [`Self::messages`].
+    pub fn ordinals(&self) -> &[u64] {
+        &self.ordinals
+    }
+
+    #[must_use]
+    /// Whether each message is exactly one row of the folded surface.
+    ///
+    /// `false` when the log carries the legacy one-part-per-row
+    /// dialect, where one assistant turn is several rows that the
+    /// projection merges into the one message a provider accepts. The
+    /// pairing stays right — the merged message carries the ordinal of
+    /// the row that opened the turn — but the surface then has more
+    /// rows than messages, so a *position* in this history is no longer
+    /// the position of the row it came from. A caller that plans a
+    /// positional rewrite, such as a compaction's `Replace` span, must
+    /// not cite such a surface.
+    pub fn is_one_message_per_row(&self) -> bool {
+        self.one_message_per_row
+    }
+
+    #[must_use]
+    /// The messages alone, dropping the ordinals.
+    pub fn into_messages(self) -> Vec<Message> {
+        self.messages
+    }
+}
+
+#[must_use]
 /// Project folded surface payloads into provider messages.
 ///
 /// The lenient counterpart of [`derive_history`]: a payload that is
@@ -81,16 +177,22 @@ pub fn derive_history(rows: &[Value]) -> Result<Vec<Message>, HistoryError> {
 /// warning instead of failing the whole projection, because one bad
 /// row must not wedge a long-lived session's transcript.
 ///
+/// The payloads are a **folded** surface, already in the order the
+/// next LLM pass sees: the fold holds a user turn back until the
+/// tool result that answers the open call, so this projection only
+/// decodes.
+///
 /// Both entry points share one payload decoder and one coalescing
 /// rule, so the harness and the server's transcript projections
 /// cannot disagree about a row's meaning or about a turn's wire
 /// shape.
-#[must_use]
 pub fn surface_to_messages(payloads: &[Value]) -> Vec<Message> {
     let mut projection = SurfaceProjection::default();
     for payload in payloads {
         match decode_message(payload) {
-            Ok(message) => projection.push(message),
+            // In-memory payloads stand for no log row; the ordinal is
+            // required by the one push path and dropped with the rest.
+            Ok(message) => projection.push(message, 0),
             Err(error) => tracing::warn!(
                 target: "uva.session",
                 %error,
@@ -101,6 +203,7 @@ pub fn surface_to_messages(payloads: &[Value]) -> Vec<Message> {
     projection.finish()
 }
 
+#[must_use]
 /// Decode one folded surface payload into the message it carries.
 ///
 /// The index-preserving counterpart of [`surface_to_messages`]:
@@ -108,7 +211,6 @@ pub fn surface_to_messages(payloads: &[Value]) -> Vec<Message> {
 /// `Replace` range) need one message per surface row, in fold order.
 /// A payload that is neither a message nor a compaction summary is
 /// `None` — the caller must then decline to map positions at all.
-#[must_use]
 pub fn surface_message(payload: &Value) -> Option<Message> {
     decode_message(payload).ok()
 }
@@ -131,35 +233,50 @@ fn decode_message(payload: &Value) -> Result<Message, HistoryError> {
 /// The shared projection of folded surface payloads into provider
 /// messages.
 ///
-/// One rule set, one place: the assistant-part coalescing, the
-/// tool-pairing order, and the deferred user message all live here,
-/// so [`derive_history`] and [`surface_to_messages`] cannot disagree
-/// about a transcript's shape.
+/// One rule set, one place: the assistant-part coalescing and the
+/// pairing of each message with the ordinal it was written under
+/// live here, so [`derive_history`], [`ProvenancedHistory`] and
+/// [`surface_to_messages`] cannot disagree about a transcript's shape
+/// or about which row a message came from. The *order* is not this
+/// projection's: the fold already put the surface in the order the
+/// next LLM pass sees.
 #[derive(Default)]
 struct SurfaceProjection {
     /// The projected transcript, in the order the model sees it.
     messages: Vec<Message>,
-    /// The tool-call ids an assistant message asked for that no tool
-    /// result has answered yet.
-    pending_tool_calls: HashSet<String>,
-    /// The user messages that arrived while a tool call was pending.
+    /// The log ordinal of each message, index-parallel with
+    /// `messages`.
+    ordinals: Vec<u64>,
+    /// Whether the legacy one-part-per-row dialect forced a merge.
     ///
-    /// They wait for the tool results: a user message between an
-    /// assistant's tool call and its result is a transcript every
-    /// provider rejects.
-    deferred_user: Vec<Message>,
+    /// A merge is the only way this projection produces fewer messages
+    /// than the surface rows it folded: [`Self::push_assistant`] joins a
+    /// legacy turn's parts onto the message that opened it. A deferral
+    /// moves a message without changing the count, so it must not read
+    /// as a merge. This is what [`ProvenancedHistory::is_one_message_per_row`]
+    /// reports, rather than comparing lengths (which a still-deferred
+    /// tail fools).
+    merged: bool,
 }
 
 impl SurfaceProjection {
     /// Append one projected message, applying the projection's
-    /// ordering rules.
-    fn push(&mut self, message: Message) {
-        match message.role {
-            Role::Assistant => self.push_assistant(message),
-            Role::Tool => self.push_tool_result(message),
-            Role::User => self.push_user(message),
-            Role::System => self.messages.push(message),
+    /// shape rules.
+    fn push(&mut self, message: Message, seq: u64) {
+        if message.role == Role::Assistant {
+            self.push_assistant(message, seq);
+        } else {
+            self.append(message, seq);
         }
+    }
+
+    /// Append one message and the ordinal it was written under.
+    ///
+    /// The one growth path for both lists: a message can never enter
+    /// the projection without its ordinal, or with someone else's.
+    fn append(&mut self, message: Message, seq: u64) {
+        self.messages.push(message);
+        self.ordinals.push(seq);
     }
 
     /// Append an assistant turn, coalescing its parts.
@@ -173,7 +290,9 @@ impl SurfaceProjection {
     /// assistant message instead — OpenAI rejects it with
     /// "insufficient tool messages following tool_calls message".
     /// Merging the parts keeps the turn one message, so the tool
-    /// results that follow answer it directly.
+    /// results that follow answer it directly. The merged message
+    /// keeps the ordinal of the row that opened the turn; it has no
+    /// single row of its own.
     ///
     /// The merge is deliberately narrower than "adjacent assistant
     /// rows": it applies only while the message being extended holds
@@ -181,8 +300,7 @@ impl SurfaceProjection {
     /// genuinely separate turns (a compaction summary following the
     /// text it replaced), and merging those would rewrite the
     /// transcript's meaning rather than repair its wire shape.
-    fn push_assistant(&mut self, message: Message) {
-        let call_ids = tool_use_ids(&message);
+    fn push_assistant(&mut self, message: Message, seq: u64) {
         if let Some(last) = self.messages.last_mut()
             && last.role == Role::Assistant
             && last
@@ -191,93 +309,24 @@ impl SurfaceProjection {
                 .any(|part| matches!(part, ContentPart::ToolUse(_)))
         {
             merge_assistant_parts(last, message);
+            // Two surface rows became one message: the legacy dialect,
+            // and the one thing that makes a position in this history a
+            // position in a different list.
+            self.merged = true;
         } else {
-            self.messages.push(message);
-        }
-        self.pending_tool_calls.extend(call_ids);
-    }
-
-    /// Append a tool result, answering the call it names.
-    ///
-    /// A tool result closes the pairing it belongs to, so a user
-    /// message that waited for it is released here — after the
-    /// result, which is where the provider expects it.
-    fn push_tool_result(&mut self, message: Message) {
-        for id in tool_result_ids(&message) {
-            self.pending_tool_calls.remove(&id);
-        }
-        self.messages.push(message);
-        if self.pending_tool_calls.is_empty() {
-            self.release_deferred();
+            self.append(message, seq);
         }
     }
 
-    /// Append a user message, deferring it while a tool call is
-    /// pending.
-    ///
-    /// The deferral is what makes a steer safe. A steer lands in the
-    /// log while the tool batch is in flight, so its ordinal falls
-    /// between the assistant's `tool_use` row and the `tool_result`
-    /// row that answers it. A user message in that gap is a
-    /// transcript every provider rejects — and the steer would break
-    /// the very run it steers. Waiting for the result puts the
-    /// message back where it belongs.
-    fn push_user(&mut self, message: Message) {
-        if self.pending_tool_calls.is_empty() {
-            self.messages.push(message);
-        } else {
-            self.deferred_user.push(message);
-        }
+    /// The projected transcript and the ordinal of each message.
+    fn into_parts(self) -> (Vec<Message>, Vec<u64>) {
+        (self.messages, self.ordinals)
     }
 
-    /// Release the deferred user messages, in order.
-    fn release_deferred(&mut self) {
-        if self.deferred_user.is_empty() {
-            return;
-        }
-        self.messages.append(&mut self.deferred_user);
+    /// The projected transcript, without its ordinals.
+    fn finish(self) -> Vec<Message> {
+        self.into_parts().0
     }
-
-    /// The projected transcript.
-    ///
-    /// A user message that waited for a tool result that never came
-    /// is released here: the projection never loses a message, and a
-    /// dangling tool call is the repair path's problem
-    /// (`crate::repair`), not the projection's.
-    fn finish(mut self) -> Vec<Message> {
-        self.release_deferred();
-        self.messages
-    }
-}
-
-/// The tool-call ids an assistant message asks for.
-fn tool_use_ids(message: &Message) -> Vec<String> {
-    message
-        .content
-        .iter()
-        .filter_map(|part| match part {
-            ContentPart::ToolUse(call) => Some(call.id.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The tool-call ids a tool message answers.
-///
-/// The id travels either as the message's `tool_call_id` or as the
-/// `tool_use_id` of its result part; a message may carry both, and
-/// both name the same call.
-fn tool_result_ids(message: &Message) -> Vec<String> {
-    let mut ids = Vec::new();
-    if let Some(id) = message.tool_call_id.as_ref() {
-        ids.push(id.clone());
-    }
-    for part in message.content.iter() {
-        if let ContentPart::ToolResult(result) = part {
-            ids.push(result.tool_use_id.clone());
-        }
-    }
-    ids
 }
 
 /// Append one assistant message's parts onto `into`.

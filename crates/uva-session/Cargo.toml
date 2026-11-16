@@ -16,6 +16,9 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `SurfaceOp` derives `JsonSchema` so the app-server can emit the
+# durable row envelope (the frontend's `SessionTurn`) from it.
+schemars.workspace = true
 async-trait.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true

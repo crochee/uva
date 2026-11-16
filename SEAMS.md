@@ -15,10 +15,11 @@ facade — see [`MINIMAL.md`](MINIMAL.md)).
 | Seam | Trait | Ships in-tree | Install yours |
 |---|---|---|---|
 | the model | `ModelProvider` | `AnthropicProvider`, `OpenAICompatibleProvider` (feature-gated), `ModelProviderStub` (test-support) | `ReActAgent::new(provider, registry)` (the harness is the builder) |
-| the tools | `Tool` | the tool plugin family, one module + one feature per tool: `uva-tool-plugins` (`read` / `write` / `shell` / `todo` / `web` / `task` / `scheduler` / `search` / `memo`) (`uva-tool` is the paradigm: registry + trait + `workspace` path confinement; a boundary beyond a path, like the shell's process policy or the search tool's `Registry`, belongs to the plugin that enforces it) | `registry.register_entry(ToolEntry::new(Arc::new(my_tool)))`; derive it with `#[derive(Tool)]` from `uva-macros` |
+| the tools | `Tool` | the tool plugin family, one module + one feature per tool: `uva-tool-plugins` (`read` / `write` / `shell` / `todo` / `web` / `scheduler` / `search` / `memo`), plus `uva-tool-task` (`task`); `uva-tool` is the paradigm: registry + trait + `workspace` path confinement; a boundary beyond a path, like the shell's process policy or the search tool's `Registry`, belongs to the plugin that enforces it | `registry.register_entry(ToolEntry::new(Arc::new(my_tool)))`; derive it with `#[derive(Tool)]` from `uva-macros` |
 | the context window | `ContextManager` | `TruncatingContextManager`, `NoopContextManager` | `.with_context_manager(Arc<dyn ContextManager>)` — a manager only projects or trims the request it is handed |
 | compacting history | `Compactor` | `SummaryCompactor` (summarises with the provider you hand it) | `.with_compactor(Arc::new(SummaryCompactor::new(provider, model)))`; without one the loop never compacts, and the summary's `Replace` row carries the seqs the fold actually shadowed |
 | the policy layer | `Host` — one registry of `Hook`, `Gate`, `Guard`, `Hint`, `Tracker`, `OutputTransformer`, request / result transformer and prompt sections | `Host::new()` (neutral), `Host::default_policy(root)` (the defensive set) | `agent.with_host(host)?` — a registration is reversible: dropping its handle withdraws it |
+| **the hook contract** | `Hook` / `Gate` / `RequestTransformer` / `ResultTransformer` (`uva-hook`) | `uva-hook`'s `HookRegistry` + `HookPlugin` (the `hooks` profile row); implementations ship in `uva-hook-plugins` (`reflection` / `redact` / `traffic-light`) | `registry.register_hook(key, ..)` / `register_gate` / `register_request_transformer` / `register_result_transformer` — each returns a `HookRegistration`, and dropping it withdraws the registration. The loop runs this registry before `Host`'s typed chains under one arbitration; a `Block` at `tool/pre-execute` short-circuits and writes the durable `hook_block` row |
 | the durable log | `SessionSink` (backend) / `SessionLog` (the object-safe view a run holds) | `JsonlSessionSink`, `InMemorySessionSink`, plus `ReplayProvider` for reading one back | the sink is installed where the run is owned (the server's controller, your own run factory) and written through the session's one writer (`LogWriter`, which implements `SessionLog`); `.with_log_writer(writer)` wires the agent's side |
 | cancellation | `CancelToken` | `AtomicCancelToken` (std-only); a tokio `CancellationToken` satisfies the trait with no adapter | `agent.run(input, cancel)` — an `Arc<dyn CancelToken>` |
 | **what one agent may call** | `ToolRestriction` (allow / deny) | none — the deployment's `[tools]` surface is a separate, coarser layer | `.with_tool_restriction(ToolRestriction::deny(["shell"]))` (or `agents.<name>.denied_tools`); enforced at both ends — excluded tools are not advertised *and* a call is refused with a model-facing error |
@@ -47,12 +48,13 @@ and proven by `cargo run --example runtime_agnostic -p uva-harness`.
 | long-term / working memory | `Memory` | `InMemoryMemory`, `FileMemory`, `SqliteMemory` (feature `sqlite`) | hand an `Arc<dyn Memory>` to the component that talks to it (the server's state, or your own) |
 | embeddings | `Embedder` | `ModelProviderEmbedder` (any `ModelProvider` becomes one) | construct the embedder where you build the index |
 | skills | `SkillProvider` | `FileSkillProvider`, `InMemorySkillProvider`, `RemoteSkillProvider` | `SkillRegistry::new()` + `register(provider)`; surface them with `PromptContext::with_skill(name, description)` and expose the `skill` tool via `register_skill_tool(&registry)` |
-| delegation / peers | `uva_harness::DelegatingTool` + `AgentRegistry` | `uva-tool-plugins`'s `task` module (`TaskDelegator`, the `task` tool) | `.with_delegator(Arc::new(TaskDelegator::new(registry)))` — the loop then offers the `task` tool — or `host.delegator(...)` for a reversible registration |
+| delegation / peers | `AgentRegistry` (`uva-agent`) | `uva-tool-task`'s `TaskTool` (the `task` tool) | register `TaskTool::new(registry)` in the `ToolRegistry` — the model then calls `task(agent, prompt)` and the tool runs the peer as a child run |
+| gate command runner | `CommandRunner` (`uva-tool-task`'s `gate`) | `StdCommandRunner` | `TaskTool::with_command_runner(Arc<dyn CommandRunner>)` — the `gate` verification step, injected so tests replay canned outcomes |
 | candidate scoring | `CandidateScorer` | `LongestAnswer` (default), `LlmJudgeScorer` — both in `uva-policy-plugins`'s `best_of_n` module | `uva_policy_plugins::best_of_n::BestOfNStrategy::new(n, Arc::new(my_scorer))` — the strategy samples, your scorer decides; an LLM judge is just a scorer that calls a provider |
 | interactive steering | `RunInbox` | `ChannelInbox` | `let (inbox, sender) = ChannelInbox::channel();` + `AgentInput::with_inbox(inbox)`; the host writes the steer row first, then sends the message |
 | remote tools | `McpTransport`, `TransportFactory` | `StdioTransport`, `StreamableHttpTransport`, `InMemoryTransport` | `McpClient::new(transport)`; `McpSupervisor::supervise(name, factory)` for reconnect. Two model-facing paths over that client: `register_mcp_tools(&registry, .., NamingPolicy::Namespaced)` publishes one local tool per remote tool, `register_mcp_control_tool(&registry, supervisor)` publishes the single `mcp` tool that lists and calls remote tools at run time. Both want the same *instance* the agent loop dispatches from (a clone is a deep copy); the control tool takes an `&Arc<ToolRegistry>` because it keeps a weak handle for the privacy lookup, so it refuses a tool the registry marks hidden rather than being a way around the guard |
 | command confinement | `SandboxBackend` (+ `ExecutionPolicy`), both in `uva-tool-plugins`'s `shell` module | `BwrapBackend`, `NoopBackend` | `ShellTool::with_policy(ExecutionPolicy::…)` + `.with_sandbox(backend)`; the tool holds the policy, so what it advertises and what it enforces cannot diverge, and a confined policy without a backend fails closed |
-| content scanning (injection, jailbreak, exfiltration) | `Hook` (registered on the harness `Host`) | — (no crate ships a scanner) | safety scanning is a `Host::hook` registration, not a built-in feature: install your own observer on the before-tool / before-request event and decide there |
+| content scanning (injection, jailbreak, exfiltration) | `Hook` / `Gate` (`uva-hook`; register in a `HookRegistry`) | — (no crate ships a scanner) | safety scanning is your own registration — an external `HookRegistry` entry (the `hooks` service) or an in-tree `Host::hook` — not a built-in feature: observe the before-tool / before-request event and decide there (a `Gate` can block) |
 | eval metrics | `Metric`, `AsyncMetric`, `JudgeProvider` | `KeywordMetric`, `SchemaValidationMetric`, `LlmJudgeMetric<P>` | `EvalRunner::new().metric(Box::new(my_metric))`, `LlmJudgeMetric::new(my_judge)` |
 | job store | `ScheduleStore` | the PID-locked JSON store (`ScheduleStore::new(root)`) | `Scheduler::new(store)`; the timer is the caller's (`tick(now)`). A tool-side write (or a `ScheduleStore::load`) reaches the next `tick` / `next_deadline` on its own — the pass notices the store's revision move and rebuilds its wheel — and `resync(now)` is the explicit rebuild for between passes. Share one `Arc<ScheduleStore>` with `SchedulerTool::new(store)` to put the same schedule under the model's control |
 | attachment bytes | `AttachmentBackend` | `FilesystemBackend`, `InMemoryBackend` | `AttachmentStore::new(backend)` / `.with_backend(backend)` |
@@ -75,12 +77,10 @@ you replace the server with your own binary:
 | `SessionLane` | admit / queue a session's work | bounded concurrency policies |
 | the session controller | session state machine + broadcast | the server's equivalent of `ReActAgent::run` (a type, not a trait) |
 
-Two more seams exist but are **crate-internal** by design, so they are
-not part of the consumer contract: `CommandRunner` (the `uva-tool-plugins` `task` module
-gate's process runner — `run_subagent_with_runner` is `pub(crate)`;
-tests inject a recording fake) and the `Reader` trait inside the JSONL
-sink. If you need either, that is a signal to shape the feature as an
-issue rather than to patch around it.
+One more seam exists but is **crate-internal** by design, so it is not
+part of the consumer contract: the `Reader` trait inside the JSONL sink.
+If you need it, that is a signal to shape the feature as an issue
+rather than to patch around it.
 
 ## Verifying a substitution
 
@@ -88,7 +88,7 @@ Every seam above has an executable proof in the example ladder, and the
 repo's gates keep the map honest:
 
 ```bash
-make examples        # every example + both standalone consumer crates
+make examples        # every example + the standalone consumer binaries
 make check-mvp-deps  # the 7-feature subset pulls no HTTP/OTel/DB dependency
 make check-no-runtime# the runtime-free crates stay tokio-free
 make check-clock     # library code reads the wall clock through Clock

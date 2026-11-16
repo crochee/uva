@@ -4,6 +4,7 @@
 //!
 //! | Module | Responsibility |
 //! |---|---|
+//! | `assembly` | The `Assembly` sub-state: the mounted tree, the two read models, and the one change path that moves them. |
 //! | `boot` | `AppState::new` / `with_server_config`: resolve configs, build the registry, wire every field. |
 //! | `for_test` | The `test-utils` constructor with in-memory components and a fake provider. |
 //! | `sessions` | `get_or_create_session_controller`: the per-`(user, session)` controller cache. |
@@ -14,13 +15,15 @@
 
 use std::{path::PathBuf, sync::Arc};
 
+use assembly::AssemblyContext;
 use uva::{
-    harness::AgentRegistry,
+    agent::AgentRegistry,
     provider::{config::WorkspaceConfig, traits::ModelProvider},
     session::{SharedSessionSearch, manager::SessionRegistry},
     tool::ToolRegistry,
 };
 
+mod assembly;
 mod boot;
 pub(crate) mod cluster_ops;
 #[cfg(any(test, feature = "test-utils"))]
@@ -42,8 +45,9 @@ mod for_test;
 // The boot's row-config seams, re-exported for the tests that pin
 // them: the value the boot materializes into the `agent-loop` row and
 // the step that fills an empty row with it.
+pub use assembly::{Assembly, Reconciled};
 #[cfg(test)]
-pub(crate) use boot::{agent_loop_row_config, materialize_row_config};
+pub(crate) use boot::materialize_row_config;
 pub use eval_agent::HarnessEvalAgent;
 pub use evals::EvalsState;
 pub use mcp::McpRuntime;
@@ -55,7 +59,7 @@ pub use tools::AppliedToolSurface;
 pub(crate) use tools::plugin_tool_registry;
 #[cfg(test)]
 pub(crate) use tools::seeded_tool_registry;
-pub use usage::{UsageMetrics, UsageSnapshot};
+pub use usage::{DelegatedUsage, UsageMetrics, UsageSnapshot};
 /// The catalogue and its selection error live in the runtime
 /// assembly crate; the server consumes them through the facade
 /// (R121).
@@ -174,14 +178,14 @@ pub struct AppState {
     pub subagent_router: Arc<crate::session::subagent_router::SubagentRouter>,
     /// Pre-rendered default system prompt. The agent loop
     /// currently builds its own prompt from the descriptor
-    /// via [`uva::harness::PromptContext::assemble`],
+    /// via [`uva::agent::PromptContext::assemble`],
     /// so this field exists as a lock-free default for
     /// legacy callers that read it directly. Stored on
     /// `AppState` so the read is cheap on every dispatch.
     pub system_prompt: String,
     /// Pre-built prompt manifest (skills + peer agents + tool
     /// definitions) consumed by the
-    /// [`uva::harness::PromptContext::assemble`]
+    /// [`uva::agent::PromptContext::assemble`]
     /// method. Built once at startup and shared via `Arc` into
     /// every [`crate::session::controller::RunDependencies`]—
     /// the manifest never mutates after boot, so wrapping it
@@ -227,37 +231,14 @@ pub struct AppState {
     /// Unloading `mcp` stops the loop and withdraws the generations,
     /// so no remote tool outlives the service.
     pub mcp: McpRuntime,
-    /// The kernel isolation scope every native service is registered
-    /// in. Consumers resolve services here; the graph is what the
-    /// mount validated.
-    pub kernel: uva::kernel::Context,
-    /// The containers the factory directory builds from, kept so a
-    /// hot reload can construct an `added` or `remounted` plugin
-    /// without rebuilding the boot.
-    pub(crate) boot_services: Arc<crate::composition::kernel::BootServices>,
-    /// The mounted plugin groups. The boot group comes first; an HMR
-    /// remount appends one group for the rows it rebuilt, so an
-    /// untouched plugin's fiber and effects stay where they were.
-    /// Dropping a handle unloads every service in that group.
-    pub mount: parking_lot::Mutex<Vec<uva::kernel::MountHandle>>,
-    /// The raw resolved profile (rows carry `enabled`); the settings
-    /// page's read model, so a switched-off row stays visible.
-    pub profile: parking_lot::RwLock<crate::profile::Profile>,
-    /// The effective assembly the mounted tree corresponds to — enabled
-    /// rows only. Boot and every apply update both; the HMR diff's
-    /// previous side is this value.
-    pub assembly: parking_lot::RwLock<crate::profile::Profile>,
-    /// Layer paths for the transactional write path; `None` in fixtures
-    /// (a write then fails with a clear error instead of guessing a
-    /// document path).
-    pub(crate) profile_store: Option<crate::profile::ProfileStore>,
-    /// Serializes profile writes: one writer, so two surfaces cannot
-    /// interleave a read-modify-write of the document.
-    pub(crate) profile_write: tokio::sync::Mutex<()>,
-    /// The `[ui]` segment assembled into the slot tree. Swapping the
-    /// tree (HMR) drops the old one, which rolls every declaration and
-    /// registration back.
-    pub ui_tree: parking_lot::RwLock<crate::ui::tree::UiTree>,
+    /// The mounted tree and the two read models that describe it.
+    ///
+    /// The assembly owns the kernel the native services are registered
+    /// in, the mount's groups, the raw profile (the settings page's
+    /// read model), the effective assembly (the HMR diff's previous
+    /// side), the UI tree, and the transactional write path's document
+    /// layer and single-writer lock.
+    pub assembly: Assembly,
     /// The deployment's host, built once at boot with
     /// [`Host::default_policy`](uva::harness::Host::default_policy)
     /// (the steering policy) and shared with every agent.
@@ -308,6 +289,12 @@ pub struct AppState {
     /// counters outlive any one controller, so tokens spent by a
     /// closed session still show up in the process totals.
     ///
+    /// Delegated children write here too, through
+    /// [`DelegatedUsage`](crate::state::DelegatedUsage) on the
+    /// `tool-task` row: a child round runs on its own harness, so its
+    /// events never reach a controller and this seam is how they still
+    /// reach the deployment's totals.
+    ///
     /// [`RunDependencies`]: crate::session::controller::RunDependencies
     pub usage_metrics: Arc<UsageMetrics>,
     /// Cluster bus + this node's identity. `mode = "local"` (the
@@ -348,17 +335,6 @@ pub struct AppState {
     pub clock: uva::core::SharedClock,
 }
 
-/// The result of one [`AppState::apply_resolved`] reconcile.
-#[derive(Debug, Clone)]
-pub struct Reconciled {
-    /// What changed between the previous effective assembly and the
-    /// new one.
-    pub diff: crate::profile::ProfileDiff,
-    /// The `mcp` row was remounted or removed: supervision needs a
-    /// process restart (see [`AppState::reload_profile`]'s Residuals).
-    pub mcp_touched: bool,
-}
-
 impl AppState {
     /// Unload one mounted native plugin.
     ///
@@ -366,18 +342,7 @@ impl AppState {
     /// second call for an id already disposed). Consumers the plugin
     /// served are parked by the kernel, not unmounted.
     pub fn dispose_plugin(&self, id: &str) -> bool {
-        let mut handles = self.mount.lock();
-        let mut disposed = false;
-        for handle in handles.iter_mut().rev() {
-            if handle.dispose_plugin(id) {
-                disposed = true;
-                break;
-            }
-        }
-        // A group whose rows were all disposed owns nothing; dropping it
-        // now keeps the vector from growing with every reload.
-        handles.retain(|handle| !handle.is_empty());
-        disposed
+        self.assembly.dispose_plugin(id)
     }
 
     /// The lifecycle state of `id` in any mounted group.
@@ -387,22 +352,29 @@ impl AppState {
     /// kernel was shut down.
     #[must_use]
     pub fn plugin_state(&self, id: &str) -> Option<uva::kernel::PluginState> {
-        self.mount
-            .lock()
-            .iter()
-            .find_map(|handle| handle.plugin_state(id))
+        self.assembly.plugin_state(id)
     }
 
     /// The deployment's UI tree, as the last activation assembled it.
     #[must_use]
     pub fn ui_tree(&self) -> crate::ui::tree::UiTree {
-        self.ui_tree.read().clone()
+        self.assembly.ui_tree()
     }
 
-    /// The profile the mounted core set currently corresponds to.
+    /// The fixtures' re-resolve base: the raw declaration, rows a
+    /// check switched off included.
+    ///
+    /// This is the value a caller re-resolves after editing: passing
+    /// the effective assembly back would drop every filtered row, and
+    /// a row a check switched off could never rejoin. The name is a
+    /// fixture convenience only — the product reads the two models
+    /// through [`crate::state::Assembly`]'s `current()` (the effective
+    /// set) and `rows()` (the settings page's read model), so this
+    /// accessor stays off the public surface.
+    #[cfg(test)]
     #[must_use]
-    pub fn current_profile(&self) -> crate::profile::Profile {
-        self.profile.read().clone()
+    pub(crate) fn current_profile(&self) -> crate::profile::Profile {
+        self.assembly.raw()
     }
 
     /// Reconcile the mount with a freshly resolved profile.
@@ -448,7 +420,7 @@ impl AppState {
         // The watcher and the write transaction share one writer: two
         // concurrent reconciles would unload and mount the same rows
         // twice (a double mount, and an unload in the wrong order).
-        let _guard = self.profile_write.lock().await;
+        let _guard = self.assembly.writer().lock().await;
         Ok(self.reconcile(resolved, false).await?.diff)
     }
 
@@ -467,7 +439,7 @@ impl AppState {
         &self,
         resolved: crate::profile::Profile,
     ) -> Result<Reconciled, String> {
-        let _guard = self.profile_write.lock().await;
+        let _guard = self.assembly.writer().lock().await;
         self.reconcile(resolved, true).await
     }
 
@@ -485,131 +457,48 @@ impl AppState {
     ///
     /// `ignore_hmr` is the only difference between the watcher entry and
     /// the explicit-write entry: the diff is computed against an
-    /// HMR-on view of the next effective rows, so a `hmr = false`
+    /// HMR-on view of the next effective rows, so an `hmr = false`
     /// profile still applies.
     async fn reconcile(
         &self,
         next_raw: crate::profile::Profile,
         ignore_hmr: bool,
     ) -> Result<Reconciled, String> {
-        use std::collections::BTreeSet;
-
-        use crate::{
-            composition::kernel::profile_factories,
-            profile::{
-                BootContext,
-                KernelChecks,
-                build_plugins,
-                diff_profiles,
-                effective,
-            },
-            ui::tree::load_ui_tree,
-        };
-
-        let factories = profile_factories(Arc::clone(&self.boot_services));
-        let previous = self.assembly.read().clone();
-        // The boot materializes the two row configs it owns
-        // (`model-adapter`, `agent-loop`) from the deployment config;
-        // a document that leaves them empty keeps that materialization
-        // across reconciles, so an unrelated edit does not look like
-        // "clear the provider configuration".
-        let mut next_raw = next_raw;
-        carry_forward_materialized(&mut next_raw, &previous);
-        let next = {
-            let checks = KernelChecks(&self.kernel);
-            effective(&next_raw, &checks).profile
-        };
-        let diff_view = if ignore_hmr {
-            crate::profile::Profile {
-                hmr: true,
-                ..next.clone()
-            }
-        } else {
-            next.clone()
-        };
-        let diff = diff_profiles(&previous, &diff_view, &factories);
-        if diff.restart_required {
-            return Ok(Reconciled {
-                diff,
-                mcp_touched: false,
-            });
-        }
-        let tree = load_ui_tree(&next.ui).map_err(|error| error.to_string())?;
-
-        let changed: BTreeSet<&str> = diff
-            .added
-            .iter()
-            .chain(diff.remounted.iter())
-            .map(String::as_str)
-            .collect();
-        let boot = BootContext::new(self.workspace_root.clone())
-            .with_host(Arc::clone(&self.boot_services))
-            .with_clock(self.clock.clone());
-        let mount_rows = rows_for(&next, &changed);
-        let plugins = build_plugins(&mount_rows, &factories, &boot)
-            .map_err(|error| error.to_string())?;
-
-        for id in diff.removed.iter().chain(diff.remounted.iter()) {
-            self.unload_plugin(id).await;
-        }
-        if !plugins.is_empty() {
-            match uva::kernel::mount_all(&self.kernel, &plugins) {
-                Ok(mounted) => self.mount.lock().push(mounted),
-                Err(error) => {
-                    tracing::error!(
-                        %error,
-                        "the profile remount failed; restoring the old rows"
-                    );
-                    // The rollback set includes the removed ids: the
-                    // failed group disposed them, and restoring only
-                    // `changed` would leave them unmounted.
-                    let rollback_ids: BTreeSet<&str> = diff
-                        .added
-                        .iter()
-                        .chain(diff.remounted.iter())
-                        .chain(diff.removed.iter())
-                        .map(String::as_str)
-                        .collect();
-                    let rollback_rows = rows_for(&previous, &rollback_ids);
-                    if let Ok(old) =
-                        build_plugins(&rollback_rows, &factories, &boot)
-                        && let Ok(mounted) =
-                            uva::kernel::mount_all(&self.kernel, &old)
-                    {
-                        self.mount.lock().push(mounted);
-                    }
-                    return Err(error.to_string());
-                }
-            }
-        }
-
+        let reconciled = self
+            .assembly
+            .apply(&self.assembly_context(), next_raw, ignore_hmr)
+            .await?;
         // A remounted `model-adapter` redefined the provider surface:
         // AppState's own fields re-sync with the mounted services so
         // sessions created after the reload sample the new default,
         // while in-flight sessions keep the handles they resolved.
-        if let Ok(catalogue) = self
-            .kernel
-            .require::<ProviderCatalogue>(uva::provider::KEY_LLM)
+        // A change that asks for a restart touched nothing, so there
+        // is nothing to re-sync.
+        if !reconciled.diff.restart_required
+            && let Some(catalogue) = self
+                .assembly
+                .service::<ProviderCatalogue>(uva::provider::KEY_LLM)
         {
             *self.workspace_config.write() = catalogue.workspace().clone();
             *self.provider_catalogue.write() = catalogue;
-            if let Ok(default) = self.kernel.require::<Arc<dyn ModelProvider>>(
-                uva::provider::KEY_LLM_DEFAULT,
-            ) {
+            if let Some(default) =
+                self.assembly.service::<Arc<dyn ModelProvider>>(
+                    uva::provider::KEY_LLM_DEFAULT,
+                )
+            {
                 *self.default_provider.write() = Arc::clone(&*default);
             }
         }
+        Ok(reconciled)
+    }
 
-        let mcp_touched = diff
-            .removed
-            .iter()
-            .chain(diff.remounted.iter())
-            .any(|id| id == uva::mcp::KEY_MCP);
-
-        *self.ui_tree.write() = tree;
-        *self.profile.write() = next_raw;
-        *self.assembly.write() = next;
-        Ok(Reconciled { diff, mcp_touched })
+    /// The process handles an assembly change borrows.
+    fn assembly_context(&self) -> AssemblyContext<'_> {
+        AssemblyContext {
+            workspace_root: &self.workspace_root,
+            clock: &self.clock,
+            mcp: &self.mcp,
+        }
     }
 
     /// Unload one plugin with the teardown its service needs.
@@ -621,10 +510,9 @@ impl AppState {
     /// running against a dropped supervisor. Every other id is a plain
     /// [`Self::dispose_plugin`].
     pub async fn unload_plugin(&self, id: &str) -> bool {
-        if id == uva::mcp::KEY_MCP {
-            self.mcp.shutdown(&self.tool_registry).await;
-        }
-        self.dispose_plugin(id)
+        self.assembly
+            .unload_plugin(&self.assembly_context(), id)
+            .await
     }
 
     /// Tear the kernel down: stop the MCP tick loop (withdrawing its
@@ -634,9 +522,7 @@ impl AppState {
         self.mcp.shutdown(&self.tool_registry).await;
         // Drain in reverse so a later group (a reload's remount) is
         // dropped before the boot group its rows may inject from.
-        for mounted in self.mount.lock().drain(..).rev() {
-            drop(mounted);
-        }
+        self.assembly.unmount_all();
     }
 
     /// The mounted `attachments` service, or `None` when the plugin is
@@ -646,34 +532,26 @@ impl AppState {
     /// image / audio parts are refused, not silently dropped.
     #[must_use]
     pub fn attachments(&self) -> Option<Arc<uva::attachment::AttachmentStore>> {
-        self.kernel
-            .get::<uva::attachment::AttachmentStore>(
-                uva::attachment::KEY_ATTACHMENTS,
-            )
-            .ok()
-            .flatten()
+        self.assembly.service::<uva::attachment::AttachmentStore>(
+            uva::attachment::KEY_ATTACHMENTS,
+        )
     }
 
     /// The mounted `search` service, or `None` when its plugin is
     /// unloaded.
     #[must_use]
     pub fn search(&self) -> Option<Arc<crate::search::SearchService>> {
-        self.kernel
-            .get::<crate::search::SearchService>(
-                crate::search::plugin::KEY_SEARCH,
-            )
-            .ok()
-            .flatten()
+        self.assembly.service::<crate::search::SearchService>(
+            crate::search::plugin::KEY_SEARCH,
+        )
     }
 
     /// The mounted long-term `memory` service, or `None` when its
     /// plugin is unloaded.
     #[must_use]
     pub fn memory(&self) -> Option<Arc<dyn uva::context::Memory>> {
-        self.kernel
-            .get::<Arc<dyn uva::context::Memory>>(uva::context::KEY_MEMORY)
-            .ok()
-            .flatten()
+        self.assembly
+            .service::<Arc<dyn uva::context::Memory>>(uva::context::KEY_MEMORY)
             .map(|service| Arc::clone(service.as_ref()))
     }
 
@@ -684,10 +562,13 @@ impl AppState {
     pub async fn prompt_context(
         &self,
         self_name: &str,
-    ) -> Arc<uva::harness::PromptContext> {
+    ) -> Arc<uva::agent::PromptContext> {
+        let skills = self
+            .assembly
+            .service::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS);
         Arc::new(
             crate::state::boot::build_prompt_context(
-                &self.kernel,
+                skills,
                 &self.agent_registry,
                 self_name,
             )
@@ -701,12 +582,10 @@ impl AppState {
     pub fn agent_loop(
         &self,
     ) -> Option<Arc<dyn uva::harness::plugin::AgentLoopFactory>> {
-        self.kernel
-            .get::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
+        self.assembly
+            .service::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
                 uva::harness::plugin::KEY_AGENT_LOOP,
             )
-            .ok()
-            .flatten()
             .map(|service| Arc::clone(service.as_ref()))
     }
 
@@ -796,10 +675,8 @@ impl AppState {
         if let Some(catalogue) = self.catalogue_override.lock().clone() {
             return Some(catalogue);
         }
-        self.kernel
-            .get::<ProviderCatalogue>(uva::provider::KEY_LLM)
-            .ok()
-            .flatten()
+        self.assembly
+            .service::<ProviderCatalogue>(uva::provider::KEY_LLM)
     }
 
     /// The mounted default provider handle.
@@ -814,10 +691,8 @@ impl AppState {
         if let Some(provider) = self.provider_override.lock().clone() {
             return Some(provider);
         }
-        self.kernel
-            .get::<Arc<dyn ModelProvider>>(uva::provider::KEY_LLM_DEFAULT)
-            .ok()
-            .flatten()
+        self.assembly
+            .service::<Arc<dyn ModelProvider>>(uva::provider::KEY_LLM_DEFAULT)
             .map(|wrapped| Arc::clone(&*wrapped))
     }
 
@@ -896,57 +771,5 @@ impl AppState {
     ///   so dispatch has something to resolve.
     pub fn readiness_checks(&self) -> Vec<(&'static str, bool)> {
         vec![("agent_registry", self.agent_registry.first_name().is_some())]
-    }
-}
-
-/// Carry the boot's materialized row configs forward.
-///
-/// A row whose document config is empty takes the previous effective
-/// row's config when that one is non-empty: the boot owns the
-/// materialization, and a document that never spells it out is not
-/// asking to clear it.
-fn carry_forward_materialized(
-    next: &mut crate::profile::Profile,
-    previous: &crate::profile::Profile,
-) {
-    for entry in &mut next.core {
-        let empty = match &entry.config {
-            serde_json::Value::Null => true,
-            serde_json::Value::Object(map) => map.is_empty(),
-            _ => false,
-        };
-        if !empty {
-            continue;
-        }
-        let Some(previous) =
-            previous.core.iter().find(|row| row.id == entry.id)
-        else {
-            continue;
-        };
-        let previous_empty = match &previous.config {
-            serde_json::Value::Null => true,
-            serde_json::Value::Object(map) => map.is_empty(),
-            _ => false,
-        };
-        if !previous_empty {
-            entry.config = previous.config.clone();
-        }
-    }
-}
-
-/// The rows of `profile` whose ids are in `ids`, with no UI rows.
-fn rows_for(
-    profile: &crate::profile::Profile,
-    ids: &std::collections::BTreeSet<&str>,
-) -> crate::profile::Profile {
-    crate::profile::Profile {
-        core: profile
-            .core
-            .iter()
-            .filter(|entry| ids.contains(entry.id.as_str()))
-            .cloned()
-            .collect(),
-        ui: Vec::new(),
-        hmr: profile.hmr,
     }
 }

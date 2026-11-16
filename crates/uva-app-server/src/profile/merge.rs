@@ -6,15 +6,16 @@ use std::{
 };
 
 use super::model::{
-    Entry,
     EntryPatch,
+    Manifest,
     Patch,
     Profile,
     ProfileError,
     ProfileSource,
     Segment,
-    segment_of,
+    children_from_config,
 };
+
 
 /// Resolve an ordered layer stack and an optional CLI overlay.
 ///
@@ -52,38 +53,41 @@ pub fn resolve(
 
 /// Merge one profile document into the assembly.
 ///
-/// A later document replaces a row with the same id whole and adopts its
-/// `hmr` flag. Rows the document does not mention keep their position.
+/// A later document replaces a row with the same id whole — at the top
+/// level or nested in a group, in place — and adopts its `hmr` flag.
+/// Rows the document does not mention keep their position.
 fn merge_profile_layer(
     resolved: &mut Profile,
     layer: &Profile,
 ) -> Result<(), ProfileError> {
     layer.validate_unique()?;
     resolved.hmr = layer.hmr;
-    for entry in layer.core.iter().chain(layer.ui.iter()) {
-        replace_row(resolved, entry.clone());
+    for (rows, incoming) in [
+        (&mut resolved.core, &layer.core),
+        (&mut resolved.ui, &layer.ui),
+    ] {
+        for row in incoming {
+            if !replace_in_tree(rows, row) {
+                rows.push(row.clone());
+            }
+        }
     }
     Ok(())
 }
 
-/// Insert or replace one row, preserving its segment position when the
-/// segment does not change.
-fn replace_row(profile: &mut Profile, entry: Entry) {
-    let destination = segment_of(&entry);
-    let existing = profile.position(&entry.id);
-    let same_segment = matches!(
-        existing,
-        Some((segment, _)) if segment == destination
-    );
-    let index = existing.map(|(_, index)| index);
-    remove_row(profile, &entry.id);
-    let target = segment_mut(profile, destination);
-    let at = if same_segment {
-        index.unwrap_or(target.len()).min(target.len())
-    } else {
-        target.len()
-    };
-    target.insert(at, entry);
+/// Replace the row with `new`'s id at this level or in any group
+/// below, in place. Returns `false` when no such row exists.
+fn replace_in_tree(rows: &mut [Manifest], new: &Manifest) -> bool {
+    for row in rows.iter_mut() {
+        if row.id == new.id {
+            *row = new.clone();
+            return true;
+        }
+        if replace_in_tree(&mut row.children, new) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Apply one patch document.
@@ -95,48 +99,76 @@ fn apply_patch(
     for replacement in &patch.replace {
         apply_replacement(profile, replacement)?;
     }
-    for entry in &patch.insert {
-        if profile.contains(&entry.id) {
+    for insertion in &patch.insert {
+        if profile.contains(&insertion.row.id) {
             return Err(ProfileError::DuplicateId {
-                id: entry.id.clone(),
+                id: insertion.row.id.clone(),
             });
         }
-        segment_mut(profile, segment_of(entry)).push(entry.clone());
+        segment_mut(profile, insertion.segment).push(insertion.row.clone());
     }
     disable_rows(profile, &patch.disabled)?;
     Ok(())
 }
 
-/// Replace the fields one `[[replace]]` row provides.
+/// Replace the fields one `[[replace]]` row provides, in place.
+///
+/// A replacement edits fields; it never moves a row between segments
+/// or groups. On a group row, a `config` replacement replaces the
+/// child list whole.
 fn apply_replacement(
     profile: &mut Profile,
     replacement: &EntryPatch,
 ) -> Result<(), ProfileError> {
-    let Some((segment, index)) = profile.position(&replacement.id) else {
-        return Err(ProfileError::UnknownPatchId {
-            id: replacement.id.clone(),
-        });
-    };
-    let mut entry = remove_row(profile, &replacement.id)
-        .expect("the position lookup just found the row");
-    if let Some(runtime) = replacement.runtime {
-        entry.runtime = runtime;
+    for row in profile
+        .core
+        .iter_mut()
+        .chain(profile.ui.iter_mut())
+    {
+        if patch_row(row, replacement)? {
+            return Ok(());
+        }
     }
-    if let Some(config) = &replacement.config {
-        entry.config = config.clone();
+    Err(ProfileError::UnknownPatchId {
+        id: replacement.id.clone(),
+    })
+}
+
+/// Apply one replacement to `row` or any descendant. `Ok(true)` — the
+/// addressed id was found and patched; `Ok(false)` — not in this
+/// subtree; `Err` — the replacement is invalid for the row it
+/// addressed (a group's child list that does not parse).
+fn patch_row(
+    row: &mut Manifest,
+    replacement: &EntryPatch,
+) -> Result<bool, ProfileError> {
+    if row.id == replacement.id {
+        if let Some(name) = &replacement.name {
+            row.name = name.clone();
+        }
+        if let Some(config) = &replacement.config {
+            if row.group {
+                row.children =
+                    children_from_config(&row.id, Some(config), "the patch")?;
+                row.config = serde_json::Value::Null;
+            } else {
+                row.config = config.clone();
+            }
+        }
+        if let Some(disabled) = replacement.disabled {
+            row.disabled = disabled;
+        }
+        if let Some(inject) = &replacement.inject {
+            row.inject = Some(inject.clone());
+        }
+        return Ok(true);
     }
-    if let Some(enabled) = &replacement.enabled {
-        entry.enabled = enabled.clone();
+    for child in &mut row.children {
+        if patch_row(child, replacement)? {
+            return Ok(true);
+        }
     }
-    let destination = segment_of(&entry);
-    let target = segment_mut(profile, destination);
-    let at = if destination == segment {
-        index.min(target.len())
-    } else {
-        target.len()
-    };
-    target.insert(at, entry);
-    Ok(())
+    Ok(false)
 }
 
 /// Remove every id in `disabled`, rejecting an id that matches nothing.
@@ -159,22 +191,25 @@ fn disable_rows(
     Ok(())
 }
 
-fn segment_mut(profile: &mut Profile, segment: Segment) -> &mut Vec<Entry> {
+fn segment_mut(profile: &mut Profile, segment: Segment) -> &mut Vec<Manifest> {
     match segment {
         Segment::Core => &mut profile.core,
         Segment::Ui => &mut profile.ui,
     }
 }
 
-fn remove_row(profile: &mut Profile, id: &str) -> Option<Entry> {
-    if let Some(index) = profile.core.iter().position(|entry| entry.id == id) {
-        return Some(profile.core.remove(index));
+/// Remove the row with `id` anywhere in the tree, top level or nested.
+fn remove_row(profile: &mut Profile, id: &str) {
+    remove_from_tree(&mut profile.core, id);
+    remove_from_tree(&mut profile.ui, id);
+}
+
+fn remove_from_tree(rows: &mut Vec<Manifest>, id: &str) -> bool {
+    if let Some(index) = rows.iter().position(|row| row.id == id) {
+        rows.remove(index);
+        return true;
     }
-    profile
-        .ui
-        .iter()
-        .position(|entry| entry.id == id)
-        .map(|index| profile.ui.remove(index))
+    rows.iter_mut().any(|row| remove_from_tree(&mut row.children, id))
 }
 
 /// Resolve the CLI's file layers, in the spec order.
@@ -210,6 +245,23 @@ pub fn resolve_files(
     }
     let overlay = overlay.map(Patch::from_path).transpose()?;
     resolve(&layers, overlay)
+}
+
+/// The project layer's profile document: `<workspace>/.agents/profile.toml`.
+///
+/// The document layer is the deployment's own profile, and it lives in
+/// the project's configuration layer — next to
+/// `<workspace>/.agents/config.toml` (the provider fallback) and the
+/// seeded skills — not in the workspace root: the settings surface
+/// rewrites the document whole, so a root-level file would be a stray
+/// artefact in every source checkout that runs a server.
+///
+/// The global layer keeps its own file at `~/.agents/profile.toml` (a
+/// **patch**, see [`discover_home_patch`]); the two layers are
+/// distinguished by their root, not by their name.
+#[must_use]
+pub fn project_document(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".agents").join("profile.toml")
 }
 
 /// Environment variable naming an explicit home-level patch file.

@@ -9,35 +9,25 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::Value;
 use tracing::warn;
+use uva_approval::{
+    ApprovalRequest,
+    GrantKey,
+    GrantScope,
+    ResumeDecision,
+    ResumeStatus,
+    ResumeToken,
+    align_decisions,
+    may_retry,
+    open_requests,
+    suspended_segment,
+    wants_session_grant,
+};
+use uva_events::SessionEndReason;
 use uva_provider::Message;
 use uva_tool::ToolOutput;
 
-use super::{
-    ReActLoop,
-    TURN_ORDINAL,
-    guard,
-    prepare,
-    tools::commit_tool_result,
-};
-use crate::{
-    agent::{
-        approval::{
-            ApprovalRequest,
-            GrantKey,
-            GrantScope,
-            ResumeDecision,
-            ResumeStatus,
-            ResumeToken,
-            align_decisions,
-            may_retry,
-            open_requests,
-            suspended_segment,
-            wants_session_grant,
-        },
-        re_act::state::RunState,
-    },
-    events::SessionEndReason,
-};
+use super::{ReActLoop, guard, step, step::commit_tool_result};
+use crate::agent::re_act::state::RunState;
 
 pub(super) async fn resume_suspended(
     this: &mut ReActLoop,
@@ -109,8 +99,7 @@ pub(super) async fn resume_suspended(
     // exactly like the ordinary mid-call crash window, so repair can
     // close it instead of the next resume failing on an unbalanced
     // tail.
-    this.emit_typed(uva_session::turn_start(TURN_ORDINAL));
-    this.turn_open = true;
+    this.turn.open(&this.sink);
     for (request, decision) in requests.iter().zip(&decisions) {
         writer.append_event_nowait(&uva_session::approval_decided(
             &request.id,
@@ -244,7 +233,7 @@ fn validate(
         .find_map(|row| {
             uva_session::SessionEvent::from_value(row)
                 .as_ref()
-                .and_then(prepare::request_snapshot_hash)
+                .and_then(step::request_snapshot_hash)
         })
         .ok_or_else(|| {
             stale("stale resume: the log has no request snapshot")
@@ -394,14 +383,7 @@ fn completed_calls(rows: &[Value]) -> BTreeSet<String> {
     rows.iter()
         .filter_map(|row| {
             let event = uva_session::SessionEvent::from_value(row)?;
-            let uva_session::SessionEvent::ToolResult { data, .. } = event
-            else {
-                return None;
-            };
-            data.get("tool_call_id")
-                .or_else(|| data.get("call_id"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            event.tool_call_id().map(str::to_string)
         })
         .collect()
 }

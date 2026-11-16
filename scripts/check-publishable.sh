@@ -48,9 +48,11 @@ ORDER=(
   uva-core uva-kernel
   uva-eval uva-core-tokio uva-scheduler
   uva-telemetry uva-provider
-  uva-attachment uva-search uva-session uva-tool
+  uva-attachment uva-search uva-session uva-tool uva-approval
   uva-context uva-mcp uva-skill uva-test-support
-  uva-steering uva-harness uva-policy-plugins
+  uva-steering uva-events uva-agent uva-hook uva-harness uva-policy-plugins
+  uva-hook-plugins
+  uva-tool-task
   uva-tool-plugins uva-mcp-server
   uva-runtime uva uva-app-server uva-gateway
   uva-tui

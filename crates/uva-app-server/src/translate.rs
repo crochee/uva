@@ -1,5 +1,5 @@
 //! The `translate` command: migrate a legacy `config.yaml` into a
-//! profile TOML's `model-adapter` row.
+//! profile TOML — the deployment's own document layer.
 //!
 //! This is the **one** migration entry point (the design's "profile
 //! 唯一真相"): the yaml parsing that used to live in the boot-time
@@ -10,7 +10,17 @@
 //!   and the TOML `ProviderEntry` shape — into
 //!   `model-adapter.config.workspace`;
 //! - `cache` / `resilience` / `budget` into the tier-1 sections of the
-//!   same row.
+//!   same row;
+//! - the default agent's strategy, tool lists and compaction into
+//!   `agent-loop.config` — the values the boot materializes for that
+//!   row, so the document states the loop the config file described.
+//!
+//! The document carries the **whole assembly**: the built-in plugin
+//! set with the migrated rows in place. The document layer is
+//! authoritative — a row it does not name is a plugin the deployment
+//! does not mount — so a document holding only the `model-adapter` row
+//! would boot into a deployment without the tool registry, without the
+//! sessions and without the agent loop.
 //!
 //! Everything else the yaml may carry is reported as unmapped: those
 //! sections keep being read by [`ServerConfig::load`](crate::config)
@@ -52,13 +62,13 @@ pub struct TranslateArgs {
 
 /// The yaml sections the translator maps, in report order.
 const MAPPED: &str = "providers / default_provider / default_model / \
-                      cache / resilience / budget";
+                      cache / resilience / budget / the default agent's \
+                      strategy + tool lists + compaction (agent-loop row)";
 
 /// The yaml sections that stay on `ServerConfig::load` until their
 /// plugins solidify.
 const UNMAPPED_SECTIONS: &[&str] = &[
     "agents",
-    "default_agent",
     "operations",
     "tools",
     "plugins",
@@ -163,7 +173,8 @@ pub fn run(args: &TranslateArgs, directory: &std::path::Path) -> Result<()> {
         resilience: section::<ResilienceSection>(&document, "resilience")?,
         budget: section::<BudgetSection>(&document, "budget")?,
     };
-    let text = profile_toml(&config)?;
+    let agent_loop = agent_loop_policy(&document)?;
+    let text = profile_toml(&config, Some(&agent_loop))?;
     match &args.out {
         Some(out) => {
             fs::write(out, &text)
@@ -310,77 +321,85 @@ fn section<T: serde::de::DeserializeOwned>(
         .with_context(|| format!("parse the `{name}` section"))
 }
 
-/// Serialize the migrated profile: one `model-adapter` row whose
-/// config is the [`ModelAdapterConfig`], in the wire shape
+/// Serialize the migrated deployment: the built-in plugin set with the
+/// migrated rows in place.
+///
+/// The document layer is **authoritative** — a row the document does
+/// not name is a plugin the deployment does not mount. A document
+/// carrying only the `model-adapter` row therefore boots into a
+/// deployment without the tool registry, without the sessions and
+/// without the agent loop: the dependency chain those rows provide is
+/// gone, and the boot fails on the missing `tools` service. The
+/// migration therefore carries the whole assembly and replaces only
+/// the rows it migrates.
+///
+/// The wire shape is the one
 /// [`Profile::from_toml_str`](crate::profile::Profile::from_toml_str)
-/// parses.
-fn profile_toml(config: &ModelAdapterConfig) -> Result<String> {
-    let json = serde_json::to_value(config).context("serialize the row")?;
-    let row = toml::Value::Table(toml_table(&json)?);
-    let mut entries = toml::value::Table::new();
-    entries.insert("id".to_string(), "model-adapter".into());
-    entries.insert("runtime".to_string(), "native".into());
-    entries.insert("config".to_string(), row);
-    let mut core = toml::value::Table::new();
-    core.insert(
-        "entries".to_string(),
-        toml::Value::Array(vec![toml::Value::Table(entries)]),
-    );
-    let mut root = toml::value::Table::new();
-    root.insert("hmr".to_string(), true.into());
-    root.insert("core".to_string(), toml::Value::Table(core));
-    toml::to_string_pretty(&root).context("serialize the profile")
-}
-
-/// Convert a JSON value into a TOML table value, omitting null
-/// members (an absent optional is what the wire structs expect).
-fn toml_table(value: &serde_json::Value) -> Result<toml::value::Table> {
-    let serde_json::Value::Object(map) = value else {
-        bail!("the model-adapter config must serialize to an object");
-    };
-    let mut table = toml::value::Table::new();
-    for (key, value) in map {
-        if value.is_null() {
-            continue;
-        }
-        table.insert(key.clone(), json_to_toml(value)?);
+/// parses, written by the same serializer the settings surface uses.
+fn profile_toml(
+    config: &ModelAdapterConfig,
+    agent_loop: Option<&serde_json::Value>,
+) -> Result<String> {
+    let row = serde_json::to_value(config).context("serialize the row")?;
+    let mut profile = crate::composition::kernel::native_profile();
+    profile.hmr = true;
+    set_row_config(&mut profile, "model-adapter", row);
+    if let Some(policy) = agent_loop {
+        set_row_config(&mut profile, "agent-loop", policy.clone());
     }
-    Ok(table)
+    crate::profile::ProfileStore::to_toml(&profile).map_err(anyhow::Error::msg)
 }
 
-/// Recursively convert JSON into TOML values.
-fn json_to_toml(value: &serde_json::Value) -> Result<toml::Value> {
-    Ok(match value {
-        // `Option::None` fields serialize to `null`; TOML has no
-        // such value, and the wire structs' absent optionals are
-        // exactly what the deserializer expects (serde defaults).
-        // Callers drop object members that convert to `None`.
-        serde_json::Value::Null => toml::Value::String(String::new()),
-        serde_json::Value::Bool(b) => (*b).into(),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                i.into()
-            } else {
-                n.as_f64().unwrap_or_default().into()
-            }
-        }
-        serde_json::Value::String(s) => s.clone().into(),
-        serde_json::Value::Array(items) => {
-            let converted =
-                items.iter().map(json_to_toml).collect::<Result<Vec<_>>>()?;
-            toml::Value::Array(converted)
-        }
-        serde_json::Value::Object(map) => {
-            let mut table = toml::value::Table::new();
-            for (key, value) in map {
-                if value.is_null() {
-                    continue;
-                }
-                table.insert(key.clone(), json_to_toml(value)?);
-            }
-            toml::Value::Table(table)
-        }
-    })
+/// Put a row's config on the profile, when the row is there.
+fn set_row_config(
+    profile: &mut crate::profile::Profile,
+    id: &str,
+    config: serde_json::Value,
+) {
+    if let Some(row) = profile.core.iter_mut().find(|entry| entry.id == id) {
+        row.config = config;
+    }
+}
+
+/// The `agent-loop` row's policy, resolved the way the boot resolves
+/// it.
+///
+/// The translator and the boot must agree: a document stating a
+/// different loop than the config file describes would make the
+/// migration change the deployment's behaviour.
+fn agent_loop_policy(
+    document: &serde_yaml::Value,
+) -> Result<serde_json::Value> {
+    let agents: HashMap<String, crate::config::AgentConfig> =
+        section::<HashMap<String, crate::config::AgentConfig>>(
+            document, "agents",
+        )?
+        .unwrap_or_default();
+    let default_agent = match document.get("default_agent") {
+        Some(value) => Some(
+            serde_yaml::from_value(value.clone())
+                .context("read default_agent")?,
+        ),
+        None => None,
+    };
+    let server_config = crate::config::ServerConfig {
+        agents,
+        default_agent,
+        ..crate::config::ServerConfig::default()
+    };
+    let name = server_config.default_agent.as_deref();
+    let restriction = crate::state::boot::load_default_tool_restriction(
+        Some(&server_config),
+        name,
+    );
+    let compaction =
+        crate::state::boot::load_default_compaction(Some(&server_config), name);
+    Ok(crate::state::boot::agent_loop_row_config(
+        Some(&server_config),
+        name,
+        restriction.as_deref(),
+        compaction,
+    ))
 }
 
 /// Print the migration report to stderr.
@@ -390,11 +409,20 @@ fn report(
     document: &serde_yaml::Value,
     inline_keys: &[String],
 ) {
-    eprintln!("translated {} -> model-adapter row", path.display());
+    eprintln!(
+        "translated {} -> profile document (model-adapter + agent-loop \
+         rows)",
+        path.display()
+    );
     eprintln!(
         "  mapped: {MAPPED} ({} providers, default `{}`)",
         config.workspace.providers.len(),
         config.workspace.default_provider,
+    );
+    eprintln!(
+        "  assembly: the built-in plugin set is carried over — the \
+         document names every row, so the deployment keeps its \
+         dependency chain and its agent loop"
     );
     let unmapped: Vec<&str> = UNMAPPED_SECTIONS
         .iter()

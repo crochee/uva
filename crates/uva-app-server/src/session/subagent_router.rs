@@ -1,21 +1,23 @@
-//! Sub-agent session router: every delegated child runs in its own
+//! Sub-agent session opener: every delegated child runs in its own
 //! first-class session instead of inlining its trace into the parent.
 //!
-//! The `task` tool forwards a child's events into the parent run's
-//! stream wrapped in `AgentEvent::Agent(AgentMeta, inner)`. Before
-//! this module existed the controller persisted those wrapped events
-//! into the **parent's** log and broadcast them on the parent's SSE —
-//! the parent transcript became a flat dump of every child's tool
-//! calls, and the child had no addressable session of its own.
+//! The `task` tool drives the child run; the child's own harness
+//! writes its model facts into the child session's log, and this
+//! module opens that session: the `subagent_enter` header row, the
+//! dispatch prompt, and the writer the child's run writes through.
 //!
-//! The router inverts the ownership: a wrapped event arriving at
-//! [`ControllerInner::persist_and_broadcast`](super::controller) is
-//! handed here and never reaches the parent's log or broadcast.
-//! Instead, per child (keyed by `AgentMeta::child_session_id`, a ULID
-//! the task tool mints):
+//! The opener is the **writer half** of the old sub-agent router. The
+//! routing half — the one that intercepted a wrapped child event and
+//! copied it into a session — is gone with the delegation channel: the
+//! child session is opened up front and the child's harness writes to
+//! it directly, so there is no event to intercept and nothing to route.
+//! The parent's log keeps only the ordinary `tool_call` / `tool_result`
+//! rows the tool dispatch writes; the child session is the one
+//! full-fidelity record.
 //!
-//! 1. a `subagent_enter` header row + the dispatch prompt (carried on
-//!    the child's first event, see `AgentMeta::prompt`) open the
+//! Per child (keyed by the child session id the `task` tool mints):
+//!
+//! 1. a `subagent_enter` header row + the dispatch prompt open the
 //!    child's own session log — created through the same
 //!    [`SessionRegistry`] every top-level session uses, so the child
 //!    shows up in `GET /api/v1/sessions` and replays through
@@ -24,94 +26,46 @@
 //!    turn, one `tool_result` row per result — are written by the
 //!    child's **own harness**, through the child session's writer
 //!    this module resolves for it
-//!    ([`SubagentWriters`](uva::harness::SubagentWriters)); the
-//!    router copies none of the child's events (none is durable),
-//!    so the child's transcript folds with the standard
-//!    machinery exactly like a top-level run's;
-//! 3. a child `SessionEnded` closes the child log with a
-//!    `subagent_exit` footer;
-//! 4. the **parent's** log gets only the two lightweight
-//!    `subagent_enter` / `subagent_exit` marker rows — enough for the
-//!    parent transcript to link the delegation, without any of the
-//!    child's content;
-//! 5. if a controller for the child session exists (a client opened
-//!    its SSE stream), the inner event is broadcast through it, so
-//!    the child session streams live like any other.
+//!    ([`SubagentWriters`](uva::harness::SubagentWriters));
+//! 3. the `task` tool appends the matching `subagent_exit` footer
+//!    when the child run ends.
 //!
-//! Every row the router writes — the child's own and the parent's
-//! markers alike — goes through that session's one writer, so each
-//! log keeps one ordinal sequence and every row is stamped with its
-//! ordinal. The child's writer is flushed here before the child's
-//! live tail fires: the child has no run of its own to flush for it.
-//! The parent's markers ride the parent run's flush cadence (each
-//! durable parent event flushes, and the run task flushes at the
-//! tail).
-//!
-//! Nested delegation (a child delegating a grandchild) arrives as
-//! `Agent(m1, Agent(m2, inner))`. The recursion keeps each level's
-//! trace in its own session: the `Agent(m2, …)` wrapper row lands in
-//! child `m1`'s log (its record of having delegated), `inner` lands
-//! in child `m2`'s log, and only the depth-1 markers reach the root
-//! parent's `RunLog`.
+//! Every row this module writes goes through that session's one
+//! writer, so each log keeps one ordinal sequence and every row is
+//! stamped with its ordinal.
 
 use std::sync::Arc;
 
 use dashmap::DashSet;
 use uva::{
-    harness::{AgentEvent, AgentMeta, SystemEvent},
-    session::{manager::SessionRegistry, subagent_enter, subagent_exit},
+    provider::Message,
+    session::{manager::SessionRegistry, subagent_enter, user_message},
 };
 
-use super::controller::RunLog;
-use crate::state::ActiveSessions;
-
-/// Where a level's marker rows go. Only the ROOT parent's ledgered
-/// writer receives them: deeper levels' delegations are already
-/// recorded in their parent's log as the wrapped `Agent(meta, …)`
-/// row, and a second marker row there would say the same thing
-/// twice.
-enum ParentSink<'a> {
-    Root(&'a mut RunLog),
-    Deeper,
-}
-
-/// Routes delegated sub-agent events into per-child sessions.
+/// Opens the session a delegated child runs in.
 pub struct SubagentRouter {
     registry: Arc<SessionRegistry>,
-    active: Arc<ActiveSessions>,
-    /// Child session ids whose own header + prompt rows are
-    /// written — by [`Self::open_child_session`] when the run
-    /// carried a writer source, otherwise by [`Self::route`] on
-    /// the first event. Ids are ULIDs minted per delegation, so an
-    /// id is never legitimately reused.
+    /// Child session ids whose own header + prompt rows are written.
+    /// Ids are ULIDs minted per delegation, so an id is never
+    /// legitimately reused.
     opened: DashSet<String>,
-    /// Child session ids whose `subagent_enter` marker has been
-    /// written to the parent's log.
-    marked: DashSet<String>,
 }
 
 impl SubagentRouter {
-    /// Build a router over the process-wide session registry and
-    /// controller cache.
+    /// Build an opener over the process-wide session registry.
     #[must_use]
-    pub fn new(
-        registry: Arc<SessionRegistry>,
-        active: Arc<ActiveSessions>,
-    ) -> Self {
+    pub fn new(registry: Arc<SessionRegistry>) -> Self {
         Self {
             registry,
-            active,
             opened: DashSet::new(),
-            marked: DashSet::new(),
         }
     }
 
-    /// Open the child session `meta` names and return its writer.
+    /// Open the child session and return its writer.
     ///
-    /// Called by the delegation runner (through
-    /// [`ChildSessionWriters`]) before the child run starts: the
-    /// enter header and dispatch prompt are stamped now, so the
-    /// child's own first row — its `request_header`, its first
+    /// Called through [`SessionSubagentWriters`] before the child run
+    /// starts: the enter header and dispatch prompt are stamped now, so
+    /// the child's own first row — its `request_header`, its first
     /// assistant turn — lands after them. The rows take the
     /// writer's synchronous path; the child's first flush lands
     /// them.
@@ -119,227 +73,43 @@ impl SubagentRouter {
         &self,
         user_id: &str,
         parent_session_id: &str,
-        meta: &AgentMeta,
+        child_session_id: &str,
+        depth: usize,
+        agent_name: &str,
+        prompt: Option<&str>,
     ) -> Arc<uva::session::LogWriter> {
-        let child_id = meta.child_session_id.trim().to_string();
+        let child_id = child_session_id.trim().to_string();
         let writer = self.registry.writer(user_id, &child_id);
         if !is_safe_session_id(&child_id) {
             return writer;
         }
         if self.opened.insert(child_id.clone()) {
-            let depth: u32 = meta.parent_depth.try_into().unwrap_or(u32::MAX);
-            let agent_name = meta.agent_name.as_deref().unwrap_or("unknown");
-            if let Ok(header) = serde_json::to_value(subagent_enter(
+            let depth: u32 = depth.try_into().unwrap_or(u32::MAX);
+            writer.append_event_nowait(&subagent_enter(
                 &child_id,
                 parent_session_id,
                 depth,
                 agent_name,
-            )) {
-                writer.append_nowait(header);
-            }
-            if let Some(prompt) = meta.prompt.as_ref().filter(|p| !p.is_empty())
-            {
-                writer.append_nowait(serde_json::json!({
-                    "type": "UserInput",
-                    "data": { "text": prompt },
-                }));
+            ));
+            if let Some(prompt) = prompt.filter(|p| !p.is_empty()) {
+                match serde_json::to_value(Message::user(prompt)) {
+                    Ok(data) => {
+                        writer.append_event_nowait(&user_message(data, None));
+                    }
+                    // A log write must never stop the run: the child's
+                    // header landed, and a missing prompt degrades the
+                    // record rather than aborting the delegation.
+                    Err(error) => tracing::error!(
+                        target: "uva.session",
+                        child_session_id = %child_id,
+                        %error,
+                        "the dispatch prompt could not be encoded; \
+                         the child log keeps its header only"
+                    ),
+                }
             }
         }
         writer
-    }
-
-    /// Route one wrapped child event (and, recursively, any deeper
-    /// wrapped levels) into the child sessions it belongs to.
-    ///
-    /// `root_log` is the ROOT parent's ledgered writer: only the
-    /// depth-1 markers go through it, because it is the one log a
-    /// compaction checkpoint validates provenance against.
-    pub(crate) async fn route(
-        &self,
-        user_id: &str,
-        parent_session_id: &str,
-        meta: &AgentMeta,
-        event: &AgentEvent,
-        root_log: &mut RunLog,
-    ) {
-        if let Err(error) = self
-            .route_level(
-                user_id,
-                parent_session_id,
-                meta,
-                event,
-                ParentSink::Root(root_log),
-            )
-            .await
-        {
-            tracing::warn!(
-                target: "uva.session",
-                parent_session_id,
-                child_session_id = %meta.child_session_id,
-                %error,
-                "subagent router: a write failure left the child's \
-                 rows owed to the log; the next flush writes them"
-            );
-        }
-    }
-
-    /// One level of the recursion. See the module docs for the row
-    /// layout; errors bubble as `anyhow` because every failure mode
-    /// is a sink write the caller can only log.
-    async fn route_level(
-        &self,
-        user_id: &str,
-        parent_session_id: &str,
-        meta: &AgentMeta,
-        event: &AgentEvent,
-        parent: ParentSink<'_>,
-    ) -> anyhow::Result<()> {
-        // Async recursion must be boxed; the depth is bounded by
-        // `MAX_SUBAGENT_DEPTH`, so one box per level is bounded too.
-        Box::pin(self.route_level_inner(
-            user_id,
-            parent_session_id,
-            meta,
-            event,
-            parent,
-        ))
-        .await
-    }
-
-    async fn route_level_inner(
-        &self,
-        user_id: &str,
-        parent_session_id: &str,
-        meta: &AgentMeta,
-        event: &AgentEvent,
-        mut parent: ParentSink<'_>,
-    ) -> anyhow::Result<()> {
-        let child_id = meta.child_session_id.trim().to_string();
-        if !is_safe_session_id(&child_id) {
-            return Ok(());
-        }
-        let depth: u32 = meta.parent_depth.try_into().unwrap_or(u32::MAX);
-        let agent_name = meta.agent_name.as_deref().unwrap_or("unknown");
-        // The child's rows go through the child session's writer —
-        // a different session, so a different writer, but the same
-        // rule: one writer per session, one ordinal source. The
-        // writer stamps each row's `seq` and `ts`.
-        let writer = self.registry.writer(user_id, &child_id);
-
-        if self.marked.insert(child_id.clone()) {
-            let header = serde_json::to_value(subagent_enter(
-                &child_id,
-                parent_session_id,
-                depth,
-                agent_name,
-            ))?;
-            // The child's own header + prompt were pre-written by
-            // `open_child_session` when the run carried a writer
-            // source; without one this route is the only writer
-            // they have, so they land here.
-            if !self.opened.contains(&child_id) {
-                writer.append(header.clone()).await?;
-                if let Some(prompt) =
-                    meta.prompt.as_ref().filter(|p| !p.is_empty())
-                {
-                    writer
-                        .append(serde_json::json!({
-                            "type": "UserInput",
-                            "data": { "text": prompt },
-                        }))
-                        .await?;
-                }
-            }
-            self.append_to_parent(&mut parent, header).await?;
-        }
-
-        match event {
-            AgentEvent::Agent(inner_meta, inner_event) => {
-                // The wrapped level below is THIS child's record
-                // having delegated; the innermost events belong to
-                // the grandchild's own session. The wrapped row
-                // itself is not copied: the child's model facts
-                // come from the child's own writer (see
-                // [`SubagentWriters`]), never from this event tap.
-                self.route_level(
-                    user_id,
-                    &child_id,
-                    inner_meta,
-                    inner_event,
-                    ParentSink::Deeper,
-                )
-                .await?;
-            }
-            inner => {
-                // Nothing to copy: no `AgentEvent` is durable any
-                // more — the child's harness writes its own rows
-                // through the child session's writer. Only the
-                // exit footer is the router's to record.
-                if let AgentEvent::System(SystemEvent::SessionEnded {
-                    reason,
-                }) = inner
-                {
-                    let footer = serde_json::to_value(subagent_exit(
-                        &child_id,
-                        depth,
-                        end_reason_name(reason),
-                    ))?;
-                    writer.append(footer.clone()).await?;
-                    self.append_to_parent(&mut parent, footer).await?;
-                }
-            }
-        }
-
-        // The child's rows are durable before the session is read or
-        // streamed: the child has no run of its own to flush for it,
-        // so this level's flush is the one that lands them.
-        // A failed flush does not drop the rows — they wait in the
-        // writer's spill — and the child's last event has no later
-        // flush to lean on, so one retry catches a transient write
-        // error before the failure is surfaced.
-        let flushed = match writer.flush().await {
-            Ok(()) => Ok(()),
-            Err(first) => {
-                tracing::warn!(
-                    target: "uva.session",
-                    child_session_id = %child_id,
-                    %first,
-                    "subagent router: retrying the child's flush"
-                );
-                writer.flush().await
-            }
-        };
-        if let Err(error) = flushed {
-            return Err(anyhow::anyhow!(
-                "the child's rows stay owed to the log after a failed \
-                 flush: {error}"
-            ));
-        }
-
-        // Live tail: a client that opened the child session's stream
-        // (which materialised a controller through the normal
-        // get-or-create path) sees the event on that session's own
-        // broadcast, exactly like a top-level run's subscribers do.
-        if let Some(controller) =
-            self.active.get(&(user_id.to_string(), child_id.clone()))
-        {
-            controller.broadcast_event(event);
-        }
-        Ok(())
-    }
-
-    /// Write a marker row to the root parent's ledgered log. Deeper
-    /// levels pass [`ParentSink::Deeper`] and write nothing — see
-    /// the enum's docs.
-    async fn append_to_parent(
-        &self,
-        parent: &mut ParentSink<'_>,
-        row: serde_json::Value,
-    ) -> anyhow::Result<()> {
-        if let ParentSink::Root(log) = parent {
-            log.append_typed(row).await?;
-        }
-        Ok(())
     }
 
     /// Session registry the router creates child sinks through.
@@ -349,67 +119,185 @@ impl SubagentRouter {
     }
 }
 
-/// [`SubagentWriters`](uva::harness::SubagentWriters) bound to
-/// one parent run: a delegated child's harness writes its model
-/// facts through the child session's own writer, opened here
-/// through the router so the child's log opens in order.
-pub struct ChildSessionWriters {
+/// [`SubagentWriters`](uva::harness::SubagentWriters) that resolves the
+/// owning user **from the parent session id** the caller passes with
+/// the child.
+///
+/// The `task` tool is a process-wide registry tool, so it cannot hold a
+/// writer source bound to one run's `(user, parent)` pair. This source
+/// is bound to the process instead:
+/// [`open_child`](uva::harness::SubagentWriters::open_child) reads
+/// `parent_session_id`, looks the owner up in the session registry, and
+/// opens the child through the router with that pair — the same rows a
+/// per-run source would write, resolved from the tool's own context.
+pub struct SessionSubagentWriters {
     router: Arc<SubagentRouter>,
-    user_id: String,
-    parent_session_id: String,
+    registry: Arc<SessionRegistry>,
 }
 
-impl ChildSessionWriters {
-    /// Open child sessions for `user_id`'s delegations out of
-    /// `parent_session_id`.
+impl SessionSubagentWriters {
+    /// Open children of any session `registry` knows, through `router`.
     pub fn new(
         router: Arc<SubagentRouter>,
-        user_id: String,
-        parent_session_id: String,
+        registry: Arc<SessionRegistry>,
     ) -> Self {
-        Self {
-            router,
-            user_id,
-            parent_session_id,
-        }
+        Self { router, registry }
     }
 }
 
-impl uva::harness::SubagentWriters for ChildSessionWriters {
+impl uva::harness::SubagentWriters for SessionSubagentWriters {
     fn open_child(
         &self,
-        meta: &AgentMeta,
+        child_session_id: &str,
+        parent_session_id: &str,
+        depth: usize,
+        agent_name: &str,
+        prompt: Option<&str>,
     ) -> Arc<dyn uva::session::SessionLog> {
+        let parent = parent_session_id.trim();
+        // A tool context without a session (an embedder driving a bare
+        // run) has no user to resolve; the child still gets a log under
+        // the registry root rather than no log at all.
+        let user_id = self.registry.user_of(parent).unwrap_or_default();
         let writer = self.router.open_child_session(
-            &self.user_id,
-            &self.parent_session_id,
-            meta,
+            &user_id,
+            parent,
+            child_session_id,
+            depth,
+            agent_name,
+            prompt,
         );
         writer as Arc<dyn uva::session::SessionLog>
     }
 }
 
-/// The log row's name for a run's end reason.
+/// A writer source that is filled **after** the kernel mount.
 ///
-/// The harness keeps its own mapping crate-internal; this is the
-/// server's spelling of the same vocabulary for the child session's
-/// `subagent_exit` footer.
-fn end_reason_name(reason: &uva::harness::SessionEndReason) -> &'static str {
-    use uva::harness::SessionEndReason;
-    match reason {
-        SessionEndReason::Completed => "completed",
-        SessionEndReason::Cancelled => "cancelled",
-        SessionEndReason::Error(_) => "error",
-        SessionEndReason::MaxIterations => "max_iterations",
-        SessionEndReason::Suspended => "suspended",
-        SessionEndReason::ConfigDrift => "config_drift",
+/// The `tool-task` row builds its tool during the mount, while the
+/// router needs the `sessions` service the same mount publishes. The
+/// boot therefore hands the row this slot and installs the real source
+/// immediately after the mount; a child opened before that (nothing can
+/// be, in boot order) falls back to a log that discards its rows rather
+/// than panicking inside a tool call.
+#[derive(Clone, Default)]
+pub struct SubagentWriterSlot {
+    inner: Arc<
+        parking_lot::RwLock<Option<Arc<dyn uva::harness::SubagentWriters>>>,
+    >,
+}
+
+impl SubagentWriterSlot {
+    /// An empty slot.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Install the real source.
+    pub fn set(&self, writers: Arc<dyn uva::harness::SubagentWriters>) {
+        *self.inner.write() = Some(writers);
+    }
+}
+
+impl std::fmt::Debug for SubagentWriterSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubagentWriterSlot")
+            .field("installed", &self.inner.read().is_some())
+            .finish()
+    }
+}
+
+impl uva::harness::SubagentWriters for SubagentWriterSlot {
+    fn open_child(
+        &self,
+        child_session_id: &str,
+        parent_session_id: &str,
+        depth: usize,
+        agent_name: &str,
+        prompt: Option<&str>,
+    ) -> Arc<dyn uva::session::SessionLog> {
+        match self.inner.read().as_ref() {
+            Some(writers) => writers.open_child(
+                child_session_id,
+                parent_session_id,
+                depth,
+                agent_name,
+                prompt,
+            ),
+            None => Arc::new(DiscardingLog::new(child_session_id.to_string())),
+        }
+    }
+}
+
+/// The fallback log of a child opened before the boot installed its
+/// writer source: every row is dropped, which is the documented
+/// "children stream live but persist nothing" shape.
+struct DiscardingLog {
+    id: String,
+}
+
+impl DiscardingLog {
+    fn new(id: String) -> Self {
+        Self { id }
+    }
+}
+
+#[async_trait::async_trait]
+impl uva::session::SessionLog for DiscardingLog {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn last_seq(&self) -> u64 {
+        0
+    }
+
+    async fn read(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, uva::session::SessionError> {
+        Ok(Vec::new())
+    }
+
+    fn set_ledger(&self, _ledger: Arc<uva::session::SurfaceLedger>) {}
+
+    fn seed_ledger(&self, _rows: &[serde_json::Value]) {}
+
+    async fn append_event(
+        &self,
+        _event: &uva::session::SessionEvent,
+    ) -> Result<u64, uva::session::SessionError> {
+        Ok(0)
+    }
+
+    fn append_event_nowait(&self, _event: &uva::session::SessionEvent) -> u64 {
+        0
+    }
+
+    async fn flush(&self) -> Result<(), uva::session::SessionError> {
+        Ok(())
+    }
+
+    async fn close(
+        &self,
+        _reason: uva::session::SessionEndReason,
+    ) -> Result<(), uva::session::SessionError> {
+        Ok(())
+    }
+
+    async fn repair(
+        &self,
+    ) -> Result<uva::session::RepairReport, uva::session::SessionError> {
+        Ok(uva::session::RepairReport {
+            closers: 0,
+            last_seq: 0,
+        })
     }
 }
 
 /// The same shape [`SessionRegistry`] validates ids with, checked
 /// here defensively: the child id reaches `sessions_root`'s path via
 /// `sink()`, which does not validate on its own. ULIDs always pass;
-/// this guards a future delegator that mints something else.
+/// this guards a future caller that mints something else.
 fn is_safe_session_id(id: &str) -> bool {
     !id.is_empty()
         && !id.contains('/')
@@ -420,22 +308,7 @@ fn is_safe_session_id(id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use uva::provider::{ContentPart, TextContent};
-
     use super::*;
-
-    fn text_event(text: &str) -> AgentEvent {
-        AgentEvent::Model(ContentPart::Text(TextContent {
-            text: text.to_string(),
-            cache_control: None,
-        }))
-    }
-
-    fn ended_event() -> AgentEvent {
-        AgentEvent::System(SystemEvent::SessionEnded {
-            reason: uva::harness::SessionEndReason::Completed,
-        })
-    }
 
     fn row_types(events: &[serde_json::Value]) -> Vec<String> {
         events
@@ -449,32 +322,40 @@ mod tests {
             .collect()
     }
 
-    /// The contract the whole design hangs on: a delegated child's
-    /// durable events land in the child's own session log, while the
-    /// parent's log keeps only the enter / exit markers — the child's
-    /// trace never inlines into the parent transcript.
+    /// The text of one user row. The typed `user_message` carries a
+    /// provider `Message`, so decode it back and ask for its text; a
+    /// log written before the typed writer kept `{"text": …}` in the
+    /// payload instead.
+    fn uva_session_row_text(row: &serde_json::Value) -> Option<String> {
+        if row.get("type").and_then(|t| t.as_str()) == Some("user_message") {
+            let message = row.get("data").cloned().and_then(|data| {
+                serde_json::from_value::<uva::provider::Message>(data).ok()
+            })?;
+            return message.content.extract_text();
+        }
+        row.pointer("/data/text")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+    }
+
+    /// The contract the opener hangs on: a delegated child's own
+    /// session opens with the enter header and the dispatch prompt,
+    /// and the child's harness writes its rows through that writer —
+    /// the child's trace never inlines into the parent transcript.
     #[tokio::test]
-    async fn child_events_land_in_their_own_session() {
+    async fn the_child_session_opens_with_its_header_and_prompt() {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Arc::new(SessionRegistry::new(dir.path().to_path_buf()));
-        let router = SubagentRouter::new(
-            Arc::clone(&registry),
-            Arc::new(ActiveSessions::new()),
-        );
-        let parent_sink = registry.sink("u1", "parent-1");
-        let mut log = RunLog::new(registry.writer("u1", "parent-1"));
+        let router = SubagentRouter::new(Arc::clone(&registry));
 
-        let meta = AgentMeta::new("parent-1", "child-1", 1)
-            .with_agent_name(Some("scout".to_string()));
-        // First forwarded event carries the dispatch prompt.
-        let first_meta = meta.clone().with_prompt(Some("map the repo".into()));
-        // The child's run opens its own session before its first
-        // row: the opener stamps the header + prompt, and the
-        // child's harness writes its turn as one assistant row
-        // through the same writer — the shape this test then
-        // expects the routing below to fit around.
-        let child_writer =
-            router.open_child_session("u1", "parent-1", &first_meta);
+        let child_writer = router.open_child_session(
+            "u1",
+            "parent-1",
+            "child-1",
+            1,
+            "scout",
+            Some("map the repo"),
+        );
         child_writer.append_nowait(serde_json::json!({
             "type": "assistant_message",
             "data": {"role": "assistant",
@@ -482,25 +363,12 @@ mod tests {
                          {"type": "text", "text": "step one"}
                      ]}},
         }));
-        router
-            .route(
-                "u1",
-                "parent-1",
-                &first_meta,
-                &text_event("step one"),
-                &mut log,
-            )
-            .await;
-        router
-            .route("u1", "parent-1", &meta, &ended_event(), &mut log)
-            .await;
-        // The parent's markers ride the parent run's flush cadence;
-        // this test has no run, so the flush is the test's.
         registry
-            .writer("u1", "parent-1")
+            .writer("u1", "child-1")
             .flush()
             .await
-            .expect("parent flush");
+            .expect("child flush");
+
         let child_events = registry
             .sink("u1", "child-1")
             .read()
@@ -508,22 +376,12 @@ mod tests {
             .expect("child read");
         assert_eq!(
             row_types(&child_events),
-            vec![
-                "subagent_enter",
-                "UserInput",
-                "assistant_message",
-                "subagent_exit"
-            ],
-            "child log: header, prompt, the child's own assistant \
-             row, footer — the child's model facts come from the \
-             child's writer, never inlined from the parent's stream"
+            vec!["subagent_enter", "user_message", "assistant_message"],
+            "child log: header, prompt, the child's own assistant row — \
+             the child's model facts come from the child's writer"
         );
-        assert_eq!(
-            child_events[1]
-                .pointer("/data/text")
-                .and_then(|t| t.as_str()),
-            Some("map the repo")
-        );
+        let prompt = uva_session_row_text(&child_events[1]);
+        assert_eq!(prompt.as_deref(), Some("map the repo"));
         assert_eq!(
             child_events[0]
                 .pointer("/data/agent_name")
@@ -536,94 +394,41 @@ mod tests {
                 .and_then(|p| p.as_str()),
             Some("parent-1")
         );
-
-        let parent_events = parent_sink.read().await.expect("parent read");
         assert_eq!(
-            row_types(&parent_events),
-            vec!["subagent_enter", "subagent_exit"],
-            "parent log: markers only, none of the child's content"
+            child_events[0]
+                .pointer("/data/depth")
+                .and_then(|d| d.as_u64()),
+            Some(1)
         );
     }
 
-    /// A grandchild delegation arrives as `Agent(m1, Agent(m2, …))`;
-    /// each level's trace stays in its own session and the root
-    /// parent still sees only its direct child's markers.
+    /// Opening the same child twice must not stamp the header twice:
+    /// the opener is idempotent per child id.
     #[tokio::test]
-    async fn nested_delegation_splits_per_level() {
+    async fn opening_a_child_twice_stamps_the_header_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let registry = Arc::new(SessionRegistry::new(dir.path().to_path_buf()));
-        let router = SubagentRouter::new(
-            Arc::clone(&registry),
-            Arc::new(ActiveSessions::new()),
-        );
-        let parent_sink = registry.sink("u1", "root");
-        let mut log = RunLog::new(registry.writer("u1", "root"));
+        let router = SubagentRouter::new(Arc::clone(&registry));
 
-        let m1 = AgentMeta::new("root", "child-1", 1)
-            .with_agent_name(Some("scout".to_string()));
-        let m2 = AgentMeta::new("child-1", "child-2", 2)
-            .with_agent_name(Some("deep".to_string()));
-        // The grandchild's run opens its own session and writes
-        // its turn through it, exactly one level down.
-        let grandchild_writer = router.open_child_session("u1", "child-1", &m2);
-        grandchild_writer.append_nowait(serde_json::json!({
-            "type": "assistant_message",
-            "data": {"role": "assistant",
-                     "content": {"Multi": [
-                         {"type": "text", "text": "deep work"}
-                     ]}},
-        }));
-        let nested = AgentEvent::Agent(m2, Box::new(text_event("deep work")));
         router
-            .route(
-                "u1",
-                "root",
-                &m1.clone().with_prompt(Some("outer".into())),
-                &nested,
-                &mut log,
-            )
-            .await;
+            .open_child_session("u1", "parent-1", "child-1", 1, "scout", None);
+        router
+            .open_child_session("u1", "parent-1", "child-1", 1, "scout", None);
         registry
-            .writer("u1", "root")
+            .writer("u1", "child-1")
             .flush()
             .await
-            .expect("parent flush");
+            .expect("child flush");
 
-        let grandchild = registry
-            .sink("u1", "child-2")
-            .read()
-            .await
-            .expect("grandchild read");
-        assert_eq!(
-            row_types(&grandchild),
-            vec!["subagent_enter", "assistant_message"],
-            "grandchild log: its own header + its own assistant row, \
-             written by the grandchild's writer"
-        );
-        assert_eq!(
-            grandchild[0]
-                .pointer("/data/parent_session_id")
-                .and_then(|p| p.as_str()),
-            Some("child-1"),
-            "grandchild attribution names the child, not the root"
-        );
-
-        let child = registry
+        let child_events = registry
             .sink("u1", "child-1")
             .read()
             .await
             .expect("child read");
         assert_eq!(
-            row_types(&child),
-            vec!["subagent_enter", "UserInput"],
-            "child log: header + prompt; the wrapped grandchild \
-             trace is not inlined here"
-        );
-        let parent_events = parent_sink.read().await.expect("parent read");
-        assert_eq!(
-            row_types(&parent_events),
+            row_types(&child_events),
             vec!["subagent_enter"],
-            "root parent: only its direct child's enter marker"
+            "the header lands once, whatever the number of opens"
         );
     }
 }

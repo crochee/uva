@@ -187,13 +187,25 @@ cargo run -p uva-app-server -- --profile ./profile.toml --dump-config
 `--bundle`（及 home 级 patch）是 patch 文档：`[[replace]]` 改已有行、
 `[[insert]]` 追加、`disabled` 过滤。home 级 patch 读取
 `~/.agents/profile.toml`（或 `UVA_HOME_PROFILE`），文件不存在时跳过。
+profile 文档层缺省落在工作区的配置层 `<workspace>/.agents/profile.toml`
+—— 与 provider 回退输入 `<workspace>/.agents/config.toml`、种子技能
+`<workspace>/.agents/skills/` 同一层；`--profile` 显式指定时以它为准，
+设置面也写回同一路径。文档层是设置面的生成物（整篇重写），不是仓库里
+该提交的配置源。
 `--dump-config` 打印确定性 JSON 后以 0 退出；`provides` / `inject` 来自
 已注册工厂的 manifest，工厂尚未注册的行显式输出空数组（`ui` 段同样输出
 空数组，因为 UI 行没有核心工厂）。
-`config.yaml` 的 provider / plugin 段不再翻译成 profile 行：用
-`uva-app-server translate` 把 `[providers]`（连同
-`cache` / `resilience` / `budget`）迁移到 profile 的 `model-adapter` 行；
-其余段仍由 `ServerConfig::load` 直读。provider 的回退输入是
+`config.yaml` 的 provider 段不再被 boot 直接翻译成插件配置：用
+`uva-app-server translate --config config.yaml --out .agents/profile.toml`
+写出一份**完整**的 profile 文档 —— 内置插件集合 + 迁移后的两行：
+`[providers]`（连同 `cache` / `resilience` / `budget`）进 `model-adapter`
+行，默认 agent 的 strategy / tool 列表 / compaction 进 `agent-loop` 行。
+文档层是权威装配，所以迁移必须带上整个装配：只写 `model-adapter` 一行
+的文档会让部署丢掉工具注册表与 agent loop（boot 在 `tools` 服务缺失处
+失败）。内联 `api_key` 不写进文档，`api_key_env` 指向
+`UVA_PROVIDER_API_KEY_<NAME>`，报告逐条列出要 export 的变量。
+其余段（`agents` 表、`operations`、`tools`、`cluster` …）仍由
+`ServerConfig::load` 直读。provider 的回退输入是
 `<workspace>/.agents/config.toml`（TOML 形状）。
 
 显式 `[core]` 行是权威装配：boot 通过 `build_plugins` → `mount_all`

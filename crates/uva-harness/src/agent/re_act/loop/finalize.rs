@@ -1,6 +1,7 @@
 //! Post-loop finalize: the max-iterations warning, the terminal `SessionEnded` emission, and output assembly.
+use uva_events::{SessionEndReason, WarningKind};
+
 use super::{super::state::RunState, ReActLoop};
-use crate::events::{SessionEndReason, WarningKind};
 
 impl ReActLoop {
     pub(super) async fn drive_finalize(
@@ -24,28 +25,10 @@ impl ReActLoop {
             );
             end_reason = SessionEndReason::MaxIterations;
         }
-        // Close the turn this run opened. A suspended run already
-        // wrote its own `turn_end_suspended` at the suspension
-        // boundary, and a run that never opened an ordinary turn (a
-        // refused resume continues the suspended one) has nothing to
-        // close here.
-        if self.turn_open && !matches!(end_reason, SessionEndReason::Suspended)
-        {
-            let mut event =
-                uva_session::turn_end(super::TURN_ORDINAL, end_reason.as_str());
-            // A failed turn's message is part of the outcome. Without
-            // it the log says only "error", and every reader — the
-            // page's banner, an operator reading the log — has to
-            // guess why the run stopped.
-            if let (
-                SessionEndReason::Error(message),
-                uva_session::SessionEvent::Turn { data, .. },
-            ) = (&end_reason, &mut event)
-            {
-                data["message"] = serde_json::Value::String(message.clone());
-            }
-            self.emit_typed(event);
-        }
+        // Close the turn this run opened (a no-op when the turn was
+        // never this run's to close — the step module's `TurnState`
+        // owns the decision, and its doc says when).
+        self.turn.close(&self.sink, &end_reason);
         // The last flush: a run that ends (completed, cancelled or
         // failed) must not leave a row in the buffer. The rows of
         // the final step are only durable once they are written.
@@ -57,7 +40,7 @@ impl ReActLoop {
         }
         tracing::info!(
             end_reason = ?end_reason,
-            history_len = session.messages.len(),
+            history_len = session.transcript.messages().len(),
             "session end: finalize()"
         );
         self.warn_missing_structured_output(&session, &end_reason);
@@ -71,6 +54,7 @@ impl ReActLoop {
             .seams
             .run_finished(
                 &ctx,
+                &self.sink,
                 &self.caps.model.descriptor.name,
                 0,
                 end_reason.as_str(),

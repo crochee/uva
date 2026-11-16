@@ -4,10 +4,9 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use dashmap::DashMap;
 use uva::{
+    agent::{AgentEntry, AgentRegistry},
     core::registry::Registry,
-    harness::{AgentEntry, AgentRegistry},
     provider::{config::WorkspaceConfig, traits::ModelProvider},
     session::{
         JsonlSessionSearch,
@@ -19,17 +18,11 @@ use uva::{
 
 use super::{
     AppState,
-    EvalsState,
-    McpRuntime,
     ProviderCatalogue,
-    SchedulesState,
-    tools::{AppliedToolSurface, plugin_tool_registry},
-    usage::UsageMetrics,
+    boot::{BootInputs, BootMode, ProviderSeam},
+    tools::plugin_tool_registry,
 };
-use crate::{
-    composition::kernel::{BootServices, mount_profile, native_profile},
-    session::controller::SessionController,
-};
+use crate::composition::kernel::native_profile;
 
 impl AppState {
     /// Create an AppState for testing with in-memory components and no LLM provider dependency.
@@ -39,6 +32,12 @@ impl AppState {
     /// production boot mounts (so the `skill` tool, the capability
     /// services, and the prompt builder are the real ones), over
     /// in-memory components where the production boot uses disk.
+    ///
+    /// Construction goes through the same shared assembler as the
+    /// production boot (`AppState::assemble`): this function resolves
+    /// only the values a fixture differs on (the provider, the profile
+    /// document, the detached runtimes) and hands the rest to the
+    /// shared path.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn for_test(
         session_manager: SessionRegistry,
@@ -88,9 +87,11 @@ impl AppState {
                 .unwrap_or_default(),
         );
 
-        let clock = uva::core::SharedClock::system();
         // Same seams the production boot installs: the tests drive a
         // tokio runtime, so the fs work belongs on its blocking pool.
+        // The session store the mount publishes is built from this
+        // registry's directory; this handle supplies the directory and
+        // nothing else.
         let session_manager = Arc::new(
             session_manager.with_blocking(crate::spawner::server_blocking()),
         );
@@ -99,11 +100,11 @@ impl AppState {
                 .with_blocking(crate::spawner::server_blocking()),
         );
 
+        // Test state: register the canonical ReAct descriptor (without
+        // holding a live provider) so the registry has at least one
+        // entry and the peer-agent manifest snapshot excludes it via
+        // the `self_name` filter.
         let agent_registry = Arc::new(AgentRegistry::new());
-        // Test state: register the canonical ReAct descriptor
-        // (without holding a live provider) so the registry has
-        // at least one entry and the peer-agent manifest snapshot
-        // excludes it via the `self_name` filter.
         let _ = agent_registry
             .put(AgentEntry::new(Arc::new(uva::harness::ReActAgent::new(
                 Arc::clone(&default_provider),
@@ -111,25 +112,6 @@ impl AppState {
             ))))
             .await;
 
-        let agent_registry = Arc::new(AgentRegistry::new());
-        // Test state: register the canonical ReAct descriptor
-        // (without holding a live provider) so the registry has
-        // at least one entry and the peer-agent manifest snapshot
-        // excludes it via the `self_name` filter.
-        let _ = agent_registry
-            .put(AgentEntry::new(Arc::new(uva::harness::ReActAgent::new(
-                Arc::clone(&default_provider),
-                Arc::new(ToolRegistry::new()),
-            ))))
-            .await;
-
-        // The fixture's management surfaces read the services the
-        // rows publish (see the reads after the mount).
-        let boot_services = Arc::new(BootServices {
-            tool_registry: Arc::clone(&tool_registry),
-            agent_registry: Arc::clone(&agent_registry),
-            plugin_host: plugin_host.clone(),
-        });
         let mut profile = native_profile();
         // The fixture's row config carries the demo provider the
         // deployment catalogue would otherwise inject under `cfg(test)`;
@@ -140,11 +122,11 @@ impl AppState {
                     "demo": {
                         "type": "demo",
                         "api_key_env": "NONE",
-                        "default_model": default_model,
+                        "default_model": default_model.clone(),
                     }
                 },
                 "default_provider": "demo",
-                "default_model": default_model,
+                "default_model": default_model.clone(),
             }
         });
         if let Some(row) = profile
@@ -154,115 +136,32 @@ impl AppState {
         {
             row.config = value;
         }
-        let (kernel, mounted) = mount_profile(
-            Arc::clone(&boot_services),
-            &profile,
-            uva::core::SharedClock::system(),
-            crate::composition::kernel::BootExtras {
-                workspace_root: workspace_root.clone(),
-                blocking: Some(crate::spawner::server_blocking()),
-                compaction: Some(uva::session::CompactionPluginConfig {
-                    model: default_model.clone(),
-                    settings: uva::session::CompactionSettings::default(),
-                }),
-                sessions_dir: Some(
-                    session_manager.sessions_root().to_path_buf(),
-                ),
+
+        Self::assemble(BootInputs {
+            workspace_root: workspace_root.clone(),
+            server_config,
+            profile,
+            profile_store: None,
+            default_model,
+            providers: ProviderSeam::Injected {
+                catalogue: provider_catalogue,
+                default_provider,
+                workspace: workspace_config,
             },
-        )
-        .expect("the fixture's native plugin set mounts");
-
-        // The effective assembly the fixture's tree corresponds to.
-        let assembly = {
-            let checks = crate::profile::KernelChecks(&kernel);
-            crate::profile::effective(&profile, &checks).profile
-        };
-        let ui_tree = crate::ui::tree::load_ui_tree(&assembly.ui)
-            .expect("the fixture's UI segment loads");
-
-        let active_sessions: Arc<
-            DashMap<(String, String), Arc<SessionController>>,
-        > = Arc::new(DashMap::new());
-        let subagent_router =
-            Arc::new(crate::session::subagent_router::SubagentRouter::new(
-                Arc::clone(&session_manager),
-                Arc::clone(&active_sessions),
-            ));
-
-        let mcp_supervisor = kernel
-            .require::<uva::mcp::McpSupervisor>(uva::mcp::KEY_MCP)
-            .expect("the fixture mounts the mcp row");
-        // The fixture's route surfaces read the services the rows
-        // published (one store / one engine), exactly like the boot.
-        let schedules = SchedulesState::from_store(
-            Arc::clone(
-                kernel
-                    .require::<uva::scheduler::SchedulerService>(
-                        uva::scheduler::KEY_SCHEDULER,
-                    )
-                    .expect("the fixture mounts the scheduler row")
-                    .store(),
-            ),
-            uva::core::SharedClock::system(),
-        );
-        let eval_runner = kernel
-            .require::<uva::eval::EvalRunner>(uva::eval::KEY_EVAL)
-            .expect("the fixture mounts the eval row");
-        let evals = EvalsState::build_with_runner(&workspace_root, eval_runner);
-        let session_manager = kernel
-            .require::<SessionRegistry>(uva::session::KEY_SESSIONS)
-            .expect("the fixture mounts the session-store row");
-        let attachment_store = kernel
-            .require::<uva::attachment::AttachmentStore>(
-                uva::attachment::KEY_ATTACHMENTS,
-            )
-            .expect("the fixture mounts the attachments row");
-        let mcp = McpRuntime::detached(mcp_supervisor);
-        Self {
-            clock,
-            cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
             tool_registry,
             agent_registry,
-            session_search,
-            session_manager,
-            workspace_root: workspace_root.clone(),
-            default_model,
-            workspace_config: parking_lot::RwLock::new(workspace_config),
-            default_provider: parking_lot::RwLock::new(default_provider),
-            provider_catalogue: parking_lot::RwLock::new(provider_catalogue),
-            operations_config,
-            system_prompt: uva::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
-            server_config,
-            default_max_iterations: uva::harness::DEFAULT_MAX_ITERATIONS,
-            default_compaction: None,
-            tool_surface: AppliedToolSurface::default(),
-            tool_defs_cache: parking_lot::RwLock::new(None),
-            mcp,
-            kernel,
-            boot_services,
-            mount: parking_lot::Mutex::new(mounted.into_groups()),
-            profile: parking_lot::RwLock::new(profile),
-            assembly: parking_lot::RwLock::new(assembly),
-            profile_store: None,
-            profile_write: tokio::sync::Mutex::new(()),
-            ui_tree: parking_lot::RwLock::new(ui_tree),
-            // The fixture composes no host plugins; its host is empty
-            // and already bound above.
             plugin_host,
-            #[cfg(any(test, feature = "test-utils"))]
-            provider_override: parking_lot::Mutex::new(None),
-            #[cfg(any(test, feature = "test-utils"))]
-            catalogue_override: parking_lot::Mutex::new(None),
-            active_sessions,
-            spawn_gates: Arc::new(DashMap::new()),
-            spawn_gate_timeout: super::sessions::COLD_OPEN_GATE_TIMEOUT,
-            subagent_router,
-            default_agent_name: parking_lot::RwLock::new(None),
-            usage_metrics: Arc::new(UsageMetrics::default()),
-            attachment_store,
-            schedules,
-            evals,
+            session_search,
+            sessions_dir: Some(session_manager.sessions_root().to_path_buf()),
+            default_compaction: None,
+            operations_config,
+            default_agent_name: None,
+            default_max_iterations: uva::harness::DEFAULT_MAX_ITERATIONS,
+            cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
             rpc: Arc::new(crate::rpc::RpcRuntime::detached()),
-        }
+            mode: BootMode::Fixture,
+        })
+        .await
+        .expect("the fixture's native plugin set mounts")
     }
 }

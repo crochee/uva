@@ -23,34 +23,53 @@
 //! The loop holds one [`Seams`](crate::seams::Seams) and names only its methods: `step_pre`,
 //! `step_post`, `tool_pre`, `tool_post`, the `llm_*` points, and the
 //! scoped read helpers (`prompt_sections`, `hints`, `tracker_table`,
-//! `tools`, `delegators`). It never names [`Host`] or builds a
-//! `HookEvent`.
+//! `tools`). It never names [`Host`] or builds a `HookEvent`.
 //!
-//! Every seam method is a pass over the point's kernel
-//! [`Waterfall`](uva_kernel::Waterfall) chain: foreign middleware
-//! registered through [`Host::waterfall`](crate::agent::host::Host::waterfall)
-//! runs first and may observe, rewrite (via
-//! [`SeamPass::rewrite`](crate::seams::SeamPass::rewrite)), or
-//! short-circuit the pass with a
-//! [`SeamRuling`](crate::seams::SeamRuling); when nothing foreign
-//! decided, the [`Host`]'s typed hooks, gates and transformers run
-//! over the effective event the chain produced, with the arbitration,
-//! fail-closed gate rules and panic isolation they have always had.
-//! An empty chain plus no host registration exits before the event is
-//! even built, so a bare run pays nothing for the spine.
+//! Every seam method dispatches in two stages. First the external
+//! [`HookRegistry`](uva_hook::HookRegistry) runs the registrations a
+//! third-party plugin installed through the `hooks` service — observe,
+//! rewrite, or decide; a denial short-circuits here, and a `Block` at
+//! `tool/pre-execute` writes the durable `hook_block` row. Then the
+//! point's kernel [`Waterfall`](uva_kernel::Waterfall) chain runs:
+//! middleware registered through
+//! [`Host::waterfall`](crate::agent::host::Host::waterfall) together
+//! with the [`Host`]'s typed hooks, gates and transformers, with the
+//! arbitration, fail-closed gate rules and panic isolation they have
+//! always had, over the event the registry produced. Both stages fold
+//! through one [`Arbitration`]:
+//!
+//! - the first `Block` short-circuits the pass — later registrations
+//!   do not run;
+//! - `Ask` reasons collect from both surfaces into one report;
+//! - a `Terminate` is accepted only where `HookEvent::accepts` says so;
+//! - once a denial is recorded nothing later can turn it back into
+//!   permission (the deny-only terminal, ADR 0004).
+//!
+//! The pass payload is the contract crate's
+//! [`HookPayload`](uva_hook::HookPayload); the keys and the
+//! interception traits are `uva-hook`'s too, re-exported by this
+//! module (ADR 0004). An empty registry plus no chain and no host
+//! registration exits before the event is even built, so a bare run
+//! pays nothing for the spine.
 //!
 //! # Registration and lifecycle
 //!
-//! Registrations still go through [`Host`] (`hook`, `gate`, `guard`,
-//! transformer, `prompt_section`, `tool`, `delegator`), which the loop no
-//! longer reads. A deployment either wraps an installed host with
-//! [`Seams::new`](crate::seams::Seams::new) and installs it with
-//! [`ReActAgent::with_seams`](crate::ReActAgent::with_seams), or keeps
-//! using `ReActAgent::with_host`, which wraps the host for it.
+//! External registrations go through [`HookRegistry`](uva_hook::HookRegistry)
+//! and arrive as the `hooks` service the `agentLoop` factory injects;
+//! typed registrations still go through [`Host`] (`hook`, `gate`,
+//! `guard`, transformer, `prompt_section`, `tool`), which
+//! the loop no longer reads. A deployment wraps an installed host with
+//! [`Seams::new`](crate::seams::Seams::new), attaches the registry with
+//! [`Seams::with_hook_registry`](crate::seams::Seams::with_hook_registry),
+//! and installs the result with
+//! [`ReActAgent::with_seams`](crate::ReActAgent::with_seams); the
+//! legacy `ReActAgent::with_host` wraps a host for it.
 //!
-//! A registration's lifetime is its [`Registration`] handle: dropping
-//! the last handle withdraws the row from every seam wrapped around
-//! the host — the same lifetime a kernel plugin's effect handle owns.
+//! A registration's lifetime is its handle: dropping the last
+//! [`Registration`] withdraws the typed row, and dropping the last
+//! [`HookRegistration`](uva_hook::HookRegistration) withdraws the
+//! external one — the same lifetime a kernel plugin's effect handle
+//! owns.
 
 use std::{
     panic::AssertUnwindSafe,
@@ -60,6 +79,20 @@ use std::{
 
 use futures::FutureExt;
 use uva_context::AgentState;
+use uva_events::WarningKind;
+// The mount-point keys are the contract crate's (ADR 0004); the deep
+// paths `uva_harness::seams::<KEY>` keep working through this
+// module-internal re-export, which is not a crate-root curated name.
+pub use uva_hook::seam::{
+    LLM_REQUEST,
+    LLM_RESULT,
+    PROMPT_SECTIONS,
+    STEP_POST,
+    STEP_PRE,
+    TOOL_POST,
+    TOOL_PRE,
+};
+use uva_hook::{HookPayload, HookRegistry};
 use uva_kernel::{Context, EventValue, Next, Outcome, Waterfall, WaterfallCtx};
 use uva_steering::{
     Action,
@@ -74,55 +107,16 @@ use uva_steering::{
 use uva_tool::{Tool, ToolOutput, ToolRegistry};
 
 use crate::agent::{
-    DelegatingTool,
-    host::{Arbitration, Diagnostic, HookContext, Host, PromptSection},
+    EventSink,
+    host::{
+        Arbitration,
+        Diagnostic,
+        HookContext,
+        Host,
+        PromptSection,
+        veto_row,
+    },
 };
-
-/// Before a loop step samples the model.
-///
-/// A middleware may observe the step, terminate the run, or
-/// short-circuit it — a short-circuit skips the model call and its
-/// value is the step's result.
-pub const STEP_PRE: &str = "agent/step-pre";
-
-/// After a loop step committed its tool results.
-///
-/// The pass observes a step that already ran; a middleware returns
-/// `Continue` to leave the result unchanged.
-pub const STEP_POST: &str = "agent/step-post";
-
-/// Before a tool call executes.
-///
-/// A middleware may observe the call, rewrite its arguments, or
-/// short-circuit it with a rejection. A rejection skips the tool and the
-/// loop commits a matching `tool_result`.
-pub const TOOL_PRE: &str = "tool/pre-execute";
-
-/// After a tool call returned, before the loop commits its result.
-///
-/// A middleware may observe the result or rewrite it; the rewritten
-/// value is what the model reads in the next request.
-pub const TOOL_POST: &str = "tool/post-execute";
-
-/// Before a model request goes on the wire.
-///
-/// Carries the request parameters (`RequestParams`): the model, the
-/// temperature, the max tokens, the tool choice and the tool schemas.
-/// The transcript and the system prompt are not part of the payload.
-pub const LLM_REQUEST: &str = "llm/request";
-
-/// After a model request returned.
-///
-/// Carries the provider's answer. A middleware may observe it or
-/// rewrite it before the loop commits the step.
-pub const LLM_RESULT: &str = "llm/result";
-
-/// A collection event: one system-prompt section per middleware.
-///
-/// Sections render in registration order after the base manifest; a run
-/// takes its section snapshot once, so a registration made mid-run lands
-/// on the next run.
-pub const PROMPT_SECTIONS: &str = "prompt/sections";
 
 #[derive(Debug, Clone)]
 /// A foreign middleware's ruling on one seam pass.
@@ -173,114 +167,40 @@ impl SeamRuling {
             },
         }
     }
-
-    fn ask_reason(&self) -> Option<&str> {
-        match self {
-            Self::Ask { reason } => Some(reason),
-            _ => None,
-        }
-    }
 }
 
-/// The payload every seam chain carries for one pass.
-///
-/// A middleware downcasts the chain context's payload to this type
-/// to read the event, record ask reasons, or rebuild the context
-/// with a rewritten event (see [`SeamPass::rewrite`]). It also
-/// carries the run's [`HookContext`]
-/// data — the state snapshot, event sink and cancellation token the
-/// host's typed registrations read — so a middleware can expose the
-/// same context a host registration sees.
-pub struct SeamPass {
-    event: HookEvent,
-    context: PassContext,
-    // Shared across every pass of one chain run: a rewrite builds a
-    // new payload, but the ask reasons a middleware recorded before
-    // the rewrite must survive to the fold.
-    rulings: Arc<Mutex<Vec<SeamRuling>>>,
-}
-
-// The owned pieces of a HookContext: a snapshot of the run state
-// plus the shareable sink and cancel handles. Cheap to clone per
-// active pass; the loop's own state stays untouched.
+// The short-circuit value the host's own adapters produce: the
+// ruling plus the veto row the decision owes. The adapters run
+// inside the kernel chain, where the run's sink is not reachable, so
+// the veto travels with the ruling and the dispatch pass records it
+// where the sink lives. A foreign middleware short-circuits with a
+// bare [`SeamRuling`] instead — its veto row is the known gap the
+// hook registry closes (design §6.2.1).
 #[derive(Clone)]
-struct PassContext {
-    state: AgentState,
-    sink: crate::agent::EventSink,
-    cancel: Arc<dyn uva_core::CancelToken>,
+pub(crate) struct Decided {
+    pub(crate) ruling: SeamRuling,
+    pub(crate) veto: Option<VetoRow>,
 }
 
-impl SeamPass {
-    pub(crate) fn new(event: HookEvent, ctx: &HookContext<'_>) -> Self {
-        Self {
-            event,
-            context: PassContext {
-                state: ctx.state.clone(),
-                sink: ctx.events.clone(),
-                cancel: Arc::clone(ctx.cancel),
-            },
-            rulings: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
+// The `hook_block` row one veto owes: who refused, why, and the call
+// it refused. See `veto_row` in the host adapters for the filter.
+#[derive(Clone)]
+pub(crate) struct VetoRow {
+    pub(crate) name: String,
+    pub(crate) reason: String,
+    pub(crate) tool_name: String,
+    pub(crate) call_id: String,
+}
 
-    #[must_use]
-    /// The registration context this pass carries: the state
-    /// snapshot, event sink and cancellation token the host's typed
-    /// registrations read.
-    pub fn hook_context(&self) -> HookContext<'_> {
-        HookContext {
-            state: &self.context.state,
-            events: &self.context.sink,
-            cancel: &self.context.cancel,
-        }
-    }
-
-    #[must_use]
-    /// The typed event this pass carries.
-    pub fn event(&self) -> &HookEvent {
-        &self.event
-    }
-
-    /// Record an ask reason; the pass continues.
-    pub fn ask(&self, reason: impl Into<String>) {
-        lock(&self.rulings).push(SeamRuling::Ask {
-            reason: reason.into(),
-        });
-    }
-
-    #[must_use]
-    /// The pass payload a chain context carries, if it carries one.
-    pub fn payload(ctx: &WaterfallCtx) -> Option<Arc<Self>> {
-        ctx.payload().downcast::<Self>().ok()
-    }
-
-    #[must_use]
-    /// Continue the chain with a rewritten event.
-    ///
-    /// The rewritten context keeps the chain's event name, services
-    /// and pass context; only the event is replaced. A context that
-    /// carries no pass payload is returned unchanged.
-    pub fn rewrite(
-        ctx: &Arc<WaterfallCtx>,
-        event: HookEvent,
-    ) -> Arc<WaterfallCtx> {
-        let Some(pass) = Self::payload(ctx) else {
-            return Arc::clone(ctx);
-        };
-        let rewritten = Arc::new(Self {
-            event,
-            context: pass.context.clone(),
-            rulings: Arc::clone(&pass.rulings),
-        });
-        Arc::new(WaterfallCtx::new(
-            ctx.event().to_owned(),
-            EventValue::from_arc(rewritten),
-            ctx.services().clone(),
-        ))
-    }
-
-    fn take_rulings(&self) -> Vec<SeamRuling> {
-        std::mem::take(&mut *lock(&self.rulings))
+impl VetoRow {
+    // Record the row through the run's sink.
+    pub(crate) fn record(&self, sink: &EventSink) {
+        sink.append_hook_block(
+            &self.name,
+            &self.reason,
+            &self.tool_name,
+            &self.call_id,
+        );
     }
 }
 
@@ -360,13 +280,43 @@ pub(crate) const fn pass_chain_keys() -> [&'static str; 6] {
 /// interception surface.
 pub struct Seams {
     host: Host,
+    registry: HookRegistry,
 }
 
 impl Seams {
     #[must_use]
     /// Wrap an installed host policy table.
+    ///
+    /// The external registry starts empty; a deployment that publishes
+    /// a `hooks` service attaches it with
+    /// [`Seams::with_hook_registry`].
     pub fn new(host: Host) -> Self {
-        Self { host }
+        Self {
+            host,
+            registry: HookRegistry::new(),
+        }
+    }
+
+    #[must_use]
+    /// Attach the deployment's external hook registry.
+    ///
+    /// The registry's registrations run *before* the host's typed
+    /// ones on every pass, through the same [`Arbitration`]: the
+    /// first `Block` short-circuits, `Ask`s collect from both
+    /// surfaces, and a deciding registration stops the later one. The
+    /// table is shared, so a [`HookRegistration`] dropped anywhere
+    /// withdraws its row from every agent built over this registry.
+    ///
+    /// [`HookRegistration`]: uva_hook::HookRegistration
+    pub fn with_hook_registry(mut self, registry: HookRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+
+    #[must_use]
+    /// The external registry this layer dispatches.
+    pub fn hook_registry(&self) -> &HookRegistry {
+        &self.registry
     }
 
     #[must_use]
@@ -401,10 +351,11 @@ impl Seams {
     pub async fn step_pre(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         agent_name: &str,
         iteration: u32,
     ) -> Arbitration {
-        self.dispatch_on(Some(STEP_PRE), ctx, || HookEvent::BeforeStep {
+        self.dispatch_on(Some(STEP_PRE), ctx, sink, || HookEvent::BeforeStep {
             agent_name: agent_name.to_string(),
             run_idx: 0,
             iteration,
@@ -420,10 +371,11 @@ impl Seams {
     pub async fn step_post(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         agent_name: &str,
         iteration: u32,
     ) -> Arbitration {
-        self.dispatch_on(Some(STEP_POST), ctx, || HookEvent::AfterStep {
+        self.dispatch_on(Some(STEP_POST), ctx, sink, || HookEvent::AfterStep {
             agent_name: agent_name.to_string(),
             run_idx: 0,
             iteration,
@@ -442,11 +394,12 @@ impl Seams {
     pub async fn tool_pre(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         tool_name: &str,
         call_id: &str,
         arguments: &serde_json::Value,
     ) -> Arbitration {
-        self.dispatch_on(Some(TOOL_PRE), ctx, || HookEvent::BeforeTool {
+        self.dispatch_on(Some(TOOL_PRE), ctx, sink, || HookEvent::BeforeTool {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
             arguments: arguments.clone(),
@@ -464,11 +417,12 @@ impl Seams {
     pub async fn tool_post(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         tool_name: &str,
         call_id: &str,
         is_error: bool,
     ) -> Arbitration {
-        self.dispatch_on(Some(TOOL_POST), ctx, || HookEvent::AfterTool {
+        self.dispatch_on(Some(TOOL_POST), ctx, sink, || HookEvent::AfterTool {
             tool_name: tool_name.to_string(),
             call_id: call_id.to_string(),
             is_error,
@@ -487,16 +441,19 @@ impl Seams {
     pub async fn llm_request(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         provider: &str,
         params: &mut RequestParams,
     ) -> Arbitration {
-        if !self.chain_active(LLM_REQUEST) {
+        if !self.seam_active(LLM_REQUEST) {
             return Arbitration::default();
         }
         let pass = self
-            .dispatch_on(Some(LLM_REQUEST), ctx, || HookEvent::BeforeRequest {
-                provider: provider.to_string(),
-                params: params.clone(),
+            .dispatch_on(Some(LLM_REQUEST), ctx, sink, || {
+                HookEvent::BeforeRequest {
+                    provider: provider.to_string(),
+                    params: params.clone(),
+                }
             })
             .await;
         // The chain's effective event carries every rewrite — a
@@ -516,16 +473,21 @@ impl Seams {
     ///
     /// Observational in the current steering vocabulary: a decision the
     /// point does not accept is recorded and ignored.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the sink is explicit (ADR 0004); the other parameters are the AfterProviderCall event's own fields"
+    )]
     pub async fn llm_result(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         provider: &str,
         model: &str,
         prompt_tokens: usize,
         completion_tokens: usize,
         stop_reason: Option<String>,
     ) -> Arbitration {
-        self.dispatch_on(Some(LLM_RESULT), ctx, || {
+        self.dispatch_on(Some(LLM_RESULT), ctx, sink, || {
             HookEvent::AfterProviderCall {
                 provider: provider.to_string(),
                 model: model.to_string(),
@@ -543,10 +505,11 @@ impl Seams {
     pub async fn run_started(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         agent_name: &str,
         run_idx: u32,
     ) -> Arbitration {
-        self.dispatch(ctx, || HookEvent::BeforeRun {
+        self.dispatch(ctx, sink, || HookEvent::BeforeRun {
             agent_name: agent_name.to_string(),
             run_idx,
         })
@@ -558,11 +521,12 @@ impl Seams {
     pub async fn run_finished(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         agent_name: &str,
         run_idx: u32,
         reason: &str,
     ) -> Arbitration {
-        self.dispatch(ctx, || HookEvent::AfterRun {
+        self.dispatch(ctx, sink, || HookEvent::AfterRun {
             agent_name: agent_name.to_string(),
             run_idx,
             reason: reason.to_string(),
@@ -575,11 +539,12 @@ impl Seams {
     pub async fn provider_started(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         provider: &str,
         model: &str,
         estimated_tokens: usize,
     ) -> Arbitration {
-        self.dispatch(ctx, || HookEvent::BeforeProviderCall {
+        self.dispatch(ctx, sink, || HookEvent::BeforeProviderCall {
             provider: provider.to_string(),
             model: model.to_string(),
             estimated_tokens,
@@ -592,10 +557,11 @@ impl Seams {
     pub async fn provider_failed(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         agent_name: &str,
         reason: &str,
     ) -> Arbitration {
-        self.dispatch(ctx, || HookEvent::OnError {
+        self.dispatch(ctx, sink, || HookEvent::OnError {
             agent_name: agent_name.to_string(),
             reason: reason.to_string(),
         })
@@ -606,11 +572,12 @@ impl Seams {
     pub async fn compacted(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         start: usize,
         end: usize,
         summary: &str,
     ) -> Arbitration {
-        self.dispatch(ctx, || HookEvent::OnCompaction {
+        self.dispatch(ctx, sink, || HookEvent::OnCompaction {
             start,
             end,
             summary: summary.to_string(),
@@ -647,12 +614,6 @@ impl Seams {
     }
 
     #[must_use]
-    /// The registered delegating tools, in registration order.
-    pub fn delegators(&self) -> Vec<Arc<dyn DelegatingTool>> {
-        self.host.delegators()
-    }
-
-    #[must_use]
     /// Whether any guard is registered, for the loop's zero-guard fast
     /// path.
     pub fn has_guards(&self) -> bool {
@@ -674,16 +635,21 @@ impl Seams {
     /// no-rewrite fast path.
     pub fn has_tool_result_transformers(&self) -> bool {
         self.host.has_result_rewriters()
+            || self.registry.has_result_transformers()
     }
 
-    /// `tool/post-execute`'s result transformers: run in registration
-    /// order and return the names that changed the output.
+    /// `tool/post-execute`'s result transformers: the external
+    /// registry's first, then the host's, in registration order. Each
+    /// sees what the previous one left; the names that ran are
+    /// returned when the aggregate output changed.
     pub async fn tool_result_transformers(
         &self,
         ctx: &HookContext<'_>,
         output: &mut ToolOutput,
     ) -> Vec<String> {
-        self.host.apply_result_transformers(output, ctx).await
+        let mut ran = self.registry.transform_result(output, ctx).await;
+        ran.extend(self.host.apply_result_transformers(output, ctx).await);
+        ran
     }
 
     /// `tool/post-execute`'s output transformers over the result text.
@@ -712,32 +678,126 @@ impl Seams {
             .is_some_and(|chain| !chain.is_empty())
     }
 
-    // One dispatch pass. The seam's kernel chain runs first when it
-    // carries foreign middleware; the host's hooks and gates then run
-    // over the effective event the chain produced. The event is built
-    // lazily, so a run with no chain middleware and no registration
+    fn seam_active(&self, key: &'static str) -> bool {
+        self.chain_active(key) || self.registry.has_entries(key)
+    }
+
+    // One dispatch pass. The external registry runs first; the host's
+    // typed registrations — the seam's kernel chain, or the residual
+    // hooks table at the observation points — then run over the
+    // effective event the registry produced. Both fold through the
+    // same `Arbitration`: a registry denial short-circuits the host
+    // pass, and a continuing pass carries its asks and rewrite on.
+    // The event is built lazily, so a run with no registration at all
     // pays nothing for the clone.
     async fn dispatch(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         event: impl FnOnce() -> HookEvent,
     ) -> Arbitration {
-        self.dispatch_on(None, ctx, event).await.arbitration
+        self.dispatch_on(None, ctx, sink, event).await.arbitration
     }
 
     async fn dispatch_on(
         &self,
         key: Option<&'static str>,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         build: impl FnOnce() -> HookEvent,
     ) -> PassOutcome {
-        let chain = key.and_then(|k| self.host.waterfall(k));
-        match chain.filter(|chain| !chain.is_empty()) {
-            Some(chain) => {
-                self.chained_pass(key.unwrap_or_default(), chain, ctx, build)
-                    .await
+        let chain = key
+            .and_then(|key| self.host.waterfall(key))
+            .filter(|chain| !chain.is_empty());
+        let registry_active =
+            key.is_some_and(|key| self.registry.has_entries(key));
+        if !registry_active && chain.is_none() {
+            return self.host_pass(ctx, sink, build).await;
+        }
+        let mut event = build();
+        let mut registry_arbitration = Arbitration::default();
+        if let Some(key) = key.filter(|_| registry_active) {
+            match self.registry_pass(key, &event, ctx, sink).await {
+                RegistryStep::Continue {
+                    event: rewritten,
+                    arbitration,
+                } => {
+                    event = rewritten;
+                    registry_arbitration = arbitration;
+                }
+                RegistryStep::Decided(arbitration) => {
+                    return PassOutcome {
+                        arbitration,
+                        effective: None,
+                    };
+                }
             }
-            None => self.host_pass(ctx, build).await,
+        }
+        let outcome = match chain {
+            Some(chain) => {
+                self.chained_pass(
+                    key.unwrap_or_default(),
+                    chain,
+                    ctx,
+                    sink,
+                    event,
+                )
+                .await
+            }
+            None => {
+                let arbitration = if self.host.has_event_registrations() {
+                    self.host.dispatch_hooks(&event, ctx, sink).await
+                } else {
+                    Arbitration::default()
+                };
+                PassOutcome {
+                    arbitration,
+                    effective: Some(event),
+                }
+            }
+        };
+        PassOutcome {
+            arbitration: merge(registry_arbitration, outcome.arbitration),
+            effective: outcome.effective,
+        }
+    }
+
+    // The registry's half of one dispatch. A continuing pass hands the
+    // (possibly rewritten) event and its arbitration back; a decided
+    // pass writes the veto row it owes and stops here. The row is the
+    // harness's to write (ADR 0004): the contract carries no sink, and
+    // a reloaded session must still know which registration blocked
+    // which call.
+    async fn registry_pass(
+        &self,
+        key: &'static str,
+        event: &HookEvent,
+        ctx: &HookContext<'_>,
+        sink: &EventSink,
+    ) -> RegistryStep {
+        let pass = self.registry.dispatch(key, event, ctx).await;
+        // A gate that could not answer at a point with no denial to
+        // carry (`llm/request`, `llm/result`) cannot refuse the pass.
+        // The registry reports it instead of folding it into `Allow` —
+        // it becomes a `hook` warning on the run's event stream, which
+        // the session controller persists like every other warning, so
+        // an operator reading the session sees the gate that never
+        // answered.
+        for failure in &pass.failures {
+            sink.warn(WarningKind::Hook, None, failure.clone());
+        }
+        let Some(rewritten) = pass.event else {
+            let name = pass.denied_by.as_deref().unwrap_or("hook registry");
+            if let Some(veto) =
+                veto_row(name, &pass.arbitration.decision, event)
+            {
+                veto.record(sink);
+            }
+            return RegistryStep::Decided(pass.arbitration);
+        };
+        RegistryStep::Continue {
+            event: rewritten,
+            arbitration: pass.arbitration,
         }
     }
 
@@ -746,6 +806,7 @@ impl Seams {
     async fn host_pass(
         &self,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
         build: impl FnOnce() -> HookEvent,
     ) -> PassOutcome {
         if !self.host.has_event_registrations() {
@@ -755,7 +816,7 @@ impl Seams {
             };
         }
         let event = build();
-        let arbitration = self.host.dispatch_hooks(&event, ctx).await;
+        let arbitration = self.host.dispatch_hooks(&event, ctx, sink).await;
         PassOutcome {
             arbitration,
             effective: Some(event),
@@ -764,15 +825,19 @@ impl Seams {
 
     // The chain pass: foreign middleware first, then — when nothing
     // foreign decided — the host's own hooks and gates over the
-    // effective event the chain produced.
+    // effective event the chain produced. The payload is the
+    // contract crate's `HookPayload`; a deciding adapter ruling
+    // travels back as a `Decided` value, and the veto row it owes is
+    // recorded here, where the run's sink lives.
     async fn chained_pass(
         &self,
         key: &'static str,
         chain: &Waterfall,
         ctx: &HookContext<'_>,
-        build: impl FnOnce() -> HookEvent,
+        sink: &EventSink,
+        event: HookEvent,
     ) -> PassOutcome {
-        let pass = Arc::new(SeamPass::new(build(), ctx));
+        let pass = Arc::new(HookPayload::new(event, ctx));
         let seen: Arc<Mutex<Option<HookEvent>>> = Arc::new(Mutex::new(None));
         let request = Arc::new(WaterfallCtx::new(
             key,
@@ -787,12 +852,12 @@ impl Seams {
             Ok(Ok(Outcome::Continue)) => {
                 let event = lock(&seen).take();
                 PassOutcome {
-                    arbitration: fold_rulings(pass.take_rulings()),
+                    arbitration: fold_asks(pass.take_asks()),
                     effective: event,
                 }
             }
             Ok(Ok(Outcome::ShortCircuit(value))) => PassOutcome {
-                arbitration: short_circuit_arbitration(value, &pass),
+                arbitration: short_circuit_arbitration(value, &pass, sink),
                 effective: None,
             },
             Ok(Err(error)) => PassOutcome {
@@ -807,34 +872,51 @@ impl Seams {
     }
 }
 
-// Fold the ask reasons a foreign chain collected, stopping at the
-// first deciding ruling — the same absorb rules the host's own hook
-// loop applies.
-fn fold_rulings(rulings: Vec<SeamRuling>) -> Arbitration {
-    let mut arbitration = Arbitration::default();
-    for ruling in rulings {
-        if let Some(reason) = ruling.ask_reason() {
-            arbitration.asks.push(reason.to_owned());
-        } else {
-            arbitration.decision = ruling.decision();
-            break;
-        }
+// Fold the ask reasons a chain collected. Only asks are recorded on
+// the payload — a deciding ruling short-circuits the chain instead —
+// so the fold is a plain collection, the same absorb rules the
+// host's own hook loop applies.
+fn fold_asks(asks: Vec<String>) -> Arbitration {
+    Arbitration {
+        asks,
+        ..Arbitration::default()
     }
-    arbitration
+}
+
+// Fold the host's pass into the registry's: the registry ran first, so
+// its asks stay first, and its decision was necessarily undecided (a
+// decided registry pass returns before the host runs). The host's
+// decision — including a veto that its chain adapters recorded — is
+// what the merged pass reports.
+fn merge(mut earlier: Arbitration, later: Arbitration) -> Arbitration {
+    earlier.asks.extend(later.asks);
+    earlier.absorb(later.decision);
+    earlier
 }
 
 fn short_circuit_arbitration(
     value: EventValue,
-    pass: &SeamPass,
+    pass: &HookPayload,
+    sink: &EventSink,
 ) -> Arbitration {
-    let decision = match value.downcast::<SeamRuling>() {
-        Ok(ruling) => ruling.decision(),
-        Err(_) => unrecognized_short_circuit(),
+    // The host's own adapters short-circuit with a `Decided` value
+    // (the ruling plus the veto row it owes); foreign middleware
+    // short-circuits with a bare `SeamRuling`. Anything else reads
+    // as a block — the same fail-closed posture as before.
+    let (decision, veto) = if let Ok(decided) = value.downcast::<Decided>() {
+        (decided.ruling.decision(), decided.veto.clone())
+    } else if let Ok(ruling) = value.downcast::<SeamRuling>() {
+        (ruling.decision(), None)
+    } else {
+        (unrecognized_short_circuit(), None)
     };
     // The ask reasons recorded before the deciding ruling belong to
     // the same report — today's hook loop keeps them too.
-    let mut arbitration = fold_rulings(pass.take_rulings());
+    let mut arbitration = fold_asks(pass.take_asks());
     arbitration.decision = decision;
+    if let Some(veto) = veto {
+        veto.record(sink);
+    }
     arbitration
 }
 
@@ -852,6 +934,15 @@ struct PassOutcome {
     effective: Option<HookEvent>,
 }
 
+// The external registry's half of one dispatch.
+enum RegistryStep {
+    Continue {
+        event: HookEvent,
+        arbitration: Arbitration,
+    },
+    Decided(Arbitration),
+}
+
 fn unrecognized_short_circuit() -> HookDecision {
     HookDecision::Block {
         reason: "seam middleware short-circuited with an unrecognized                  payload"
@@ -865,7 +956,7 @@ fn recorder(seen: Arc<Mutex<Option<HookEvent>>>) -> Next {
     Arc::new(move |ctx| {
         let seen = Arc::clone(&seen);
         Box::pin(async move {
-            if let Some(pass) = SeamPass::payload(&ctx) {
+            if let Some(pass) = HookPayload::payload(&ctx) {
                 *lock(&seen) = Some(pass.event().clone());
             }
             Ok(Outcome::Continue)

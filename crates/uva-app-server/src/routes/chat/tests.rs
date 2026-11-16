@@ -322,3 +322,196 @@ mod attachment_admission_tests {
         assert!(admit_attachments(&req, false).is_ok());
     }
 }
+
+// ---------------------------------------------------------------------------
+// The feedback target
+// ---------------------------------------------------------------------------
+
+/// The feedback target is the rated row's **ordinal** — the `seq`
+/// the session's writer stamped on it.
+///
+/// The rating is about an assistant message, so the server resolves
+/// the ordinal against the session's own rows and refuses a target
+/// that names no row or names a row that is not an answer. A rating
+/// that names nothing is noise in an append-only audit log.
+#[cfg(test)]
+mod feedback_target_tests {
+    use std::sync::Arc;
+
+    use serde_json::Value;
+    use uva::session::{SessionEvent, manager::SessionRegistry};
+
+    use super::{FeedbackRequest, feedback};
+    use crate::state::AppState;
+
+    /// The session the fixture writes its rows into.
+    const SESSION: &str = "feedback-session";
+
+    /// A state whose session log holds one user turn and one
+    /// assistant answer — the two rows a rating can name.
+    ///
+    /// The rows are written through the session's own writer, so they
+    /// carry the ordinals the writer stamped. The controller is
+    /// opened first: a cold open may repair a dangling turn, and
+    /// that repair row would move the ordinals the test reads.
+    async fn fixture() -> (Arc<AppState>, tempfile::TempDir, String) {
+        let temp = tempfile::TempDir::new().expect("a temp workspace");
+        let registry = SessionRegistry::new(temp.path().to_path_buf());
+        let state = Arc::new(
+            AppState::for_test(registry, temp.path().to_path_buf()).await,
+        );
+        let user = state.default_user_id().to_string();
+        state
+            .session_manager
+            .create_with_user(SESSION.to_string(), user.clone())
+            .await
+            .expect("the session is created");
+        state
+            .get_or_create_session_controller(&user, SESSION)
+            .await
+            .expect("a controller");
+        let writer = state.session_manager.writer(&user, SESSION);
+        writer
+            .append_event(&SessionEvent::UserMessage {
+                seq: 0,
+                ts: String::new(),
+                data: serde_json::json!({"role": "user", "content": []}),
+                source: None,
+                surface_op: None,
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("the user row is written");
+        writer
+            .append_event(&SessionEvent::AssistantMessage {
+                seq: 0,
+                ts: String::new(),
+                data: serde_json::json!({"role": "assistant", "content": []}),
+                surface_op: None,
+            })
+            .await
+            .expect("the assistant row is written");
+        writer.flush().await.expect("the rows are flushed");
+        (state, temp, user)
+    }
+
+    /// The ordinal the log gave the row of that kind — the number a
+    /// client saw on the wire.
+    async fn ordinal_of(state: &AppState, user: &str, kind: &str) -> u64 {
+        let rows = state
+            .session_manager
+            .sink(user, SESSION)
+            .read()
+            .await
+            .expect("the log reads");
+        rows.iter()
+            .find(|row| row.get("type").and_then(Value::as_str) == Some(kind))
+            .and_then(|row| row.get("seq").and_then(Value::as_u64))
+            .unwrap_or_else(|| panic!("the log holds a `{kind}` row: {rows:?}"))
+    }
+
+    /// The rows the session's log holds.
+    async fn rows_of(state: &AppState, user: &str) -> Vec<Value> {
+        state
+            .session_manager
+            .sink(user, SESSION)
+            .read()
+            .await
+            .expect("the log reads")
+    }
+
+    /// A target that names no row is refused: the log holds no such
+    /// ordinal, so the rating would name nothing.
+    #[tokio::test]
+    async fn a_target_that_names_no_row_is_refused() {
+        let (state, _temp, user) = fixture().await;
+        let target = "9999".to_string();
+        let error = feedback(
+            Arc::clone(&state),
+            target.clone(),
+            FeedbackRequest {
+                thumbs_up: true,
+                session_id: SESSION.to_string(),
+            },
+        )
+        .await
+        .expect_err("a target that names no row is refused");
+        assert_eq!(
+            error.code, "feedback_target_unknown",
+            "the refusal carries the family's machine code"
+        );
+        let rows = rows_of(&state, &user).await;
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.get("type").and_then(Value::as_str)
+                    == Some("feedback")),
+            "a refused rating writes no row: {rows:?}"
+        );
+    }
+
+    /// A target that names a row that is not an answer is refused: a
+    /// rating is about an assistant message.
+    #[tokio::test]
+    async fn a_target_that_names_a_non_assistant_row_is_refused() {
+        let (state, _temp, user) = fixture().await;
+        let target = ordinal_of(&state, &user, "user_message").await;
+        let error = feedback(
+            Arc::clone(&state),
+            target.to_string(),
+            FeedbackRequest {
+                thumbs_up: true,
+                session_id: SESSION.to_string(),
+            },
+        )
+        .await
+        .expect_err("a target that names a user turn is refused");
+        assert_eq!(
+            error.code, "feedback_target_unknown",
+            "the refusal carries the family's machine code"
+        );
+        let rows = rows_of(&state, &user).await;
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.get("type").and_then(Value::as_str)
+                    == Some("feedback")),
+            "a refused rating writes no row: {rows:?}"
+        );
+    }
+
+    /// A target that names the assistant's answer is persisted as it
+    /// always was: the rating lands beside the answer it is about.
+    #[tokio::test]
+    async fn a_target_that_names_an_assistant_row_is_persisted() {
+        let (state, _temp, user) = fixture().await;
+        let target = ordinal_of(&state, &user, "assistant_message").await;
+        feedback(
+            Arc::clone(&state),
+            target.to_string(),
+            FeedbackRequest {
+                thumbs_up: true,
+                session_id: SESSION.to_string(),
+            },
+        )
+        .await
+        .expect("a target that names an answer is accepted");
+        let rows = rows_of(&state, &user).await;
+        let feedback = rows
+            .iter()
+            .find(|row| {
+                row.get("type").and_then(Value::as_str) == Some("feedback")
+            })
+            .unwrap_or_else(|| panic!("the rating is on disk: {rows:?}"));
+        assert_eq!(
+            feedback.get("message_id").and_then(Value::as_str),
+            Some(target.to_string().as_str()),
+            "the rating names the row it is about"
+        );
+        assert_eq!(
+            feedback.get("thumbs_up").and_then(Value::as_bool),
+            Some(true),
+            "the rating is on disk"
+        );
+    }
+}

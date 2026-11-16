@@ -8,14 +8,13 @@ use futures::StreamExt;
 use uva::{
     harness::AgentInput,
     provider::traits::ModelProvider,
-    session::SurfaceLedger,
+    session::{SessionLog, SurfaceLedger},
 };
 
 use super::{
     inner::ControllerInner,
     ops::SessionState,
     run_log::{
-        RunLog,
         attachment_refs_of_parts,
         prompt_text_of_parts,
         rerun_replace_op,
@@ -62,6 +61,205 @@ fn last_request_snapshot(
             let model = row.get("model")?.as_str()?.to_string();
             Some((provider, model))
         })
+}
+
+/// The history a run starts from when the log does not fold
+/// strictly.
+///
+/// The strict fold refuses a replace whose provenance it cannot
+/// prove — a compaction whose citation does not name the rows its
+/// span covers. The lenient fold is the same fold with that one rule
+/// relaxed: it skips the refused replace and replays the span it
+/// shadowed. The run therefore keeps the history the log actually
+/// supports, which is *more* of the conversation, not less.
+///
+/// An empty history — what this replaced — loses every turn the log
+/// still holds, which is worse than the situation the refusal
+/// replaced.
+fn lenient_history(
+    events: &[serde_json::Value],
+) -> Vec<uva::provider::Message> {
+    let surface = uva::session::fold_log_surface(events);
+    uva::session::surface_to_messages(&surface.messages)
+}
+
+/// The `kind` slug of the warning row that records a refused fold.
+///
+/// A stable, machine-readable slug, in the shape the harness already
+/// writes for an accepted resume drift (`config_drift`): a client
+/// reads the row to learn that the log did not fold strictly, and
+/// the slug is what it matches on.
+const FOLD_REFUSAL_KIND: &str = "strict_fold_refused";
+
+/// Whether the log already records this fold refusal.
+///
+/// The refusal is a property of the *log*, not of the run: every
+/// later run folds the same log and is refused the same way, so the
+/// row belongs to the log and is written once. The rows in hand are
+/// the log's own, so the check is a scan of them.
+fn fold_refusal_recorded(events: &[serde_json::Value]) -> bool {
+    events.iter().any(|row| {
+        row.get("type").and_then(serde_json::Value::as_str) == Some("warning")
+            && row
+                .get("data")
+                .and_then(|data| data.get("kind"))
+                .and_then(serde_json::Value::as_str)
+                == Some(FOLD_REFUSAL_KIND)
+    })
+}
+
+impl ControllerInner {
+    /// Record a refused fold in the session's durable log.
+    ///
+    /// The session's log is the client's view of the session, and a
+    /// refusal the client cannot see is a refusal it cannot act on:
+    /// the run looks like any other. The row is a `warning` — the
+    /// log-only variant the harness already writes for an accepted
+    /// resume drift — and it carries the refusal's `kind` and a
+    /// `message`.
+    ///
+    /// The row does not change the folded surface: `warning` is not
+    /// one of the row kinds the fold projects, so the surface the
+    /// model sees is the surface the log had before the row landed.
+    ///
+    /// One row per session: the refusal belongs to the log, so a
+    /// later run that is refused the same way finds the row and
+    /// writes none.
+    async fn record_fold_refusal(
+        &self,
+        events: &[serde_json::Value],
+        error: &uva::session::HistoryError,
+    ) {
+        if fold_refusal_recorded(events) {
+            return;
+        }
+        let event = uva::session::SessionEvent::Warning {
+            seq: 0,
+            ts: String::new(),
+            data: serde_json::json!({
+                "kind": FOLD_REFUSAL_KIND,
+                "message": format!(
+                    "the session log does not fold strictly; the run \
+                     replayed the lenient fold: {error}"
+                ),
+            }),
+        };
+        // The row goes through the session's one writer, and the
+        // flush lands it: the next turn reads the log, and a row
+        // still queued would not be in it.
+        if let Err(e) = self.append_durable_event(&event).await {
+            tracing::error!(
+                target: "uva.session",
+                session_id = %self.session_id,
+                error = %e,
+                "Failed to persist the fold-refusal warning"
+            );
+        }
+    }
+
+    /// The history a run starts from, and the replace op a rerun's
+    /// prompt row carries.
+    ///
+    /// One strict projection for every reader: the run's history is
+    /// what the log derives, never a second, lenient shape. A log
+    /// the strict fold refuses — a compaction whose citation does
+    /// not name the rows it shadows — does not cost the run its
+    /// conversation: the run falls back to the lenient fold, which
+    /// skips the refused compaction and replays the span it
+    /// shadowed. An empty history would lose turns the log still
+    /// holds, which is worse than the situation the refusal
+    /// replaced.
+    ///
+    /// The refusal is recorded in the log (see
+    /// [`Self::record_fold_refusal`]), and the log is read again
+    /// afterwards: the history below is then the log the client sees
+    /// — the warning row and all — and the cached fold is keyed by an
+    /// ordinal that fold covers.
+    async fn fold_run_history(
+        &self,
+        events: &[serde_json::Value],
+        rerun_turn: bool,
+        snapshot_seq: u64,
+    ) -> (Vec<uva::provider::Message>, Option<uva::session::SurfaceOp>) {
+        // A rerun shadows the turn it replaces, so the prompt row it
+        // is about to append carries replace semantics computed
+        // against THIS fold — the surface as it stands before the
+        // rerun's own rows land.
+        let rerun_replace = if rerun_turn {
+            rerun_replace_op(events)
+        } else {
+            None
+        };
+        match uva::session::derive_history(events) {
+            Ok(history) => {
+                self.cache_fold(snapshot_seq, history.clone());
+                (history, rerun_replace)
+            }
+            Err(error) => {
+                tracing::error!(
+                    target: "uva.session",
+                    session_id = %self.session_id,
+                    %error,
+                    "Session log does not fold strictly; replaying the \
+                     lenient fold"
+                );
+                self.record_fold_refusal(events, &error).await;
+                // The warning row landed, so the log moved. Read it
+                // again, so the history below is the log as it stands
+                // — warning row and all — and the marker names an
+                // ordinal the fold covers. The marker is sampled
+                // BEFORE that read: it is the log's own ordinal after
+                // the warning row, and a lower bound on what the
+                // fold covers, so a row that lands while the fold is
+                // made invalidates the cache rather than being
+                // dropped from the next run's history.
+                let marker = self.writer.last_seq();
+                match self.writer.read().await {
+                    Ok(events) => {
+                        let rerun_replace = if rerun_turn {
+                            rerun_replace_op(&events)
+                        } else {
+                            None
+                        };
+                        let history = lenient_history(&events);
+                        self.cache_fold(marker, history.clone());
+                        (history, rerun_replace)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "uva.session",
+                            session_id = %self.session_id,
+                            error = %e,
+                            "Failed to re-read the session log after \
+                             recording the fold refusal"
+                        );
+                        // The log cannot be read again, so there is no
+                        // fold to cache: a cache keyed by an ordinal
+                        // the log may have moved past would hand the
+                        // next run a history it cannot trust.
+                        (lenient_history(events), rerun_replace)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Keep the fold as the session's cached history.
+    ///
+    /// The cache is keyed by the log's ordinal: a turn that finds the
+    /// log unchanged re-uses the fold instead of reading the log
+    /// again. The key is the log's own ordinal, sampled before the
+    /// read that produced the fold — so it names an ordinal the fold
+    /// covers, and a row that lands while the fold is being made
+    /// invalidates the cache instead of being dropped from the next
+    /// run's history.
+    fn cache_fold(&self, marker: u64, history: Vec<uva::provider::Message>) {
+        *self.cached_history.lock() =
+            Some(crate::session::controller::inner::CachedHistory {
+                last_event_seq: marker,
+                history,
+            });
+    }
 }
 
 impl ControllerInner {
@@ -205,18 +403,6 @@ impl ControllerInner {
         // compaction writes through, so the log holds one ordinal
         // sequence.
         config.log_writer = Some(Arc::clone(&self.writer));
-        // Delegated children write their own sessions: the run's
-        // `task` delegator resolves each child's writer through
-        // the same registry the router routes child events by.
-        if let Some(router) = self.subagent_router.as_ref() {
-            config.subagent_writers = Some(Arc::new(
-                crate::session::subagent_router::ChildSessionWriters::new(
-                    Arc::clone(router),
-                    self.user_id.clone(),
-                    self.session_id.clone(),
-                ),
-            ));
-        }
         let factory = Arc::clone(&self.run_factory);
         let inner = Arc::clone(self);
         // The park this run starts from, if any: its id rides along so
@@ -259,7 +445,7 @@ impl ControllerInner {
             // memory. The sink is the only durable source of truth
             // here — the park this run starts from is log-only and
             // never folds into history, and the turn's own
-            // `UserInput` row is appended only after this read, so
+            // prompt row is appended only after this read, so
             // this run sees prior turns, never its own prompt twice.
             // R34: the same read seeds the run's surface ledger
             // through the session's writer, which numbers the
@@ -276,12 +462,12 @@ impl ControllerInner {
             // semantics are computed against THIS fold — the surface
             // as it stands before the rerun's own rows land. It
             // therefore never reads the cache.
-            let snapshot_seq = inner
-                .session_store
-                .snapshot()
-                .await
-                .map(|snapshot| snapshot.last_event_seq)
-                .unwrap_or(0);
+            // The writer's *flushed* counter is the movement
+            // detector: `last_seq()` reports the last ordinal the
+            // writer made durable, not the rows still in its queue, so
+            // a cached fold is reused exactly when the log it was made
+            // from has not changed.
+            let snapshot_seq = inner.writer.last_seq();
             let cached = if rerun_turn {
                 None
             } else {
@@ -290,61 +476,29 @@ impl ControllerInner {
                         .then_some(cached.history)
                 })
             };
-            let (mut log, sink_history, rerun_replace) = match cached {
+            // The run's handle on the session's one writer. The
+            // controller holds the typed seam, so every row this run
+            // persists — the park's consumption mark, the turn's
+            // prompt, the op loop's out-of-band rows the router
+            // writes — draws from one ordinal sequence.
+            let log: Arc<dyn SessionLog> = Arc::clone(&inner.writer);
+            let (sink_history, rerun_replace) = match cached {
                 // The log has not moved since the last fold: the
                 // cached history is the history. The ledger is not
                 // seeded again — the writer seeded it when the fold
                 // was made, and seeding it twice would number the
                 // rows twice.
-                Some(history) => {
-                    (RunLog::new(Arc::clone(&inner.writer)), history, None)
-                }
-                None => match inner.session_store.read().await {
+                Some(history) => (history, None),
+                None => match inner.writer.read().await {
                     Ok(events) => {
                         inner.writer.seed_ledger(&events);
-                        // A rerun shadows the turn it replaces, so
-                        // the prompt row it is about to append
-                        // carries replace semantics computed against
-                        // THIS fold — the surface as it stands before
-                        // the rerun's own rows land.
-                        let rerun_replace = if rerun_turn {
-                            rerun_replace_op(&events)
-                        } else {
-                            None
-                        };
-                        // One strict projection for every reader: the
-                        // run's history is what the log derives, never a
-                        // second, lenient shape. A log that does not fold
-                        // is logged and the run continues from an empty
-                        // history, exactly as an unreadable log does.
-                        let history =
-                            match uva::session::derive_history(&events) {
-                                Ok(history) => history,
-                                Err(error) => {
-                                    tracing::error!(
-                                        target: "uva.session",
-                                        session_id = %inner.session_id,
-                                        %error,
-                                        "Failed to fold session log; \
-                                         starting run with empty history"
-                                    );
-                                    Vec::new()
-                                }
-                            };
-                        // The fold is the history: keep it so the next
-                        // turn that finds the log unchanged does not
-                        // read it again.
-                        *inner.cached_history.lock() = Some(
-                            crate::session::controller::inner::CachedHistory {
-                                last_event_seq: snapshot_seq,
-                                history: history.clone(),
-                            },
-                        );
-                        (
-                            RunLog::new(Arc::clone(&inner.writer)),
-                            history,
-                            rerun_replace,
-                        )
+                        // The fold is the history: it is derived from
+                        // the log, kept so the next turn that finds
+                        // the log unchanged does not read it again.
+                        let (history, rerun_replace) = inner
+                            .fold_run_history(&events, rerun_turn, snapshot_seq)
+                            .await;
+                        (history, rerun_replace)
                     }
                     Err(e) => {
                         tracing::error!(
@@ -353,13 +507,9 @@ impl ControllerInner {
                             error = %e,
                             "Failed to read session sink; starting run with empty history"
                         );
-                        (
-                            RunLog::new(Arc::clone(&inner.writer)),
-                            Vec::new(),
-                            // No readable log ⇒ nothing to shadow ⇒
-                            // the rerun degrades to a plain append.
-                            None,
-                        )
+                        // No readable log ⇒ nothing to shadow ⇒ the
+                        // rerun degrades to a plain append.
+                        (Vec::new(), None)
                     }
                 },
             };
@@ -438,30 +588,43 @@ impl ControllerInner {
                 })
                 .unwrap_or_default();
             if !current_turn_text.is_empty() || !attachment_refs.is_empty() {
-                let mut row = serde_json::json!({
-                    "type": "UserInput",
-                    "data": { "text": current_turn_text },
-                });
-                if !attachment_refs.is_empty()
-                    && let Some(obj) =
-                        row.get_mut("data").and_then(|d| d.as_object_mut())
-                    && let Ok(refs) = serde_json::to_value(&attachment_refs)
-                {
-                    obj.insert("attachments".to_string(), refs);
-                }
-                if let (Some(op), Some(obj)) =
-                    (rerun_replace.as_ref(), row.as_object_mut())
-                    && let Ok(op_value) = serde_json::to_value(op)
-                {
-                    obj.insert("surface_op".to_string(), op_value);
-                }
-                if let Err(e) = log.append(row).await {
-                    tracing::error!(
+                // The row is the typed `user_message`: the writer
+                // stamps its ordinal, the variant owns its shape, and
+                // the payload is the provider message the model saw —
+                // never a `json!` literal the call site has to keep in
+                // step with the reader.
+                //
+                // A row that could not be encoded or appended is logged,
+                // not fatal: a log write must never stop the run, and the
+                // park this turn came from still re-runs on restart.
+                match serde_json::to_value(uva::provider::Message::user(
+                    current_turn_text.as_str(),
+                )) {
+                    Ok(data) => {
+                        let row = uva::session::SessionEvent::UserMessage {
+                            seq: 0,
+                            ts: String::new(),
+                            data,
+                            source: None,
+                            surface_op: rerun_replace,
+                            attachments: attachment_refs,
+                        };
+                        if let Err(e) = log.append_event(&row).await {
+                            tracing::error!(
+                                target: "uva.session",
+                                session_id = %inner.session_id,
+                                error = %e,
+                                "Failed to persist current-turn user prompt \
+                                 to session sink"
+                            );
+                        }
+                    }
+                    Err(e) => tracing::error!(
                         target: "uva.session",
                         session_id = %inner.session_id,
                         error = %e,
-                        "Failed to persist current-turn user prompt to session sink"
-                    );
+                        "Failed to encode the current-turn user prompt"
+                    ),
                 }
             }
             let history = sink_history;
@@ -494,6 +657,11 @@ impl ControllerInner {
                 // keep the agent alive if it ever happens anyway.
                 AgentInput::text("")
             };
+            // The run's tool context reads its session identity from
+            // the input's `thread_id`; tools that keep per-session
+            // state (the `task` tool's child bookkeeping) key on it.
+            let mut input = input;
+            input.thread_id = Some(inner.session_id.clone());
 
             tracing::info!(
                 target: "uva.session",
@@ -516,9 +684,7 @@ impl ControllerInner {
             let mut event_count = 0usize;
             while let Some(event) = stream.next().await {
                 event_count += 1;
-                if let Err(e) =
-                    inner.persist_and_broadcast(&event, &mut log).await
-                {
+                if let Err(e) = inner.persist_and_broadcast(&event).await {
                     tracing::error!(
                         target: "uva.session",
                         session_id = %inner.session_id,

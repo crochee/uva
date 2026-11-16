@@ -18,6 +18,10 @@ uva-kernel.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+# `EvalSuite` / `TestCase` / `TestResult` / `EvalReport` derive
+# `JsonSchema` so the app-server can emit the frontend's wire
+# contract from them.
+schemars.workspace = true
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

@@ -4,6 +4,7 @@
 
 > **仓库根的隐藏目录**：`./.agents/` `./.omo/` `./.superpowers/` `./.uva/` `./.trae/` `./.worktrees/` `./.attachments/` `./.scratch/` 是 AI agent / 本地工具链的状态、草稿与会话，不是本项目资产，已在 [`.gitignore`](.gitignore) 显式排除——**不要**把它们的路径写进 commit message、PR 描述或本文件。同理 `./.env` 与 `./config.yaml` 含真实 LLM API 配置，仅本地加载、不入库。
 > **例外 — `./.cargo/config.toml` 是项目资产**：CI 与本地一致可达的工具链入口，`.gitignore` 不排除它（也不应排除）。
+> **例外 — `./.agents/profile.toml` 是项目资产**：本仓自己的部署 profile 文档层，app server 开机即读它；`.gitignore` 单独放行这一个文件，`.agents/` 其余内容仍排除。
 
 ***
 
@@ -11,18 +12,25 @@
 
 ## 1.1 工作区分层
 
-25 个 workspace member（以 `cargo metadata` 为准），全部在 `crates/`；另有独立 workspace 的 `desktop/` 与前端 `uva-web/`。
+31 个 workspace member（以 `cargo metadata` 为准），全部在 `crates/`；另有独立 workspace 的 `desktop/` 与前端 `uva-web/`。
 
 | 层 | crate | 职责 |
 |---|---|---|
 | 基座 | `uva-core` | 纯类型 / trait 基座：Clock、IdGen、CancelToken、Spawner、Registry、schema、错误 |
 | 范式 | `uva-provider` `uva-tool` `uva-context` `uva-steering` `uva-session` `uva-skill` | 七个可替换组件的 trait + 默认实现（§3.7） |
-| 插件 | `uva-tool-plugins` `uva-policy-plugins` | 工具 / 策略插件族，一模块一 feature |
+| 插件 | `uva-tool-plugins` `uva-policy-plugins` `uva-hook-plugins` | 工具 / 策略 / hook 实现插件族，一模块一 feature |
 | 装配 | `uva-kernel` `uva-runtime` | 插件内核（manifest / mount / effect）与配置驱动装配 |
-| 运行时 | `uva-harness` | ReAct 循环、seam、委派 |
+| 运行时 | `uva-events` | run 事件词汇（`AgentEvent` / `SystemEvent` / `WarningKind`）；`uva-harness` 根与 `events` 深路径经 re-export 保路径 |
+| 运行时 | `uva-agent` | agent 词汇：`Agent` trait、`AgentInput`、两种收件箱（转向通道）、peer 注册表、子会话写入者来源、prompt manifest；`AgentCaps` 与 `ReActAgent` 仍住 harness，路径经 re-export 保持 |
+| 运行时 | `uva-hook` | 拦截契约：`Hook` / `Gate` / 请求与结果 transformer、七个挂载点键、解耦 `HookContext`、`HookPayload`、可撤销 `HookRegistry` 与仲裁、`hooks` 内核插件；harness 根与深路径保持 |
+| 运行时 | `uva-harness` | ReAct 循环、seam、`Host` 注册表 |
+| 插件 | `uva-tool-task` | `task` 工具：普通 `Tool`，解析同伴 agent、开子会话、内联驱动子 run；依赖 agent/事件词汇，不依赖 harness |
 | 宿主 | `uva-app-server` `uva-tui` `uva-gateway` `uva-mcp-server` `desktop/` | 人机入口：唯一允许在公开签名里出现 tokio 的地方 |
+| 观测 | `uva-telemetry` | console / file logging、Prometheus metrics、OTel 导出；日志与指标的唯一入口 |
+| 适配 | `uva-mcp` | MCP 客户端：stdio / HTTP / in-memory 传输、supervisor 重连，把远端工具注册进本机 `ToolRegistry` |
+| 门面 | `uva` | facade：每个部件一个 feature + 精选 `prelude`；只有 `pub use`，零逻辑 |
 
-其余 crate 各占一个领域：`uva-core-tokio`（`uva-core` 那些 runtime-neutral seam 的 tokio 实现）、`uva-search`（多域检索）、`uva-scheduler`（定时分发）、`uva-eval`（评测）、`uva-attachment`（多模态附件）、`uva-test-support`（确定性假件）。逐 crate 一句话职责见 [`docs/architecture.md`](docs/architecture.md)。
+其余 crate 各占一个领域：`uva-core-tokio`（`uva-core` 那些 runtime-neutral seam 的 tokio 实现）、`uva-approval`（审批词汇与决策函数，harness 冻结面经 re-export 保路径）、`uva-search`（多域检索）、`uva-scheduler`（定时分发）、`uva-eval`（评测）、`uva-attachment`（多模态附件）、`uva-test-support`（确定性假件）。逐 crate 一句话职责见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 1.2 入口
 
@@ -90,7 +98,7 @@
 | `scripts/harness-shape/clippy.toml` | 形状预算：函数 ≤100 行、嵌套 ≤4 层。**故意不放进根 `clippy.toml`**——写进去会全局启用这两个默认关闭的 lint；只由 `scripts/check-harness-shape.sh` 经 `CLIPPY_CONF_DIR` 注入 |
 | `Cargo.toml` | `resolver = "2"`、edition 2024、`rust-version = "1.98"`；release profile（opt-level 3 / thin LTO / codegen-units 1 / strip symbols）不得随意改 |
 | `deny.toml` | `cargo-deny` 的许可证 / 来源 / ban 审计入口；安全公告由 `cargo-audit` 单独负责 |
-| `.markdownlint.json` | markdown lint 锁，作用于 25 个 crate 的 `README.md` 与 `CONTRIBUTORS.md`（与 `make fmt-check` 互不重叠） |
+| `.markdownlint.json` | markdown lint 锁，作用于 31 个 crate 的 `README.md` 与 `CONTRIBUTORS.md`（与 `make fmt-check` 互不重叠） |
 | `.editorconfig` | 编辑期 LF / UTF-8 / 尾空格 / 末行换行；与 rustfmt / prettier 互补不重叠 |
 | `.gitattributes` | git 期 LF 强制 + binary 标记 + linguist 关闭 vendor/generated；`CHANGELOG.md` / `Cargo.lock` 用 `merge = union` |
 | `[workspace.lints]`（根 `Cargo.toml`） | rustdoc 棘轮表（`missing_docs` 等）。**当前没有 crate opt-in**（`grep -rln '^\[lints\]' crates/*/Cargo.toml` 为空），所以一个都没在跑；实际约束是 `make check-public-docs` 的计数棘轮 |
@@ -114,6 +122,7 @@
 | `check-mvp-deps` | 七 feature 最小子集与两个插件族不引入 HTTP / OTel / DB 依赖 |
 | `check-no-runtime` | runtime-free crate 的 lib 构建不含 tokio |
 | `check-kernel-deps` | `uva-kernel` 的依赖图不含 agent / UI / 传输层 crate |
+| `check-hook-external` | 样板 `docs/examples/hook-only-consumer` 的 **normal** 依赖树不含 `uva-harness`（harness 只进 dev-deps），并跑其 dev 测试驱动一次真实工具调用 |
 | `check-public-api-runtime` | 库 crate 的公开 API 不出现运行时类型 |
 | `check-pub-surface` / `check-pub-surface-strict` | 库 crate 内禁止 `pub use <mod>::*`；范式 crate 的 `pub use` 计数不得增长 |
 | `check-frozen-api` | 冻结 crate 的精选公开面变动必须同步 `docs/api-frozen.md` 与基线 |
@@ -127,9 +136,11 @@
 | `check-single-writer` | 会话行只能由该会话的 writer 写 |
 | `check-claim-language` | 当前状态文档不出现与代码事实矛盾的绝对化措辞 |
 | `check-publishable` / `check-deny` | 每个 crate 可 `cargo package`；许可证 / 来源 / ban 审计通过 |
-| `lint-sh` | 对 12 个 `scripts/*.sh` 门禁跑 shellcheck |
+| `check-web` / `check-web-contract` | 前端类型 / lint / 格式化 / 纯函数单测；`uva-web/src/api/types.ts` 必须逐字节等于服务端 wire types 的重新生成结果 |
+| `check-web-methods` | 前端域客户端的 `METHOD` 表里的每个方法名都必须是服务端真正提供的方法（路由注册表 + 通知常量）；服务端有而前端不调的不算错；**读不懂的表也红**（每个含 `const METHOD` 的文件必须至少产出一行；表里读不出的一行——计算值、带插值的模板、计算 key、取值不在 key 那一行——也算读不懂，门禁点名文件与 key；契约清单的每一行都必须是被抽取器读到的一行） |
+| `lint-sh` | 对 16 个 `scripts/*.sh` 门禁跑 shellcheck |
 
-**新增 `scripts/*.sh` 门禁必须在同一变更里同步三处**：`Makefile` 的 `lint-sh` 清单、`.github/workflows/shellcheck.yml` 的清单、本节的 `lint-sh` 行——两份清单必须一致。
+**新增 `scripts/*.sh` 门禁必须在同一变更里同步四处**：`Makefile` 的 `check-*` 目标与 `make ci` 的聚合清单、`Makefile` 的 `lint-sh` 清单、`.github/workflows/shellcheck.yml` 的清单、本节的 `lint-sh` 行——两份脚本清单必须一致。
 
 CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)）只调用上述 `make` 目标，分 `gates` / `tests` / `examples` / `web` / `bench` 五个 job；测试与示例无需 API key。
 
@@ -140,10 +151,10 @@ CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)�
 - **依赖方向单向**：`uva` → `uva-*` → `uva-core`，永不回指；用 `cargo tree -p uva-core` 验证无环。
 - **公开面最小化**：只在 crate 外真的被用到的项才 `pub`（判据是 grep，不是印象）。每个 `uva-*` crate 的 `lib.rs` 是决定公开面的唯一地方，必须显式列名——禁止 `pub use <mod>::*`。
 - **facade 零逻辑**：`crates/uva/src/lib.rs` 只有 `pub use`，所有逻辑属于底层 crate。
-- **工具实现 = 插件族 crate**：面向 agent 的工具住在 `uva-tool-plugins`（一工具 = 一模块 + 一 feature），范式留在 `uva-tool`；策略插件同理住在 `uva-policy-plugins`。不存在"默认工具集"。
-- **插件专属依赖逐插件 optional**：一个工具带什么由它自己的 feature 决定（`web` → `reqwest`、`task` → `uva-harness`、`scheduler` → `uva-scheduler`）。
+- **工具实现 = 插件族 crate**：面向 agent 的工具住在 `uva-tool-plugins`（一工具 = 一模块 + 一 feature），范式留在 `uva-tool`；策略插件同理住在 `uva-policy-plugins`，hook 实现同理住在 `uva-hook-plugins`。`task` 是单独的工具 crate `uva-tool-task`（注册进同一 `ToolRegistry`），因为它要带着自己的委派实现且不得依赖 harness。不存在"默认工具集"。
+- **插件专属依赖逐插件 optional**：一个工具带什么由它自己的 feature 决定（`web` → `reqwest`、`scheduler` → `uva-scheduler`）；`uva-tool-task` 无 feature，依赖集固定为 agent/事件词汇 + 工具 trait。
 - **工具的边界随工具走**：OS 执行策略（`ExecutionPolicy` / `SandboxBackend` / `effective_policy`）住在 `uva-tool-plugins::shell::sandbox`，由 `ShellTool` 自己持有——告诉模型的描述与真正 spawn 的 argv 来自同一个值，不可能漂移。
-- **harness 与插件分离**：`uva-harness` 只保留核心循环 + registry 组装；委派工具走 `DelegatingTool` seam，实现住在工具族，不得回填 harness。
+- **harness 与插件分离**：`uva-harness` 只保留核心循环 + registry 组装；委派是**普通工具**（`uva-tool-task` 的 `task`，注册表分发），不再有专门的委派通道，实现不得回填 harness。
 - **不依赖具体运行时**：公开 API 不出现 `tokio::*` / `async_std::*` / `smol::*`（§1.4）。
 - **chrono 是唯一的时间库**：墙钟走 `uva_core::Clock`（§3.8）。
 - **ULID 是默认 ID 生成器**：走 `uva_core::IdGen`。
@@ -151,7 +162,7 @@ CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)�
 - **`uva-kernel` 是框架边界，不是 agent**：位于 `uva-core` 与 `uva-harness` 之间，只承载插件适配与生命周期原语。
 - **profile HMR 只重挂 diff 的 id**：变更后只对 `added` / `removed` / `remounted` 的行卸载 / 重挂；`hmr = false` 的变更只记录"需要重启"，绝不半重载。
 - **UI 扩展点只传 JSON schema**：`ui/schema` 只返回 `version` / `slot` / `kind` / `props`；v1 永不执行远端 JS / CSS。
-- **第三方扩展走 MCP server**：动态插件通道（进程插件 / Wasm 组件）已删除，第三方工具与脚本以 **MCP server** 接入——`mcp.json` 的 `mcpServers` 映射按 `command` + `args` 声明，stdio 传输，server 发布的工具注册进同一个 `ToolRegistry`。MCP 不承载的角色（结果改写 / gate / authority 分级）随通道一起消失，不要为它们另开一条插件通道。
+- **第三方扩展走 MCP server**：动态插件通道（进程插件 / Wasm 组件）已删除，第三方工具与脚本以 **MCP server** 接入——`mcp.json` 的 `mcpServers` 映射按 `command` + `args` 声明，stdio 传输，server 发布的工具注册进同一个 `ToolRegistry`。MCP 不承载的角色（结果改写 / gate / authority 分级）随通道一起消失，不要为第三方另开一条动态插件通道；仓内的结果改写与 gate 实现是 `uva-hook-plugins` 的编译期 feature（`redact` / `traffic-light`），不是运行时插件通道。
 - **Optional crates 是 opt-in 扩展**：可选 crate 各自带测试、example 与 facade feature；默认 `uva` 不拉起其中任何一个（`make check-mvp-deps` 断言）。
 
 ## 3.8 时间与 ID 的使用准则
@@ -184,15 +195,15 @@ CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)�
 
 - 0 lint（无 lint 错误 / 警告）、需要格式化、`npm run build` 通过。
 - 代码符合 Web TS / HTML / CSS 编码规范。
-- 门禁：`make check-web`（`tsc --noEmit` + `eslint` + `prettier --check`，无需浏览器）。
+- 门禁：`make check-web`（`tsc --noEmit` + `eslint` + `prettier --check` + `vitest` 单元测试，无需浏览器）。
 
-## 4.2 前端验证：Playwright MCP，不写 spec
+## 4.2 前端验证：vitest 纯函数单测 + Playwright MCP，不写 e2e
 
-**本项目不保留任何前端自动化测试套件**，验证一律用 Playwright MCP 直接驱动浏览器。
+**不保留前端 e2e 套件；纯函数单元测试用 vitest（`uva-web/tests/*.test.ts`，node 环境），随 `make check-web` 跑。** 单测覆盖不到的一切——DOM、网络、React 组件、真实渲染——一律用 Playwright MCP 直接驱动浏览器验证。
 
-1. 起真实前端（`npm run dev`，必要时 `cargo run -p uva-app-server -- serve`）。
-2. 用 MCP 打开页面、执行交互、读取 DOM 与真实渲染结果作为证据。
-3. 纯函数同样如此：Vite 把 `src/**` 作为模块直接提供，页面内 `await import('/src/lib/foo.ts')` 即可断言，无需测试 harness。
+1. 纯函数（`src/lib/` / `src/api/` 的投影、validator、分页等规则密集逻辑）改动：先在 `uva-web/tests/` 补或改 vitest 用例，`make check-web` 必须绿。
+2. 起真实前端（`npm run dev`，必要时 `cargo run -p uva-app-server -- serve`）。
+3. 用 MCP 打开页面、执行交互、读取 DOM 与真实渲染结果作为证据。
 
 **MCP 的两个易踩陷阱**（必须处理，否则 chat 页"看起来没反应"）：
 
@@ -211,9 +222,9 @@ CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)�
   或更直接地 mock `/readyz` 200 + `bringToFront`，效果一样。
 - **隐藏 tab 里 `requestAnimationFrame` 永不触发**：页面内 `await new Promise(r => requestAnimationFrame(r))` 会一路挂到 `protocolTimeout`（默认 30 s）。验证 `naturalWidth` 之类的渲染后量应改用 `setTimeout` 或 MCP 提供的 `wait(...)` 助手。
 
-理由：前端 e2e 套件（原 44 个 spec / ~5,200 行）跑一次 13 分钟，且需 `cargo build` + Vite + Chromium 三件套，成本远高于它发现的问题；spec 与实现会同步腐化（曾出现整批 mock 停留在重构前的 wire 形状、长期红灯无人察觉）。MCP 打在真实应用上，不引入第二份需要维护的契约；MCP 的浏览器是 harness 自带的，与 `uva-web` 的依赖无关。
+理由：前端 e2e 套件（原 44 个 spec / ~5,200 行）跑一次 13 分钟，且需 `cargo build` + Vite + Chromium 三件套，成本远高于它发现的问题；spec 与实现会同步腐化（曾出现整批 mock 停留在重构前的 wire 形状、长期红灯无人察觉）。这套理由对 e2e 成立，对纯函数单测不成立——vitest 在 node 里跑，无需浏览器，秒级完成。MCP 打在真实应用上，不引入第二份需要维护的契约；MCP 的浏览器是 harness 自带的，与 `uva-web` 的依赖无关。边界论证见 [`docs/adr/0001-frontend-test-policy.md`](docs/adr/0001-frontend-test-policy.md)。
 
-因此：`uva-web/tests/`、`playwright*.config.ts`、`.github/workflows/e2e.yml` 与 `uva-web/scripts/e2e/` 均已删除；新增前端验证不要再建这些。
+因此：`playwright*.config.ts`、`.github/workflows/e2e.yml` 与 `uva-web/scripts/e2e/` 均已删除，不要再建 e2e 套件；`uva-web/tests/` 只放 vitest 纯函数单测（不装 jsdom / happy-dom，不做组件测试）。
 
 ***
 

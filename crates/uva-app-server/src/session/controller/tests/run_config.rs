@@ -54,7 +54,6 @@ async fn run_config_carries_the_dependencies_tool_surface() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        manager.sink("alice", "s1"),
         manager.writer("alice", "s1"),
         deps,
         Duration::from_secs(60),
@@ -120,7 +119,6 @@ async fn run_factory_narrows_the_wire_tools_to_the_tool_surface() {
         max_iterations: Some(1),
         agent_registry: None,
         log_writer: None,
-        subagent_writers: None,
         host: None,
         agent_loop: None,
         tool_surface: None,

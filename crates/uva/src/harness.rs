@@ -7,12 +7,12 @@
 //! type. Around it: the [`AgentRegistry`] catalog, the pluggable
 //! [`ReasoningStrategy`] seam with the three strategies this workspace
 //! [`Agent::run`] as the single entry point that streams a
-//! session's [`AgentEvent`]s, and the
-//! [`DelegatingTool`] seam a delegation plugin installs through.
+//! session's [`AgentEvent`]s.
 //!
 //! Sub-agent delegation itself is **not** here: the `task` tool, its
-//! gates, worktree isolation and routing live in
-//! `uva::tool_task` (`uva-tool-plugins`).
+//! gates and worktree isolation live in `uva::tool_task`
+//! (`uva-tool-task`) and reach the loop as an ordinary registry
+//! tool.
 //!
 //! Every interception point is one registry: [`Host`] holds the
 //! hooks, gates, guards, hints, trackers, transformers and prompt

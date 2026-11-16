@@ -22,6 +22,33 @@ use crate::{
     state::{AppState, app_state::PARKED_PROMPT_WINDOW},
 };
 
+/// True for a row that records a user turn: the typed
+/// `user_message` this build writes, or the legacy `UserInput`
+/// envelope an older log holds.
+fn is_prompt_row(row: &serde_json::Value) -> bool {
+    matches!(
+        row.get("type").and_then(serde_json::Value::as_str),
+        Some("user_message" | "UserInput")
+    )
+}
+
+/// The user text of a prompt row, in either dialect.
+///
+/// A log written by this build records a turn as a typed
+/// `user_message` row whose `data` is the provider message; a log
+/// written before the typed writer kept `{"text": …}` in the payload
+/// of a `UserInput` row. Both are prompt records, so a test that asks
+/// "did this turn run?" must not care which dialect it is reading.
+fn prompt_text_of(row: &serde_json::Value) -> Option<String> {
+    let data = row.get("data")?;
+    if let Some(text) = data.get("text").and_then(serde_json::Value::as_str) {
+        return Some(text.to_string());
+    }
+    let message: uva::provider::Message =
+        serde_json::from_value(data.clone()).ok()?;
+    message.content.extract_text()
+}
+
 fn scripted_provider() -> Arc<dyn ModelProvider> {
     Arc::new(FakeProvider::new(vec![CompletionResponse {
         content: Content::text("pong"),
@@ -278,7 +305,7 @@ async fn a_takeover_requeues_a_prompt_the_dead_node_parked() {
     assert!(!adopted.is_remote());
 
     // The recovered prompt must actually run: the run records the turn
-    // it was started for as a `UserInput` row.
+    // it was started for as a typed `user_message` row.
     let rows = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let rows = b
@@ -288,8 +315,7 @@ async fn a_takeover_requeues_a_prompt_the_dead_node_parked() {
                 .await
                 .unwrap_or_default();
             let ran = rows.iter().any(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "recovered turn"
+                prompt_text_of(row).as_deref() == Some("recovered turn")
             });
             if ran {
                 return rows;
@@ -300,7 +326,7 @@ async fn a_takeover_requeues_a_prompt_the_dead_node_parked() {
     .await
     .expect("the recovered prompt runs");
     assert!(
-        rows.iter().any(|row| row["type"] == "UserInput"),
+        rows.iter().any(is_prompt_row),
         "the recovered turn is in the log"
     );
 }
@@ -427,8 +453,8 @@ async fn a_takeover_does_not_run_a_parked_turn_under_the_default_model() {
         .unwrap_or_default();
     assert!(
         !rows.iter().any(|row| {
-            row["type"] == "UserInput"
-                && row["data"]["text"] == "a turn under an unconfigured model"
+            prompt_text_of(row).as_deref()
+                == Some("a turn under an unconfigured model")
         }),
         "the turn must stay queued rather than run under the default model"
     );
@@ -439,7 +465,7 @@ async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
     // Two multimodal prompts queued behind a live run produce two parks.
     // The first run records its turn; the node then crashes. The second
     // prompt must still be queued — clearing the queue on the first
-    // `UserInput` would lose it although its row is intact.
+    // user-turn row would lose it although its row is intact.
     let dir = TempDir::new().unwrap();
     let bus = Arc::new(LocalBus::new());
     let state = node("a", dir.path(), Arc::clone(&bus)).await;
@@ -475,6 +501,9 @@ async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
         })
         .await
         .unwrap();
+    // A log written before the typed writer: the spent park's turn is
+    // the legacy `UserInput` envelope, and the takeover must still read
+    // it (and must not treat it as a second consumption).
     writer
         .append(serde_json::json!({
             "type": "UserInput",
@@ -499,8 +528,7 @@ async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
                 .await
                 .unwrap_or_default();
             if rows.iter().any(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "second turn"
+                prompt_text_of(row).as_deref() == Some("second turn")
             }) {
                 return rows;
             }
@@ -512,8 +540,7 @@ async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
     assert_eq!(
         rows.iter()
             .filter(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "first turn"
+                prompt_text_of(row).as_deref() == Some("first turn")
             })
             .count(),
         1,
@@ -552,7 +579,7 @@ async fn a_park_behind_a_long_run_is_still_recovered() {
         .await
         .unwrap();
     // The live run keeps writing, well past the base window and with no
-    // `UserInput` row of its own (it has not started its turn yet).
+    // prompt row of its own (it has not started its turn yet).
     for index in 0..(PARKED_PROMPT_WINDOW + 60) {
         writer
             .append_event(&uva::session::usage(
@@ -582,8 +609,7 @@ async fn a_park_behind_a_long_run_is_still_recovered() {
                 .await
                 .unwrap_or_default();
             if rows.iter().any(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "queued behind the run"
+                prompt_text_of(row).as_deref() == Some("queued behind the run")
             }) {
                 return;
             }
@@ -592,6 +618,94 @@ async fn a_park_behind_a_long_run_is_still_recovered() {
     })
     .await
     .expect("the parked prompt behind the long run is recovered");
+}
+
+#[tokio::test]
+async fn an_ordinary_user_message_is_not_a_consumption_frontier() {
+    // Every turn this build runs writes a `user_message` row, and a
+    // steer or a seeded history turn writes one too. None of them
+    // says a parked prompt reached the model: only the `park_consumed`
+    // row naming the park does. Reading a user turn as the frontier
+    // stops the widening early and silently drops a prompt queued
+    // behind a long run — the one outcome the park row exists to
+    // prevent.
+    let dir = TempDir::new().unwrap();
+    let bus = Arc::new(LocalBus::new());
+    let state = node("a", dir.path(), Arc::clone(&bus)).await;
+    state
+        .session_manager
+        .create_with_user("u".to_string(), "s".to_string())
+        .await
+        .unwrap();
+    let writer = state.session_manager.writer("u", "s");
+    writer
+        .append_event(&uva::session::SessionEvent::ParkedPrompt {
+            seq: 0,
+            ts: String::new(),
+            park_id: "park-behind-turns".to_string(),
+            text: "queued behind the turns".to_string(),
+            attachments: Vec::new(),
+            agent_name: None,
+            provider: None,
+            model: None,
+            rerun: false,
+        })
+        .await
+        .unwrap();
+    // The run keeps writing past the base window, and every few rows
+    // it records a user turn (as a live session does when a steer
+    // lands). None of them names a park.
+    for index in 0..(PARKED_PROMPT_WINDOW + 60) {
+        if index % 10 == 0 {
+            writer
+                .append_event(&uva::session::user_message(
+                    serde_json::json!({
+                        "role": "user",
+                        "content": {"text": format!("steer {index}")},
+                    }),
+                    Some("steer"),
+                ))
+                .await
+                .unwrap();
+        }
+        writer
+            .append_event(&uva::session::usage(
+                10 + index,
+                1,
+                11 + index,
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+    writer.flush().await.unwrap();
+
+    state
+        .get_or_create_session_controller("u", "s")
+        .await
+        .expect("the session opens");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let rows = state
+                .session_manager
+                .sink("u", "s")
+                .read_tail(50)
+                .await
+                .unwrap_or_default();
+            if rows.iter().any(|row| {
+                prompt_text_of(row).as_deref()
+                    == Some("queued behind the turns")
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a user turn is not the consumption frontier");
 }
 
 #[tokio::test]
@@ -649,8 +763,7 @@ async fn two_concurrent_cold_opens_start_exactly_one_run() {
                 .await
                 .unwrap_or_default();
             if rows.iter().any(|row| {
-                row["type"] == "UserInput"
-                    && row["data"]["text"] == "recovered once"
+                prompt_text_of(row).as_deref() == Some("recovered once")
             }) {
                 return rows;
             }
@@ -668,10 +781,7 @@ async fn two_concurrent_cold_opens_start_exactly_one_run() {
         .unwrap_or(rows);
     let runs = rows
         .iter()
-        .filter(|row| {
-            row["type"] == "UserInput"
-                && row["data"]["text"] == "recovered once"
-        })
+        .filter(|row| prompt_text_of(row).as_deref() == Some("recovered once"))
         .count();
     assert_eq!(runs, 1, "the recovered turn must start exactly once");
 }

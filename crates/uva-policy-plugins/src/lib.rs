@@ -2,7 +2,7 @@
 //!
 //! The shipped **policy plugins** — one module and one feature per
 //! policy. A policy either wraps the model provider (cache, resilience,
-//! budget) or shapes the reasoning strategy (reflection, chain of
+//! budget) or shapes the reasoning strategy (chain of
 //! thought, plan-execute, best-of-N); the seam it plugs into lives in
 //! `uva-provider` and `uva-harness`.
 //!
@@ -11,7 +11,6 @@
 //! | `cache` | [`mod@cache`] | serve a repeated completion from a semantic cache |
 //! | `resilience` | [`mod@resilience`] | retry, back off and trip a breaker around a provider |
 //! | `budget` | [`mod@budget`] | cap spend, and expose the budget as a tool |
-//! | `reflection` | [`mod@reflection`] | critique a result and feed the critique back |
 //! | `cot` | [`mod@cot`] | chain-of-thought reasoning strategy |
 //! | `plan-execute` | [`mod@plan_execute`] | plan, execute, re-plan |
 //! | `best-of-n` | [`mod@best_of_n`] | sample N answers and keep the best-scored one |
@@ -70,15 +69,6 @@ pub use plan_execute::{
     Step,
     StepOutcome,
 };
-#[cfg(feature = "reflection")]
-pub use reflection::{
-    CriticProvider,
-    Critique,
-    ReflectionHook,
-    ReflectiveOutputTransformer,
-    ReflectorConfig,
-    Severity,
-};
 #[cfg(feature = "resilience")]
 pub use resilience::{
     ResiliencePolicy,
@@ -97,7 +87,5 @@ pub mod cache;
 pub mod cot;
 #[cfg(feature = "plan-execute")]
 pub mod plan_execute;
-#[cfg(feature = "reflection")]
-pub mod reflection;
 #[cfg(feature = "resilience")]
 pub mod resilience;

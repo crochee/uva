@@ -20,7 +20,7 @@
 //! | [`parallel_safe`]          | Safe (concurrent) tool execution                            |
 //! | [`parallel_unsafe`]        | Sequential bucket for unsafe tools                          |
 //! | [`tool_projection_memo`]   | Tool projection memoization across iterations               |
-//! | [`tool_restriction`]       | Per-agent `denied_tools` / `allow_list` + delegators        |
+//! | [`tool_restriction`]       | Per-agent `denied_tools` / `allow_list`                     |
 //! | [`compaction_wiring`]      | Which context manager / compactor a run uses                |
 //! | [`host_wiring`]            | Host registrations reaching the loop's decision points      |
 //! | [`host_snapshot`]          | The host's immutable dispatch view and its invalidation     |
@@ -30,19 +30,17 @@
 //! | [`steering_tracker_panic`] | Panic isolation of the tracker                              |
 //! | [`steering_transformers`]  | Output transformers                                         |
 //! | [`hot_path_costs`]         | Hot-path cost budget assertions                             |
-//! | [`delegation_routing`]     | Name-keyed dispatch of a delegated tool call                |
-//! | [`delegation_scheduling`]  | A delegator's `mode()` decides its batch bucket              |
 //! | [`support`]                | Shared fixtures                                             |
 
 use std::path::PathBuf;
 
+use uva_events::{AgentEvent, SessionEndReason, SystemEvent, WarningKind};
 use uva_provider::{Content, ContentPart, Message, TextContent, ToolUse};
 
 use super::*;
 use crate::{
     Agent,
     agent::AgentDescriptor,
-    events::{AgentEvent, SessionEndReason, SystemEvent, WarningKind},
     input::AgentInput,
     prompt::PromptContext,
 };
@@ -51,9 +49,6 @@ mod agent_smoke;
 mod compaction;
 mod compaction_wiring;
 mod compose_pipeline_tests;
-mod delegation_emit_leak;
-mod delegation_routing;
-mod delegation_scheduling;
 mod end_to_end_runtime;
 mod host_snapshot;
 mod host_wiring;

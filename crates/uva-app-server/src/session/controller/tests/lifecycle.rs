@@ -492,7 +492,6 @@ async fn an_unreadable_log_refuses_a_fresh_run() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        sink,
         writer,
         super::support::test_deps(),
         Duration::from_secs(60),
@@ -552,7 +551,6 @@ async fn an_unreadable_log_is_not_a_spent_resume() {
     let controller = super::super::SessionController::spawn(
         "alice",
         "s1",
-        sink,
         writer,
         super::support::test_deps(),
         Duration::from_secs(60),
@@ -741,7 +739,6 @@ async fn a_panicking_loop_is_not_reused() {
     let corpse = super::super::SessionController::spawn(
         "u",
         "s",
-        sink,
         writer,
         super::support::test_deps(),
         Duration::from_secs(60),
@@ -881,7 +878,6 @@ async fn a_panicking_loop_cancels_its_in_flight_run() {
     let corpse = super::super::SessionController::spawn(
         "u",
         "s",
-        sink,
         writer,
         super::support::test_deps(),
         Duration::from_secs(60),

@@ -14,7 +14,7 @@
 //! | guard state (budget/loop counters) held in interior-mutability shared across runs | per-run [`uva_context::AgentState`] is the single source of truth |
 //! | `Sanitize` result silently discarded | sanitized action is adopted before dispatch |
 //! | `inject_hints` ignores `InjectionPoint`/priority | all four injection points + priority gating honoured |
-//! | severity never consumed | severity rides the denial message + `WarningKind::Guard` event |
+//! | severity never consumed | severity rides the denial message the model reads and the loop's structured log line |
 //!
 //! ## Layering
 //!

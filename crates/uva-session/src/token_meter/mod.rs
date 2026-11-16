@@ -50,7 +50,7 @@
 //! ([`SessionEvent::UserMessage`] / `AssistantMessage` /
 //! `ToolResult` / `Compaction` rows), exactly like
 //! [`crate::surface::fold_surface`]; pre-R4 legacy envelopes
-//! (`{"type": "UserInput"}` / `{"type": "Model"}`) contribute no
+//! (`UserInput` / `Model` rows) contribute no
 //! surface. A caller replaying a mixed log should feed the meter
 //! the same typed partition it feeds `fold_surface`.
 
@@ -63,8 +63,11 @@ use uva_provider::{
 };
 
 use crate::{
-    events::{ReplaceRange, SessionEvent, SurfaceOp},
-    surface::{FoldError, validate_replace},
+    events::{SessionEvent, SurfaceOp},
+    surface::{
+        FoldError,
+        fold::{RowKind, SurfaceFold, SurfaceRow, row_view},
+    },
 };
 
 /// Disjoint provider usage buckets for one report or one folded
@@ -301,11 +304,13 @@ pub struct TokenMeter {
     /// Events folded so far — the replay cursor.
     consumed: usize,
     /// Current surface, one priced node per projected message.
-    nodes: Vec<SurfaceNode>,
-    /// Running heuristic total over `nodes`.
+    ///
+    /// The fold's own engine, so the meter prices the surface the
+    /// fold produces: the same order, the same replace rules, the
+    /// same refusals.
+    fold: SurfaceFold<SurfaceNode>,
+    /// Running heuristic total over the surface's nodes.
     surface_tokens: u64,
-    /// Highest seq currently on the surface (replace guard).
-    max_surface_seq: u64,
     /// Surface tokens just before the latest assistant append —
     /// the surface that assistant's request saw.
     response_boundary_tokens: u64,
@@ -327,9 +332,8 @@ impl TokenMeter {
     pub const fn new() -> Self {
         Self {
             consumed: 0,
-            nodes: Vec::new(),
+            fold: SurfaceFold::new(),
             surface_tokens: 0,
-            max_surface_seq: 0,
             response_boundary_tokens: 0,
             anchor: None,
             totals: UsageBuckets {
@@ -458,8 +462,8 @@ impl TokenMeter {
             SessionEvent::Usage { .. } => self.fold_usage(event),
             _ => {}
         }
-        if event.is_surface_eligible() {
-            self.apply_surface(event)?;
+        if let Some(data) = event.surface_payload() {
+            self.apply_surface(event, data)?;
         }
         Ok(())
     }
@@ -493,51 +497,36 @@ impl TokenMeter {
     /// Apply one surface-eligible event to the priced surface,
     /// mirroring [`crate::surface::fold_surface`]'s append /
     /// replace semantics.
-    fn apply_surface(&mut self, event: &SessionEvent) -> Result<(), FoldError> {
+    fn apply_surface(
+        &mut self,
+        event: &SessionEvent,
+        data: &Value,
+    ) -> Result<(), FoldError> {
         let seq = event.seq();
-        let data = match event {
-            SessionEvent::UserMessage { data, .. }
-            | SessionEvent::AssistantMessage { data, .. }
-            | SessionEvent::ToolResult { data, .. }
-            | SessionEvent::Compaction { data, .. } => data,
-            _ => unreachable!("is_surface_eligible narrows to these four"),
-        };
         let op = event
             .surface_op()
             .cloned()
             .unwrap_or_else(SurfaceOp::append);
         let tokens = estimate_message_tokens(data);
-        match op {
-            SurfaceOp::AppendString(_) => {
-                if matches!(event, SessionEvent::AssistantMessage { .. }) {
-                    self.response_boundary_tokens = self.surface_tokens;
-                }
-                self.nodes.push(tokens);
-                self.surface_tokens += tokens;
-                self.max_surface_seq = self.max_surface_seq.max(seq);
-            }
-            SurfaceOp::Replace {
-                start,
-                end,
-                source_event_seqs,
-            } => {
-                validate_replace(
-                    seq,
-                    ReplaceRange {
-                        start,
-                        end,
-                        source_event_seqs: &source_event_seqs,
-                    },
-                    self.nodes.len(),
-                    self.max_surface_seq,
-                )?;
-                let removed: u64 = self.nodes[start..end].iter().sum();
-                self.nodes.splice(start..end, [tokens]);
-                self.surface_tokens += tokens;
-                self.surface_tokens -= removed;
-                self.max_surface_seq = self.max_surface_seq.max(seq);
-            }
+        let Some((kind, calls)) = row_view(event, data) else {
+            // A surface-eligible row this fold cannot place: it is
+            // neither priced nor folded, so the meter's figure does
+            // not count a row the surface never carried.
+            return Ok(());
+        };
+        if matches!(kind, RowKind::Assistant) && op.is_append() {
+            self.response_boundary_tokens = self.surface_tokens;
         }
+        let removed = self.fold.apply(SurfaceRow {
+            seq,
+            kind,
+            payload: tokens,
+            op,
+            calls,
+        })?;
+        let removed: u64 = removed.iter().sum();
+        self.surface_tokens += tokens;
+        self.surface_tokens -= removed;
         Ok(())
     }
 }

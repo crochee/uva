@@ -1,0 +1,36 @@
+[package]
+name = "uva-hook"
+description = "The interception contract under the agent loop: the Hook/Gate/transformer traits, the seven mount-point keys, the decoupled HookContext and the HookPayload waterfall payload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# `FutureExt::catch_unwind` isolates a registration's panic: a broken
+# hook is skipped, a broken gate fails closed. Runtime-free.
+futures.workspace = true
+# The `LoggingHook` adapter impl (the orphan rule puts it here) logs
+# its observations at debug level.
+tracing.workspace = true
+uva-context.workspace = true
+uva-core.workspace = true
+uva-kernel.workspace = true
+uva-steering.workspace = true
+uva-tool.workspace = true
+
+[dev-dependencies]
+# The registry tests build request parameters from a wire request and
+# name a tool output; both are dev-only.
+serde_json.workspace = true
+uva-provider = { workspace = true, default-features = false }
+# The async dispatch tests need an executor; the library itself names
+# no runtime.
+tokio = { workspace = true, features = ["macros", "rt"] }

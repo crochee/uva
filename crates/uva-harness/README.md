@@ -1,8 +1,8 @@
 # uva-harness
 
-The agent runtime: the ReAct loop, the `Agent` / `ReasoningStrategy` /
-`DelegatingTool` seams, the one `Host` registry every interception
-point reads, and `AgentRegistry`. One crate turns a model + a tool set
+The agent runtime: the ReAct loop, the `Agent` / `ReasoningStrategy`
+seams, the one `Host` registry every interception point reads, and
+`AgentRegistry`. One crate turns a model + a tool set
 into a streaming `AgentEvent` flow; nothing here names a runtime.
 
 公开 API 与 seam 规则见 [`src/lib.rs`](src/lib.rs)；可替换点见
@@ -15,10 +15,10 @@ into a streaming `AgentEvent` flow; nothing here names a runtime.
   committed message carries the ordinal of the row it was written
   under, so a compaction can cite provenance without a re-read.
 - **One interception registry.** `Host` holds hooks, gates, guards,
-  hints, trackers, transformers, prompt sections, tools and
-  delegators. Each registration is reversible: dropping its handle
-  withdraws it. `Host::new()` is neutral; `Host::default_policy(root)`
-  installs the defensive set.
+  hints, trackers, transformers, prompt sections and tools. Each
+  registration is reversible: dropping its handle withdraws it.
+  `Host::new()` is neutral; `Host::default_policy(root)` installs the
+  defensive set.
 - **One compaction engine.** The `Compactor` seam in `uva-session`
   is the only writer of a `compaction` row; a `ContextManager` only
   projects or trims the request it is handed.
@@ -121,15 +121,23 @@ uva-provider = { version = "0.1", default-features = false }
 
 ## The two public layers
 
-The crate root re-exports a curated facade of 64 names. That facade is
+The crate root re-exports a curated facade of 61 names. That facade is
 the promised surface: depend on it, and a release will not move your
-names. The crate is public further down, under
-`uva_harness::agent::…` and `uva_harness::events::…`. Only a
-deep path reaches 57 names: rustdoc records 109 public paths under
-those two modules, 53 of them being facade names at their defining
-path, which leaves 56 names the facade does not carry — plus `Risk`,
-re-exported from `uva-tool`, which has no path of its own inside
-the harness. None of those 57 is promised.
+names. The crate is public further down, under `uva_harness::agent::…`,
+`uva_harness::events::…` (a re-export of the vocabulary that lives in
+`uva-events`) and `uva_harness::seams::…` (the mount-point keys
+re-exported from `uva-hook`). Only a deep path reaches 21 names:
+rustdoc records 36 public paths under the `agent` module, 22 of them
+being facade names at their defining path, which leaves 14 names the
+facade does not carry; the seven mount-point keys re-exported from
+`uva-hook` into `uva_harness::seams` are the one cross-crate deep-only
+set, which brings the total to 21. The approval vocabulary (the old
+`agent::approval` module and `Risk` re-exported from `uva-tool`) moved
+to `uva-approval`; the event vocabulary moved to `uva-events`; the
+agent vocabulary (`Agent`, `AgentInput`, the steer inboxes, the peer
+registry, the child-session writer source and the prompt manifest)
+moved to `uva-agent`; all three reach this crate through the facade.
+None of those 21 is promised.
 
 ## Seams
 
@@ -144,7 +152,6 @@ the harness. None of those 57 is promised.
 | the durable log | `SessionLog` (from `uva-session`) | `with_log_writer` |
 | cancellation | `CancelToken` (from `uva-core`) | `agent.run(input, cancel)` |
 | detached work | `Spawner` (from `uva-core`) | `with_spawner` |
-| delegation | `DelegatingTool` | `with_delegator`, or `Host::delegator` |
 | the loop's outer contract | `Agent` | implement it and register it in `AgentRegistry` |
 
 ## Verify it

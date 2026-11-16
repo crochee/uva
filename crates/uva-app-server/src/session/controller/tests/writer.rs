@@ -27,6 +27,8 @@ use uva::{
         traits::ModelProvider,
     },
     session::{
+        LogWriter,
+        SessionSink,
         SurfaceLedger,
         manager::{SERVER_DEFAULT_USER_ID, SessionRegistry},
         try_fold_log_surface,
@@ -99,6 +101,18 @@ async fn a_feedback_row_does_not_break_the_run_ordinals() {
 
     let sink = manager.sink("alice", "s1");
     let rows = sink.read().await.unwrap();
+    // The feedback row is typed: its own tag, the rating in typed
+    // fields, and the ordinal the writer handed it.
+    let feedback = rows
+        .iter()
+        .find(|row| row["type"] == "feedback")
+        .expect("the feedback row is a typed log-only row");
+    assert_eq!(feedback["message_id"], "m1", "the rated message");
+    assert_eq!(feedback["thumbs_up"], true, "the rating");
+    assert!(
+        feedback.get("kind").is_none(),
+        "the row carries no ad-hoc `kind` field: {feedback:?}"
+    );
     assert!(
         rows.iter()
             .all(|row| row.get("seq").and_then(Value::as_u64).is_some()),
@@ -395,8 +409,8 @@ async fn the_user_prompt_is_on_disk_before_the_model_call() {
     let rows = manager.sink("alice", "s1").read().await.unwrap();
     assert!(
         rows.iter().any(|row| {
-            row["type"] == "UserInput"
-                && row.to_string().contains("the question")
+            super::support::prompt_text_of(row).as_deref()
+                == Some("the question")
         }),
         "the prompt must be on disk while the model is still blocked; \
          got {rows:?}"
@@ -580,4 +594,162 @@ async fn a_forked_session_remaps_the_inherited_compaction() {
             && !flattened.contains("raw output"),
         "the shadowed span stays shadowed after the fork; got {flattened}"
     );
+}
+
+/// The writer is the only thing that can tell a compaction
+/// checkpoint where its shadowed rows are: it stamps every row with
+/// the ordinal the reader will reproduce and feeds the same rows,
+/// under the same ordinals, to the ledger. The controller never sees
+/// a handle of its own that could bypass that.
+#[tokio::test]
+async fn the_writer_feeds_the_ledger_with_log_ordinals() {
+    let sink: Arc<dyn SessionSink> =
+        Arc::new(uva::session::in_memory::InMemorySessionSink::new("s1"));
+    let ledger = Arc::new(SurfaceLedger::new());
+    let writer = Arc::new(
+        LogWriter::new(Arc::clone(&sink), Arc::new(uva::core::SystemClock))
+            .with_ledger(Arc::clone(&ledger)),
+    );
+    // The rows are the writer's: it stamps each one with the ordinal
+    // the reader will reproduce and feeds the same ordinals to the
+    // ledger.
+    writer
+        .append(json!({
+            "type": "UserInput",
+            "data": {"text": "hi"},
+        }))
+        .await
+        .unwrap();
+    writer
+        .append(json!({
+            "type": "Model",
+            "data": {
+                "type": "tool_result",
+                "tool_use_id": "c1",
+                "content": [{"type": "text", "text": "out"}],
+            }
+        }))
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    assert_eq!(ledger.len(), 2);
+    let resolved = ledger
+        .resolve(&[Some("tool:c1".to_string())])
+        .expect("the tool row resolves");
+    assert_eq!(resolved.start, 1, "the tool row is the second surface row");
+    assert_eq!(resolved.source_event_seqs, vec![2]);
+
+    // A typed row is stamped with the ordinal it will have in the
+    // log, which is what a checkpoint cites.
+    let event = uva::session::SessionEvent::CompactionEnd {
+        seq: 0,
+        ts: String::new(),
+        token: "t".to_string(),
+        outcome: "failed".to_string(),
+        data: json!({}),
+    };
+    writer.append_event(&event).await.unwrap();
+    writer.flush().await.unwrap();
+    let rows = sink.read().await.unwrap();
+    assert_eq!(rows[2]["seq"], 3);
+    assert!(
+        rows[2]["ts"].as_str().is_some_and(|ts| !ts.is_empty()),
+        "the wall clock is stamped too"
+    );
+    // The log is fully stamped, so the strict fold reads each row's
+    // own ordinal — the same numbers the ledger recorded.
+    try_fold_log_surface(&rows).expect("a fully stamped log folds");
+}
+
+/// The ledger must record the ordinal the **sink's counter** gave
+/// the row, not `previous + 1`.
+///
+/// The controller's op loop appends out-of-band — `Feedback` rows,
+/// and the shutdown marker, which can land while a run is still
+/// writing. A locally counted value would file the next run row one
+/// slot too low, and a checkpoint citing it would fail
+/// `validate_replace`'s `cited >= self_seq` check: the lenient fold
+/// then replays the span the checkpoint had replaced, and the strict
+/// fold errors. The out-of-band rows go through the same writer, so
+/// the interleave below is the production shape: one ordinal source,
+/// and the ledger, the fold and the counter agree.
+#[tokio::test]
+async fn the_writer_takes_its_ordinal_from_the_sink_not_a_local_counter() {
+    let sink: Arc<dyn SessionSink> =
+        Arc::new(uva::session::in_memory::InMemorySessionSink::new("s1"));
+    let writer = Arc::new(LogWriter::new(
+        Arc::clone(&sink),
+        Arc::new(uva::core::SystemClock),
+    ));
+    // Seed the writer as the run task does: the previous run left
+    // one row, and the run seeds its ledger from what is on disk.
+    writer
+        .append_event(&uva::session::user_message(
+            json!({
+                "role": "user",
+                "content": {"text": "old"},
+            }),
+            None,
+        ))
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    let ledger = Arc::new(SurfaceLedger::new());
+    writer.set_ledger(Arc::clone(&ledger));
+    let existing = sink.read().await.unwrap();
+    writer.seed_ledger(&existing);
+
+    writer
+        .append_event(&uva::session::user_message(
+            json!({
+                "role": "user",
+                "content": {"text": "run row"},
+            }),
+            None,
+        ))
+        .await
+        .unwrap();
+
+    // The op loop's out-of-band row lands between two of the run's
+    // own — through the same writer, so it draws from the same
+    // counter and the two cannot collide.
+    writer
+        .append_event(&uva::session::SessionEvent::Feedback {
+            seq: 0,
+            ts: String::new(),
+            message_id: "m1".to_string(),
+            thumbs_up: true,
+        })
+        .await
+        .unwrap();
+
+    writer
+        .append(json!({
+            "type": "Model",
+            "data": {
+                "type": "tool_result",
+                "tool_use_id": "c9",
+                "content": [{"type": "text", "text": "out"}],
+            }
+        }))
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    let rows = sink.read().await.unwrap();
+    assert_eq!(rows.len(), 4, "seed + run + feedback + run");
+    // The tool row is physically row 4. The ledger must say so —
+    // a local counter would have said 3 (the feedback row's
+    // ordinal) and made any checkpoint citing it unresolvable.
+    let resolved = ledger
+        .resolve(&[Some("tool:c9".to_string())])
+        .expect("the tool row resolves");
+    assert_eq!(
+        resolved.source_event_seqs,
+        vec![4],
+        "the ledger records the counter's ordinal, not previous + 1"
+    );
+    try_fold_log_surface(&rows).expect("a fully stamped log folds");
 }

@@ -20,6 +20,7 @@ use uva_harness::{
 use uva_provider::{
     CompletionRequest,
     ContentPart,
+    Message,
     ModelProvider,
     SamplingResult,
     TextContent,
@@ -260,10 +261,7 @@ impl BestOfNStrategy {
         // The winner is the run's durable fact: one
         // `assistant_message` row through the session's writer. The
         // alternatives were never published, so they leave no row.
-        sink.write_assistant_turn(&[ContentPart::Text(TextContent {
-            text: text.clone(),
-            cache_control: None,
-        })]);
+        sink.write_assistant_turn(&Message::assistant(text.clone()));
         sink.emit(AgentEvent::ModelDone(SamplingResult {
             text,
             usage: Default::default(),

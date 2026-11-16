@@ -108,11 +108,9 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                 s.last_ts = ts.to_string();
             }
             match ev {
-                SessionEvent::Turn { data, .. } => match boundary_kind(data) {
+                SessionEvent::Turn { .. } => match ev.boundary_kind() {
                     Some("start") => {
-                        if let Some(turn) =
-                            data.get("turn").and_then(Value::as_u64)
-                        {
+                        if let Some(turn) = ev.boundary_turn() {
                             s.open_turn = Some(turn);
                             s.open_step = None;
                         }
@@ -124,12 +122,11 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                     }
                     _ => {}
                 },
-                SessionEvent::Step { data, .. } => match boundary_kind(data) {
+                SessionEvent::Step { .. } => match ev.boundary_kind() {
                     Some("start") => {
-                        if let (Some(turn), Some(step)) = (
-                            data.get("turn").and_then(Value::as_u64),
-                            data.get("step").and_then(Value::as_u64),
-                        ) {
+                        if let (Some(turn), Some(step)) =
+                            (ev.boundary_turn(), ev.boundary_step())
+                        {
                             s.open_step = Some((turn, step));
                         }
                     }
@@ -138,15 +135,10 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                     }
                     _ => {}
                 },
-                SessionEvent::ToolCall { data, .. } => {
-                    if let Some(call_id) =
-                        data.get("call_id").and_then(Value::as_str)
-                    {
-                        let name = data
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or("")
-                            .to_string();
+                SessionEvent::ToolCall { .. } => {
+                    if let Some(call_id) = ev.tool_call_id() {
+                        let name =
+                            ev.tool_call_name().unwrap_or("").to_string();
                         s.pending_calls.insert(
                             call_id.to_string(),
                             PendingCall {
@@ -232,16 +224,12 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                         }
                     }
                 }
-                SessionEvent::ToolResult { data, .. } => {
-                    // The row payload is the provider tool message:
-                    // its `tool_call_id` is the call it answers.
-                    // `call_id` is the legacy spelling a synthetic
-                    // closer or an older log uses.
-                    if let Some(call_id) = data
-                        .get("tool_call_id")
-                        .or_else(|| data.get("call_id"))
-                        .and_then(Value::as_str)
-                    {
+                SessionEvent::ToolResult { .. } => {
+                    // The row answers one call. The typed field
+                    // carries it; a synthetic closer or an older log
+                    // spells it `call_id` in the payload, and the
+                    // parser joins that spelling into the field.
+                    if let Some(call_id) = ev.tool_call_id() {
                         s.pending_calls.remove(call_id);
                     }
                 }
@@ -280,6 +268,7 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
             // failed: a reader that trusts the flag must not read
             // this as a call that returned.
             is_error: true,
+            tool_call_id: Some(call_id.clone()),
             surface_op: Some(SurfaceOp::append()),
         });
     }
@@ -293,6 +282,9 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                 "turn": turn,
                 "step": step,
             }),
+            kind: Some("end".to_string()),
+            turn: Some(turn),
+            step: Some(step),
         });
     }
     closers.push(SessionEvent::Turn {
@@ -303,6 +295,8 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
             "turn": turn,
             "reason": TURN_INTERRUPTED,
         }),
+        kind: Some("end".to_string()),
+        turn: Some(turn),
     });
     closers
 }
@@ -543,6 +537,7 @@ fn event_ts(ev: &SessionEvent) -> Option<&str> {
         | SessionEvent::CompactionSummary { ts, .. }
         | SessionEvent::CompactionEnd { ts, .. }
         | SessionEvent::ToolCall { ts, .. }
+        | SessionEvent::ToolOutput { ts, .. }
         | SessionEvent::Step { ts, .. }
         | SessionEvent::Turn { ts, .. }
         | SessionEvent::Iteration { ts, .. }
@@ -563,17 +558,10 @@ fn event_ts(ev: &SessionEvent) -> Option<&str> {
         | SessionEvent::ToolResultTransformed { ts, .. }
         | SessionEvent::ParkedPrompt { ts, .. }
         | SessionEvent::ParkConsumed { ts, .. }
+        | SessionEvent::Feedback { ts, .. }
         | SessionEvent::Plugin { ts, .. }
-        | SessionEvent::LifecycleShutdown { ts, .. } => Some(ts.as_str()),
+        | SessionEvent::SessionShutdown { ts, .. } => Some(ts.as_str()),
     }
-}
-
-// The loop writes `kind` on ordinary boundaries and `phase` on a
-// suspension's suspended/end rows; both spellings mark the boundary.
-fn boundary_kind(data: &Value) -> Option<&str> {
-    data.get("kind")
-        .or_else(|| data.get("phase"))
-        .and_then(Value::as_str)
 }
 
 #[cfg(test)]

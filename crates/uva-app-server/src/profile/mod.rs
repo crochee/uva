@@ -1,28 +1,39 @@
 //! Profile / Bundle / Patch assembly.
 //!
-//! A deployment describes its plugin graph in a profile TOML document:
+//! A deployment describes its plugin graph in a profile TOML document.
+//! The row shape is the dsh entry model: every row states its identity
+//! (`id`), the plugin it loads (`name`), its configuration, its
+//! enablement (`disabled`), its dependency declaration (`inject`), its
+//! interception config (`intercept`), and its service-scope isolation
+//! (`isolate`):
 //!
 //! ```toml
 //! hmr = true
 //!
-//! [core]
-//! entries = [
-//!   { id = "agent-loop", runtime = "native", config = {} },
-//!   { id = "llm-openai", runtime = "native", config = { model = "gpt-4o" } },
-//! ]
+//! [[core.entries]]
+//! id = "agent-loop"
+//! name = "agent-loop"
+//! inject = ["llm.default", "tools", "sessions", "events"]
 //!
-//! [ui]
-//! entries = [
-//!   { id = "theme", runtime = "ui-bundle", config = {} },
+//! [[core.entries]]
+//! id = "batch"
+//! group = true
+//! config = [
+//!   { id = "llm-openai", name = "model-adapter", config = { default_provider = "openai" } },
 //! ]
+//! isolate = { tools = "batch" }
 //! ```
 //!
 //! [`resolve`] stacks the layers (empty → bundle patch → profile patch →
 //! home patch → CLI overlay); a later layer replaces a row's `config`
-//! **whole**, never deep-merges it. [`dump`] renders the resolved tree
-//! deterministically, [`build_plugins`] maps each core row through the
-//! [`PluginFactories`] directory after validating its configuration
-//! against the factory manifest's `config_schema`, and
+//! **whole**, never deep-merges it. [`effective`] filters `disabled`
+//! subtrees. [`build_plugins`] maps each assembled core row through the
+//! [`PluginFactories`] directory (keyed by plugin `name`), resolves the
+//! row's **effective** dependency set — the plugin manifest's `inject`
+//! unioned with the row's, the row winning on a shared key — wraps
+//! group rows in the runtime group plugin, and returns mountable
+//! plugins with their per-row context derivations (isolation labels,
+//! intercept configs) for [`mount_all_with`](uva::kernel::mount_all_with).
 //! [`diff_profiles`] compares two resolutions so only affected fibers
 //! are remounted.
 //!
@@ -35,19 +46,18 @@
 //! [`BootContext`], so it can be tested without naming a concrete
 //! plugin.
 
+use serde_json::Value;
 use std::{
     any::Any,
     fmt::{self, Formatter},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
-
-use serde_json::Value;
 use uva::core::SharedClock;
+use uva::kernel::{Context, EffectHandle};
+use uva::kernel::{IsolateSpec, MountRow, mount_all_with};
+pub use uva::kernel::Realms;
 
-mod enabled;
-#[cfg(test)]
-mod enabled_tests;
 mod merge;
 mod model;
 mod store;
@@ -55,23 +65,20 @@ mod store;
 mod store_tests;
 mod watch;
 
-pub(crate) use enabled::KernelChecks;
-pub use enabled::{
-    CheckAnswer,
-    CheckSource,
-    EffectiveAssembly,
-    SkippedRow,
-    effective,
-    partition_waves,
+pub use merge::{
+    HOME_PATCH_ENV,
+    discover_home_patch,
+    project_document,
+    resolve,
+    resolve_files,
 };
-pub use merge::{HOME_PATCH_ENV, discover_home_patch, resolve, resolve_files};
 pub use model::{
     Capability,
-    EnableCheck,
-    Enabled,
-    Entry,
     EntryPatch,
+    IsolateLabel,
+    Manifest,
     Patch,
+    PatchInsert,
     Plugin,
     PluginError,
     PluginFactories,
@@ -80,6 +87,7 @@ pub use model::{
     ProfileError,
     ProfileSource,
     RuntimeKind,
+    Segment,
 };
 pub use store::{
     CapabilityAction,
@@ -92,13 +100,31 @@ pub use store::{
 };
 pub use watch::{ProfileDiff, ProfileWatcher, diff_profiles};
 
+/// The rows that will actually mount and render.
+///
+/// A `disabled` bit anywhere on the ancestor chain keeps the subtree
+/// out — dsh's `Entry#disabled` walk, decided before `build_plugins` /
+/// `mount_all` / `load_ui_tree`, so a disabled row never builds a
+/// plugin and a disabled UI row never reaches the frontend schema.
+/// Core group rows stay in (they mount as the runtime group plugin);
+/// UI group rows flatten away (the frontend projects rows and has no
+/// group plugin).
+#[must_use]
+pub fn effective(profile: &Profile) -> Profile {
+    Profile {
+        core: profile.core_rows().into_iter().cloned().collect(),
+        ui: profile.ui_rows().into_iter().cloned().collect(),
+        hmr: profile.hmr,
+    }
+}
+
 /// The host objects a factory may need while constructing a plugin.
 ///
 /// The concrete boot state (workspace root, provider catalogue, session
-/// registry, agent registry) lands here in Task 12. Until then the
-/// context carries the workspace root and an optional opaque host
-/// handle, which is enough for the factory directory and its tests to
-/// stay independent of the concrete plugin set.
+/// registry, agent registry) lands here. The context carries the
+/// workspace root and an optional opaque host handle, which is enough
+/// for the factory directory and its tests to stay independent of the
+/// concrete plugin set.
 pub struct BootContext {
     workspace_root: PathBuf,
     host: Option<Arc<dyn Any + Send + Sync>>,
@@ -133,9 +159,8 @@ impl BootContext {
         self
     }
 
-    /// Attach the process's one clock, so a factory building a
-    /// clocked plugin samples the same time source every other
-    /// component reads.
+    /// Attach the process's one clock, so a factory building a clocked
+    /// plugin samples the same time source every other component reads.
     #[must_use]
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
         self.clock = clock;
@@ -226,18 +251,19 @@ impl fmt::Debug for BootContext {
     }
 }
 
-/// The app-server's factory for one plugin id.
+/// The app-server's factory for one plugin name.
 ///
 /// A factory owns the knowledge the kernel must not have: how to turn a
 /// profile row into a concrete [`Plugin`]. The manifest it returns is
 /// the same value the kernel will read at mount time, so the profile
-/// loader and the kernel cannot disagree about `provides` / `inject`.
+/// loader and the kernel cannot disagree about `provides`.
 ///
 /// A factory may also mark top-level config fields as **volatile**: a
 /// change to only those fields updates the value the plugin reads next
 /// time without a remount.
 pub trait PluginFactory: Send + Sync {
-    /// The plugin id this factory builds.
+    /// The plugin name this factory builds (the directory key rows
+    /// reference through `name`).
     fn id(&self) -> &'static str;
 
     /// The manifest of the plugin this factory builds.
@@ -248,14 +274,13 @@ pub trait PluginFactory: Send + Sync {
     ///
     /// The capabilities are the profile row's grants, already parsed
     /// into kernel capability names; a factory whose plugin confines
-    /// itself by them (the Wasm loader) copies them into the plugin's
-    /// manifest.
+    /// itself by them copies them into the plugin's manifest.
     ///
     /// # Errors
     ///
     /// A construction failure is reported as [`PluginError`]; the
     /// profile loader wraps it in [`ProfileError::BuildFailed`] naming
-    /// the id.
+    /// the row.
     fn build(
         &self,
         config: &Value,
@@ -271,17 +296,29 @@ pub trait PluginFactory: Send + Sync {
     }
 }
 
-/// Build every core entry in `profile`, in assembly order.
+/// One plugin ready for the kernel, with its row's context derivation.
+pub struct Mounted {
+    /// The shell-wrapped plugin.
+    pub plugin: Arc<dyn Plugin>,
+    /// The per-row isolation and intercept derivation.
+    pub row: MountRow,
+}
+
+/// Build every assembled core row in `profile`, in document order.
 ///
-/// For each row: look the id up in `factories`, check the manifest's
-/// runtime and id agree with the row, reject a core-side `ui.` service
-/// key, validate `config` against the manifest's `config_schema`, then
-/// call [`PluginFactory::build`]. UI rows are not built here — the
-/// frontend loader reads them.
+/// For each row: look the plugin `name` up in `factories`, check the
+/// manifest's runtime fits the core segment, reject a core-side `ui.`
+/// service key (whether declared by the manifest, the row's `inject`,
+/// its `isolate` keys, or its `intercept` keys), resolve the
+/// **effective** dependency set — the manifest's `inject` unioned with
+/// the row's, the row winning on a shared key — then validate `config`
+/// against the manifest's `config_schema` and call
+/// [`PluginFactory::build`]. A group row skips the factory and mounts
+/// as the runtime group plugin with its recursively built children.
 ///
 /// The returned vector is ready for
-/// [`mount_all`](uva::kernel::mount_all); dependency ordering,
-/// cycle detection, and rollback stay the kernel's job.
+/// [`mount_all_with`](uva::kernel::mount_all_with); dependency
+/// ordering, cycle detection, and rollback stay the kernel's job.
 ///
 /// # Errors
 ///
@@ -292,62 +329,233 @@ pub fn build_plugins(
     profile: &Profile,
     factories: &PluginFactories,
     boot: &BootContext,
-) -> Result<Vec<Arc<dyn Plugin>>, ProfileError> {
+    realms: &Arc<Realms>,
+) -> Result<Vec<Mounted>, ProfileError> {
     profile.validate_unique()?;
-    let mut built = Vec::with_capacity(profile.core.len());
-    for entry in &profile.core {
-        built.push(build_one(entry, factories, boot)?);
+    let mut built = Vec::new();
+    for row in profile.core_rows() {
+        built.push(build_one(row, factories, boot, realms)?);
     }
     Ok(built)
 }
 
 fn build_one(
-    entry: &Entry,
+    row: &Manifest,
     factories: &PluginFactories,
     boot: &BootContext,
-) -> Result<Arc<dyn Plugin>, ProfileError> {
-    let factory = factories.get(&entry.id).ok_or_else(|| {
+    realms: &Arc<Realms>,
+) -> Result<Mounted, ProfileError> {
+    let context = row_context(row);
+    if row.group {
+        let mut children = Vec::new();
+        for child in &row.children {
+            // A disabled bit on the group or the child keeps the child
+            // out; the group itself still mounts (an empty group is
+            // observable nothing, dsh `Entry#disabled` walk).
+            for assembled in child.assembled(row.disabled) {
+                children.push(build_one(assembled, factories, boot, realms)?);
+            }
+        }
+        let plugin = GroupShell {
+            manifest: PluginManifest::new(row.id.clone(), "1.0"),
+            children,
+            realms: Arc::clone(realms),
+            children_handle: Mutex::new(None),
+        };
+        return Ok(Mounted {
+            plugin: Arc::new(plugin),
+            row: context,
+        });
+    }
+    let factory = factories.get(&row.name).ok_or_else(|| {
         ProfileError::UnknownPluginId {
-            id: entry.id.clone(),
+            id: row.id.clone(),
+            name: row.name.clone(),
             known: factories.ids(),
         }
     })?;
-    let manifest = factory.manifest();
-    if manifest.id != entry.id {
-        return Err(ProfileError::ManifestIdMismatch {
-            entry: entry.id.clone(),
-            manifest: manifest.id,
+    let mut manifest = factory.manifest();
+    if manifest.runtime != RuntimeKind::Native {
+        return Err(ProfileError::SegmentMismatch {
+            id: row.id.clone(),
+            segment: "core",
+            manifest: runtime_name(manifest.runtime),
         });
     }
-    if manifest.runtime != entry.runtime {
-        return Err(ProfileError::RuntimeMismatch {
-            id: entry.id.clone(),
-            entry: model::runtime_name(entry.runtime).to_owned(),
-            manifest: model::runtime_name(manifest.runtime).to_owned(),
-        });
+    // The shell's manifest id is the ROW id: fibers are correlated with
+    // document rows by id (the runtime write-back depends on it).
+    manifest.id = row.id.clone();
+    manifest.inject = effective_inject(&manifest.inject, row.inject.as_deref());
+    let mut service_keys: Vec<&String> = manifest
+        .provides
+        .iter()
+        .chain(manifest.inject.iter())
+        .collect();
+    if let Some(isolate) = &row.isolate {
+        service_keys.extend(isolate.keys());
     }
-    for key in manifest.provides.iter().chain(manifest.inject.iter()) {
+    if let Some(intercept) = &row.intercept {
+        service_keys.extend(intercept.keys());
+    }
+    for key in service_keys {
         if key.starts_with(uva::kernel::UI_PREFIX) {
             return Err(ProfileError::NamespaceViolation {
-                id: entry.id.clone(),
+                id: row.id.clone(),
                 key: key.clone(),
             });
         }
     }
     if let Some(schema) = &manifest.config_schema {
-        validate_config(&entry.config, schema).map_err(|message| {
+        validate_config(&row.config, schema).map_err(|message| {
             ProfileError::InvalidConfig {
-                id: entry.id.clone(),
+                id: row.id.clone(),
                 message,
             }
         })?;
     }
-    factory
-        .build(&entry.config, &entry.capabilities, boot)
+    let inner = factory
+        .build(&row.config, &row.capabilities, boot)
         .map_err(|error| ProfileError::BuildFailed {
-            id: entry.id.clone(),
+            id: row.id.clone(),
             message: error.to_string(),
-        })
+        })?;
+    Ok(Mounted {
+        plugin: Arc::new(ManifestShell { inner, manifest }),
+        row: context,
+    })
+}
+
+/// The per-row context derivation: isolation scopes and intercept
+/// overlays, in kernel terms.
+fn row_context(row: &Manifest) -> MountRow {
+    MountRow {
+        isolate: row
+            .isolate
+            .as_ref()
+            .map(|map| {
+                map.iter()
+                    .map(|(service, label)| {
+                        let spec = match label {
+                            IsolateLabel::Local => IsolateSpec::Local,
+                            IsolateLabel::Shared(label) => {
+                                IsolateSpec::Shared(label.clone())
+                            }
+                        };
+                        (service.clone(), spec)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        intercept: row
+            .intercept
+            .as_ref()
+            .map(|map| {
+                map.iter()
+                    .map(|(service, config)| (service.clone(), config.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// Resolve a row's effective dependency set.
+///
+/// The plugin manifest's own `inject` comes first, then the row's extra
+/// keys in declaration order; a key present in both keeps the row's
+/// position last. Nothing is ever removed — the document can only
+/// widen a plugin's dependencies, dsh's `Inject.resolve` union.
+#[must_use]
+pub(crate) fn effective_inject(
+    factory: &[String],
+    row: Option<&[String]>,
+) -> Vec<String> {
+    let mut merged = factory.to_vec();
+    if let Some(row) = row {
+        for key in row {
+            if let Some(position) = merged.iter().position(|seen| seen == key) {
+                merged.remove(position);
+            }
+            merged.push(key.clone());
+        }
+    }
+    merged
+}
+
+/// A built plugin wrapped with the document's dependency declaration.
+///
+/// The kernel reads everything — validation, ordering, the fiber's
+/// inject map — through [`Plugin::manifest`], so the shell is the one
+/// place the resolved manifest exists; `apply` delegates to the inner
+/// plugin untouched.
+struct ManifestShell {
+    /// The factory-built plugin.
+    inner: Arc<dyn Plugin>,
+    /// The factory manifest with the row's `inject` unioned in and the
+    /// row id as its id.
+    manifest: PluginManifest,
+}
+
+impl Plugin for ManifestShell {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
+        self.inner.apply(ctx)
+    }
+}
+
+/// A group row's runtime plugin: mounts its children beneath its own
+/// fiber, dsh's `Group`.
+///
+/// The children were built through the same factory pipeline (shells
+/// included), so every kernel guarantee — manifests, validation,
+/// rollback, parking — applies to them exactly as it does to top-level
+/// rows. Unloading the group's fiber unloads the subtree.
+struct GroupShell {
+    /// Minimal group manifest: the group itself provides and requires
+    /// nothing; its children declare their own edges.
+    manifest: PluginManifest,
+    /// The recursively built children with their context derivations.
+    children: Vec<Mounted>,
+    /// The process-wide label registry, so shared isolation labels
+    /// stay stable across mounts and remounts.
+    realms: Arc<Realms>,
+    /// The children's mount ownership. Held here so the subtree lives
+    /// exactly as long as the group's plugin (and therefore its
+    /// fiber): when the fiber disposes, the shell drops with it and
+    /// the children unload in reverse.
+    children_handle: Mutex<Option<uva::kernel::MountHandle>>,
+}
+
+impl Plugin for GroupShell {
+    fn manifest(&self) -> &PluginManifest {
+        &self.manifest
+    }
+
+    fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
+        let rows: Vec<(Arc<dyn Plugin>, MountRow)> = self
+            .children
+            .iter()
+            .map(|mounted| (Arc::clone(&mounted.plugin), mounted.row.clone()))
+            .collect();
+        let children_handle = mount_all_with(ctx, &self.realms, &rows)
+            .map_err(|error| PluginError::new(error.to_string()))?;
+        self.children_handle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace(children_handle);
+        Ok(Vec::new())
+    }
+}
+
+/// The wire name of a runtime.
+#[must_use]
+pub(crate) fn runtime_name(runtime: RuntimeKind) -> &'static str {
+    match runtime {
+        RuntimeKind::Native => "native",
+        RuntimeKind::UiBundle => "ui-bundle",
+    }
 }
 
 /// Validate `config` against the supported subset of JSON Schema.
@@ -474,12 +682,12 @@ fn check_additional(
 
 /// Render a resolved profile as stable, pretty JSON.
 ///
-/// This is the manifest-free view: each row's `id`, `runtime`,
-/// `capabilities`, final `config`, and optional `source`. It is
-/// byte-identical for the same input: entries keep their assembly order
-/// and object keys are sorted at every depth.
+/// This is the manifest-free view: each row's `id`, `name`,
+/// `capabilities`, final `config`, `disabled`, `inject`, `intercept`,
+/// and `isolate`. It is byte-identical for the same input: rows keep
+/// their document order and object keys are sorted at every depth.
 ///
-/// [`dump_with_manifests`] adds the manifest-level `provides` / `inject`
+/// [`dump_with_manifests`] adds the effective `provides` / `inject`
 /// lists; use it for `--dump-config` once the factory directory is
 /// populated.
 #[must_use]
@@ -487,34 +695,19 @@ pub fn dump(profile: &Profile) -> String {
     render(profile, None)
 }
 
-/// Render the resolved tree with each core row's manifest services.
+/// Render the resolved tree with each core row's effective services.
 ///
-/// `provides` and `inject` come from the factory manifest, so the dump
-/// shows what the kernel will actually order and bind. A core row whose
-/// id has no registered factory prints explicit empty lists rather than
-/// omitting the fields (the boot registers factories in Task 12); UI
-/// rows have no core factory and also print empty lists.
-///
-/// # Errors
-///
-/// Returns [`ProfileError::ManifestIdMismatch`] when a registered
-/// factory's manifest names a different id than the row it is bound to.
+/// `provides` comes from the factory manifest and `inject` is the
+/// resolved union (factory manifest ∪ row declaration), so the dump
+/// shows what the kernel will actually order and bind. A core row
+/// whose name has no registered factory prints explicit empty lists
+/// rather than omitting the fields; UI rows have no core factory and
+/// also print empty lists.
 pub fn dump_with_manifests(
     profile: &Profile,
     factories: &PluginFactories,
-) -> Result<String, ProfileError> {
-    for entry in &profile.core {
-        if let Some(factory) = factories.get(&entry.id) {
-            let manifest = factory.manifest();
-            if manifest.id != entry.id {
-                return Err(ProfileError::ManifestIdMismatch {
-                    entry: entry.id.clone(),
-                    manifest: manifest.id,
-                });
-            }
-        }
-    }
-    Ok(render(profile, Some(factories)))
+) -> String {
+    render(profile, Some(factories))
 }
 
 fn render(profile: &Profile, factories: Option<&PluginFactories>) -> String {
@@ -531,7 +724,7 @@ fn render(profile: &Profile, factories: Option<&PluginFactories>) -> String {
 
 fn dump_entries(
     out: &mut String,
-    entries: &[Entry],
+    entries: &[Manifest],
     indent: usize,
     factories: Option<&PluginFactories>,
 ) {
@@ -544,11 +737,10 @@ fn dump_entries(
     out.push_str("[\n");
     for (index, entry) in entries.iter().enumerate() {
         // `Some(None)` means "manifests were requested and this row has
-        // no factory": print explicit empty lists. `None` means the
-        // manifest-free dump, which omits the fields entirely.
-        let services = factories.map(|factories| {
-            factories.get(&entry.id).map(|factory| factory.manifest())
-        });
+        // no factory": print the row's own declaration. `None` means
+        // the manifest-free dump, which omits the fields entirely.
+        let services = factories
+            .map(|factories| factories.get(&entry.name).map(|f| f.manifest()));
         out.push_str(&entry_pad);
         out.push_str("{\n");
         let mut first = true;
@@ -556,8 +748,14 @@ fn dump_entries(
         out.push_str("\"id\": ");
         out.push_str(&json_string(&entry.id));
         begin_field(out, &field_pad, &mut first);
-        out.push_str("\"runtime\": ");
-        out.push_str(&json_string(model::runtime_name(entry.runtime)));
+        out.push_str("\"name\": ");
+        out.push_str(&json_string(&entry.name));
+        begin_field(out, &field_pad, &mut first);
+        out.push_str("\"group\": ");
+        out.push_str(if entry.group { "true" } else { "false" });
+        begin_field(out, &field_pad, &mut first);
+        out.push_str("\"disabled\": ");
+        out.push_str(if entry.disabled { "true" } else { "false" });
         begin_field(out, &field_pad, &mut first);
         out.push_str("\"capabilities\": ");
         write_json(
@@ -573,16 +771,50 @@ fn dump_entries(
         );
         begin_field(out, &field_pad, &mut first);
         out.push_str("\"config\": ");
-        write_json(out, &entry.config, indent + 4);
-        if entry.enabled != crate::profile::Enabled::On {
+        if entry.group {
+            dump_entries(out, &entry.children, indent + 4, factories);
+        } else {
+            write_json(out, &entry.config, indent + 4);
+        }
+        // With factories available the effective union subsumes the
+        // row's declaration and is printed once, inside the services
+        // block below; the manifest-free dump prints the row's own.
+        if services.is_none()
+            && let Some(inject) = &entry.inject
+        {
             begin_field(out, &field_pad, &mut first);
-            out.push_str("\"enabled\": ");
+            out.push_str("\"inject\": ");
             write_json(
                 out,
-                &serde_json::to_value(&entry.enabled)
-                    .unwrap_or(Value::Bool(true)),
+                &Value::Array(inject.iter().map(|key| Value::String(key.clone())).collect()),
                 indent + 4,
             );
+        }
+        if let Some(intercept) = &entry.intercept {
+            begin_field(out, &field_pad, &mut first);
+            out.push_str("\"intercept\": ");
+            write_json(
+                out,
+                &serde_json::to_value(intercept).unwrap_or(Value::Null),
+                indent + 4,
+            );
+        }
+        if let Some(isolate) = &entry.isolate {
+            begin_field(out, &field_pad, &mut first);
+            out.push_str("\"isolate\": ");
+            let wire: serde_json::Map<String, Value> = isolate
+                .iter()
+                .map(|(service, label)| {
+                    let value = match label {
+                        IsolateLabel::Local => Value::Bool(true),
+                        IsolateLabel::Shared(label) => {
+                            Value::String(label.clone())
+                        }
+                    };
+                    (service.clone(), value)
+                })
+                .collect();
+            write_json(out, &Value::Object(wire), indent + 4);
         }
         if let Some(manifest) = &services {
             let provides = manifest
@@ -602,6 +834,7 @@ fn dump_entries(
                 .as_ref()
                 .map(|manifest| manifest.inject.clone())
                 .unwrap_or_default();
+            let inject = effective_inject(&inject, entry.inject.as_deref());
             begin_field(out, &field_pad, &mut first);
             out.push_str("\"inject\": ");
             write_json(

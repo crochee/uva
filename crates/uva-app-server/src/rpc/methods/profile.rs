@@ -11,10 +11,10 @@ use serde_json::Value;
 
 use super::{parse, parse_raw};
 use crate::{
+    api::v1::profile::ProfileChange,
     profile::{
         CapabilityAction,
         CapabilityDomain,
-        Enabled,
         ProfileAction,
         RowEdit,
     },
@@ -22,6 +22,10 @@ use crate::{
 };
 
 /// Register the profile methods.
+///
+/// The responses are named types ([`ProfileRow`](crate::api::v1::profile::ProfileRow)
+/// for the two reads, [`ProfileChange`] for the three writes), not
+/// bare JSON: the schema emitter derives a schema from them.
 pub fn register(router: &mut RpcRouter) {
     router.register("profile/list", |state, _raw| async move {
         encode(state.profile_rows())
@@ -38,22 +42,24 @@ pub fn register(router: &mut RpcRouter) {
     });
     router.register("profile/set", |state, raw| async move {
         let params: SetParams = parse_raw(raw)?;
-        if params.enabled.is_none() && params.config.is_none() {
+        if params.disabled.is_none() && params.config.is_none() {
             return Err(RpcError::protocol(
                 crate::rpc::INVALID_PARAMS,
-                "profile/set requires `enabled` and/or `config`",
+                "profile/set requires `disabled` and/or `config`",
             ));
         }
         let edit = RowEdit::Set {
             id: params.id,
-            enabled: params.enabled,
+            disabled: params.disabled,
             config: params.config,
         };
-        encode(state.profile_apply("ui", ProfileAction::Edit(edit)).await)
+        encode(ProfileChange::from(
+            state.profile_apply("ui", ProfileAction::Edit(edit)).await,
+        ))
     });
     router.register("profile/create", |state, raw| async move {
         let params: CreateParams = parse_raw(raw)?;
-        encode(
+        encode(ProfileChange::from(
             state
                 .profile_apply(
                     "ui",
@@ -63,11 +69,11 @@ pub fn register(router: &mut RpcRouter) {
                     }),
                 )
                 .await,
-        )
+        ))
     });
     router.register("profile/delete", |state, raw| async move {
         let params: DeleteParams = parse_raw(raw)?;
-        encode(
+        encode(ProfileChange::from(
             state
                 .profile_apply(
                     "ui",
@@ -77,7 +83,7 @@ pub fn register(router: &mut RpcRouter) {
                     }),
                 )
                 .await,
-        )
+        ))
     });
 }
 
@@ -87,12 +93,12 @@ struct IdParams {
     id: String,
 }
 
-/// `{"id": "...", "enabled"?: ..., "config"?: {...}}`.
+/// `{"id": "...", "disabled"?: ..., "config"?: {...}}`.
 #[derive(Deserialize)]
 struct SetParams {
     id: String,
     #[serde(default)]
-    enabled: Option<Enabled>,
+    disabled: Option<bool>,
     #[serde(default)]
     config: Option<Value>,
 }
@@ -126,12 +132,12 @@ mod tests {
             dir.to_path_buf(),
         )
         .await;
-        state.profile_store = Some(ProfileStore {
+        state.assembly.set_store(Some(ProfileStore {
             bundle: None,
             doc: dir.join("profile.toml"),
             home: None,
             overlay: None,
-        });
+        }));
         Arc::new(state)
     }
 
@@ -200,6 +206,116 @@ mod tests {
         assert!(
             dir.path().join("profile.toml").exists(),
             "the transaction commits the document"
+        );
+    }
+
+    /// The row's wire shape is the settings page's contract: it reads
+    /// these fields by name, so an added, removed, or renamed field is
+    /// a breaking change.
+    #[tokio::test]
+    async fn a_row_keeps_the_shape_the_settings_page_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path()).await;
+        let router = router();
+        let got = call(
+            &router,
+            state,
+            "1",
+            "profile/get",
+            json!({ "id": "skills" }),
+        )
+        .await;
+        let row = got["result"].as_object().expect("a row object");
+        let mut keys: Vec<&str> = row.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "config",
+                "enabled",
+                "id",
+                "plugin_state",
+                "runtime",
+                "segment",
+                "status",
+            ]
+        );
+        assert_eq!(row["id"], "skills");
+        assert_eq!(row["segment"], "core");
+        assert_eq!(row["runtime"], "native");
+        assert_eq!(row["enabled"], true);
+        assert_eq!(row["status"], "mounted");
+    }
+
+    /// The receipt's wire shape: the four states, the reasons, and the
+    /// diff the mount produced.
+    #[tokio::test]
+    async fn a_receipt_keeps_the_shape_the_settings_page_renders() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path()).await;
+        let router = router();
+        let answer = call(
+            &router,
+            state,
+            "1",
+            "profile/set",
+            json!({ "id": "skills", "enabled": false }),
+        )
+        .await;
+        let receipt = answer["result"].as_object().expect("a receipt");
+        let mut keys: Vec<&str> = receipt.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["diff", "reasons", "state"]);
+        assert_eq!(receipt["state"], "applied");
+        assert!(receipt["reasons"].is_array(), "{receipt:?}");
+        assert_eq!(receipt["diff"]["removed"], json!(["skills"]));
+    }
+
+    /// A capability write answers with the same receipt, minus the
+    /// diff: it changes files, not the assembly.
+    #[tokio::test]
+    async fn a_capability_write_answers_with_the_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path()).await;
+        let router = router();
+        let answer = call(
+            &router,
+            state,
+            "1",
+            "profile/create",
+            json!({ "domain": "agent", "definition": { "name": "x" } }),
+        )
+        .await;
+        let receipt = answer["result"].as_object().expect("a receipt");
+        let mut keys: Vec<&str> = receipt.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["reasons", "state"]);
+        assert_eq!(receipt["state"], "failed");
+    }
+
+    /// `profile/delete` answers with the same receipt.
+    #[tokio::test]
+    async fn a_delete_answers_with_the_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path()).await;
+        let router = router();
+        let answer = call(
+            &router,
+            state,
+            "1",
+            "profile/delete",
+            json!({ "domain": "agent", "id": "nobody" }),
+        )
+        .await;
+        let receipt = answer["result"].as_object().expect("a receipt");
+        let mut keys: Vec<&str> = receipt.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["reasons", "state"]);
+        let state = receipt["state"].as_str().expect("a state");
+        assert!(
+            ["applied", "restart-required", "overridden", "failed"]
+                .contains(&state),
+            "{receipt:?}"
         );
     }
 

@@ -23,50 +23,28 @@
  * wire rename lands here once.
  */
 import { rpc, type Unsubscribe } from './rpc';
+import type { ProfileChange, ProfileChangedEvent, ProfileRow } from './types';
 
-/** One row of the resolved profile, as `profile/list` returns it. */
-export interface ProfileRow {
-  id: string;
-  /** Which assembly segment the row sits in. */
-  segment: 'core' | 'ui';
-  /** Loader kind: `native` / `ui-bundle` / … */
-  runtime: string;
-  /** `true` / `false`, or a plugin-delegated check (D39). */
-  enabled: boolean | ProfileEnableCheck;
-  config: unknown;
-  /** `mounted`, or `off: <reason>` when the assembly skipped it. */
-  status: string;
-  /** Kernel plugin state, when the row is mounted. */
-  plugin_state?: string | null;
-}
-
-/** `enabled = { service = "…", check = "…", arg = "…" }` — a plugin
- *  answers whether the row assembles. */
-export interface ProfileEnableCheck {
-  service: string;
-  check: string;
-  arg?: unknown;
-}
-
-export type ProfileChangeState = 'applied' | 'restart-required' | 'overridden' | 'failed';
-
-/** The transaction's report (D37). */
-export interface ProfileChange {
-  state: ProfileChangeState;
-  reasons: string[];
-}
+/**
+ * The profile wire types are generated: `ProfileRow`,
+ * `ProfileEnableCheck`, `ProfileChange`, `ProfileChangeState` and
+ * `ProfileChangedEvent` are derived from
+ * `crates/uva-app-server/src/api/v1/profile.rs`, so a rename there is a
+ * rename here and the emitter's gate catches a drift. They are
+ * re-exported because this module is the settings surface's single entry
+ * point.
+ */
+export type {
+  ProfileChange,
+  ProfileChangeState,
+  ProfileChangedEvent,
+  ProfileEnableCheck,
+  ProfileRow,
+} from './types';
 
 /** The two capability domains `profile/create` / `profile/delete`
  *  accept (D28). */
 export type CapabilityDomain = 'agent' | 'skill';
-
-/** The `profile/changed` broadcast's payload. */
-export interface ProfileChangedEvent {
-  actor: string;
-  state: ProfileChangeState;
-  ids: string[];
-  at: string | null;
-}
 
 const METHOD = {
   list: 'profile/list',

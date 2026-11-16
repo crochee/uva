@@ -14,10 +14,12 @@ use std::{
     time::SystemTime,
 };
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::model::{Entry, PluginFactories, Profile};
+use super::effective_inject;
+use super::model::{Manifest, PluginFactories, Profile};
 
 /// One file's identity for polling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,16 +92,18 @@ fn stamp(path: &Path) -> io::Result<Option<FileStamp>> {
 /// What changed between two resolved profiles, and therefore which
 /// fibers a running process must remount.
 ///
-/// `added`, `removed`, and `remounted` name **core** ids only: a UI
-/// bundle change is the frontend loader's concern and never remounts a
-/// core fiber.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+/// `added`, `removed`, and `remounted` name **core** unit ids only: a
+/// UI bundle change is the frontend loader's concern and never remounts
+/// a core fiber.
+#[derive(
+    Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
 pub struct ProfileDiff {
     /// Ids present in the new assembly but not the old one.
     pub added: Vec<String>,
     /// Ids present in the old assembly but not the new one.
     pub removed: Vec<String>,
-    /// Ids whose non-volatile configuration or runtime changed.
+    /// Ids whose declaration or non-volatile configuration changed.
     pub remounted: Vec<String>,
     /// Ids whose only configuration change was in a volatile field.
     pub volatile_changed: Vec<String>,
@@ -121,11 +125,16 @@ impl ProfileDiff {
 
 /// Diff two resolved profiles.
 ///
-/// Only ids whose effective configuration changed appear in
+/// The diff's unit is the **top-level row** (a `group` row and its
+/// whole subtree count as one unit): children mount beneath their
+/// group's fiber, so any change inside a subtree remounts the group.
+/// Only units whose effective configuration changed appear in
 /// `remounted`; a change confined to a factory's
-/// [`volatile_fields`](super::PluginFactory::volatile_fields) appears in
-/// `volatile_changed` instead, because the plugin reads the new value on
-/// its next access without being torn down.
+/// [`volatile_fields`](super::PluginFactory::volatile_fields) appears
+/// in `volatile_changed` instead, because the plugin reads the new
+/// value on its next access without being torn down. The volatile
+/// fast path applies to plain top-level rows only — a config change
+/// inside a group always remounts the group, whose children it owns.
 ///
 /// When the new profile disables HMR, the diff reports
 /// `restart_required` and empty id lists: a running process does not
@@ -140,15 +149,15 @@ pub fn diff_profiles(
 ) -> ProfileDiff {
     let mut diff = ProfileDiff::default();
 
-    for entry in &next.core {
-        match find(&previous.core, &entry.id) {
-            None => diff.added.push(entry.id.clone()),
-            Some(old) => classify(old, entry, factories, &mut diff),
+    for unit in next.core_rows() {
+        match find(previous, &unit.id) {
+            None => diff.added.push(unit.id.clone()),
+            Some(old) => classify(old, unit, factories, &mut diff),
         }
     }
-    for entry in &previous.core {
-        if find(&next.core, &entry.id).is_none() {
-            diff.removed.push(entry.id.clone());
+    for unit in previous.core_rows() {
+        if find(next, &unit.id).is_none() {
+            diff.removed.push(unit.id.clone());
         }
     }
 
@@ -171,12 +180,15 @@ pub fn diff_profiles(
 /// would pin the withdrawn value for the rest of the process's life.
 /// Every previous row that injects a key a **remounted** row provides
 /// joins `remounted` (never `added` — the row never left the profile),
-/// and the closure repeats over the newly pulled rows.
+/// and the closure repeats over the newly pulled rows. The graph is
+/// the **effective** one — each row's factory manifest unioned with
+/// its `inject` declaration — for top-level rows and group children
+/// alike.
 ///
 /// Removals do **not** cascade: unloading the provider withdraws its
 /// services, and the kernel parks the injectors itself; they must not
 /// be rebuilt (a rebuild would mount a dependent with no provider and
-/// fail the group, taking the removal's rollback down with it).
+/// pend, and the removal's rollback must stay clean).
 fn cascade_remounts(
     previous: &Profile,
     factories: &PluginFactories,
@@ -184,21 +196,19 @@ fn cascade_remounts(
 ) {
     use std::collections::{HashMap, HashSet, VecDeque};
 
-    // The service graph as the previous assembly declared it: what
-    // each mounted row provides, and which rows inject which keys.
+    // The effective service graph as the previous assembly declared
+    // it: what each mounted row provides, and which rows inject which
+    // keys.
     let mut provides_of: HashMap<String, Vec<String>> = HashMap::new();
     let mut injectors_of: HashMap<String, Vec<String>> = HashMap::new();
-    for entry in &previous.core {
-        let Some(factory) = factories.get(&entry.id) else {
+    for row in previous.all_rows() {
+        let Some(factory) = factories.get(&row.name) else {
             continue;
         };
         let manifest = factory.manifest();
-        provides_of.insert(entry.id.clone(), manifest.provides.clone());
-        for key in &manifest.inject {
-            injectors_of
-                .entry(key.clone())
-                .or_default()
-                .push(entry.id.clone());
+        provides_of.insert(row.id.clone(), manifest.provides.clone());
+        for key in effective_inject(&manifest.inject, row.inject.as_deref()) {
+            injectors_of.entry(key).or_default().push(row.id.clone());
         }
     }
 
@@ -223,24 +233,39 @@ fn cascade_remounts(
     }
 }
 
-fn find<'a>(entries: &'a [Entry], id: &str) -> Option<&'a Entry> {
-    entries.iter().find(|entry| entry.id == id)
+fn find<'a>(profile: &'a Profile, id: &str) -> Option<&'a Manifest> {
+    profile
+        .core
+        .iter()
+        .find(|row| row.id == id)
+        .or_else(|| profile.ui.iter().find(|row| row.id == id))
 }
 
+/// Classify one unit: unchanged, volatile-only, or a remount.
+///
+/// A structural change anywhere — name, capabilities, `disabled`,
+/// `inject`, `intercept`, `isolate`, or (for a group) any difference in
+/// the child subtree — remounts the unit. A config-only change on a
+/// plain row may be volatile.
 fn classify(
-    old: &Entry,
-    new: &Entry,
+    old: &Manifest,
+    new: &Manifest,
     factories: &PluginFactories,
     diff: &mut ProfileDiff,
 ) {
-    if old.runtime != new.runtime || old.capabilities != new.capabilities {
+    if structural_change(old, new)
+        || (old.group && old.children != new.children)
+    {
         diff.remounted.push(new.id.clone());
+        return;
+    }
+    if old.group {
         return;
     }
     if equivalent(&old.config, &new.config) {
         return;
     }
-    let volatile = factories.volatile_fields(&new.id);
+    let volatile = factories.volatile_fields(&new.name);
     if equivalent(
         &masked(&old.config, volatile),
         &masked(&new.config, volatile),
@@ -249,6 +274,17 @@ fn classify(
     } else {
         diff.remounted.push(new.id.clone());
     }
+}
+
+/// Whether a row's declaration changed in a way only a remount can
+/// apply.
+fn structural_change(old: &Manifest, new: &Manifest) -> bool {
+    old.name != new.name
+        || old.capabilities != new.capabilities
+        || old.disabled != new.disabled
+        || old.inject != new.inject
+        || old.intercept != new.intercept
+        || old.isolate != new.isolate
 }
 
 /// Whether two configurations mean the same thing.

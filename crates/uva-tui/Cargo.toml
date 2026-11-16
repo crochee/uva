@@ -54,8 +54,16 @@ thiserror.workspace = true
 # The one local action (copy an id) reaches the terminal's clipboard
 # through OSC 52, whose payload is base64.
 base64.workspace = true
+# The one-line truncation rule the transcript's tool lines use: the
+# workspace's canonical character-boundary truncator. The `…` marker
+# and the limit stay here, where the rendering lives.
+uva-core.workspace = true
 
 [dev-dependencies]
+# The row-accounting test iterates the session wire vocabulary's
+# source of truth; the projection itself stays a client of the wire
+# and never links against the session crate in production code.
+uva-session = { workspace = true }
 # The tests run against an in-process WebSocket gateway, so they need
 # the axum the gateway crate's own tests use; `net` covers the test
 # server's listener, `sync` the notification broadcast.

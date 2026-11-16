@@ -1,8 +1,9 @@
 //! Panic isolation for the loop's pluggable seams: [`caught`] for the synchronous seams, [`catching_panics`] for the `async` ones, and [`isolate`] layering the common "report it and carry on" recovery on top.
 use futures::FutureExt;
 use tracing::warn;
+use uva_events::WarningKind;
 
-use crate::{agent::sink::EventSink, events::WarningKind};
+use crate::agent::sink::EventSink;
 
 /// Convert a panic in `fut` into `Err(message)` — a seam panic must
 /// not kill the run's task silently. `AssertUnwindSafe` is sound:

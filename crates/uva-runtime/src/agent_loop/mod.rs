@@ -22,13 +22,26 @@
 //! providers without a compactor, exactly like the old per-run
 //! composition did.
 //!
-//! # The delegation backend
+//! # The task tool is not a service
 //!
-//! The `task` delegator is a **service**, not a boot-built object:
-//! the `subagent-backend` row publishes it under
-//! [`KEY_SUBAGENTS`] and the
-//! `agent-loop` row resolves it at mount, so the kernel orders the
-//! two rows and a remount of the backend reaches the loop.
+//! Delegation is an ordinary tool brick (`tool-task`) that the boot
+//! mounts into the tool registry; the loop has no delegation edge.
+//!
+//! # The hook registry
+//!
+//! The external hook registry is a service too: the `hooks` row
+//! publishes [`uva_hook::KEY_HOOKS`] and this row resolves it at
+//! mount into the defaults, which `ServerAgentLoop::create` hands
+//! to every run's [`uva_harness::seams::Seams`].
+//!
+//! The lookup is **opportunistic** (`ctx.get`), not an `inject` edge:
+//! the kernel validates `inject` keys statically and refuses the whole
+//! group when a provider is absent, so an edge here would make the
+//! `hooks` row mandatory — a profile document written before the row
+//! existed, or one that switches it off, would fail at boot with no
+//! way back in. Without the service the loop simply runs with no
+//! external registrations. The native profile still lists `hooks`
+//! before `agent-loop`, so the row mounts first when it is there.
 
 use std::{sync::Arc, time::Duration};
 
@@ -36,7 +49,6 @@ use uva_harness::plugin::{AgentLoopFactory, RunConfig};
 use uva_kernel::{Context, PluginError};
 use uva_provider::{ModelProvider, plugin::KEY_LLM_DEFAULT};
 use uva_session::{CompactionSettings, Compactor, SummaryCompactor};
-use uva_tool_plugins::task::KEY_SUBAGENTS;
 
 /// The policy a fresh per-run compactor is built from when a run
 /// names an explicit provider.
@@ -57,11 +69,6 @@ pub struct CompactionBoot {
 /// rebuilding the defaults.
 #[derive(Clone, Default)]
 pub struct AgentLoopDefaults {
-    /// Delegating tools (the `task` delegator); a run that installs
-    /// none gets these. The plugin appends the `subagents` service
-    /// it resolves, so the deployment's delegation backend is one of
-    /// them.
-    pub delegators: Vec<Arc<dyn uva_harness::DelegatingTool>>,
     /// Deployment `[tools]` surface policy.
     pub tool_surface: Option<uva_tool::ToolSurfacePolicy>,
     /// Deployment reasoning loop.
@@ -69,14 +76,15 @@ pub struct AgentLoopDefaults {
     /// Deployment allow/deny list.
     pub tool_restriction: Option<Arc<uva_tool::ToolRestriction>>,
     /// The session's one writer; `None` keeps the run's own.
-    pub log_writer: Option<Arc<uva_session::LogWriter>>,
-    /// Writer source for this agent's delegated children.
-    pub subagent_writers: Option<Arc<dyn uva_harness::SubagentWriters>>,
+    pub log_writer: Option<Arc<dyn uva_session::SessionLog>>,
     /// The deployment's one context manager (request-level
     /// truncation); `None` keeps the run's own.
     pub context_manager: Option<Arc<dyn uva_context::ContextManager>>,
     /// The deployment's plugin host.
     pub host: Option<uva_harness::Host>,
+    /// The deployment's external hook registry, resolved from the
+    /// mounted `hooks` service at mount time.
+    pub hooks: Option<uva_hook::HookRegistry>,
     /// Where the run's detached work executes.
     pub spawner: Option<Arc<dyn uva_core::spawn::Spawner>>,
     /// The policy a per-run compactor is built from when the run
@@ -121,17 +129,17 @@ fn build_loop(
     })
 }
 
-/// The delegation backend the `subagent-backend` row published, when
-/// it is mounted.
+/// The external hook registry the `hooks` row published, when it is
+/// mounted.
 ///
-/// The service value is an `Arc` around the trait object (the kernel's
-/// `provide` is sized), so one deref is the delegator itself.
-fn subagents_delegator(
+/// The row publishes an `Arc<HookRegistry>` (the registry itself is
+/// cheap to clone and shares one table), so the loop keeps its own
+/// clone and the plugin's provenance is irrelevant.
+fn hooks_registry(
     ctx: &Context,
-) -> Result<Option<Arc<dyn uva_harness::DelegatingTool>>, PluginError> {
-    let backend =
-        ctx.get::<Arc<dyn uva_harness::DelegatingTool>>(KEY_SUBAGENTS)?;
-    Ok(backend.map(|backend| Arc::clone(&*backend)))
+) -> Result<Option<uva_hook::HookRegistry>, PluginError> {
+    let registry = ctx.get::<uva_hook::HookRegistry>(uva_hook::KEY_HOOKS)?;
+    Ok(registry.map(|registry| (*registry).clone()))
 }
 
 /// The mounted `agent-loop` factory: one per deployment, rebuilt by a
@@ -146,7 +154,15 @@ pub(crate) struct ServerAgentLoop {
 
 impl AgentLoopFactory for ServerAgentLoop {
     fn create(&self, run: &RunConfig) -> Arc<dyn uva_harness::Agent> {
-        Arc::new(self.resolve(run).build())
+        let agent = self.resolve(run).build();
+        // The registry reaches every run's seam layer here: a
+        // registration dropped anywhere withdraws from every agent
+        // that shares the table, including runs created later.
+        let agent = match &self.defaults.hooks {
+            Some(registry) => agent.with_hook_registry(registry.clone()),
+            None => agent,
+        };
+        Arc::new(agent)
     }
 }
 
@@ -168,17 +184,11 @@ impl ServerAgentLoop {
         if config.log_writer.is_none() {
             config.log_writer = self.defaults.log_writer.clone();
         }
-        if config.subagent_writers.is_none() {
-            config.subagent_writers = self.defaults.subagent_writers.clone();
-        }
         if config.context_manager.is_none() {
             config.context_manager = self.defaults.context_manager.clone();
         }
         if config.host.is_none() {
             config.host = self.defaults.host.clone();
-        }
-        if config.delegators.is_empty() {
-            config.delegators = self.defaults.delegators.clone();
         }
         // Deliberate exception to the fill-only rule: the deployment's
         // spawner replaces a run's, because every run this factory
@@ -257,12 +267,6 @@ pub fn agent_loop_manifest() -> uva_kernel::PluginManifest {
 /// providers first — and a mount failure parks the loop until both
 /// return. A remount re-runs `apply`, which is how a provider swap
 /// reaches new runs without restarting the process.
-///
-/// `apply` also resolves the `subagents` service the
-/// `subagent-backend` row publishes and appends it to the factory's
-/// delegators: the delegation backend is a **service**, not an object
-/// the host pre-builds, so the kernel orders the two rows and a
-/// remount of the backend reaches the loop.
 pub struct AgentLoopServicePlugin {
     manifest: uva_kernel::PluginManifest,
     defaults: AgentLoopDefaults,
@@ -284,8 +288,8 @@ impl AgentLoopServicePlugin {
     /// plus the services the context resolved.
     fn resolve(&self, ctx: &Context) -> Result<ServerAgentLoop, PluginError> {
         let mut defaults = self.defaults.clone();
-        if let Some(delegator) = subagents_delegator(ctx)? {
-            defaults.delegators.push(delegator);
+        if let Some(registry) = hooks_registry(ctx)? {
+            defaults.hooks = Some(registry);
         }
         build_loop(ctx, defaults)
     }
@@ -317,11 +321,17 @@ impl uva_kernel::Plugin for AgentLoopServicePlugin {
 /// compactor is built by the factory itself, so `compaction` is not
 /// injected.
 ///
-/// `subagents` is the delegation backend the `subagent-backend` row
-/// publishes: the edge orders the loop after the backend, and the
-/// factory installs the backend as one more delegator.
-pub const AGENT_LOOP_INJECTS: [&str; 5] =
-    ["llm", "llm.default", "tools", "sessions", "subagents"];
+/// Documented above: `subagents` is **not** one of them — delegation is
+/// an ordinary tool brick the boot files in the registry, not a service
+/// the loop consumes.
+///
+/// `hooks` is **not** one either, and must never be added: an `inject`
+/// key is a hard dependency (the kernel rejects the group when nothing
+/// provides it), while the registry is optional. [`AgentLoopServicePlugin`]
+/// resolves it with `ctx.get` at mount instead, so a missing or
+/// switched-off `hooks` row boots a loop with no external registrations.
+pub const AGENT_LOOP_INJECTS: [&str; 4] =
+    ["llm", "llm.default", "tools", "sessions"];
 
 #[cfg(test)]
 mod tests;

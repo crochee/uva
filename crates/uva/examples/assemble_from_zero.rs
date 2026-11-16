@@ -242,7 +242,6 @@ async fn main() {
                 answer = done.text.clone();
             }
             AgentEvent::System(sys) => lifecycle.push(sys.kind()),
-            AgentEvent::Agent(_, _) => {}
         }
     }
     println!("      lifecycle    : {lifecycle:?}");

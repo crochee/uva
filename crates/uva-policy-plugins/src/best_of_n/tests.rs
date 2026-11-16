@@ -148,7 +148,6 @@ fn runtime(
     AgentRuntime {
         caps: Arc::new(caps),
         cancel,
-        subagent_depth: 0,
     }
 }
 
@@ -250,7 +249,6 @@ async fn a_queued_row_is_on_disk_before_the_summariser_runs() {
                             Arc::new(caps)
                         },
                         cancel: uva_core::AtomicCancelToken::shared(),
-                        subagent_depth: 0,
                     },
                     AgentInput::text("answer me"),
                     &sink,
@@ -515,7 +513,6 @@ fn best_of_n_prepares_context_once() {
     let rt = AgentRuntime {
         caps: Arc::new(caps),
         cancel: uva_core::AtomicCancelToken::shared(),
-        subagent_depth: 0,
     };
 
     let events = drive(&BestOfNStrategy::new(3, Arc::new(LongestAnswer)), rt);

@@ -23,6 +23,8 @@
 //! projection but keeps the transcript, so the operator can see what
 //! was lost.
 
+use std::collections::HashMap;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
@@ -36,6 +38,27 @@ use crate::{
 /// sees the layout, so half a page is a fixed step rather than a
 /// measured one.
 const HALF_PAGE: usize = 10;
+
+/// The name a call shows when the model named no tool. The provider
+/// gives such a call the same placeholder, so the transcript and the
+/// wire agree on what the call is called.
+const UNNAMED_TOOL: &str = "unknown";
+
+/// The name a tool result shows when the transcript never saw the
+/// call it answers: the outcome is known, the tool is not.
+const UNKNOWN_TOOL: &str = "unknown tool";
+
+/// How much of a tool's arguments or output one transcript line
+/// carries: the TUI's own one-line-entry limit, the same 48
+/// characters `views::catalog`'s confirm-modal summary uses. The cut
+/// is made on a character boundary by
+/// [`uva_core::text::truncate_chars`] — the workspace's one
+/// truncator — and marked with the `…` ellipsis the TUI's own
+/// truncation points use (`views::catalog`'s summary appends the
+/// same marker). Other in-repo call sites mark their cuts
+/// differently, so the marker is this crate's convention, not the
+/// workspace's.
+const ONE_LINE_LIMIT: usize = 48;
 
 /// Who authored a transcript line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +80,13 @@ pub struct TranscriptLine {
     pub role: Role,
     /// The text itself.
     pub text: String,
+    /// The row's ordinal in the session log — that row's identity
+    /// there, and the only thing a `chat/feedback` target can name.
+    ///
+    /// `None` for a line that did not come from a stamped row: an
+    /// old log's rows carry no ordinal, so the line has none to
+    /// offer.
+    pub seq: Option<u64>,
 }
 
 /// The transport's lifecycle as the projection sees it.
@@ -412,6 +442,10 @@ pub struct App {
     /// The deployment's UI tree (empty until the first `ui/schema`
     /// answers).
     ui: crate::ui_schema::UiSchemaResponse,
+    /// The tool each call id names: the assistant row's `tool_use`
+    /// part fills it, the `tool_result` row reads it back by the id
+    /// the result answers.
+    tool_names: HashMap<String, String>,
 }
 
 impl Default for App {
@@ -445,6 +479,7 @@ impl Default for App {
             follow_pending: Vec::new(),
             follow_request_hash: String::new(),
             ui: crate::ui_schema::UiSchemaResponse::default(),
+            tool_names: HashMap::new(),
         }
     }
 }
@@ -806,19 +841,48 @@ impl App {
     /// one exists and still has suspended interrupts.
     fn resume_material(&self) -> Option<ResumeMaterial> {
         let session_id = self.session_id.clone()?;
-        let assistant_count = self
-            .messages
-            .iter()
-            .filter(|line| line.role == Role::Assistant)
-            .count();
+        // The feedback target is the current turn's answer row's
+        // **ordinal** — the `seq` the log's writer stamped on it. A
+        // count of the assistant lines in this view would name
+        // nothing: two sessions both count "msg-1", and the server
+        // resolves the target against the log's rows. A line whose row
+        // carried no ordinal (an old log) offers no target at all.
+        let last_message_id =
+            self.current_turn_target().map(|seq| seq.to_string());
         Some(ResumeMaterial {
             session_id,
             last_seq: self.follow_cursor,
             pending: self.follow_pending.clone(),
             request_snapshot_hash: self.follow_request_hash.clone(),
-            last_message_id: (assistant_count > 0)
-                .then(|| format!("msg-{assistant_count}")),
+            last_message_id,
         })
+    }
+
+    /// The ordinal of the row the **current turn's** answer came
+    /// from.
+    ///
+    /// A rating is about this turn's answer: an earlier turn's answer
+    /// belongs to a different turn, so the target never reaches back
+    /// into it. The turn starts at the operator's last prompt — the
+    /// boundary the web's projection splits its assistant bubbles at
+    /// too, so both surfaces name the same row.
+    ///
+    /// A turn that wrote only reasoning renders no assistant line, so
+    /// it names no row at all: the web offers no target for a bubble
+    /// whose only content is reasoning, and the TUI offers none
+    /// either.
+    fn current_turn_target(&self) -> Option<u64> {
+        let turn_start = self
+            .messages
+            .iter()
+            .rposition(|line| line.role == Role::User)
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        self.messages[turn_start..]
+            .iter()
+            .rev()
+            .find(|line| line.role == Role::Assistant)
+            .and_then(|line| line.seq)
     }
 
     /// The composer's keys: characters, backspace, submit, and `Esc`
@@ -1146,7 +1210,10 @@ impl App {
         }
         self.composer.clear();
         if let Some(session_id) = self.session_id.clone() {
-            self.push_line(Role::User, text.clone());
+            // The optimistic line has no row yet: the durable
+            // `user_message` row lands later, and it is the row that
+            // carries an ordinal.
+            self.push_line(Role::User, text.clone(), None);
             self.turn = TurnState::Running;
             self.status = "sending".to_string();
             return vec![Action::SendMessage { session_id, text }];
@@ -1481,6 +1548,7 @@ impl App {
             self.reasoning.clear();
             self.approval = None;
             self.approval_answered = false;
+            self.tool_names.clear();
             self.turn = TurnState::Idle;
             self.status = "session deleted".to_string();
         }
@@ -1494,7 +1562,7 @@ impl App {
             self.pending_prompt = Some(text);
             return Vec::new();
         };
-        self.push_line(Role::User, text.clone());
+        self.push_line(Role::User, text.clone(), None);
         self.turn = TurnState::Running;
         self.status = "sending".to_string();
         vec![Action::SendMessage { session_id, text }]
@@ -1567,6 +1635,9 @@ impl App {
         self.reasoning.clear();
         self.approval = None;
         self.approval_answered = false;
+        // The baseline's rows replace the transcript, so the join
+        // between a call and its result is rebuilt from them too.
+        self.tool_names.clear();
         if let Some(rows) = snapshot.get("rows").and_then(Value::as_array) {
             for row in rows {
                 self.apply_row(row);
@@ -1637,42 +1708,171 @@ impl App {
         }
     }
 
-    fn apply_row(&mut self, row: &Value) {
-        match row.get("type").and_then(Value::as_str) {
-            Some("user_message") => self.push_row(Role::User, row),
-            Some("assistant_message") => self.apply_assistant_row(row),
-            Some("turn") => self.apply_turn_row(row),
-            Some("approval_asked") => self.apply_approval_row(row),
-            Some("session_shutdown") => {
+    pub(crate) fn apply_row(&mut self, row: &Value) {
+        let Some(tag) = row.get("type").and_then(Value::as_str) else {
+            return;
+        };
+        if IGNORED_ROW_TYPES.contains(&tag) {
+            // Declared ignore: log-only bookkeeping the transcript
+            // deliberately does not render.
+            return;
+        }
+        if !APPLIED_ROW_TYPES.contains(&tag) {
+            // A tag this build predates (version skew); the
+            // accounting test classifies every tag of the current
+            // vocabulary, so this branch is empty for same-version
+            // peers.
+            return;
+        }
+        // The row's ordinal: the row's identity in the session log,
+        // and what a `chat/feedback` target names. An old log's rows
+        // carry none, and a line without one offers no rating.
+        let seq = row.get("seq").and_then(Value::as_u64);
+        match tag {
+            "user_message" => self.push_row(Role::User, row, seq),
+            "assistant_message" => self.apply_assistant_row(row, seq),
+            "tool_result" => self.apply_tool_result_row(row, seq),
+            "hook_block" => self.apply_hook_block_row(row, seq),
+            "turn" => self.apply_turn_row(row),
+            "approval_asked" => self.apply_approval_row(row),
+            "session_shutdown" => {
                 self.turn = TurnState::Idle;
                 self.live_text.clear();
             }
-            _ => {}
+            "warning" => self.apply_warning_row(row, seq),
+            // The arm test feeds one row of every `APPLIED_ROW_TYPES`
+            // tag through this match: a tag added to the accounting
+            // without an arm fails that test, not the first
+            // production row.
+            _ => unreachable!("APPLIED_ROW_TYPES names `{tag}` with no arm"),
         }
     }
 
-    fn apply_assistant_row(&mut self, row: &Value) {
-        let text = row_text(row);
-        if text.is_empty() {
-            return;
-        }
-        // The live projection usually carries the same text until the
-        // terminal `turn` row; once the durable row lands, drop the
-        // copy so the transcript is not rendered twice.
-        if self.live_text == text {
-            self.live_text.clear();
-        }
-        self.push_line(Role::Assistant, text);
+    /// Render one `warning` row — a durable fact about the session the
+    /// runtime could not report any other way — as a one-line notice in
+    /// the transcript's muted system style. Mirrors the web projection:
+    /// with no message, the kind slug says which warning it was.
+    fn apply_warning_row(&mut self, row: &Value, seq: Option<u64>) {
+        let message = row
+            .pointer("/data/message")
+            .and_then(Value::as_str)
+            .filter(|message| !message.is_empty());
+        let kind = row
+            .pointer("/data/kind")
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty());
+        let text = message.or(kind).unwrap_or("warning");
+        self.push_line(Role::System, format!("warning: {text}"), seq);
     }
 
-    fn push_row(&mut self, role: Role, row: &Value) {
+    fn apply_assistant_row(&mut self, row: &Value, seq: Option<u64>) {
         let text = row_text(row);
         if !text.is_empty() {
-            self.push_line(role, text);
+            // The live projection usually carries the same text until
+            // the terminal `turn` row; once the durable row lands, drop
+            // the copy so the transcript is not rendered twice. The
+            // server's live text concatenates the streamed pieces, so
+            // the copy is compared in that shape ([`glued_row_text`])
+            // while the line above joins the row's parts with a
+            // space.
+            if self.live_text == glued_row_text(row) {
+                self.live_text.clear();
+            }
+            self.push_line(Role::Assistant, text, seq);
+        }
+        // The turn's calls travel in the same row as its text: each
+        // one is a line of its own, and its call id is the key the
+        // result row answers by.
+        //
+        // The call line carries the row's ordinal too: it is a line
+        // of the same assistant row, and the transcript's last
+        // assistant line is the one a rating names. Without it the
+        // row's ordinal would be lost the moment a turn called a
+        // tool.
+        for call in row_tool_calls(row) {
+            let ToolCall {
+                id,
+                name,
+                arguments,
+            } = call;
+            if let Some(id) = id {
+                self.tool_names.insert(id, name.clone());
+            }
+            // The call line carries the arguments too: what the model
+            // asked for is the half of the call the transcript was
+            // missing. A one-line entry holds a one-line preview of
+            // them, not the whole payload.
+            let text = match arguments {
+                Some(arguments) => {
+                    format!("tool call: {name} {}", one_line(&arguments))
+                }
+                None => format!("tool call: {name}"),
+            };
+            self.push_distinct_line(Role::Assistant, text, seq);
         }
     }
 
-    fn push_line(&mut self, role: Role, text: String) {
+    /// Render one `tool_result` row — the outcome of a call the
+    /// assistant row announced. The row names the call it answers,
+    /// not the tool, so the tool's name comes from the join the
+    /// assistant row filled; a result whose call the transcript never
+    /// saw names no tool and says so.
+    fn apply_tool_result_row(&mut self, row: &Value, seq: Option<u64>) {
+        let outcome = tool_outcome(row);
+        // The outcome says more than ok/failed: a call that never
+        // finished carries why (the crash-repair closer's recovery
+        // code), and a tool that answered carries what it said — the
+        // second half of the call line's pairing.
+        let status = outcome.status();
+        let name = outcome
+            .call_id
+            .as_ref()
+            .and_then(|id| self.tool_names.get(id))
+            .cloned()
+            .or(outcome.name)
+            .unwrap_or_else(|| UNKNOWN_TOOL.to_string());
+        let output = tool_output_text(row);
+        let text = if output.is_empty() {
+            format!("{name}: {status}")
+        } else {
+            format!("{name}: {status} {}", one_line(&output))
+        };
+        self.push_distinct_line(Role::Tool, text, seq);
+    }
+
+    /// Render one `hook_block` row — a policy's veto of a call — as a
+    /// one-line notice, like the warning row. The row's shape is
+    /// pinned by the one writer it has (`docs/log-format.md`):
+    /// `data.hook` names the policy that refused, `data.reason` says
+    /// why, `data.tool` the call it refused — the same three the web's
+    /// `⛔` notice reads.
+    fn apply_hook_block_row(&mut self, row: &Value, seq: Option<u64>) {
+        let hook = data_field(row, "hook");
+        let reason = data_field(row, "reason");
+        let tool = data_field(row, "tool");
+        let named = match (&hook, &tool) {
+            (Some(hook), Some(tool)) => format!("{hook} blocked {tool}"),
+            (Some(hook), None) => hook.clone(),
+            (None, Some(tool)) => tool.clone(),
+            (None, None) => String::new(),
+        };
+        let text = match (named.is_empty(), reason) {
+            (true, Some(reason)) => reason,
+            (false, Some(reason)) => format!("{named} — {reason}"),
+            (false, None) => named,
+            (true, None) => "blocked".to_string(),
+        };
+        self.push_line(Role::System, format!("hook: {text}"), seq);
+    }
+
+    fn push_row(&mut self, role: Role, row: &Value, seq: Option<u64>) {
+        let text = row_text(row);
+        if !text.is_empty() {
+            self.push_line(role, text, seq);
+        }
+    }
+
+    fn push_line(&mut self, role: Role, text: String, seq: Option<u64>) {
         if self
             .messages
             .last()
@@ -1680,7 +1880,20 @@ impl App {
         {
             return;
         }
-        self.messages.push(TranscriptLine { role, text });
+        self.messages.push(TranscriptLine { role, text, seq });
+    }
+
+    /// Push a line that must not be collapsed. [`push_line`] drops a
+    /// line identical to the one before it — the durable user row
+    /// that echoes the prompt the composer already showed. Two calls
+    /// to the same tool are two calls, not one line repeated.
+    fn push_distinct_line(
+        &mut self,
+        role: Role,
+        text: String,
+        seq: Option<u64>,
+    ) {
+        self.messages.push(TranscriptLine { role, text, seq });
     }
 
     fn apply_turn_row(&mut self, row: &Value) {
@@ -1726,6 +1939,58 @@ impl App {
         }
     }
 }
+/// Durable row kinds the transcript renders or tracks. Together with
+/// [`IGNORED_ROW_TYPES`] this is the projection's accounting of the
+/// wire vocabulary — pinned against
+/// `uva_session::KNOWN_SESSION_EVENT_TYPES` by the test
+/// `every_known_row_kind_is_applied_or_ignored_by_design`, so a tag
+/// added to the vocabulary cannot land here silently unrendered.
+pub(crate) const APPLIED_ROW_TYPES: &[&str] = &[
+    "user_message",
+    "assistant_message",
+    "tool_result",
+    "hook_block",
+    "turn",
+    "approval_asked",
+    "session_shutdown",
+    "warning",
+];
+
+/// Row kinds the transcript deliberately does not render: log-only
+/// bookkeeping whose facts either never reach the operator or arrive
+/// through the `live` projection instead. Declared, not accidental —
+/// the test named on [`APPLIED_ROW_TYPES`] fails if a vocabulary tag
+/// is in neither list.
+pub(crate) const IGNORED_ROW_TYPES: &[&str] = &[
+    "assistant_chunk",
+    "compaction",
+    "compaction_start",
+    "compaction_summary",
+    "compaction_end",
+    "tool_call",
+    // Streamed chunks of a running tool: the `live` projection paints
+    // them while the call runs, and a reload's transcript is rebuilt
+    // from the settled `tool_result` row.
+    "tool_output",
+    "step",
+    "iteration",
+    "steering_guard",
+    "steering_hint",
+    "subagent_enter",
+    "subagent_exit",
+    "request_header",
+    "approval_decided",
+    "approval_granted",
+    "tool_dispatch",
+    "request_snapshot",
+    "usage",
+    "sandbox_mode",
+    "tool_result_transformed",
+    "parked_prompt",
+    "park_consumed",
+    "feedback",
+    "plugin",
+];
 
 /// Map a `sessions/follow` header's state label.
 fn turn_from_state(state: &str) -> TurnState {
@@ -1797,30 +2062,57 @@ fn approval_from(
 
 /// The text of one durable row (`data.content`), independent of
 /// whether the core serialized it as `Single`, `Multi` or a bare
-/// string.
+/// string. Its parts join with a space ([`joined_content_text`]): the
+/// parts are pieces of one message, not one glued word.
 fn row_text(row: &Value) -> String {
+    row.get("data")
+        .and_then(|data| data.get("content"))
+        .map(joined_content_text)
+        .unwrap_or_default()
+}
+
+/// The same row's text with its parts concatenated — the shape the
+/// server's live projection holds, since it appends each streamed
+/// piece. The durable row and the live copy it duplicates are
+/// compared in this shape; the row's own line joins the parts with a
+/// space instead ([`row_text`]).
+fn glued_row_text(row: &Value) -> String {
     row.get("data")
         .and_then(|data| data.get("content"))
         .map(content_text)
         .unwrap_or_default()
 }
 
-/// Extract the text parts of a serialized provider `Content`.
+/// Extract the text parts of a serialized provider `Content`,
+/// concatenated as they came.
 fn content_text(content: &Value) -> String {
     match content {
         Value::String(text) => text.clone(),
+        other => content_parts(other)
+            .iter()
+            .map(|part| part_text(part))
+            .collect(),
+    }
+}
+
+/// The parts of one serialized provider `Content`, in the shapes the
+/// core serializes it in: `Single`, `Multi`, a bare part — and a bare
+/// array, the shape a `tool_result` part's own `content` list uses.
+fn content_parts(content: &Value) -> Vec<&Value> {
+    match content {
         Value::Object(map) => {
             if let Some(single) = map.get("Single") {
-                part_text(single)
+                vec![single]
             } else if let Some(parts) =
                 map.get("Multi").and_then(Value::as_array)
             {
-                parts.iter().map(part_text).collect()
+                parts.iter().collect()
             } else {
-                part_text(content)
+                vec![content]
             }
         }
-        _ => String::new(),
+        Value::Array(parts) => parts.iter().collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -1842,6 +2134,233 @@ fn part_text(part: &Value) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// The tool calls one assistant row carries: each `tool_use` part's
+/// call id and the tool's name.
+fn row_tool_calls(row: &Value) -> Vec<ToolCall> {
+    row.get("data")
+        .and_then(|data| data.get("content"))
+        .map(content_parts)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(ToolCall::of)
+        .collect()
+}
+
+/// What one `tool_result` row says about the call it answers.
+struct ToolOutcome {
+    /// The id of the call the result answers — the key the assistant
+    /// row's call registered under.
+    call_id: Option<String>,
+    /// The tool's name, when the row itself knows it.
+    name: Option<String>,
+    /// True when the tool failed.
+    failed: bool,
+    /// Why the call never finished, when the row is the crash-repair
+    /// closer: one of the wire-stable recovery codes (`TOOL_NOT_STARTED`,
+    /// `TOOL_OUTCOME_UNKNOWN`). The web shows the code as the result's
+    /// content; the transcript's line carries it beside `failed`.
+    error_code: Option<String>,
+    /// The closer's `interrupted` marker, for a row that names no
+    /// recovery code.
+    interrupted: bool,
+}
+
+impl ToolOutcome {
+    /// The status word the result line carries: `ok`, or `failed`
+    /// with the reason the row names — the closer's recovery code,
+    /// else its `interrupted` marker. "Failed" alone would send the
+    /// operator hunting for a reason the row already had.
+    fn status(&self) -> String {
+        if !self.failed {
+            return "ok".to_string();
+        }
+        match &self.error_code {
+            Some(code) => format!("failed ({code})"),
+            None if self.interrupted => "failed (interrupted)".to_string(),
+            None => "failed".to_string(),
+        }
+    }
+}
+
+/// Read one `tool_result` row.
+///
+/// Two rows carry this type. The run's own row holds the tool
+/// message the loop committed: the provider `Message` with
+/// `role: "tool"`, the tool's output as its `content`, and the id of
+/// the call it answers. The crash-repair closer holds a marker
+/// instead — `call_id`, the tool's name, an `error` code and
+/// `interrupted: true` — because the call never finished. A row whose
+/// content is a `tool_result` part carries the whole payload in that
+/// part. All three name the call, so all three join.
+fn tool_outcome(row: &Value) -> ToolOutcome {
+    let part = row
+        .get("data")
+        .and_then(|data| data.get("content"))
+        .map(content_parts)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|part| {
+            part.get("type").and_then(Value::as_str) == Some("tool_result")
+        });
+    let call_id = row
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .or_else(|| row.pointer("/data/tool_call_id").and_then(Value::as_str))
+        .or_else(|| row.pointer("/data/call_id").and_then(Value::as_str))
+        .or_else(|| {
+            part.and_then(|part| part.get("tool_use_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    let name = row
+        .pointer("/data/tool_name")
+        .and_then(Value::as_str)
+        .or_else(|| row.pointer("/data/name").and_then(Value::as_str))
+        .or_else(|| {
+            part.and_then(|part| part.get("tool_name"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string);
+    // A failed tool says so three ways: the row's own flag, the
+    // part's flag, and the closer's error code or `interrupted`
+    // marker. A call that never finished must not read as one that
+    // returned.
+    let error_code = row
+        .pointer("/data/error")
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty())
+        .map(str::to_string);
+    let interrupted = row
+        .pointer("/data/interrupted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let failed = row
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || part
+            .and_then(|part| part.get("is_error"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        || error_code.is_some()
+        || interrupted;
+    ToolOutcome {
+        call_id,
+        name,
+        failed,
+        error_code,
+        interrupted,
+    }
+}
+
+/// One tool call: the provider's call id, the tool the model asked
+/// for, and what it asked for — the arguments, as the part carries
+/// them.
+struct ToolCall {
+    /// The id the result row answers by.
+    id: Option<String>,
+    /// The tool's name.
+    name: String,
+    /// The call's arguments in their compact JSON form, when the part
+    /// carries any worth showing.
+    arguments: Option<String>,
+}
+
+impl ToolCall {
+    /// Read one `tool_use` part. A part without an id still names a
+    /// call the operator should see; it just cannot be joined to a
+    /// result.
+    fn of(part: &Value) -> Option<Self> {
+        let map = part.as_object()?;
+        if map.get("type").and_then(Value::as_str) != Some("tool_use") {
+            return None;
+        }
+        // `null` is no arguments and `{}` an empty ask; neither adds
+        // anything to the line, so neither renders.
+        let arguments = map
+            .get("input")
+            .map(|input| input.to_string())
+            .filter(|input| input != "null" && input != "{}");
+        Some(Self {
+            id: map.get("id").and_then(Value::as_str).map(str::to_string),
+            name: map
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(UNNAMED_TOOL)
+                .to_string(),
+            arguments,
+        })
+    }
+}
+
+/// One transcript line's worth of a payload: whitespace collapsed to
+/// single spaces — a tool's output is usually many lines — then cut
+/// to [`ONE_LINE_LIMIT`] characters on a character boundary and
+/// marked with the `…` ellipsis when the cut happened.
+fn one_line(text: &str) -> String {
+    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (kept, truncated) =
+        uva_core::text::truncate_chars(&flattened, ONE_LINE_LIMIT);
+    if truncated {
+        format!("{kept}…")
+    } else {
+        kept
+    }
+}
+
+/// The output a `tool_result` row carries, if any. The run's own row
+/// holds the tool message's content; a row the app-server writes for
+/// seeded history holds a `tool_result` part whose own `content` list
+/// is the output. The crash-repair closer holds neither — its
+/// recovery code is the only thing it knows. A multi-part output
+/// joins with a space ([`joined_content_text`]): the parts are
+/// pieces of one result, not one glued word.
+fn tool_output_text(row: &Value) -> String {
+    let content = row.get("data").and_then(|data| data.get("content"));
+    let part = content
+        .map(content_parts)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|part| {
+            part.get("type").and_then(Value::as_str) == Some("tool_result")
+        });
+    match part {
+        Some(part) => part
+            .get("content")
+            .map(joined_content_text)
+            .unwrap_or_default(),
+        None => content.map(joined_content_text).unwrap_or_default(),
+    }
+}
+
+/// The text of a serialized provider `Content`, its non-empty parts
+/// joined by a space — the tool line's preview of a multi-part
+/// output, and the text of the row lines.
+///
+/// [`content_text`] keeps the parts' own concatenation for the caller
+/// that needs it: the live copy's comparison.
+fn joined_content_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        other => content_parts(other)
+            .iter()
+            .map(|part| part_text(part))
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// A non-empty string field of a row's `data`, when the row carries
+/// one.
+fn data_field(row: &Value, field: &str) -> Option<String> {
+    row.pointer(&format!("/data/{field}"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(test)]

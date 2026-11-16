@@ -13,6 +13,7 @@
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -22,7 +23,16 @@ use thiserror::Error;
 /// queries and for `unfire`-style debugging (newer job ids
 /// sort higher).
 #[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
 #[serde(transparent)]
 pub struct JobId(String);
@@ -65,7 +75,7 @@ impl std::fmt::Display for JobId {
 /// deliberate act — `Scheduler::tick` is the only place
 /// that needs to learn the new firing semantics, and every
 /// persistence layer round-trips through the same enum.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum JobKind {
     /// Cron-style expression in 5-field POSIX format
@@ -95,7 +105,15 @@ pub enum JobKind {
 /// `gc_completed()` sweep is the only thing that removes
 /// such rows.
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -161,7 +179,7 @@ pub enum ScheduleError {
 }
 
 /// One persisted scheduling row.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Job {
     /// Stable id (ULID by default).
     pub id: JobId,

@@ -21,7 +21,7 @@ use uva::{
         open_requests,
     },
     provider::traits::ModelProvider,
-    session::{SessionError, SessionSink},
+    session::SessionError,
 };
 
 use super::{
@@ -91,10 +91,11 @@ pub(super) struct ControllerInner {
     /// log has not changed since the last read, the cached fold is
     /// the history — the read and the fold are skipped.
     pub(super) cached_history: parking_lot::Mutex<Option<CachedHistory>>,
-    pub(super) session_store: Arc<dyn SessionSink>,
-    /// The session's one writer: the only thing that stamps a row's
-    /// ordinal and the only thing that flushes it.
-    pub(super) writer: Arc<uva::session::LogWriter>,
+    /// The session's one writer, seen through the typed log seam: the
+    /// only thing that stamps a row's ordinal and the only thing that
+    /// flushes it. The controller holds the seam, never the concrete
+    /// writer — the sink the writer was built from is its business.
+    pub(super) writer: Arc<dyn uva::session::SessionLog>,
     pub(super) broadcaster: EventBroadcaster,
     pub(super) deps: parking_lot::Mutex<RunDependencies>,
     /// Process-wide usage counters this controller records into —
@@ -103,11 +104,6 @@ pub(super) struct ControllerInner {
     /// [`ControllerInner::persist_and_broadcast`], the single funnel
     /// every agent event passes through.
     pub(super) usage: Arc<UsageMetrics>,
-    /// Sub-agent session router: delegated child events are handed
-    /// here (their own sessions) instead of joining this session's
-    /// log and broadcast. `None` drops them.
-    pub(super) subagent_router:
-        Option<Arc<crate::session::subagent_router::SubagentRouter>>,
     pub(super) idle_timeout: Duration,
     pub(super) run_cancel: Mutex<Option<Arc<AtomicCancelToken>>>,
     pub(super) run_factory: Arc<dyn RunStreamFactory>,
@@ -140,7 +136,7 @@ pub(super) struct ControllerInner {
     pub(super) pending_provider:
         parking_lot::Mutex<Option<super::PinnedProvider>>,
     /// R29-Phase-I: one-shot guard for the terminal
-    /// `LifecycleShutdown` emission. Every loop exit path calls
+    /// `SessionShutdown` emission. Every loop exit path calls
     /// `finalise_shutdown`; the first call wins so a
     /// shutdown-then-idle race cannot double-append.
     pub(super) shutdown_finalised: AtomicBool,
@@ -208,7 +204,7 @@ pub(super) struct ControllerInner {
 }
 
 impl ControllerInner {
-    /// Append the terminal `LifecycleShutdown` session event and
+    /// Append the terminal `SessionShutdown` session event and
     /// close the session sink. Idempotent.
     ///
     /// Called from every exit path of the controller loop so a
@@ -222,7 +218,7 @@ impl ControllerInner {
         if self.shutdown_finalised.swap(true, Ordering::SeqCst) {
             return;
         }
-        let event = uva::session::SessionEvent::LifecycleShutdown {
+        let event = uva::session::SessionEvent::SessionShutdown {
             seq: 0,
             ts: self.deps.lock().clock.now().to_rfc3339(),
             data: serde_json::json!({ "reason": reason }),
@@ -261,22 +257,10 @@ impl ControllerInner {
     /// logging (not propagating) either failure — the
     /// shutdown path must run to the sink close regardless.
     async fn append_lifecycle_event(&self, event: &uva::session::SessionEvent) {
-        let value = match serde_json::to_value(event) {
-            Ok(value) => value,
-            Err(e) => {
-                tracing::warn!(
-                    target: "uva.session",
-                    session_id = %self.session_id,
-                    error = %e,
-                    "Failed to serialise lifecycle_shutdown event"
-                );
-                return;
-            }
-        };
         // The marker goes through the session's one writer, and
         // the flush lands it before the sink closes — a row left
         // in the writer's queue could not survive the close.
-        if let Err(e) = self.append_durable_row(value).await {
+        if let Err(e) = self.append_durable_event(event).await {
             tracing::warn!(
                 target: "uva.session",
                 session_id = %self.session_id,
@@ -286,17 +270,21 @@ impl ControllerInner {
         }
     }
 
-    /// Append one row through the session's writer and flush it.
+    /// Append one **typed** event through the session's writer and
+    /// flush it.
     ///
-    /// For the controller's out-of-band durable rows — feedback,
-    /// the shutdown marker — which no run flushes for: the append
-    /// only enqueues, so the flush is what puts the row on disk
-    /// before the op returns.
-    pub(super) async fn append_durable_row(
+    /// For the controller's out-of-band durable rows — feedback, a
+    /// parked prompt, the shutdown marker — which no run flushes for:
+    /// the append only enqueues, so the flush is what puts the row on
+    /// disk before the op returns. The writer stamps the event's `seq`
+    /// and `ts`, so a caller never names an ordinal, and the row's
+    /// shape is the variant's — not a `json!` literal the call site
+    /// owns.
+    pub(super) async fn append_durable_event(
         &self,
-        value: serde_json::Value,
+        event: &uva::session::SessionEvent,
     ) -> Result<(), SessionError> {
-        self.writer.append(value).await?;
+        self.writer.append_event(event).await?;
         self.writer.flush().await
     }
 
@@ -365,7 +353,7 @@ impl ControllerInner {
     /// does not abort the shutdown — the sink remains
     /// reachable on the next start.
     async fn close_sink(&self, reason: uva::session::SessionEndReason) {
-        if let Err(e) = self.session_store.close(reason).await {
+        if let Err(e) = self.writer.close(reason).await {
             tracing::warn!(
                 target: "uva.session",
                 session_id = %self.session_id,
@@ -601,7 +589,6 @@ impl ControllerInner {
             max_iterations: Some(deps.default_max_iterations),
             agent_registry: deps.agent_registry.clone(),
             log_writer: None,
-            subagent_writers: None,
             host: deps.host.clone(),
             agent_loop: deps.agent_loop.clone(),
             tool_surface: deps.tool_surface.clone(),

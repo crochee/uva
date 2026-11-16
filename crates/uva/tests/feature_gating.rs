@@ -138,11 +138,11 @@ fn offline_tool_plugins_are_reachable_when_enabled() {
     };
 }
 
-/// The `task` tool plugin is reachable under `tool-task`.
+/// The `task` tool is reachable under `tool-task`.
 #[cfg(feature = "tool-task")]
 #[test]
 fn tool_task_plugin_is_reachable_when_enabled() {
-    use uva::tool_task::{TaskDelegator as _, TaskSpec as _};
+    use uva::tool_task::{TaskSpec as _, TaskTool as _, TaskToolPlugin as _};
 }
 
 /// The `schedule` tool plugin is reachable under `tool-scheduler` —

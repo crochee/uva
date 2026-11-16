@@ -21,7 +21,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { Box, Flex } from '@radix-ui/themes';
-import { api } from '../../api/client';
+import { sessionsApi } from '../../api/sessions';
 import { SETTINGS_NAV_SECTIONS } from '../../settings/sections';
 import { useListNavigation } from '../../hooks/useListNavigation';
 import { useToast } from '../../hooks/useToast';
@@ -116,7 +116,7 @@ function WorkspaceNav({ collapsed, onToggle }: { collapsed: boolean; onToggle?: 
     if (deleteTarget === null) return;
     setDeleting(true);
     try {
-      await api.del(`/api/v1/sessions/${encodeURIComponent(deleteTarget)}`);
+      await sessionsApi.remove(deleteTarget);
       toast.push({ variant: 'success', message: `Deleted session "${shortId(deleteTarget)}".` });
       await tree.refresh();
     } catch (cause) {

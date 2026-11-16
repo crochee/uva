@@ -43,10 +43,14 @@ use std::{
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use uva::{core::Error, session::is_metadata_header_row};
+use uva::{
+    core::Error,
+    session::{SessionEvent, is_metadata_header_row},
+};
 
 use super::helpers::paginate;
 use crate::{
@@ -54,6 +58,7 @@ use crate::{
         List,
         SessionPageQuery,
         resolve_page,
+        v1::session_view::{SessionArtifact, SessionTurn},
         validate_resource_name,
         validate_sort,
     },
@@ -81,7 +86,7 @@ const SESSION_SORT_WHITELIST: &[&str] = &["created_at", "status"];
 pub const SESSION_LIST_TAIL_WINDOW: usize = 512;
 
 /// Frontend-facing session summary.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct SessionSummary {
     pub id: String,
     /// Static string slice — the closed set of 9 status labels.
@@ -112,7 +117,7 @@ pub struct SessionSummary {
 /// sink). The frontend's `SessionDetailPage` reads the entries
 /// individually and runs them through the same renderer the
 /// live `ChatPage` uses.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct SessionDetail {
     pub id: String,
     pub status: &'static str,
@@ -126,11 +131,13 @@ pub struct SessionDetail {
     /// timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
+    #[schemars(with = "Vec<SessionTurn>")]
     pub history: Vec<Value>,
     /// Legacy field — kept as an empty array so the
     /// SessionDetailPage doesn't have to special-case undefined.
     /// The modern equivalents (`ContentPart::Raw`,
     /// `ContentPart::Resource`) are inlined into `history`.
+    #[schemars(with = "Vec<SessionArtifact>")]
     pub artifacts: Vec<Value>,
     /// Sub-agent provenance — see [`SessionSummary::parent_session_id`].
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -199,7 +206,7 @@ fn selected(
 /// The prefix carries its own separator, so membership is exact: a
 /// session named `anthropicx-1` starts with the same letters but is
 /// not in the namespace and is listed like any other.
-fn is_ephemeral_session(id: &str) -> bool {
+pub(crate) fn is_ephemeral_session(id: &str) -> bool {
     id.starts_with(EPHEMERAL_SESSION_PREFIX)
 }
 
@@ -288,17 +295,14 @@ fn subagent_attribution(events: &[Value]) -> (Option<String>, Option<String>) {
     let Some(first) = events.first() else {
         return (None, None);
     };
-    if first.get("type").and_then(Value::as_str) != Some("subagent_enter") {
+    let Some(event) = SessionEvent::from_value(first) else {
+        return (None, None);
+    };
+    if !matches!(event, SessionEvent::SubagentEnter { .. }) {
         return (None, None);
     }
-    let parent = first
-        .pointer("/data/parent_session_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let agent = first
-        .pointer("/data/agent_name")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let parent = event.delegation_parent().map(str::to_string);
+    let agent = event.delegation_agent().map(str::to_string);
     (parent, agent)
 }
 /// `<sessions_root>/<user_id>/<session_id>/events.jsonl`.
@@ -419,7 +423,7 @@ struct ScannedSession {
 /// Only the directory listing runs here — blocking `std::fs`, so the
 /// caller wraps it in `spawn_blocking`; each transcript is then read
 /// through its sink, bounded, on the async side.
-fn unregistered_session_ids(
+pub(crate) fn unregistered_session_ids(
     sessions_root: &Path,
     user_id: &str,
     registered: &HashSet<String>,
@@ -1097,7 +1101,7 @@ pub struct ForkSessionRequest {
 }
 
 /// Response of `POST /api/v1/sessions/{id}/fork`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ForkSessionResponse {
     /// The new session — addressable, listable and streamable exactly
     /// like any other conversation.

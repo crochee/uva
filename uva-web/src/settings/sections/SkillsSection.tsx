@@ -9,8 +9,8 @@
  * `skills/reload` the removed Skills page used).
  */
 import { useEffect, useState } from 'react';
-import { api } from '../../api/client';
-import type { List, ReloadSkillsResponse, Skill } from '../../api/types';
+import { skillsApi } from '../../api/skills';
+import type { Skill } from '../../api/types';
 import { useToast } from '../../hooks/useToast';
 import { EnableToggle } from '../EnableToggle';
 import { ProfileToggle } from '../ProfileToggle';
@@ -29,8 +29,8 @@ export function SkillsSection({ reloadToken }: SettingsSectionProps) {
 
   useEffect(() => {
     const controller = new AbortController();
-    api
-      .get<List<Skill>>('/api/v1/skills?limit=100', controller.signal)
+    skillsApi
+      .list(controller.signal)
       .then((response) => {
         setSkills(response.data);
         setError(null);
@@ -45,7 +45,7 @@ export function SkillsSection({ reloadToken }: SettingsSectionProps) {
   const reloadSkills = async (): Promise<void> => {
     setReloading(true);
     try {
-      const response = await api.post<ReloadSkillsResponse>('/api/v1/skills/reload');
+      const response = await skillsApi.reload();
       toast.push({
         variant: 'success',
         message: `已重新载入 ${response.count} 个技能。`,

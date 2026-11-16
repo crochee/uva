@@ -4,10 +4,15 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use futures::channel::mpsc;
+use uva_events::AgentEvent;
 use uva_provider::{BlockAssembler, ContentPart, StreamChunk};
 
-use super::state::SampleOutcome;
-use crate::{agent::sink::EventSink, events::AgentEvent};
+use super::{
+    r#loop::step::coalesce_parts,
+    state::SampleOutcome,
+    transcript::Transcript,
+};
+use crate::agent::sink::EventSink;
 
 // `Arc<Mutex>` because the provider's `'static` callback outlives the borrow scope; `parking_lot` (not
 // `std`) because a poisoned mutex would propagate a panic on a path with no `SessionEnded` to report it with.
@@ -41,20 +46,22 @@ impl ChunkAssembler {
     /// stream never closed (network cut-off, missing `ToolCallEnd`), so a
     /// partial tool call reaches the wire and history once.
     ///
-    /// Also the one place the turn is persisted: the assembled
-    /// message — text and tool calls together — becomes exactly
-    /// one `assistant_message` row through the sink's typed path.
-    /// The deltas that produced it live on the event stream only.
+    /// Also the one place the turn is built and persisted: the parts
+    /// — text and tool calls together, coalesced — become the one
+    /// `Message` the log row serializes and the loop later commits
+    /// to the transcript. The deltas that produced it live on the
+    /// event stream only.
     pub(super) fn finalize_outcome(&self, sink: &EventSink) -> SampleOutcome {
         let mut guard = self.state.0.lock();
         let (result, parts, _incomplete) = guard.assembler.finalize_assistant();
         // The drain above can append tool calls the stream never
         // closed; publish whatever is new before returning.
         publish_parts(&parts, &mut guard.published, sink);
-        let assistant_seq = sink.write_assistant_turn(&parts);
+        let message = Transcript::assistant_message(coalesce_parts(parts));
+        let assistant_seq = sink.write_assistant_turn(&message);
         SampleOutcome {
             result: Arc::new(result),
-            parts,
+            message,
             assistant_seq,
         }
     }
@@ -255,7 +262,7 @@ mod tests {
             "a second finalize must not republish the turn"
         );
         assert!(
-            second.parts.is_empty(),
+            second.message.content.iter().next().is_none(),
             "and must not hand back a turn it already handed back"
         );
     }

@@ -159,6 +159,14 @@ pub enum SessionOpWire {
         agent_name: Option<String>,
         priority: u8,
     },
+    /// A rating of one assistant message.
+    ///
+    /// `message_id` is the rated row's **ordinal** — its `seq`, in
+    /// decimal. The ordinal is the row's identity in the session log,
+    /// so the row this op writes names an answer that exists. The
+    /// ordinal is resolved against the log before the op leaves the
+    /// node that received the request: the log is on the shared
+    /// filesystem, so every node resolves it the same way.
     Feedback {
         message_id: String,
         thumbs_up: bool,

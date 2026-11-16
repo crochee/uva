@@ -1,0 +1,42 @@
+[package]
+name = "uva-tool-task"
+description = "The `task` tool as a plain tool: run a registered peer agent as a child run — child session, depth cap, one child per call, cancellation — without the loop's delegation seam."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+uva-core.workspace = true
+uva-provider.workspace = true
+uva-session.workspace = true
+uva-events.workspace = true
+uva-agent.workspace = true
+uva-tool.workspace = true
+uva-kernel.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+
+[dev-dependencies]
+# The integration tests drive the real loop (a `task` call from a
+# parent run, a child session's rows); the crate's own build tree
+# stays harness-free, which the packaging and runtime-free gates
+# assert.
+uva-harness.workspace = true
+uva-test-support.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+tempfile.workspace = true

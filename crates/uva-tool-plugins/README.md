@@ -1,8 +1,8 @@
 # uva-tool-plugins
 
 The shipped **tool plugins**, one module and one feature per tool:
-`read`, `write`, `shell`, `todo`, `web`, `task`, `scheduler`, `search`,
-`memo`.
+`read`, `write`, `shell`, `todo`, `web`, `scheduler`, `search`, `memo`.
+(The `task` tool lives in its own crate, [`uva-tool-task`](../uva-tool-task).)
 
 The paradigm — the `Tool` trait, the registry, the exposure projection,
 the `workspace` path confinement — lives in [`uva-tool`](../uva-tool).
@@ -73,19 +73,8 @@ maintain.
 The `web_fetch` builtin: the one builtin that talks to the network.
 
 This is the **only** feature allowed to pull `reqwest` / `hyper` /
-`rustls`. The `make check-mvp-deps` gate asserts that the other eight
+`rustls`. The `make check-mvp-deps` gate asserts that the other seven
 tool features stay offline.
-
-### `task`
-
-The `task` tool plugin: multi-agent delegation by running registered
-peers as sub-agents (depth cap, verification gates, worktree
-isolation).
-
-It is the first consumer of the
-[`DelegatingTool`](../../SEAMS.md) seam — i.e. it needs the loop's
-internal capability (event forwarding, cancellation, depth), so it
-depends on `uva-harness` rather than just `uva-tool`.
 
 ### `scheduler`
 
@@ -166,19 +155,21 @@ registry.register_entry(ToolEntry::new(memo));
 | `todo_list` | 任务清单的状态流转 |
 | `sandbox_policy` | shell 的执行策略 |
 | `allowlist` | `web_fetch` 的域名白名单 |
-| `delegation_gate` | 子任务 gate 命令必须通过 |
-| `worktree_isolation` | 每个子 agent 一个 `uva/agent-<ulid>` worktree |
 | `schedule_jobs` | 创建与查询定时任务 |
 | `search_tool_demo` | 跨域检索工具 |
 | `tool_memo_demo` | 记忆层命中缓存 |
 
 跑： `cargo run --example <name> -p uva-tool-plugins`。
 
+`task` 的两个示例（`delegation_gate` / `worktree_isolation`）随工具搬到
+`uva-tool-task`：`cargo run -p uva-tool-task --example <name>`。
+
 ## CI 契约
 
 - 离线（无 HTTP / DB / OTel）：`read` / `write` / `shell` / `todo` /
-  `task` / `scheduler` / `search` / `memo` 八个 feature 的组合由
-  `make check-mvp-deps` 断言；只有 `web` 允许 `reqwest`；
+  `scheduler` / `search` / `memo` 七个 feature 的组合（连同无 feature 的
+  `uva-tool-task`）由 `make check-mvp-deps` 断言；只有 `web` 允许
+  `reqwest`；
 - `cargo test -p uva-tool-plugins --all-features` 绿；
 - `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p uva-tool-plugins
   --all-features` 绿（门禁见 `AGENTS.md` §3.6）。

@@ -62,30 +62,6 @@ impl Plugin for ProviderPlugin {
     }
 }
 
-/// The fixture that publishes the `subagents` service the
-/// `subagent-backend` row publishes.
-struct SubagentsPlugin {
-    manifest: PluginManifest,
-    delegator: Arc<dyn uva_harness::DelegatingTool>,
-}
-
-impl Plugin for SubagentsPlugin {
-    fn manifest(&self) -> &PluginManifest {
-        &self.manifest
-    }
-
-    fn apply(
-        &self,
-        ctx: &Context,
-    ) -> Result<Vec<uva_kernel::EffectHandle>, uva_kernel::PluginError> {
-        let service = ctx.provide(
-            uva_tool_plugins::task::KEY_SUBAGENTS,
-            Arc::clone(&self.delegator),
-        )?;
-        Ok(vec![service])
-    }
-}
-
 fn provider_manifest() -> PluginManifest {
     let mut manifest =
         PluginManifest::new("fixture", uva_kernel::PLUGIN_PROTOCOL_VERSION);
@@ -93,18 +69,6 @@ fn provider_manifest() -> PluginManifest {
     manifest
         .provides
         .push(uva_provider::plugin::KEY_LLM_DEFAULT.to_string());
-    manifest
-}
-
-fn subagents_manifest() -> PluginManifest {
-    let mut manifest = PluginManifest::new(
-        "subagent-backend",
-        uva_kernel::PLUGIN_PROTOCOL_VERSION,
-    );
-    manifest.runtime = uva_kernel::RuntimeKind::Native;
-    manifest
-        .provides
-        .push(uva_tool_plugins::task::KEY_SUBAGENTS.to_string());
     manifest
 }
 
@@ -124,29 +88,15 @@ fn context_with(
     (ctx, mounted)
 }
 
-/// A context that publishes the `subagents` service the
-/// `subagent-backend` row publishes, next to `llm.default`.
-///
-/// The mount handle stays alive for the test's scope: dropping it
-/// withdraws the services.
-fn context_with_subagents(
-    provider: Arc<dyn ModelProvider>,
-    delegator: Arc<dyn uva_harness::DelegatingTool>,
-) -> (Context, uva_kernel::MountHandle) {
-    let ctx = Context::new();
-    let plugins: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(ProviderPlugin {
-            manifest: provider_manifest(),
-            provider,
-        }),
-        Arc::new(SubagentsPlugin {
-            manifest: subagents_manifest(),
-            delegator,
-        }),
-    ];
-    let mounted =
-        mount_all(&ctx, &plugins).expect("the subagent fixture mounts");
-    (ctx, mounted)
+/// The `agent-loop` row declares no delegation edge: `task` is an
+/// ordinary tool brick, not a service the loop consumes.
+#[test]
+fn the_loop_does_not_inject_a_delegation_service() {
+    assert!(
+        !super::AGENT_LOOP_INJECTS.contains(&"subagents"),
+        "delegation is a registry tool now: {:?}",
+        super::AGENT_LOOP_INJECTS
+    );
 }
 
 /// The factory under test, built over a context whose services
@@ -179,12 +129,10 @@ fn run(provider: Arc<dyn ModelProvider>) -> RunConfig {
         descriptor: uva_harness::default_descriptor("test".into()),
         prompt_context: Arc::new(uva_harness::PromptContext::default()),
         max_iterations: 4,
-        delegators: Vec::new(),
         tool_surface: None,
         strategy: None,
         tool_restriction: None,
         log_writer: None,
-        subagent_writers: None,
         context_manager: None,
         compactor: None,
         host: None,
@@ -255,41 +203,105 @@ fn explicit_provider_runs_get_their_own_compactor() {
     );
 }
 
-/// The `subagents` service the `subagent-backend` row publishes
-/// becomes one of the factory's delegators: the loop consumes the
-/// delegation backend as a **service**, not as an object the host
-/// pre-built, so the kernel orders the two rows.
+/// A gate fixture: it never decides anything.
+struct NoopGate;
+
+#[async_trait::async_trait]
+impl uva_hook::Gate for NoopGate {
+    fn name(&self) -> &str {
+        "noop"
+    }
+
+    async fn check(
+        &self,
+        _event: &uva_hook::HookEvent,
+        _ctx: &uva_hook::HookContext<'_>,
+    ) -> Result<uva_hook::HookDecision, String> {
+        Ok(uva_hook::HookDecision::Allow)
+    }
+}
+
+/// The `hooks` service the `hooks` row publishes reaches the loop's
+/// defaults as a **shared** table: the row's registrations are the
+/// loop's, and dropping a registration withdraws it from both.
 #[test]
-fn the_subagents_service_becomes_a_delegator() {
+fn the_hooks_service_reaches_the_loop() {
     let provider: Arc<dyn ModelProvider> =
         Arc::new(uva_test_support::FakeProvider::text("ok"));
-    let delegator: Arc<dyn uva_harness::DelegatingTool> =
-        Arc::new(uva_tool_plugins::task::TaskDelegator::new(Arc::new(
-            uva_harness::AgentRegistry::new(),
-        )));
-    let (ctx, _mounted) =
-        context_with_subagents(Arc::clone(&provider), Arc::clone(&delegator));
+    let ctx = Context::new();
+    let registry = uva_hook::HookRegistry::new();
+    let registration = registry
+        .register_gate(uva_hook::seam::TOOL_PRE, Arc::new(NoopGate))
+        .expect("the gate registers on the row's table");
+    let plugins: Vec<Arc<dyn Plugin>> = vec![
+        Arc::new(ProviderPlugin {
+            manifest: provider_manifest(),
+            provider,
+        }),
+        Arc::new(uva_hook::HookPlugin::new(registry)),
+    ];
+    let mounted = mount_all(&ctx, &plugins).expect("the fixtures mount");
+
     let plugin = super::agent_loop_service_plugin(AgentLoopDefaults::default());
     let loop_ = plugin.resolve(&ctx).expect("the loop resolves");
-    assert_eq!(
-        loop_.defaults.delegators.len(),
-        1,
-        "the published backend is the loop's delegator"
-    );
+    let hooks = loop_
+        .defaults
+        .hooks
+        .clone()
+        .expect("the loop resolved the hooks service");
     assert!(
-        Arc::ptr_eq(&loop_.defaults.delegators[0], &delegator),
-        "the very backend the row published"
+        !hooks.is_empty(),
+        "the loop shares the row's table, so its registration is there"
+    );
+    drop(registration);
+    assert!(
+        hooks.is_empty(),
+        "one dropped handle withdraws the row from every clone"
+    );
+
+    // Unmounting the row withdraws the service; a remount re-resolves
+    // the loop against the new table.
+    drop(mounted);
+    assert!(
+        ctx.get::<uva_hook::HookRegistry>(uva_hook::KEY_HOOKS)
+            .expect("the lookup itself succeeds")
+            .is_none(),
+        "dropping the mount handle withdraws the hooks service"
     );
 }
 
-/// The loop declares the delegation backend as an inject edge, so
-/// the kernel mounts the loop after the `subagent-backend` row.
+/// The `hooks` row is optional, not an inject edge: the kernel rejects
+/// a group whose `inject` key has no provider, so an edge here would
+/// make a profile document written before the row existed — or one
+/// that switches the row off — fail at boot with no way into the
+/// settings page. A deployment without the row still gets a loop.
 #[test]
-fn the_loop_injects_the_subagents_service() {
+fn the_loop_boots_without_the_hooks_row() {
+    let provider: Arc<dyn ModelProvider> =
+        Arc::new(uva_test_support::FakeProvider::text("ok"));
+    let (ctx, _mounted) = context_with(provider);
+    let plugin = super::agent_loop_service_plugin(AgentLoopDefaults::default());
+
     assert!(
+        !super::AGENT_LOOP_INJECTS.contains(&uva_hook::KEY_HOOKS),
+        "hooks is resolved opportunistically, not injected: {:?}",
         super::AGENT_LOOP_INJECTS
-            .contains(&uva_tool_plugins::task::KEY_SUBAGENTS),
-        "the loop waits for the delegation backend: {:?}",
-        super::AGENT_LOOP_INJECTS
+    );
+    assert!(
+        !plugin
+            .manifest()
+            .inject
+            .iter()
+            .any(|key| key == uva_hook::KEY_HOOKS),
+        "the manifest's inject list has no hooks edge: {:?}",
+        plugin.manifest().inject
+    );
+
+    let loop_ = plugin
+        .resolve(&ctx)
+        .expect("a context without the hooks row resolves the loop");
+    assert!(
+        loop_.defaults.hooks.is_none(),
+        "no hooks row means no external registrations"
     );
 }

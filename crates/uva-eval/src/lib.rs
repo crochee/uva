@@ -77,6 +77,7 @@ pub use metrics::{
 };
 pub use plugin::{EvalPlugin, EvalPluginConfig, KEY_EVAL};
 pub use runner::{AsyncMetric, EvalAgent, EvalRunner, SyncMetricAdapter};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use store::EvalStore;
 use thiserror::Error;
@@ -113,7 +114,7 @@ pub enum EvalError {
 pub const KEYWORD_METRIC_NAME: &str = "keyword_match";
 
 /// A suite of evaluation test cases.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalSuite {
     /// Suite name. `pub(crate)` so the `Serialize` derive can
     /// read it directly; consumers use the [`Self::name`] getter.
@@ -153,7 +154,7 @@ impl EvalSuite {
 }
 
 /// A single evaluation test case.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TestCase {
     /// Test case identifier (also the CSV `case_id`).
     pub id: String,
@@ -195,7 +196,7 @@ impl TestCase {
 }
 
 /// A single test case result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TestResult {
     /// Test case ID.
     pub case_id: String,
@@ -209,7 +210,7 @@ pub struct TestResult {
 }
 
 /// An evaluation report: every case result plus aggregates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EvalReport {
     /// Suite name.
     pub suite_name: String,

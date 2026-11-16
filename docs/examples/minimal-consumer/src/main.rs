@@ -219,7 +219,7 @@ async fn main() {
                 }
             }
             AgentEvent::ModelDone(done) => answer = done.text.clone(),
-            AgentEvent::System(_) | AgentEvent::Agent(_, _) => {}
+            AgentEvent::System(_) => {}
         }
     }
 

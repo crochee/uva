@@ -49,6 +49,8 @@ fn turn_start(turn: u64, ts: &str) -> SessionEvent {
         seq: turn,
         ts: ts.into(),
         data: json!({"kind": "start", "turn": turn}),
+        kind: Some("start".to_string()),
+        turn: Some(turn),
     }
 }
 
@@ -57,6 +59,8 @@ fn turn_end(turn: u64, ts: &str) -> SessionEvent {
         seq: turn,
         ts: ts.into(),
         data: json!({"kind": "end", "turn": turn}),
+        kind: Some("end".to_string()),
+        turn: Some(turn),
     }
 }
 
@@ -65,6 +69,9 @@ fn step_start(turn: u64, step: u64, ts: &str) -> SessionEvent {
         seq: turn * 100 + step,
         ts: ts.into(),
         data: json!({"kind": "start", "turn": turn, "step": step}),
+        kind: Some("start".to_string()),
+        turn: Some(turn),
+        step: Some(step),
     }
 }
 
@@ -93,6 +100,7 @@ fn tool_result(seq: u64, ts: &str, call_id: &str) -> SessionEvent {
         ts: ts.into(),
         data: json!({"call_id": call_id, "content": "ok"}),
         is_error: false,
+        tool_call_id: Some(call_id.to_string()),
         surface_op: None,
     }
 }
@@ -135,6 +143,7 @@ fn tool_result_message(seq: u64, ts: &str, call_id: &str) -> SessionEvent {
             "content": [{"type": "text", "text": "ok"}],
         }),
         is_error: false,
+        tool_call_id: Some(call_id.to_string()),
         surface_op: None,
     }
 }
@@ -166,16 +175,23 @@ fn suspension_closes_the_turn_with_suspended_not_interrupted() {
                 "status": "suspended",
                 "pending": ["c1"],
             }),
+            kind: Some("end".to_string()),
+            turn: None,
         },
         SessionEvent::Step {
             seq: 6,
             ts: ts.into(),
             data: json!({"phase": "end", "status": "suspended"}),
+            kind: Some("end".to_string()),
+            turn: None,
+            step: None,
         },
         SessionEvent::Turn {
             seq: 7,
             ts: ts.into(),
             data: json!({"phase": "end", "reason": "suspended"}),
+            kind: Some("end".to_string()),
+            turn: None,
         },
     ];
     assert!(
@@ -226,6 +242,8 @@ fn balanced_log_produces_no_closers() {
             seq: 99,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"kind": "end", "turn": 1}),
+            kind: Some("end".to_string()),
+            turn: Some(1),
         },
     ];
     assert!(interrupted_turn_closers(&events).is_empty());
@@ -265,6 +283,8 @@ fn dangling_tool_call_after_open_turn_emits_tool_result_then_closers() {
             seq: 4,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"call_id": "c1", "name": "read", "arguments": {}}),
+            call_id: Some("c1".to_string()),
+            name: Some("read".to_string()),
         },
         // No tool_result for c1, no step/end, no turn/end.
     ];
@@ -420,12 +440,16 @@ fn paired_call_does_not_get_a_synthetic_result() {
             seq: 4,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"call_id": "c1", "name": "read", "arguments": {}}),
+            call_id: Some("c1".to_string()),
+            name: Some("read".to_string()),
         },
         tool_result(5, "2026-09-10T00:00:00Z", "c1"),
         SessionEvent::ToolCall {
             seq: 6,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"call_id": "c2", "name": "shell", "arguments": {}}),
+            call_id: Some("c2".to_string()),
+            name: Some("shell".to_string()),
         },
     ];
     let closers = interrupted_turn_closers(&events);
@@ -507,6 +531,8 @@ fn closers_leave_their_ordinal_to_the_writer() {
             seq: 8,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"call_id": "c1", "name": "shell", "arguments": {}}),
+            call_id: Some("c1".to_string()),
+            name: Some("shell".to_string()),
         },
     ];
     let closers = interrupted_turn_closers(&events);
@@ -857,6 +883,32 @@ fn a_keyless_park_row_is_warned_once_and_skipped() {
         warns[0].contains("park_id"),
         "the warn names what the row is missing: {}",
         warns[0]
+    );
+}
+
+/// A turn's own prompt row is a `user_message` row. It records what
+/// the user asked, not that a park was spent: the park a run took is
+/// spent by the `park_consumed` row naming it, so an ordinary turn's
+/// prompt record leaves every queued park alone. Inferring the
+/// consumption from "this row is a user turn" would drop a prompt
+/// whose park is still waiting.
+#[test]
+fn an_ordinary_user_message_row_does_not_consume_a_park() {
+    let rows = vec![
+        parked_row(1, "park-1", "still queued"),
+        json!({
+            "type": "user_message",
+            "seq": 2,
+            "data": {"role": "user", "content": {"text": "another turn"}},
+        }),
+    ];
+    assert_eq!(
+        parked_prompts(&rows)
+            .iter()
+            .map(|p| p.park_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["park-1"],
+        "the turn's prompt record is not a consumption"
     );
 }
 

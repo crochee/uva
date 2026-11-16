@@ -1,45 +1,51 @@
 /**
  * Chat transport for the uva-web frontend.
  *
- * The transcript is one long-lived server stream —
- * `GET /api/v1/sessions/{id}/follow`. Its first frame is a **complete
- * baseline** (header, durable window, cursor, live projection, context
- * meter, open interrupts, request-envelope fingerprint) and every later
- * frame is an increment: a durable `row`, a transient `live` projection,
- * or the changed `interrupts` set. A page load or a reconnect replaces
- * its whole window from that baseline, then applies rows past the
- * cursor — there is no local-cache-plus-stream splice any more.
+ * The transcript is one long-lived server stream — `sessions/follow`
+ * (opened through `sessionsApi.follow`). Its first frame is a
+ * **complete baseline** (header, durable window, cursor, live
+ * projection, context meter, open interrupts, request-envelope
+ * fingerprint) and every later frame is an increment: a durable
+ * `row`, a transient `live` projection, or the changed `interrupts`
+ * set. A page load or a reconnect replaces its whole window from that
+ * baseline, then applies rows past the cursor — there is no
+ * local-cache-plus-stream splice any more.
  *
- * Everything else is the ordinary v1 REST surface:
+ * The five `chat/*` actions live here, beside the stream they feed:
  *
- * - `POST /api/v1/chat/sessions` — mint the session id. The follow
- *   stream 404s for a session the server does not know, so the page
- *   never guesses an id: creation is the only way a chat starts.
- * - `POST /api/v1/chat/sessions/{id}/messages` — a turn, with
- *   `delivery: "queue" | "steer"`.
- * - `POST /api/v1/sessions/{id}/resume` — the decisions for a
- *   suspended run, with the token rebuilt from the follow baseline.
- * - `POST /api/v1/sessions/{id}/compact` — one manual compaction pass.
- * - `GET /api/v1/sessions/{id}/usage` — session-scoped tokens.
- * - cancel / regenerate / feedback / session detail / model catalog.
+ * - `chat/session/create` — mint the session id. The follow stream
+ *   answers `not_found` for a session the server does not know, so
+ *   the page never guesses an id: creation is the only way a chat
+ *   starts.
+ * - `chat/message/send` — a turn, with `delivery: "queue" | "steer"`.
+ * - `chat/cancel` — drop the in-flight run of a session.
+ * - `chat/regenerate` — replay the latest user turn.
+ * - `chat/feedback` — a thumbs-up / thumbs-down verdict.
+ *
+ * Session reads/writes (resume, compact, usage, detail, list,
+ * delete) belong to `sessions.ts`; the model catalogue to
+ * `catalog.ts`.
  */
 
-import { api } from './client';
+import {
+  readBaseline,
+  readInterrupts,
+  readLiveTurn,
+  readRowFrame,
+  type FollowEvent,
+} from './follow-frames';
 import { RpcError, rpc } from './rpc';
-import type {
-  ApprovalRequest,
-  CompactResult,
-  FollowSnapshot,
-  LiveToolCall,
-  LiveTurn,
-  ResumeDecision,
-  ResumeToken,
-  SendChatMessageResponse,
-  SessionDetail,
-  SessionTurn,
-  SessionUsage,
-  SteerDelivery,
-} from './types';
+import { sessionsApi } from './sessions';
+import type { SendChatMessageResponse, SteerDelivery } from './types';
+
+/** The `chat/*` methods this module owns. */
+const METHOD = {
+  createSession: 'chat/session/create',
+  send: 'chat/message/send',
+  cancel: 'chat/cancel',
+  regenerate: 'chat/regenerate',
+  feedback: 'chat/feedback',
+} as const;
 
 // ---------------------------------------------------------------------------
 // Segment vocabulary
@@ -58,6 +64,8 @@ export type SegmentType =
   | 'progress'
   | 'notice'
   | 'attachment'
+  | 'warning'
+  | 'hook_block'
   | 'compaction';
 
 // ---------------------------------------------------------------------------
@@ -134,8 +142,15 @@ function attachmentsToWire(attachments: ReadonlyArray<AttachmentPart>): WireAtta
 }
 
 // ---------------------------------------------------------------------------
-// REST actions
+// Chat actions
 // ---------------------------------------------------------------------------
+
+/** Create a chat session; the server mints the id. */
+export async function createChatSession(agentName?: string): Promise<string> {
+  const body = agentName === undefined ? {} : { agent_name: agentName };
+  const resp = await rpc.request<{ session_id: string }>(METHOD.createSession, body);
+  return resp.session_id;
+}
 
 /**
  * Drop the in-flight run (if any) on a session. Used by the "Stop"
@@ -143,86 +158,42 @@ function attachmentsToWire(attachments: ReadonlyArray<AttachmentPart>): WireAtta
  * `cancelled` as part of the same op, so a stop never leaves a
  * session paused forever.
  */
-/** Create a chat session; the server mints the id. */
-export async function createChatSession(agentName?: string): Promise<string> {
-  const body = agentName === undefined ? {} : { agent_name: agentName };
-  const resp = await api.post<{ session_id: string }>('/api/v1/chat/sessions', body);
-  return resp.session_id;
-}
-
 export async function cancelSession(sessionId: string, signal?: AbortSignal): Promise<void> {
-  await api.post<void>(
-    `/api/v1/chat/sessions/${encodeURIComponent(sessionId)}/cancel`,
-    undefined,
-    signal,
-  );
+  await rpc.request<void>(METHOD.cancel, { session_id: sessionId }, signal);
 }
 
 /**
  * Replay the most recent user turn against the same attachments —
- * backs the "Regenerate" button. The route answers `202`; the rerun's
- * outcome arrives through `follow` like any other turn.
+ * backs the "Regenerate" button. The rerun's outcome arrives through
+ * `follow` like any other turn.
  */
 export async function regenerate(sessionId: string, signal?: AbortSignal): Promise<void> {
-  await api.post<void>(
-    `/api/v1/chat/sessions/${encodeURIComponent(sessionId)}/regenerate`,
-    undefined,
-    signal,
-  );
+  await rpc.request<void>(METHOD.regenerate, { session_id: sessionId }, signal);
 }
 
 /**
  * Record a thumbs-up / thumbs-down verdict against an assistant
  * message.
+ *
+ * `targetOrdinal` is the ordinal of the rated row — its `seq`, in
+ * decimal. The wire field keeps the name `message_id`: the log
+ * format's version gate refuses an old log rather than migrating it,
+ * so the field's name is fixed and only its meaning changed.
  */
 export async function submitFeedback(
   sessionId: string,
-  messageId: string,
+  targetOrdinal: string,
   thumbsUp: boolean,
   signal?: AbortSignal,
 ): Promise<void> {
-  await api.post<void>(
-    `/api/v1/chat/messages/${encodeURIComponent(messageId)}/feedback`,
-    // The session rides in the body: the message id is a client-side
-    // label, so the server cannot resolve the session from it.
-    { thumbs_up: thumbsUp, session_id: sessionId },
+  await rpc.request<void>(
+    METHOD.feedback,
+    // The session rides beside the target: an ordinal only means
+    // something inside one session's log, so the server cannot
+    // resolve the session from it.
+    { message_id: targetOrdinal, thumbs_up: thumbsUp, session_id: sessionId },
     signal,
   );
-}
-
-/**
- * Fetch one session's durable transcript.
- *
- * Kept for the session-detail view and the regenerate path; the chat
- * page itself takes its window from `follow`.
- */
-export async function getSessionDetail(
-  sessionId: string,
-  signal?: AbortSignal,
-): Promise<SessionDetail> {
-  return api.get<SessionDetail>(`/api/v1/sessions/${encodeURIComponent(sessionId)}`, signal);
-}
-
-/**
- * Enumerate registered models + the workspace default — backs the
- * model-selector dropdown.
- */
-export interface ModelEntry {
-  provider: string;
-  model: string;
-  context_window: number;
-  supports_tools: boolean;
-  supports_streaming: boolean;
-}
-
-export interface ModelsResponse {
-  models: ModelEntry[];
-  default_provider: string;
-  default_model: string;
-}
-
-export async function listModels(signal?: AbortSignal): Promise<ModelsResponse> {
-  return api.get<ModelsResponse>('/api/v1/models', signal);
 }
 
 export interface SendChatMessageOptions {
@@ -251,9 +222,10 @@ export async function sendChatMessage(
   options: SendChatMessageOptions,
 ): Promise<SendChatMessageResponse> {
   const attachments = attachmentsToWire(options.attachments ?? []);
-  return api.post<SendChatMessageResponse>(
-    `/api/v1/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+  return rpc.request<SendChatMessageResponse>(
+    METHOD.send,
     {
+      session_id: sessionId,
       text: options.text,
       ...(attachments.length > 0 ? { attachments } : {}),
       ...(options.agentName ? { agent_name: options.agentName } : {}),
@@ -264,62 +236,6 @@ export async function sendChatMessage(
   );
 }
 
-/**
- * Resume a suspended run.
- *
- * `decisions` must cover every open interrupt; the server rejects a
- * partial set with `422 incomplete_resume` and does not touch the log.
- *
- * The server tells three outcomes apart, and the page reacts to each:
- * `409 resume_conflict` means the log moved on since the token was
- * issued — or the operator changed a decision the log already holds
- * (the page reconnects, and the new baseline carries a fresh token's
- * inputs), `409 resume_no_snapshot` means this round cannot
- * be resumed at all (the log holds no request envelope, so a new
- * session is the way forward), and a token whose decisions are already
- * in the log **and match them** is not a failure — it is a replay,
- * answered with `200`.
- */
-export async function resumeSession(
-  sessionId: string,
-  token: ResumeToken,
-  decisions: ReadonlyArray<ResumeDecision>,
-  options: { allowDrift?: boolean; signal?: AbortSignal } = {},
-): Promise<void> {
-  await api.post<void>(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/resume`,
-    {
-      resume_token: token,
-      interrupts: decisions,
-      ...(options.allowDrift ? { allow_drift: true } : {}),
-    },
-    options.signal,
-  );
-}
-
-/**
- * Run one manual compaction pass. The durable rows it writes arrive
- * through `follow`, so the timeline marker needs no return value.
- */
-export async function compactSession(
-  sessionId: string,
-  signal?: AbortSignal,
-): Promise<CompactResult> {
-  return api.post<CompactResult>(
-    `/api/v1/sessions/${encodeURIComponent(sessionId)}/compact`,
-    undefined,
-    signal,
-  );
-}
-
-/** Session-scoped token usage (not the process-wide counters). */
-export async function getSessionUsage(
-  sessionId: string,
-  signal?: AbortSignal,
-): Promise<SessionUsage> {
-  return api.get<SessionUsage>(`/api/v1/sessions/${encodeURIComponent(sessionId)}/usage`, signal);
-}
-
 // ---------------------------------------------------------------------------
 // Follow stream
 // ---------------------------------------------------------------------------
@@ -328,20 +244,11 @@ export async function getSessionUsage(
  * One increment of the session stream.
  *
  * `baseline` is complete on its own; the others are applied on top of
- * the window it established.
+ * the window it established. The frame vocabulary lives beside the
+ * validators that read the wire shapes (`follow-frames.ts`); it is
+ * re-exported here so this module stays the one import a caller needs.
  */
-export type FollowEvent =
-  | { type: 'baseline'; snapshot: FollowSnapshot }
-  | {
-      type: 'row';
-      seq: number;
-      turnId?: string;
-      row: SessionTurn;
-      /** The request envelope hash, when this row is a snapshot. */
-      hash?: string;
-    }
-  | { type: 'live'; live: LiveTurn }
-  | { type: 'interrupts'; pending: ApprovalRequest[] };
+export type { FollowEvent };
 
 /**
  * A `follow` open that the server refused, carrying the code so the
@@ -435,14 +342,11 @@ export async function* followSession(
     });
     try {
       const baseline = readBaseline(
-        await rpc.request<unknown>(
-          'sessions/follow',
-          {
-            session_id: sessionId,
-            // The first open asks for the plain window; a reconnect
-            // asserts the cursor it left off at.
-            ...(openedOnce && lastSeq > 0 ? { from: lastSeq } : {}),
-          },
+        await sessionsApi.follow(
+          sessionId,
+          // The first open asks for the plain window; a reconnect
+          // asserts the cursor it left off at.
+          openedOnce && lastSeq > 0 ? { from: lastSeq } : {},
           signal,
         ),
       );
@@ -487,151 +391,4 @@ export async function* followSession(
       unsubscribeConnection();
     }
   }
-}
-
-/**
- * Validate the fields of a `row` frame the client acts on, so a
- * malformed frame is dropped instead of shifting a cursor or appending
- * a non-row to the window.
- */
-function readRowFrame(data: unknown): FollowEvent | null {
-  if (!data || typeof data !== 'object' || !('seq' in data) || !('row' in data)) return null;
-  const { seq, row } = data;
-  if (typeof seq !== 'number' || !row || typeof row !== 'object' || Array.isArray(row)) return null;
-  const turnId =
-    'turn_id' in data && typeof data.turn_id === 'string' && data.turn_id.length > 0
-      ? data.turn_id
-      : null;
-  const hash =
-    'request_snapshot_hash' in data &&
-    typeof data.request_snapshot_hash === 'string' &&
-    data.request_snapshot_hash.length > 0
-      ? data.request_snapshot_hash
-      : null;
-  return {
-    type: 'row',
-    seq,
-    row: row as SessionTurn,
-    ...(turnId ? { turnId } : {}),
-    ...(hash ? { hash } : {}),
-  };
-}
-
-/** Validate the `interrupts` frame's list before trusting its shape. */
-function readInterrupts(data: unknown): ApprovalRequest[] | null {
-  if (!data || typeof data !== 'object' || !('pending_interrupts' in data)) return null;
-  const pending = data.pending_interrupts;
-  if (!Array.isArray(pending)) return null;
-  const out: ApprovalRequest[] = [];
-  for (const entry of pending) {
-    if (!entry || typeof entry !== 'object') continue;
-    const strings = ['id', 'call_id', 'tool', 'arguments_hash', 'agent'] as const;
-    if (
-      strings.some((key) => {
-        const value = Reflect.get(entry, key);
-        return typeof value !== 'string';
-      })
-    ) {
-      continue;
-    }
-    const risk = Reflect.get(entry, 'risk');
-    if (risk !== 'low' && risk !== 'high' && risk !== 'unknown') continue;
-    out.push({
-      id: Reflect.get(entry, 'id') as string,
-      call_id: Reflect.get(entry, 'call_id') as string,
-      tool: Reflect.get(entry, 'tool') as string,
-      arguments_hash: Reflect.get(entry, 'arguments_hash') as string,
-      risk,
-      agent: Reflect.get(entry, 'agent') as string,
-    });
-  }
-  return out;
-}
-
-/**
- * Validate a `baseline` frame.
- *
- * The baseline is the one frame the client replaces its whole window
- * with, so the fields it cannot proceed without are checked here; the
- * nested row payloads are the same durable rows the session-detail
- * projection already reads.
- */
-function readBaseline(data: unknown): FollowSnapshot | null {
-  if (!data || typeof data !== 'object') return null;
-  if (
-    !('header' in data) ||
-    !('rows' in data) ||
-    !('cursor' in data) ||
-    !('live' in data) ||
-    !('context' in data)
-  ) {
-    return null;
-  }
-  const { header, rows, cursor, live, context } = data;
-  if (!header || typeof header !== 'object') return null;
-  if (!Array.isArray(rows) || typeof cursor !== 'number') return null;
-  if (!live || typeof live !== 'object') return null;
-  if (!context || typeof context !== 'object') return null;
-  const pending =
-    'pending_interrupts' in data && Array.isArray(data.pending_interrupts)
-      ? (data.pending_interrupts as ApprovalRequest[])
-      : [];
-  const hash =
-    'request_snapshot_hash' in data && typeof data.request_snapshot_hash === 'string'
-      ? data.request_snapshot_hash
-      : '';
-  return {
-    header: header as FollowSnapshot['header'],
-    rows: rows as SessionTurn[],
-    cursor,
-    live: live as FollowSnapshot['live'],
-    context: context as FollowSnapshot['context'],
-    pending_interrupts: pending,
-    request_snapshot_hash: hash,
-  };
-}
-
-/**
- * Validate a `live` frame.
- *
- * The projection is rendered wholesale, so its tool-call array is
- * rebuilt from checked fields rather than trusted: a malformed call
- * cannot become a `JSON.stringify` of an arbitrary value or a block
- * keyed by a non-string id.
- */
-function readLiveTurn(data: unknown): LiveTurn | null {
-  if (!data || typeof data !== 'object') return null;
-  if (!('turn_id' in data) || !('live_seq' in data)) return null;
-  if (typeof data.turn_id !== 'string' || typeof data.live_seq !== 'number') return null;
-  const text = 'text' in data && typeof data.text === 'string' ? data.text : '';
-  const reasoning = 'reasoning' in data && typeof data.reasoning === 'string' ? data.reasoning : '';
-  const running = 'running' in data ? data.running === true : false;
-  const rawCalls: unknown = 'tool_calls' in data ? data.tool_calls : [];
-  const tool_calls: LiveToolCall[] = [];
-  if (Array.isArray(rawCalls)) {
-    for (const raw of rawCalls) {
-      if (!raw || typeof raw !== 'object') continue;
-      const callId = Reflect.get(raw, 'call_id');
-      const name = Reflect.get(raw, 'name');
-      const status = Reflect.get(raw, 'status');
-      if (typeof callId !== 'string' || typeof name !== 'string') continue;
-      if (status !== 'running' && status !== 'completed' && status !== 'failed') continue;
-      const output = Reflect.get(raw, 'output');
-      tool_calls.push({
-        call_id: callId,
-        name,
-        arguments: Reflect.get(raw, 'arguments') ?? null,
-        status,
-        ...(typeof output === 'string' ? { output } : {}),
-      });
-    }
-  }
-  return {
-    turn_id: data.turn_id,
-    live_seq: data.live_seq,
-    running,
-    text,
-    reasoning,
-    tool_calls,
-  };
 }

@@ -46,8 +46,13 @@ pub enum SessionOp {
     },
     /// Append a feedback record to the session sink. The wire
     /// payload is `{thumbs_up: bool, message_id: String}` —
-    /// persisted as a JSONL row tagged `kind: "feedback"` so a
+    /// persisted as the typed `feedback` row (log-only) so a
     /// future analytics endpoint can aggregate it.
+    ///
+    /// `message_id` is the rated row's **ordinal** — its `seq`, in
+    /// decimal. The route resolves the ordinal against the session's
+    /// own log before the op is submitted, so the row this op writes
+    /// always names an assistant message that exists.
     Feedback {
         message_id: String,
         thumbs_up: bool,

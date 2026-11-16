@@ -173,7 +173,16 @@ pub trait SessionSink: Send + Sync {
     /// Returns [`SessionError::ReadFailed`] when the underlying
     /// storage cannot satisfy the request (corrupt file, IO
     /// error).
-    async fn read_from(&self, from: u64) -> Result<Vec<Value>, SessionError>;
+    async fn read_from(&self, from: u64) -> Result<Vec<Value>, SessionError> {
+        // The default is the whole-log read with the prefix dropped:
+        // the JSONL backend reads the whole file anyway, so no
+        // production path loses a bound it had. Nothing in production
+        // calls this today — it stays on the trait for the readers
+        // that want an explicit suffix and for the tests that pin it.
+        let rows = self.read().await?;
+        let start = usize::try_from(from).unwrap_or(usize::MAX);
+        Ok(rows.into_iter().skip(start).collect())
+    }
 
     /// The **last** `window` events, newest at the end.
     ///
@@ -240,34 +249,6 @@ pub trait SessionSink: Send + Sync {
     /// Whatever [`read`](Self::read) returns.
     async fn read_head(&self) -> Result<Option<Value>, SessionError> {
         Ok(self.read().await?.into_iter().next())
-    }
-
-    /// Reconstruct the chronological event stream starting **after**
-    /// the event whose `stream_index` is `idx`.
-    ///
-    /// Equivalent to `read_from` for sinks that allocate one
-    /// `stream_index` per append and never reuse or skip one
-    /// (today every sink). The default implementation
-    /// delegates to `read_from`, so the two are interchangeable
-    /// on existing sinks; future stream-position semantics
-    /// (e.g. dense-over-compaction indices) override this
-    /// default.
-    ///
-    /// `idx = 0` returns every recorded event. `idx = N`
-    /// returns only events whose `stream_index` is greater
-    /// than `N`. Callers with a stale `idx` are responsible
-    /// for surfacing that mismatch as a `410 Gone` at the HTTP
-    /// seam -- see `2026-09-24-stream-index.md` section 4.4.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SessionError::ReadFailed`] when the underlying
-    /// storage cannot satisfy the request.
-    async fn read_from_index(
-        &self,
-        idx: u64,
-    ) -> Result<Vec<Value>, SessionError> {
-        self.read_from(idx).await
     }
 
     /// Force a stable checkpoint (flush buffers, rotate logs,

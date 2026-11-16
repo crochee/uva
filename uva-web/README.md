@@ -14,14 +14,18 @@ npm run build        # 产出 dist/（桌面壳与 embed-web 共用这一份）
 ```
 
 仓库根的 `make dev` 会同时起后端与前端；`make check-web` 跑类型检查
-（`tsc --noEmit`）、eslint 与 prettier——**本项目不保留前端 e2e 套件**，
-前端行为按 AGENTS.md §4.2 用 Playwright MCP 驱动真实页面验证。
+（`tsc --noEmit`）、eslint、prettier 与纯函数单元测试（vitest，node 环境）——
+**本项目不保留前端 e2e 套件**，前端行为按 AGENTS.md §4.2 用 Playwright MCP
+驱动真实页面验证。
 
 ## 与后端的接线
 
 - 所有请求走 JSON-RPC 2.0，方法名与 `crates/uva-app-server/src/rpc/methods/`
-  的注册表一一对应；`src/api/client.ts` 保留旧的 REST 路径**映射表**（设置分区
-  仍在用），它不是页面路由。
+  的注册表一一对应。前端按域组织调用：`src/api/` 下每个域一个类型化客户端
+  （`sessions.ts`、`agents.ts`、`chat-stream.ts`、`skills.ts`、`tasks.ts`、
+  `schedules.ts`、`evals.ts`、`search.ts`、`catalog.ts`、`settings-profile.ts`），
+  每个客户端一张 `METHOD` 常量表、直接 `rpc.request`；页面与 hook 只 import
+  域客户端，不拼 URL。
 - 页面路由只有两条：`/chat*`（对话优先）与 `/settings/:section`（设置九分区）；
   其余路径落到 `/chat`。
 

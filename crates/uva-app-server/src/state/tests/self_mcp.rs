@@ -124,12 +124,12 @@ async fn the_profile_tool_reads_rows_and_writes_through_the_transaction() {
     let session_manager = SessionRegistry::new(dir.path().join("sessions"));
     let mut state =
         AppState::for_test(session_manager, dir.path().to_path_buf()).await;
-    state.profile_store = Some(crate::profile::ProfileStore {
+    state.assembly.set_store(Some(crate::profile::ProfileStore {
         bundle: None,
         doc: dir.path().join("profile.toml"),
         home: None,
         overlay: None,
-    });
+    }));
     let state = Arc::new(state);
     self_mcp::register_self_mcp(&state).await;
 

@@ -22,23 +22,22 @@
 //! in its reasons: an `hmr = true` deployment re-resolves back to the
 //! old file, an `hmr = false` one keeps the new tree until restart.
 
-use std::collections::BTreeMap;
-
-use serde_json::{Value, json};
+use serde_json::Value;
 use uva::core::{Clock as _, registry::Registry as _};
 
 use super::AppState;
-use crate::profile::{
-    CapabilityAction,
-    CapabilityDomain,
-    ChangeOutcome,
-    ChangeState,
-    KernelChecks,
-    Profile,
-    ProfileAction,
-    ProfileStore,
-    RowEdit,
-    effective,
+use crate::{
+    api::v1::profile::ProfileRow,
+    profile::{
+        CapabilityAction,
+        CapabilityDomain,
+        ChangeOutcome,
+        ChangeState,
+        Profile,
+        ProfileAction,
+        ProfileStore,
+        RowEdit,
+    },
 };
 
 impl AppState {
@@ -52,8 +51,8 @@ impl AppState {
         actor: &str,
         action: ProfileAction,
     ) -> ChangeOutcome {
-        let _guard = self.profile_write.lock().await;
-        let Some(store) = self.profile_store.as_ref() else {
+        let _guard = self.assembly.writer().lock().await;
+        let Some(store) = self.assembly.store() else {
             return ChangeOutcome::failed(
                 "no profile document is configured for this process",
             );
@@ -72,44 +71,14 @@ impl AppState {
     /// Every profile row with its effective status: the settings page's
     /// data source (D26 — the interface is the profile read backwards).
     #[must_use]
-    pub fn profile_rows(&self) -> Vec<Value> {
-        let raw = self.profile.read().clone();
-        let checks = KernelChecks(&self.kernel);
-        let assembly = effective(&raw, &checks);
-        let reasons: BTreeMap<&str, &str> = assembly
-            .skipped
-            .iter()
-            .map(|row| (row.id.as_str(), row.reason.as_str()))
-            .collect();
-        let mut rows = Vec::with_capacity(raw.core.len() + raw.ui.len());
-        for (segment, entries) in [("core", &raw.core), ("ui", &raw.ui)] {
-            for entry in entries {
-                let status = reasons
-                    .get(entry.id.as_str())
-                    .map(|reason| format!("off: {reason}"))
-                    .unwrap_or_else(|| "mounted".to_owned());
-                rows.push(json!({
-                    "id": entry.id,
-                    "segment": segment,
-                    "runtime": entry.runtime,
-                    "enabled": entry.enabled,
-                    "config": entry.config,
-                    "status": status,
-                    "plugin_state": self
-                        .plugin_state(&entry.id)
-                        .map(|state| format!("{state:?}")),
-                }));
-            }
-        }
-        rows
+    pub fn profile_rows(&self) -> Vec<ProfileRow> {
+        self.assembly.rows()
     }
 
     /// One profile row's detail.
     #[must_use]
-    pub fn profile_row(&self, id: &str) -> Option<Value> {
-        self.profile_rows()
-            .into_iter()
-            .find(|row| row.get("id").and_then(Value::as_str) == Some(id))
+    pub fn profile_row(&self, id: &str) -> Option<ProfileRow> {
+        self.profile_rows().into_iter().find(|row| row.id == id)
     }
 
     async fn apply_row_edit(
@@ -117,7 +86,7 @@ impl AppState {
         store: &ProfileStore,
         edit: RowEdit,
     ) -> ChangeOutcome {
-        let fallback = self.profile.read().clone();
+        let fallback = self.assembly.raw();
         let mut document = match store.load_doc(&fallback) {
             Ok(document) => document,
             Err(error) => {
@@ -370,35 +339,9 @@ impl AppState {
     /// assembly. A capability write changes the files a row builds
     /// from, not its config, so the diff cannot name it.
     async fn remount_row(&self, id: &str) -> Result<(), String> {
-        use crate::{
-            composition::kernel::profile_factories,
-            profile::{BootContext, build_plugins},
-        };
-
-        let assembly = self.assembly.read().clone();
-        let Some(entry) = assembly.find(id).cloned() else {
-            return Ok(());
-        };
-        let one = Profile {
-            core: vec![entry],
-            ui: Vec::new(),
-            hmr: assembly.hmr,
-        };
-        let factories =
-            profile_factories(std::sync::Arc::clone(&self.boot_services));
-        let boot = BootContext::new(self.workspace_root.clone())
-            .with_host(std::sync::Arc::clone(&self.boot_services))
-            .with_clock(self.clock.clone());
-        let plugins = build_plugins(&one, &factories, &boot)
-            .map_err(|error| error.to_string())?;
-        self.unload_plugin(id).await;
-        match uva::kernel::mount_all(&self.kernel, &plugins) {
-            Ok(mounted) => {
-                self.mount.lock().push(mounted);
-                Ok(())
-            }
-            Err(error) => Err(error.to_string()),
-        }
+        self.assembly
+            .remount_row(&self.assembly_context(), id)
+            .await
     }
 
     fn audit_and_notify(
@@ -430,15 +373,24 @@ impl AppState {
         if outcome.diff.as_ref().is_some_and(|diff| diff.is_empty()) {
             return;
         }
-        let at = serde_json::to_value(self.clock.now()).unwrap_or(Value::Null);
+        // The payload is a named type, so the emitter derives the
+        // frontend's `ProfileChangedEvent` from the same declaration this
+        // broadcast serializes — the notification cannot drift from the
+        // type the client subscribes with.
+        let event = crate::api::v1::profile::ProfileChangedEvent {
+            actor: actor.to_owned(),
+            state: outcome.state.into(),
+            ids: ids.to_vec(),
+            at: Some(self.clock.now()),
+        };
         self.rpc.outbound().notify(
             crate::rpc::notify::PROFILE_CHANGED,
-            json!({
-                "actor": actor,
-                "state": outcome.state,
-                "ids": ids,
-                "at": at,
-            }),
+            // `ProfileChangedEvent` holds a string, a plain enum, a
+            // string list and an optional timestamp: serialization
+            // cannot fail, and a `null` payload would tell every
+            // subscriber something false. The invariant, stated.
+            serde_json::to_value(&event)
+                .expect("ProfileChangedEvent is infallibly serializable"),
         );
     }
 }
@@ -462,16 +414,16 @@ fn affected_ids(action: &ProfileAction) -> Vec<String> {
 
 fn field_name(edit: &RowEdit) -> &'static str {
     match edit {
-        RowEdit::SetEnabled { .. } => "enabled",
+        RowEdit::SetDisabled { .. } => "disabled",
         RowEdit::SetConfig { .. } => "config",
         RowEdit::Set {
-            enabled: Some(_),
+            disabled: Some(_),
             config: Some(_),
             ..
-        } => "enabled/config",
+        } => "disabled/config",
         RowEdit::Set {
-            enabled: Some(_), ..
-        } => "enabled",
+            disabled: Some(_), ..
+        } => "disabled",
         RowEdit::Set { .. } => "config",
     }
 }

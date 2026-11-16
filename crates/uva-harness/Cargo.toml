@@ -1,6 +1,6 @@
 [package]
 name = "uva-harness"
-description = "The runtime-neutral agent loop for uva: ReActAgent, the Host interception registry, the DelegatingTool seam and the event stream"
+description = "The runtime-neutral agent loop for uva: ReActAgent, the Host interception registry and the event stream"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,11 +22,31 @@ uva-core.workspace = true
 # kernel in turn depends only on the dependency-free `cordis` crate, so
 # this does not pull a runtime into the harness.
 uva-kernel.workspace = true
+# The interception contract (the Hook/Gate/transformer traits, the
+# seven mount-point keys, the decoupled HookContext and HookPayload)
+# the seam layer dispatches through; the harness re-exports every
+# name, so the frozen paths do not move (ADR 0004).
+uva-hook.workspace = true
 uva-provider.workspace = true
 uva-context.workspace = true
 uva-steering.workspace = true
 uva-session.workspace = true
 uva-tool.workspace = true
+# The approval vocabulary and decision functions live one crate below
+# the harness; the crate root re-exports them so the frozen surface
+# keeps its paths. `ApprovalGate` stays here until the interception
+# contract moves under `uva-approval`.
+uva-approval.workspace = true
+# The run-event vocabulary lives one crate below the harness; the
+# `events` module re-exports it so both the crate root and the deep
+# path `uva_harness::events::…` keep their names.
+uva-events.workspace = true
+# The agent vocabulary — the `Agent` contract, `AgentInput`, the steer
+# inboxes, the peer registry, the child-session writer source and the
+# prompt manifest — lives one crate below the harness; the crate root
+# and the `agent`/`input`/`prompt` modules re-export it, so the frozen
+# surface keeps its paths.
+uva-agent.workspace = true
 # The loop names `SpanKind` in its tracing spans.
 uva-telemetry = { workspace = true, default-features = false }
 
@@ -34,8 +54,9 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-# The approval request carries a digest of the call's arguments, so a
-# decision can be checked against the call it was made for.
+# The loop fingerprints tool results and request envelopes (the
+# guard's result digest, the prepare step's tool/policy hashes), so
+# replay and drift checks compare digests, not payloads.
 sha2.workspace = true
 hex.workspace = true
 # The harness is runtime-neutral: its `[dependencies]` carries zero

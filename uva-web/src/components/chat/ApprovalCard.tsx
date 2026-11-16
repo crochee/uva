@@ -40,7 +40,7 @@ export interface ApprovalCardProps {
   onGrant: (id: string) => void;
   busy: boolean;
   error: string | null;
-  /** The `ApiError.code` behind `error`, when it has one. */
+  /** The `RpcError.code` behind `error`, when it has one. */
   errorCode: string | null;
   /** True when every open interrupt in the session has a decision. */
   ready: boolean;

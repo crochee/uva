@@ -39,9 +39,9 @@ async fn for_test_mounts_the_native_services_and_unload_is_scoped() {
 
     assert!(
         state
-            .kernel
-            .require::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
-            .is_ok(),
+            .assembly
+            .service::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
+            .is_some(),
         "the fixture mounts the native plugin set"
     );
     assert!(state.attachments().is_some());
@@ -55,9 +55,8 @@ async fn for_test_mounts_the_native_services_and_unload_is_scoped() {
     );
     assert!(
         state
-            .kernel
-            .get::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
-            .expect("read")
+            .assembly
+            .service::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
             .is_none(),
         "the service is withdrawn"
     );

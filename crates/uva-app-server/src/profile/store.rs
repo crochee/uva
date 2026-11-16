@@ -24,14 +24,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{
-    Enabled,
-    Entry,
+    IsolateLabel,
+    Manifest,
     Patch,
     Profile,
     ProfileDiff,
     ProfileError,
     ProfileSource,
-    model::runtime_name,
     resolve,
 };
 
@@ -52,13 +51,14 @@ pub struct ProfileStore {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RowEdit {
     /// Flip a row's enablement.
-    SetEnabled {
+    SetDisabled {
         /// The row to address.
         id: String,
         /// The new enablement.
-        enabled: Enabled,
+        disabled: bool,
     },
-    /// Replace a row's configuration whole.
+    /// Replace a row's configuration whole (a group's child list on a
+    /// group row).
     SetConfig {
         /// The row to address.
         id: String,
@@ -71,7 +71,7 @@ pub enum RowEdit {
         /// The row to address.
         id: String,
         /// The new enablement, when supplied.
-        enabled: Option<Enabled>,
+        disabled: Option<bool>,
         /// The new configuration object, when supplied.
         config: Option<Value>,
     },
@@ -82,7 +82,7 @@ impl RowEdit {
     #[must_use]
     pub fn id(&self) -> &str {
         match self {
-            Self::SetEnabled { id, .. }
+            Self::SetDisabled { id, .. }
             | Self::SetConfig { id, .. }
             | Self::Set { id, .. } => id,
         }
@@ -93,21 +93,21 @@ impl RowEdit {
     /// a higher layer owns the field (`overridden`).
     #[must_use]
     pub fn is_satisfied_by(&self, resolved: &Profile) -> bool {
-        let Some(entry) = resolved.find(self.id()) else {
+        let Some(row) = resolved.find(self.id()) else {
             return false;
         };
         match self {
-            Self::SetEnabled { enabled, .. } => entry.enabled == *enabled,
-            Self::SetConfig { config, .. } => entry.config == *config,
+            Self::SetDisabled { disabled, .. } => row.disabled == *disabled,
+            Self::SetConfig { config, .. } => row.config == *config,
             Self::Set {
-                enabled, config, ..
+                disabled, config, ..
             } => {
-                enabled
+                disabled
                     .as_ref()
-                    .is_none_or(|enabled| entry.enabled == *enabled)
+                    .is_none_or(|disabled| row.disabled == *disabled)
                     && config
                         .as_ref()
-                        .is_none_or(|config| entry.config == *config)
+                        .is_none_or(|config| row.config == *config)
             }
         }
     }
@@ -280,25 +280,23 @@ impl ProfileStore {
     /// Returns a message when the row does not exist.
     pub fn apply_edit(doc: &mut Profile, edit: &RowEdit) -> Result<(), String> {
         let id = edit.id();
-        let Some((segment, index)) = doc.position(id) else {
+        let target = row_mut(&mut doc.core, id)
+            .or_else(|| row_mut(&mut doc.ui, id));
+        let Some(target) = target else {
             return Err(format!("the profile has no row `{id}`"));
         };
-        let target = match segment {
-            super::model::Segment::Core => &mut doc.core[index],
-            super::model::Segment::Ui => &mut doc.ui[index],
-        };
         match edit {
-            RowEdit::SetEnabled { enabled, .. } => {
-                target.enabled = enabled.clone();
+            RowEdit::SetDisabled { disabled, .. } => {
+                target.disabled = *disabled;
             }
             RowEdit::SetConfig { config, .. } => {
                 target.config = config.clone();
             }
             RowEdit::Set {
-                enabled, config, ..
+                disabled, config, ..
             } => {
-                if let Some(enabled) = enabled {
-                    target.enabled = enabled.clone();
+                if let Some(disabled) = disabled {
+                    target.disabled = *disabled;
                 }
                 if let Some(config) = config {
                     target.config = config.clone();
@@ -337,13 +335,17 @@ impl ProfileStore {
     /// Atomically replace the document layer.
     ///
     /// The text goes to a sibling temporary file and is renamed over
-    /// `doc`, so a reader never sees a half-written document.
+    /// `doc`, so a reader never sees a half-written document. The
+    /// document's directory is created first: the layer it lives in
+    /// (the project's configuration layer) does not have to exist
+    /// before the first write.
     ///
     /// # Errors
     ///
     /// Propagates the write / rename failure.
     pub fn commit(&self, text: &str) -> std::io::Result<()> {
         let parent = self.doc.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
         let name = self
             .doc
             .file_name()
@@ -359,7 +361,7 @@ impl ProfileStore {
     }
 }
 
-fn section(rows: &[Entry]) -> Result<toml::value::Table, String> {
+fn section(rows: &[Manifest]) -> Result<toml::value::Table, String> {
     let mut section = toml::value::Table::new();
     section.insert(
         "entries".to_string(),
@@ -372,14 +374,51 @@ fn section(rows: &[Entry]) -> Result<toml::value::Table, String> {
     Ok(section)
 }
 
-fn row_to_toml(entry: &Entry) -> Result<toml::Value, String> {
+/// Find a row by id at this level or in any group below.
+fn row_mut<'a>(
+    rows: &'a mut [Manifest],
+    id: &str,
+) -> Option<&'a mut Manifest> {
+    for row in rows.iter_mut() {
+        if row.id == id {
+            return Some(row);
+        }
+        if let Some(found) = row_mut(&mut row.children, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// One row as a TOML table.
+///
+/// `disabled` is always written explicitly (the document states the
+/// whole tree); a group's children are its `config` array, the dsh
+/// Group plugin shape; `inject` / `intercept` / `isolate` are written
+/// when the row declares them.
+fn row_to_toml(entry: &Manifest) -> Result<toml::Value, String> {
     let mut row = toml::value::Table::new();
     row.insert("id".to_string(), toml::Value::String(entry.id.clone()));
+    if entry.group {
+        row.insert("group".to_string(), toml::Value::Boolean(true));
+    } else {
+        row.insert(
+            "name".to_string(),
+            toml::Value::String(entry.name.clone()),
+        );
+    }
     row.insert(
-        "runtime".to_string(),
-        toml::Value::String(runtime_name(entry.runtime).to_owned()),
+        "disabled".to_string(),
+        toml::Value::Boolean(entry.disabled),
     );
-    if !entry.config.is_null() {
+    if entry.group {
+        let children = entry
+            .children
+            .iter()
+            .map(row_to_toml)
+            .collect::<Result<Vec<_>, _>>()?;
+        row.insert("config".to_string(), toml::Value::Array(children));
+    } else if !entry.config.is_null() {
         row.insert("config".to_string(), json_to_toml(&entry.config)?);
     }
     if !entry.capabilities.is_empty() {
@@ -396,26 +435,36 @@ fn row_to_toml(entry: &Entry) -> Result<toml::Value, String> {
             ),
         );
     }
-    match &entry.enabled {
-        Enabled::On => {}
-        Enabled::Off => {
-            row.insert("enabled".to_string(), toml::Value::Boolean(false));
+    if let Some(inject) = &entry.inject {
+        row.insert(
+            "inject".to_string(),
+            toml::Value::Array(
+                inject
+                    .iter()
+                    .map(|key| toml::Value::String(key.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(intercept) = &entry.intercept {
+        let mut table = toml::value::Table::new();
+        for (service, config) in intercept {
+            table.insert(service.clone(), json_to_toml(config)?);
         }
-        Enabled::Check(check) => {
-            let mut table = toml::value::Table::new();
-            table.insert(
-                "service".to_string(),
-                toml::Value::String(check.service.clone()),
-            );
-            table.insert(
-                "check".to_string(),
-                toml::Value::String(check.check.clone()),
-            );
-            if !check.arg.is_null() {
-                table.insert("arg".to_string(), json_to_toml(&check.arg)?);
-            }
-            row.insert("enabled".to_string(), toml::Value::Table(table));
+        row.insert("intercept".to_string(), toml::Value::Table(table));
+    }
+    if let Some(isolate) = &entry.isolate {
+        let mut table = toml::value::Table::new();
+        for (service, label) in isolate {
+            let value = match label {
+                IsolateLabel::Local => toml::Value::Boolean(true),
+                IsolateLabel::Shared(label) => {
+                    toml::Value::String(label.clone())
+                }
+            };
+            table.insert(service.clone(), value);
         }
+        row.insert("isolate".to_string(), toml::Value::Table(table));
     }
     Ok(toml::Value::Table(row))
 }

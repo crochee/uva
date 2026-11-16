@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uva::{
     core::Clock as _,
@@ -41,7 +42,7 @@ use crate::{
 const SCHEDULE_SORT_WHITELIST: &[&str] = &["id", "name", "next_fire_at"];
 
 /// `GET /api/v1/schedules` — list row.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct ScheduleInfo {
     pub id: String,
     pub name: String,
@@ -51,7 +52,7 @@ pub struct ScheduleInfo {
 }
 
 /// `GET /api/v1/schedules/{id}` — full row.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct ScheduleDetail {
     #[serde(flatten)]
     pub job: Job,
@@ -59,7 +60,7 @@ pub struct ScheduleDetail {
 
 /// `POST /api/v1/schedules` body. Mirrors `CreateScheduleRequest`
 /// in `uva-web/src/api/types.ts`.
-#[derive(Deserialize, validator::Validate)]
+#[derive(Deserialize, JsonSchema, validator::Validate)]
 pub struct CreateScheduleRequest {
     /// Operator-facing name. The store's `has_name` enforces
     /// uniqueness; the route returns 409 on a duplicate.
@@ -77,7 +78,7 @@ pub struct CreateScheduleRequest {
 }
 
 /// `PATCH /api/v1/schedules/{id}` body — pause / resume / mutate payload.
-#[derive(Deserialize)]
+#[derive(Deserialize, JsonSchema)]
 pub struct UpdateScheduleRequest {
     #[serde(default)]
     pub status: Option<JobStatus>,
@@ -86,13 +87,13 @@ pub struct UpdateScheduleRequest {
 }
 
 /// Response from `POST /api/v1/schedules/{id}/tick`.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct ScheduleTickResponse {
     pub fired: Vec<JobInfo>,
 }
 
 /// Re-export of `FiredJob` under a JSON-friendly shape.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct JobInfo {
     pub id: String,
     pub name: String,

@@ -40,10 +40,81 @@ an event row:
   says what the live event said. A compaction row carries a
   `replace` op naming the span it shadows, so replaying the log
   reproduces the post-compaction transcript instead of the
-  pre-compaction one. The compaction lifecycle
+  pre-compaction one. The span is a position in the
+  **model-visible** surface — the order the next LLM pass sees,
+  in which a user turn that landed between a `tool_use` and its
+  `tool_result` waits for that result — and the op's
+  `source_event_seqs` names the rows the span covers, one seq per
+  row, so a reader can tell which rows the replace shadows. The compaction lifecycle
   (`compaction_start` / `compaction_summary` / `compaction_end`)
   brackets a summariser call; an unmatched `start` is the crash
   marker the repair path detects.
+- A `user_message` row may carry `attachments`: one re-readable
+  reference per attachment the turn carried (`kind`, optional `name`,
+  `mime_type` and `byte_len`, plus the content `hash` the deployment's
+  attachment store resolves). The bytes never ride the log — a
+  multimodal payload stays in the store — and a text-only turn omits
+  the field entirely, so the common row shape is unchanged. `hash` is
+  optional: `unstored` says why when it is absent (the payload was
+  never local, or the store refused it), so "attachment unavailable"
+  can tell a reference that will never resolve from a store that
+  dropped it.
+- A `feedback` row records the client's rating of one message
+  (`message_id` + `thumbs_up`). It is **log-only**: nothing in the
+  runtime reads it back and it never enters the transcript, so it is
+  the audit record an analytics surface aggregates rather than a fact
+  the model sees.
+  `message_id` is the rated row's **ordinal** — that row's `seq`, in
+  decimal. The ordinal is a row's identity in the log (there is no
+  second id), so the server resolves the rating against the session's
+  own rows and refuses a target that names no row, or names a row
+  that is not an assistant message: a rating that names nothing is
+  noise in an append-only audit log. The field keeps its name
+  because the version gate below refuses an old log rather than
+  migrating it — what changed is what the field holds, not the row's
+  shape, so the schema version does not move. A log written before
+  this change carries a client-side label in the same field (a
+  browser-generated UUID, or the TUI's `msg-<n>` count); such a row
+  names no ordinal and an analytics reader must not read it as one.
+- A `warning` row records a fact the runtime could not report any
+  other way. Its `data.kind` is a stable slug — `config_drift` for a
+  resume that accepted a changed request envelope,
+  `strict_fold_refused` for a session log the strict fold refused —
+  and its `data.message` says what happened. A `warning` row is
+  **log-only**: the fold ignores it, so the transcript the model sees
+  is the transcript the log had without the row.
+- A `hook_block` row records a policy that refused a tool call — a
+  `Block` (the call returns an error result) or a `Terminate` (the run
+  ends). Its `data.hook` names the policy that refused — the
+  registered name of the hook, gate or guard that vetoed —
+  `data.reason` says why it refused, and `data.tool` / `data.call_id`
+  name the call it refused. A `hook_block` row is **log-only**: the fold ignores it,
+  so the transcript the model sees is the transcript the log had
+  without the row. Without it a veto's reason reaches the log only
+  through the model-visible tool result, which says that *something*
+  blocked the call but not which policy did.
+- A `tool_output` row records one partial-output chunk of a
+  **running** tool call: `call_id` names the call, `tool` names the
+  tool, and `data.output` is the chunk's text. A streaming tool
+  (today `shell`) writes one while it runs, so a reload replays the
+  progress the live client already saw instead of losing it with the
+  process that produced it. The row is **log-only**: the settled
+  `tool_result` row is the model's copy, and the fold ignores this
+  one. The row is additive — it does not change the shape of any row
+  written before it, so the schema version does not move.
+- A `tool_output` row is **bounded at the writer boundary**. Its
+  `data.output` keeps at most `MAX_TOOL_OUTPUT_BYTES` (64 KiB, measured
+  on the escaped form): an over-long chunk keeps its **tail** — the
+  newest output is what a reload needs — and `data.original_bytes`
+  records how many output bytes the row summarized. The bound is
+  idempotent, so a rewritten row is never cut twice.
+- The chunks of one call that arrive before a flush **merge into one
+  row**: the writer holds one pending `tool_output` row per `call_id`
+  (tail-window bounded) and the flush writes it under the first
+  chunk's ordinal. A tool that prints a megabyte therefore costs one
+  bounded row per flush, not one row per pipe read — the log is
+  bounded by the flush cadence rather than by the tool's output rate,
+  and the bytes are durable from that flush onward.
 - A `turn` row brackets a run: `data.kind` is `start` or `end`,
   and the `end` row's `data.reason` names the outcome
   (`completed`, `error`, `cancelled`, …). A failed turn adds
@@ -55,6 +126,40 @@ an event row:
   from the write path means the bytes are on the disk. A retry
   after a failed flush does not duplicate a row: the sink skips
   any row whose `seq` it has already written.
+
+## The artefact set
+
+A delegated child — one `task` call — leaves one **artefact set**
+next to its own session log, in `<session dir>/artifacts/`:
+
+| file | what it is |
+|---|---|
+| `<id>.jsonl` | a frozen copy of the child's `events.jsonl` at the moment its round ended |
+| `<id>.md` | the same transcript rendered as markdown: who spoke, which tools ran, how the round ended |
+| `<id>.patch` | the diff an isolated round produced, when it produced one |
+
+- `<id>` is the child session id — the same handle `agents_list`
+  reports and `agents_message` takes.
+- The set is a **projection**, never a second source: the child's
+  log stays the durable truth. The `.jsonl` copy says what the round
+  had produced when it ended; a follow-up or a cold wake appends to
+  the log and rewrites the set.
+- `.patch` is written only for a round that ran in a git worktree
+  **and** changed something (`git diff <base sha>` before the
+  worktree is cleaned up). An empty diff is not written: an empty
+  patch would be a claim about a round that made none.
+- A round without a durable session — a host that keeps no log —
+  gets no artefact set. Writing is best-effort: the round already
+  happened, so a failed write is a log line, not a failed result.
+- Retention is the session's: the set is rewritten on every round and
+  has no independent lifetime. Deleting a session deletes its
+  artefacts with it.
+
+The convention is implemented in
+[`crates/uva-tool-task/src/control/artifacts.rs`](../crates/uva-tool-task/src/control/artifacts.rs);
+the directory comes from the host through the control surface's
+`SessionIndex::session_dir`, so a deployment that stores sessions
+somewhere other than the filesystem writes none.
 
 ## The version gate
 

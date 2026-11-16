@@ -60,15 +60,16 @@ build-release: ## Build release binaries
 
 .PHONY: test test-rust test-unit
 
-test: test-rust ## Run all tests (Rust; the frontend has no test runner —
-              #  verification is `make check-web` + Playwright MCP, see AGENTS.md §4.2)
+test: test-rust ## Run Rust tests (frontend unit tests run under
+              #  `make check-web` via vitest; no frontend e2e suite
+              #  by design, see AGENTS.md §4.2)
 
 test-rust: test-crates ## Run every member's tests in turn (never --workspace, per AGENTS.md §3.3)
 
 # The plugin families ship nothing until a feature asks for it, so
 # their own suites run with every feature on. (A `case` pattern takes
 # `|`-separated alternatives, hence the pipe-joined list.)
-FAMILY_CRATES := uva-tool-plugins|uva-policy-plugins
+FAMILY_CRATES := uva-tool-plugins|uva-policy-plugins|uva-hook-plugins
 
 test-unit: ## Run every member's library unit tests in turn
 	@set -e; for c in $(CRATES); do \
@@ -81,7 +82,7 @@ test-unit: ## Run every member's library unit tests in turn
 
 # ---- Code quality ----
 
-.PHONY: fmt fmt-rust fmt-web lint lint-rust lint-web check-web
+.PHONY: fmt fmt-rust fmt-web lint lint-rust lint-web check-web check-web-contract check-web-methods
 
 fmt: fmt-rust fmt-web ## Format all code
 
@@ -109,7 +110,7 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-harness-shape.sh \
 	  scripts/check-public-api-runtime.sh \
 	  scripts/check-plugin-shape.sh \
-  scripts/check-host-capabilities.sh \
+	  scripts/check-host-capabilities.sh \
 	  scripts/check-pub-surface-strict.sh \
 	  scripts/check-harness-docs.sh \
 	  scripts/check-single-writer.sh \
@@ -117,13 +118,39 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-publishable.sh \
 	  scripts/check-public-docs.sh \
 	  scripts/check-kernel-deps.sh \
+	  scripts/check-hook-external.sh \
 	  scripts/verify-harness-e2e.sh \
-	  scripts/check-stdout.sh
+	  scripts/check-stdout.sh \
+	  scripts/check-web-contract.sh \
+	  scripts/check-web-methods.sh
 
-check-web: ## Frontend gates: types, lint, formatting (no browser needed)
+check-web: ## Frontend gates: types, lint, formatting, unit tests (no browser needed)
 	cd $(WEB_DIR) && npx tsc --noEmit
+	cd $(WEB_DIR) && npx tsc -p tsconfig.tests.json
 	cd $(WEB_DIR) && npx eslint .
 	cd $(WEB_DIR) && npx prettier --check .
+	cd $(WEB_DIR) && npx vitest run
+
+# The wire contract is generated, not written: the Rust emitter prints
+# its JSON Schema and the Node side compiles it into
+# `uva-web/src/api/types.ts`. `check-web-contract` regenerates into a
+# scratch file and diffs; `generate-web-types` is the target a human
+# runs after changing a response type.
+.PHONY: generate-web-types check-web-contract
+
+generate-web-types: ## Regenerate uva-web/src/api/types.ts from the server's wire types
+	cd $(WEB_DIR) && npm run generate:types
+
+check-web-contract: ## Fail if uva-web/src/api/types.ts drifts from the server's wire types
+	@bash scripts/check-web-contract.sh
+
+# The domain clients name the RPC methods they call as plain strings,
+# and a typo in one of them compiles. `check-web-methods` compares every
+# name in a `METHOD` table against the methods the server actually
+# serves — the router's registrations and the notification constants.
+check-web-methods: ## Fail if a front-end METHOD table names a method the server does not serve
+	@bash scripts/check-web-methods.sh --self-test
+	@bash scripts/check-web-methods.sh
 
 # ---- Kernel dependency gate ----
 # The plugin kernel is the framework boundary, not an agent: its normal
@@ -135,6 +162,18 @@ check-web: ## Frontend gates: types, lint, formatting (no browser needed)
 
 check-kernel-deps: ## Assert the kernel's dependency graph contains no agent/UI crate
 	@bash scripts/check-kernel-deps.sh
+
+# ---- External hook contract gate ----
+# The hook contract is only "usable from outside" if a third-party
+# plugin's *normal* dependency tree carries no harness. The fixture
+# (`docs/examples/hook-only-consumer`) takes `uva-hook` as its only
+# normal dependency and the harness as a dev-dependency; the gate runs
+# `cargo tree -e normal` inside it and then its dev tests, which drive
+# one real tool call (ADR 0004).
+.PHONY: check-hook-external
+
+check-hook-external: ## Assert a hook-only consumer's normal tree has no harness
+	@bash scripts/check-hook-external.sh
 
 # ---- stdout discipline gate ----
 # The headless core's stdout is the JSON-RPC transport. A `println!`
@@ -197,16 +236,22 @@ check-cli-surface: ## Assert the CLIs are clap's and the protocol modes keep std
 # `tower-http` are caught by `hyper` / `rustls` / `tower`.
 MVP_FEATURES := core,provider,context,tool,session,steering,harness
 MVP_FORBIDDEN := opentelemetry|tonic|axum|rusqlite|sqlx|reqwest|hyper|rustls|h2|tower|webpki
-# The shipped tool plugins live in one family crate, so the isolation
-# property is per *feature*, not per crate: the offline set pulls no
-# HTTP stack, and only `web` does.
-FAMILY_TOOL_CRATES := uva-tool-plugins
-FAMILY_TOOL_OFFLINE_FEATURES := read,write,shell,todo,task,scheduler,search,memo
+# The shipped tool plugins: one family crate with one offline feature
+# per tool, plus the `task` tool's own crate (a single tool, no
+# features). The isolation property is per *feature*, not per crate:
+# the offline set pulls no HTTP stack, and only `web` does. Each entry
+# is `crate:features` (colon, not `|`: the list is word-split
+# inside a shell `for`, where an unquoted pipe would be an operator);
+# an empty feature list means the plain build.
+FAMILY_TOOL_CRATES := uva-tool-plugins:read,write,shell,todo,scheduler,search,memo uva-tool-task:
 # The policy plugins (R-OPT-HPC round: Tier 1 performance + concurrency,
 # Tier 2 reasoning + quality) live in one family crate too, all in the
 # offline tier (no HTTP/OTel/DB — proved by the `mvp-forbidden` check
 # below).
 FAMILY_POLICY_CRATES := uva-policy-plugins
+# The hook implementations are one family crate as well; every feature
+# is offline (the contract and the tool trait carry no transport).
+FAMILY_HOOK_CRATES := uva-hook-plugins
 # The two crates whose interesting configuration the plain loops never
 # check each get their own section: `uva-search` under
 # `--features provider`, `uva-tool-scheduler` under `--features
@@ -227,16 +272,18 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  exit 1; \
 	fi
 	@echo "OK: $(MVP_FEATURES) pulls no ($(MVP_FORBIDDEN))"
-	@for c in $(FAMILY_TOOL_CRATES); do \
-	  if cargo tree -p $$c --features $(FAMILY_TOOL_OFFLINE_FEATURES) -e normal --prefix none 2>/dev/null \
+	@for pair in $(FAMILY_TOOL_CRATES); do \
+	  c=$${pair%%:*}; f=$${pair#*:}; \
+	  if [ -n "$$f" ]; then feat="--features $$f"; else feat=""; fi; \
+	  if cargo tree -p $$c $$feat -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
 	    echo "FAIL: $$c (the offline tool plugins) pulled a forbidden dependency:"; \
-	    cargo tree -p $$c --features $(FAMILY_TOOL_OFFLINE_FEATURES) -e normal --prefix none 2>/dev/null \
+	    cargo tree -p $$c $$feat -e normal --prefix none 2>/dev/null \
 	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
 	    exit 1; \
 	  fi; \
 	done
-	@echo "OK: $(FAMILY_TOOL_CRATES) ($(FAMILY_TOOL_OFFLINE_FEATURES)) pull no ($(MVP_FORBIDDEN))"
+	@echo "OK: the tool family ($$(echo '$(FAMILY_TOOL_CRATES)' | tr ' ' ',')) pulls no ($(MVP_FORBIDDEN))"
 	@# The reverse assertion: the web feature really is the switch that
 	@# opens the HTTP stack. Without it the gate above would pass on a
 	@# crate that never had one.
@@ -254,6 +301,16 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	  fi; \
 	done
 	@echo "OK: $(FAMILY_POLICY_CRATES) (all features) pull no ($(MVP_FORBIDDEN))"
+	@for c in $(FAMILY_HOOK_CRATES); do \
+	  if cargo tree -p $$c --all-features -e normal --prefix none 2>/dev/null \
+	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
+	    echo "FAIL: $$c (the hook plugins) pulled a forbidden dependency:"; \
+	    cargo tree -p $$c --all-features -e normal --prefix none 2>/dev/null \
+	      | cut -d' ' -f1 | sort -u | grep -E '^($(MVP_FORBIDDEN))'; \
+	    exit 1; \
+	  fi; \
+	done
+	@echo "OK: $(FAMILY_HOOK_CRATES) (all features) pull no ($(MVP_FORBIDDEN))"
 	@for f in "" "--features simd"; do \
 	  if cargo tree -p uva-search $$f -e normal --prefix none 2>/dev/null \
 	    | cut -d' ' -f1 | sort -u | grep -Eq '^($(MVP_FORBIDDEN))'; then \
@@ -296,11 +353,11 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 	@echo "OK: uva-harness (default) pulls no ($(MVP_FORBIDDEN))"
 	@cargo check -q -p uva-harness --no-default-features 2>/dev/null \
 	  && echo "OK: uva-harness --no-default-features compiles"
-	@for p in uva-policy-plugins; do \
+	@for p in uva-policy-plugins uva-hook-plugins; do \
 	  cargo check -q -p $$p --all-features 2>/dev/null \
 	    || { echo "FAIL: $$p does not build standalone"; exit 1; }; \
 	done
-	@echo "OK: the policy plugin family builds standalone"
+	@echo "OK: the policy and hook plugin families build standalone"
 	@RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p uva-scheduler \
 	    --features cron 2>/dev/null \
 	  && echo "OK: uva-scheduler --features cron rustdoc is warning-free"
@@ -313,9 +370,11 @@ check-mvp-deps: ## Assert the MVP subset: no HTTP/server/OTel/DB deps, empty pre
 # most likely because someone went back to inheriting the workspace's
 # tokio entry instead of declaring features on it.
 RUNTIME_FREE := uva-core uva-scheduler uva-eval \
-	uva-search uva-session uva-harness \
+	uva-search uva-session uva-events uva-agent uva-hook uva-hook-plugins \
+	uva-tool-task \
+	uva-harness \
 	uva-context uva-steering \
-	uva-kernel
+	uva-kernel uva-approval
 
 .PHONY: check-no-runtime
 
@@ -434,7 +493,7 @@ CRATES := $(shell cargo metadata --no-deps --format-version 1 2>/dev/null \
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-host-capabilities check-test-layout check-deny test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + every member's test suite
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-hook-external check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-host-capabilities check-test-layout check-deny check-web check-web-contract check-web-methods test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + frontend type/lint/contract/method gates + every …
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -590,7 +649,7 @@ bench-check: ## Enforce the hot-path ratios (machine-independent; runs in CI)
 # `cargo tree` there must contain zero `tokio`. A non-zero count means
 # the harness closure grew a runtime crate — fix the library, never add
 # tokio to the fixture to silence it.
-examples: ## Run every example plus all four consumer proofs (each prints a proof line)
+examples: ## Run every example plus the standalone consumer binaries (each prints a proof line)
 	@set -e; for d in $(wildcard crates/*/examples); do \
 	  ls $$d/*.rs >/dev/null 2>&1 || continue; \
 	  pkg=$$(echo $$d | cut -d/ -f2); \
@@ -608,8 +667,6 @@ examples: ## Run every example plus all four consumer proofs (each prints a proo
 	    [ "$$name" = "todo_list" ] && extra="--features todo" || true; \
 	    [ "$$name" = "sandbox_policy" ] && extra="--features shell" || true; \
 	    [ "$$name" = "allowlist" ] && extra="--features web" || true; \
-	    [ "$$name" = "delegation_gate" ] && extra="--features task" || true; \
-	    [ "$$name" = "worktree_isolation" ] && extra="--features task" || true; \
 	    [ "$$name" = "schedule_jobs" ] && extra="--features scheduler" || true; \
 	    [ "$$name" = "search_tool_demo" ] && extra="--features search" || true; \
 	    [ "$$name" = "tool_memo_demo" ] && extra="--features memo" || true; \
@@ -731,6 +788,7 @@ check-harness-shape: ## Fail when a uva-harness production fn grows past the len
 # a non-obvious constraint are the payload and stay. The gate fails
 # on growth so a later round cannot quietly put the tax back.
 check-harness-docs: ## Fail when uva-harness private-item doc comments grow past the budget
+	@bash scripts/check-harness-docs.sh --self-test
 	@bash scripts/check-harness-docs.sh
 
 # ---- Public docs ratchet ----
@@ -756,10 +814,9 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 	@bash scripts/check-single-writer.sh
 
 # ---- Plugin shape (R-G) ----
-# Plugin tool crates (`uva-tool-read` / `-write` / `-shell` /
-# `-todo` / `-web` / `-task` / `-scheduler` / `-search` plus
-# `uva-mcp` / `-skill` / `-attachment`) ship one tool (or one
-# tool-like facade) per crate and stay flat — `lib.rs` plus focused
+# Plugin tool roots (`crates/uva-tool-plugins`, `crates/uva-tool-task`
+# plus `crates/uva-mcp` / `-skill` / `-attachment`) ship one tool (or
+# one tool-like facade) per module and stay flat — `lib.rs` plus focused
 # siblings. Long-file drift hurts the same way it did in the harness,
 # so the gate is a sibling of `check-harness-shape` but scoped at the
 # **file** grain (plugins are small, the natural remediation is
@@ -774,8 +831,8 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 .PHONY: plugin-shape-audit check-plugin-shape
 
 plugin-shape-audit: ## List plugin-crate production files and their line counts (largest first)
-	@for root in crates/uva-tool-plugins crates/uva-policy-plugins \
-	             crates/uva-mcp \
+	@for root in crates/uva-tool-plugins crates/uva-tool-task \
+	             crates/uva-policy-plugins crates/uva-hook-plugins crates/uva-mcp \
 	             crates/uva-skill crates/uva-attachment; do \
 	  [[ -d "$$root/src" ]] || continue; \
 	  find "$$root/src" -name '*.rs' ! -name 'tests.rs' -exec wc -l {} +; \

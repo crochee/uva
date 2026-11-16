@@ -11,7 +11,7 @@
 //! - `run_task` / `persist`: the run task and its event sink,
 //!   as method continuations of the inner state.
 //! - `dispatch`: the operation loop.
-//! - `run_log`: the run's durable log writer.
+//! - `run_log`: the helpers that shape a run's prompt rows.
 
 use std::{
     sync::{
@@ -24,7 +24,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use tokio::sync::mpsc;
-use uva::session::{LogWriter, SessionSink};
+use uva::session::SessionLog;
 
 use crate::{
     cluster::{ClusterRuntime, ControlFrame, SessionKey, SessionOpWire},
@@ -50,7 +50,6 @@ pub use live::{LiveToolCall, LiveTurn};
 pub use ops::{SessionOp, SessionState, SteerDelivery};
 pub use pin::PinnedProvider;
 use pin::{OpAck, SubmittedOp};
-pub(crate) use run_log::RunLog;
 pub use run_stream::{AgentRunStreamFactory, RunStreamFactory};
 pub(crate) use spawn_gate::SpawnGate;
 pub use uva::harness::{AgentEvent, AgentInput};
@@ -125,8 +124,7 @@ impl SessionController {
     pub fn spawn(
         user_id: impl Into<String>,
         session_id: impl Into<String>,
-        session_store: Arc<dyn SessionSink>,
-        writer: Arc<LogWriter>,
+        writer: Arc<dyn SessionLog>,
         deps: RunDependencies,
         idle_timeout: Duration,
         run_factory: Arc<dyn RunStreamFactory>,
@@ -134,7 +132,6 @@ impl SessionController {
         Self::spawn_with_lease(
             user_id,
             session_id,
-            session_store,
             writer,
             deps,
             idle_timeout,
@@ -149,15 +146,18 @@ impl SessionController {
     /// empty lease publishes no frames and renews nothing (tests and
     /// embedders take that shape).
     ///
-    /// The `writer` is the session's one writer — the handle that
-    /// stamps the rows' ordinals and batches their flush. It must be
-    /// the writer of the session's own sink.
+    /// The `writer` is the session's one writer, seen through the
+    /// typed log seam: the handle that stamps the rows' ordinals,
+    /// flushes them, and closes the log. The type guarantees one
+    /// handle over one log — not *which* log; the caller that builds
+    /// the controller pairs it with the session, and the sink living
+    /// inside the handle is what makes that pairing a single value
+    /// rather than two arguments that could disagree.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_lease(
         user_id: impl Into<String>,
         session_id: impl Into<String>,
-        session_store: Arc<dyn SessionSink>,
-        writer: Arc<LogWriter>,
+        writer: Arc<dyn SessionLog>,
         deps: RunDependencies,
         idle_timeout: Duration,
         run_factory: Arc<dyn RunStreamFactory>,
@@ -177,7 +177,6 @@ impl SessionController {
         // counters are the controller's write handle on the
         // process-wide totals.
         let usage = Arc::clone(&deps.usage_metrics);
-        let subagent_router = deps.subagent_router.clone();
         let cluster = Arc::clone(&deps.cluster);
 
         let inner = Arc::new(ControllerInner {
@@ -185,12 +184,10 @@ impl SessionController {
             user_id: user_id.clone(),
             state: state.clone(),
             cached_history: parking_lot::Mutex::new(None),
-            session_store,
             writer,
             broadcaster: broadcaster.clone(),
             deps: parking_lot::Mutex::new(deps),
             usage,
-            subagent_router,
             idle_timeout,
             run_cancel: Mutex::new(None),
             run_factory,
@@ -742,10 +739,13 @@ impl SessionController {
 
     /// Push one event onto this session's broadcast channel.
     ///
-    /// The sub-agent session router uses this to feed a child
-    /// session's live SSE subscribers while the parent's run task
-    /// drives the child — the child session's events originate in
-    /// the parent's run, but its stream is its own.
+    /// The child-session live tail used to arrive through this
+    /// method: the sub-agent router replayed a child's wrapped event
+    /// onto the child session's stream. The router's routing half is
+    /// gone with the delegation channel, so the method now serves the
+    /// follow tests only — they inject a live event without running a
+    /// session.
+    #[cfg(test)]
     pub(crate) fn broadcast_event(&self, event: &uva::harness::AgentEvent) {
         if let Err(error) = self.broadcaster.send(event.clone()) {
             tracing::debug!(

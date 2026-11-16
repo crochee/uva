@@ -34,8 +34,9 @@ make ci               # 上面四者的并集 + 其它不变量
 ```
 
 改 `crates/<x>/src/` 后：`make ci`。改 `uva-web/src/**` 后：
-`make check-web`（`tsc --noEmit` + `eslint` + `prettier --check`），
-然后用 Playwright MCP 验证真实渲染（`AGENTS.md` §4.2）。
+`make check-web`（`tsc --noEmit` + `eslint` + `prettier --check` + `vitest`
+纯函数单元测试，需先在 `uva-web/tests/` 补用例），单测覆盖不到的
+（DOM / 网络 / React / 真实渲染）用 Playwright MCP 验证（`AGENTS.md` §4.2）。
 
 ## 架构一览
 
@@ -44,7 +45,7 @@ make ci               # 上面四者的并集 + 其它不变量
 | 我应该用哪个 crate | [`MINIMAL.md`](MINIMAL.md)（4 步 MVP guide） |
 | 我能换掉哪个 seam | [`SEAMS.md`](SEAMS.md)（7 大组件的可替换点） |
 | 一个新工具该怎么写 | [`crates/uva-tool/`](crates/uva-tool/) + 任一离线 tool 模块（如 `read`） |
-| 多智能体委派 | [`crates/uva-tool-plugins/`](crates/uva-tool-plugins/) 的 `task` 模块（`ToolInterceptor` seam 的第一个实现） |
+| 多智能体委派 | [`crates/uva-tool-task/`](crates/uva-tool-task/) 的 `task` 工具（普通 `Tool`，注册表分发；不依赖 harness） |
 | 调度 / cron / interval | [`crates/uva-tool-plugins/`](crates/uva-tool-plugins/) 的 `scheduler` 模块 |
 | 跨域搜索 | [`crates/uva-search/`](crates/uva-search/) + [`crates/uva-tool-plugins/`](crates/uva-tool-plugins/) 的 `search` 模块 |
 | HTTP / WebSocket 表面 | [`crates/uva-app-server/`](crates/uva-app-server/) |

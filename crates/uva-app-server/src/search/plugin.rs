@@ -35,7 +35,7 @@ const SEARCH_TOOL_EFFECT: &str = "search-tool";
 /// the `search` tool.
 pub struct SearchServicePlugin {
     manifest: PluginManifest,
-    agent_registry: Arc<uva::harness::AgentRegistry>,
+    agent_registry: Arc<uva::agent::AgentRegistry>,
     session_search: SharedSessionSearch,
     workspace_root: std::path::PathBuf,
     clock: uva::core::SharedClock,
@@ -47,7 +47,7 @@ impl SearchServicePlugin {
     /// context's workspace root and clock.
     #[must_use]
     pub fn new(
-        agent_registry: Arc<uva::harness::AgentRegistry>,
+        agent_registry: Arc<uva::agent::AgentRegistry>,
         session_search: SharedSessionSearch,
         workspace_root: impl Into<std::path::PathBuf>,
         clock: uva::core::SharedClock,

@@ -31,7 +31,6 @@ impl Fixture {
     fn ctx(&self) -> HookContext<'_> {
         HookContext {
             state: &self.state,
-            events: &self.sink,
             cancel: &self.cancel,
         }
     }
@@ -230,7 +229,7 @@ async fn block_wins_over_ask_and_later_gates_do_not_run() {
     }));
 
     let arbitration = crate::seams::Seams::new(host)
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
 
     // The block wins over the ask collected before it.
@@ -259,7 +258,7 @@ async fn a_panicking_gate_is_a_block() {
 
     let seams = crate::seams::Seams::new(host);
     let arbitration = seams
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
 
     // Fail closed: a gate that could not answer does not get to
@@ -284,7 +283,7 @@ async fn a_failing_gate_is_a_block() {
 
     let seams = crate::seams::Seams::new(host);
     let arbitration = seams
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
 
     assert!(matches!(arbitration.decision, HookDecision::Block { .. }));
@@ -310,7 +309,7 @@ async fn dropping_the_plugin_handle_unregisters_every_hook() {
 
     // The installed registrations run.
     crate::seams::Seams::new(host.clone())
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 
@@ -320,7 +319,7 @@ async fn dropping_the_plugin_handle_unregisters_every_hook() {
     // The withdrawn observer's effect stops: the counter does not
     // move after the uninstall.
     crate::seams::Seams::new(host)
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
@@ -341,7 +340,8 @@ async fn unsupported_decision_at_a_point_is_a_noop_with_a_diagnostic() {
 
     // `before_run` cannot block a tool call: there is no call yet.
     let seams = crate::seams::Seams::new(host);
-    let arbitration = seams.run_started(&ctx, "default", 0).await;
+    let arbitration =
+        seams.run_started(&ctx, &fixture.sink, "default", 0).await;
 
     assert_eq!(arbitration.decision, HookDecision::Allow);
     let diagnostics = seams.host().diagnostics();
@@ -364,7 +364,7 @@ async fn a_panicking_observer_is_disabled_with_a_diagnostic() {
     }));
 
     let first = crate::seams::Seams::new(host.clone())
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
     assert_eq!(first.decision, HookDecision::Allow);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -372,7 +372,7 @@ async fn a_panicking_observer_is_disabled_with_a_diagnostic() {
     // The second pass skips the disabled observer.
     let seams = crate::seams::Seams::new(host);
     let second = seams
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
     assert_eq!(second.decision, HookDecision::Allow);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -397,7 +397,8 @@ async fn the_observers_run_in_registration_order() {
         })));
     }
 
-    host.dispatch_hooks(&before_tool_event(), &ctx).await;
+    host.dispatch_hooks(&before_tool_event(), &ctx, &fixture.sink)
+        .await;
 
     assert_eq!(
         *order.lock(),
@@ -471,7 +472,7 @@ async fn the_request_transformers_chain() {
         &uva_provider::CompletionRequest::default(),
     );
     crate::seams::Seams::new(host.clone())
-        .llm_request(&ctx, "p", &mut params)
+        .llm_request(&ctx, &fixture.sink, "p", &mut params)
         .await;
 
     // The last transformer in the chain owns the value.
@@ -498,7 +499,7 @@ async fn a_panicking_transformer_is_disabled_and_the_chain_continues() {
         &uva_provider::CompletionRequest::default(),
     );
     crate::seams::Seams::new(host.clone())
-        .llm_request(&ctx, "p", &mut params)
+        .llm_request(&ctx, &fixture.sink, "p", &mut params)
         .await;
 
     // The broken transformer is skipped, the healthy one still ran.
@@ -723,7 +724,8 @@ async fn a_registration_dropped_inside_the_install_is_dead() {
     assert_eq!(host.registration_count(), 0);
     assert_eq!(handle.registrations().len(), 0);
 
-    host.dispatch_hooks(&before_tool_event(), &ctx).await;
+    host.dispatch_hooks(&before_tool_event(), &ctx, &fixture.sink)
+        .await;
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
@@ -748,7 +750,7 @@ async fn an_ask_is_collected_and_reported_together() {
     }));
 
     let arbitration = crate::seams::Seams::new(host)
-        .tool_pre(&ctx, "shell", "c1", &serde_json::json!({}))
+        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
 
     assert_eq!(arbitration.decision, HookDecision::Allow);
@@ -756,56 +758,6 @@ async fn an_ask_is_collected_and_reported_together() {
         arbitration.asks,
         vec!["first reason".to_string(), "second reason".to_string()]
     );
-}
-
-// A delegator the host can register, distinguishable by its tool name.
-struct NamedDelegator {
-    name: &'static str,
-}
-
-impl DelegatingTool for NamedDelegator {
-    fn definitions(&self) -> Vec<uva_provider::ToolDefinition> {
-        vec![uva_provider::ToolDefinition::new(
-            self.name,
-            "delegates",
-            serde_json::json!({"type": "object"}),
-        )]
-    }
-
-    fn execute(
-        &self,
-        _call: crate::agent::re_act::delegation::DelegationCall<'_>,
-    ) -> futures::future::BoxFuture<'static, ToolOutput> {
-        Box::pin(async { ToolOutput::text("delegated") })
-    }
-}
-
-#[test]
-fn a_withdrawn_delegator_leaves_the_host() {
-    let mut host = Host::new();
-    let registration =
-        host.delegator(Arc::new(NamedDelegator { name: "task" }));
-    assert_eq!(host.delegators().len(), 1);
-    assert_eq!(host.registration_count(), 1);
-
-    drop(registration);
-
-    assert!(host.delegators().is_empty());
-    assert_eq!(host.registration_count(), 0);
-}
-
-#[test]
-fn the_hosts_delegators_keep_their_registration_order() {
-    let mut host = Host::new();
-    let _first = host.delegator(Arc::new(NamedDelegator { name: "one" }));
-    let _second = host.delegator(Arc::new(NamedDelegator { name: "two" }));
-
-    let names: Vec<String> = host
-        .delegators()
-        .iter()
-        .map(|delegator| delegator.definitions()[0].name.clone())
-        .collect();
-    assert_eq!(names, vec!["one".to_string(), "two".to_string()]);
 }
 
 // R4: one host is one policy. Every agent over a deployment binds

@@ -11,7 +11,15 @@ use uva_harness::{
     WarningKind,
     agent::strategy::{AgentRuntime, single_shot_request},
 };
-use uva_provider::{CompletionRequest, ContentPart, StreamChunk, TextContent};
+use uva_provider::{
+    CompletionRequest,
+    Content,
+    ContentPart,
+    Message,
+    Role,
+    StreamChunk,
+    TextContent,
+};
 use uva_session::{step_end, step_start};
 
 /// How many reasoning steps the instruction asks for, when the caller
@@ -207,7 +215,10 @@ impl ReasoningStrategy for ChainOfThoughtStrategy {
                 // stream that failed mid-answer leaves its deltas on
                 // the wire, because a truncated row would read back
                 // as a finished assistant turn.
-                sink.write_assistant_turn(&parts);
+                sink.write_assistant_turn(&Message::new(
+                    Role::Assistant,
+                    Content::parts(parts),
+                ));
                 sink.finish(&finish_token);
             }
             Err(message) => sink.fail(message),

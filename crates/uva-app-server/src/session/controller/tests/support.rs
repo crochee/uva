@@ -30,7 +30,7 @@ use uva::{
         TextContent,
         traits::ModelProvider,
     },
-    session::{LogWriter, SessionEvent, manager::SessionRegistry},
+    session::{SessionEvent, SessionLog, manager::SessionRegistry},
     tool::registry::ToolRegistry,
 };
 
@@ -48,7 +48,7 @@ use crate::{
 /// queued, not flushed — the run task's tail flush lands them,
 /// exactly like the harness's step-boundary flush.
 pub(super) fn persist_model_facts(
-    writer: &Arc<LogWriter>,
+    writer: &Arc<dyn SessionLog>,
     events: &[AgentEvent],
 ) {
     for event in events {
@@ -76,6 +76,7 @@ pub(super) fn persist_model_facts(
                     ))
                     .expect("tool result serializes"),
                     is_error: result.is_error.unwrap_or(false),
+                    tool_call_id: Some(result.tool_use_id.clone()),
                     surface_op: None,
                 }
             }
@@ -95,7 +96,7 @@ pub(super) fn test_deps() -> crate::session::controller::RunDependencies {
         Arc::new(uva::test_support::FakeProvider::new(vec![])),
         Arc::new(ToolRegistry::new()),
         std::path::PathBuf::from("/tmp"),
-        uva::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
+        uva::agent::DEFAULT_SYSTEM_PROMPT.to_string(),
     )
 }
 
@@ -163,11 +164,9 @@ pub(super) async fn make_manager_and_controller_with_deps(
         .await
         .unwrap();
 
-    let session_sink = manager.sink("alice", "s1");
     let controller = SessionController::spawn(
         "alice",
         "s1",
-        session_sink,
         manager.writer("alice", "s1"),
         deps,
         idle_timeout,
@@ -221,6 +220,32 @@ pub(super) async fn wait_for_log_row(
     })
     .await
     .expect("row never landed in the session log")
+}
+
+/// True for a row that records a user turn: the typed
+/// `user_message` this build writes, or the legacy `UserInput`
+/// envelope an older log holds.
+pub(super) fn is_prompt_row(row: &serde_json::Value) -> bool {
+    matches!(
+        row.get("type").and_then(serde_json::Value::as_str),
+        Some("user_message" | "UserInput")
+    )
+}
+
+/// The user text of a prompt row, in either dialect.
+///
+/// This build records a turn as a typed `user_message` row whose
+/// `data` is the provider message the model saw; a log written before
+/// the typed writer kept `{"text": …}` in the payload of a
+/// `UserInput` row. Both are prompt records, so a test that asks "did
+/// this turn run?" must not care which dialect it is reading.
+pub(super) fn prompt_text_of(row: &serde_json::Value) -> Option<String> {
+    let data = row.get("data")?;
+    if let Some(text) = data.get("text").and_then(serde_json::Value::as_str) {
+        return Some(text.to_string());
+    }
+    let message: Message = serde_json::from_value(data.clone()).ok()?;
+    message.content.extract_text()
 }
 
 /// The flat text of a message, for asserting fold output.

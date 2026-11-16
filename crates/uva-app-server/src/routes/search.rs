@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uva::{core::Error, search::Hit};
 
@@ -47,7 +48,7 @@ const DEFAULT_LIMIT: usize = 20;
 const MAX_LIMIT: usize = 50;
 
 /// One cross-domain hit in the response.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SearchHit {
     pub domain: String,
     pub id: String,

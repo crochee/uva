@@ -24,7 +24,6 @@
 //! | [`ResultTransformer`](crate::agent::host::ResultTransformer) | a rewrite of a tool result outside the pass payload — stays a table |
 //! | [`PromptSection`](crate::agent::host::PromptSection) | a collection the prompt assembly snapshots once per run, not a chain pass — stays a table |
 //! | tool | the bound [`ToolRegistry`](uva_tool::ToolRegistry), via token |
-//! | delegator | the loop's delegator table |
 //!
 //! A chain registration's lifetime is the returned handle's, exactly
 //! like a table row's: the middleware withdraws with the row.
@@ -56,11 +55,26 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use async_trait::async_trait;
 use futures::FutureExt;
 use parking_lot::{Mutex, RwLock};
+// The prompt-section vocabulary lives one layer down with the run
+// input that carries it (`uva-agent`); the deep path
+// `uva_harness::agent::host::PromptSection` and the crate-root facade
+// both re-export it from there.
+pub use uva_agent::PromptSection;
 use uva_context::AgentState;
-use uva_core::CancelToken;
+use uva_hook::HookPayload;
+// The interception contract lives one layer down (ADR 0004): the
+// traits and the dispatch context are `uva-hook`'s, re-exported here
+// so neither the crate-root facade nor this deep path moves.
+pub use uva_hook::{
+    Arbitration,
+    Gate,
+    Hook,
+    HookContext,
+    RequestTransformer,
+    ResultTransformer,
+};
 use uva_steering::{
     Guard,
     GuardOutcome,
@@ -70,7 +84,6 @@ use uva_steering::{
     HookEvent,
     InjectionPoint,
     OutputTransformer,
-    RequestParams,
     event_name,
     guards::{
         LoopDetectionGuard,
@@ -85,8 +98,7 @@ use uva_steering::{
 };
 use uva_tool::{RegistrationToken, Tool, ToolEntry, ToolOutput, ToolRegistry};
 
-use super::re_act::delegation::DelegatingTool;
-use crate::agent::sink::EventSink;
+use crate::{agent::sink::EventSink, seams::VetoRow};
 
 #[cfg(test)]
 mod tests;
@@ -94,157 +106,65 @@ mod tests;
 // How many diagnostics the host keeps.
 const DIAGNOSTIC_LIMIT: usize = 64;
 
-/// What one dispatch pass decided at one point.
-///
-/// The `decision` is the one that won the pass: `Allow` when
-/// nothing objected, `Block` / `Terminate` when a registration
-/// ended the pass, `ReplaceParams` when a request was rewritten.
-/// The `asks` are the approval reasons the registrations collected
-/// on the way — they never end a pass.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Arbitration {
-    /// The decision that won the pass.
-    pub decision: HookDecision,
-    /// The reasons the registrations asked for an approval.
-    pub asks: Vec<String>,
+// Record a policy veto as a durable `hook_block` row.
+//
+// The row is the veto's own record: the model-visible tool result
+// says that *something* refused the call, and the live warning that
+// named the policy was live-only — so a reloaded session had no
+// answer to "which policy blocked this, and why".
+//
+// Only a veto of a tool call is recorded: a denial at another seam
+// refuses no call, so it has no call to name. Both denials count —
+// `Block` and `Terminate` each refuse the call. The row is log-only —
+// the surface fold ignores it.
+//
+// The sink is an explicit argument, not a `HookContext` field: the
+// context a registration sees is decoupled run state only (ADR 0004),
+// and the writer half stays with the component that owns the run.
+fn record_hook_block(
+    sink: &EventSink,
+    name: &str,
+    decision: &HookDecision,
+    event: &HookEvent,
+) {
+    if let Some(veto) = veto_row(name, decision, event) {
+        veto.record(sink);
+    }
 }
 
-impl Arbitration {
-    /// Fold one decision into the pass.
-    ///
-    /// An `Ask` joins the collected reasons; a `Block` / `Terminate`
-    /// wins over a `ReplaceParams` that came before it, because the
-    /// run does not reach the provider when it was vetoed.
-    pub fn absorb(&mut self, decision: HookDecision) {
-        match decision {
-            HookDecision::Allow => {}
-            HookDecision::Ask { reason } => self.asks.push(reason),
-            HookDecision::ReplaceParams(_) => {
-                if matches!(self.decision, HookDecision::Allow) {
-                    self.decision = decision;
-                }
-            }
-            HookDecision::Block { .. } | HookDecision::Terminate { .. } => {
-                if matches!(
-                    self.decision,
-                    HookDecision::Allow | HookDecision::ReplaceParams(_)
-                ) {
-                    self.decision = decision;
-                }
-            }
+// The veto one adapter layer owes a pass: a denial of a tool call,
+// with everything the `hook_block` row names. The chain adapters
+// cannot reach the run's sink from inside the chain, so they fold the
+// veto into their short-circuit value and the seam layer records it
+// where the sink lives (`Decided`).
+//
+// Both denial kinds count at `BeforeTool`: `Block` renders an error
+// result the model can react to, `Terminate` ends the run — either
+// way the call was refused, and the row is the reloaded session's only
+// answer to "which policy refused this call".
+pub(crate) fn veto_row(
+    name: &str,
+    decision: &HookDecision,
+    event: &HookEvent,
+) -> Option<VetoRow> {
+    let reason = match decision {
+        HookDecision::Block { reason } | HookDecision::Terminate { reason } => {
+            reason
         }
-    }
-
-    /// Whether a decision ended the pass: a block or a termination.
-    pub fn decided(&self) -> bool {
-        matches!(
-            self.decision,
-            HookDecision::Block { .. } | HookDecision::Terminate { .. }
-        )
-    }
-}
-
-/// The per-dispatch context a registration sees.
-///
-/// Built by the loop at each boundary from the run's own state, so a
-/// host holds no run state of its own: the same installed host can
-/// serve two runs without sharing a counter.
-pub struct HookContext<'a> {
-    /// The run's agent state (counters, utilisation, decided calls).
-    pub state: &'a AgentState,
-    /// The run's event sink: a registration may publish a live event
-    /// or append a durable one.
-    pub events: &'a EventSink,
-    /// The run's cancellation token.
-    pub cancel: &'a Arc<dyn CancelToken>,
-}
-
-/// An observer: sees a hook event and may veto the run.
-///
-/// An observer is the read-mostly capability: it sees what happens
-/// and can block or end the run, but it holds no state the loop
-/// depends on.
-#[async_trait]
-pub trait Hook: Send + Sync {
-    /// The registration's name, for diagnostics.
-    fn name(&self) -> &str;
-
-    /// Observe one event.
-    async fn observe(
-        &self,
-        event: &HookEvent,
-        ctx: &HookContext<'_>,
-    ) -> HookDecision;
-}
-
-/// A gate: decides whether a call may proceed.
-///
-/// A gate is the security capability: it may block a call or ask for
-/// an approval. It can also fail — `Err` means the gate could not
-/// answer, and the host treats that as a block.
-#[async_trait]
-pub trait Gate: Send + Sync {
-    /// The registration's name, for diagnostics.
-    fn name(&self) -> &str;
-
-    /// Check one event.
-    async fn check(
-        &self,
-        event: &HookEvent,
-        ctx: &HookContext<'_>,
-    ) -> Result<HookDecision, String>;
-}
-
-/// Rewrites the request parameters before the request goes on the
-/// wire.
-///
-/// The rewrite surface is [`RequestParams`]: the model, the
-/// temperature, the max tokens, the tool choice and the tool
-/// schemas. The transcript and the system prompt are not part of it.
-#[async_trait]
-pub trait RequestTransformer: Send + Sync {
-    /// The registration's name, for diagnostics.
-    fn name(&self) -> &str;
-
-    /// Rewrite the parameters in place.
-    async fn transform(
-        &self,
-        params: &mut RequestParams,
-        ctx: &HookContext<'_>,
-    ) -> Result<(), String>;
-}
-
-/// Rewrites a tool result after the tool returned.
-///
-/// Transformers run *before* the loop commits the result, so the
-/// `tool_result` row and the history hold the rewritten text — what the
-/// log says is what the model read. The harness still records a
-/// `SessionEvent::ToolResultTransformed` row when the aggregate output
-/// changed: provenance ("a registered transformer altered this result
-/// before it was committed"), not reconciliation.
-#[async_trait]
-pub trait ResultTransformer: Send + Sync {
-    /// The registration's name, for diagnostics.
-    fn name(&self) -> &str;
-
-    /// Rewrite the output in place.
-    async fn transform(
-        &self,
-        output: &mut ToolOutput,
-        ctx: &HookContext<'_>,
-    ) -> Result<(), String>;
-}
-
-/// A system-prompt section a plugin contributes.
-///
-/// The type has no `remove` and no `replace`: a section is added to
-/// the prompt, and that is all it can do.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PromptSection {
-    /// The section's title.
-    pub title: String,
-    /// The section's body.
-    pub body: String,
+        _ => return None,
+    };
+    let HookEvent::BeforeTool {
+        tool_name, call_id, ..
+    } = event
+    else {
+        return None;
+    };
+    Some(VetoRow {
+        name: name.to_owned(),
+        reason: reason.clone(),
+        tool_name: tool_name.clone(),
+        call_id: call_id.clone(),
+    })
 }
 
 /// A plugin: a bundle of registrations installed into one host.
@@ -300,7 +220,6 @@ enum RegistrationKind {
     ResultTransformer,
     PromptSection,
     Tool,
-    Delegator,
 }
 
 impl Drop for RegistrationInner {
@@ -405,7 +324,6 @@ struct HostState {
     result_transformers: Vec<Entry<Arc<dyn ResultTransformer>>>,
     prompt_sections: Vec<Entry<PromptSection>>,
     tools: Vec<ToolRow>,
-    delegators: Vec<Entry<Arc<dyn DelegatingTool>>>,
     // The registry the host's tools live in. The host is bound to it
     // when the agent installs the host; before that, the tools wait
     // for the binding.
@@ -834,21 +752,6 @@ impl Host {
         self.finish_registration(id, RegistrationKind::Tool)
     }
 
-    /// Register a delegating tool.
-    pub fn delegator(&mut self, tool: Arc<dyn DelegatingTool>) -> Registration {
-        let name = tool
-            .definitions()
-            .first()
-            .map(|definition| definition.name.clone())
-            .unwrap_or_default();
-        self.register(
-            RegistrationKind::Delegator,
-            name,
-            tool,
-            |state, entry| state.delegators.push(entry),
-        )
-    }
-
     /// Bind the host to an agent's tool registry.
     ///
     /// Returns what *this call* refused, so the caller reports it
@@ -931,10 +834,15 @@ impl Host {
     }
 
     /// Run every observer in registration order.
+    ///
+    /// A policy veto records its `hook_block` row through `sink`:
+    /// the context a registration reads carries run state only, so
+    /// the writer half arrives as an explicit argument (ADR 0004).
     pub async fn dispatch_hooks(
         &self,
         event: &HookEvent,
         ctx: &HookContext<'_>,
+        sink: &EventSink,
     ) -> Arbitration {
         let snapshot = self.snapshot();
         let mut arbitration = Arbitration::default();
@@ -959,6 +867,7 @@ impl Host {
                 HookDecision::Allow => {}
                 HookDecision::Ask { reason } => arbitration.asks.push(reason),
                 other => {
+                    record_hook_block(sink, entry.value.name(), &other, event);
                     arbitration.decision = other;
                     break;
                 }
@@ -1161,18 +1070,6 @@ impl Host {
             .collect()
     }
 
-    /// The registered delegators, in registration order.
-    #[must_use]
-    pub fn delegators(&self) -> Vec<Arc<dyn DelegatingTool>> {
-        let state = self.inner.state.lock();
-        state
-            .delegators
-            .iter()
-            .filter(|entry| !entry.disabled)
-            .map(|entry| Arc::clone(&entry.value))
-            .collect()
-    }
-
     /// How many registrations the host holds.
     #[must_use]
     pub fn registration_count(&self) -> usize {
@@ -1187,7 +1084,6 @@ impl Host {
             + state.result_transformers.len()
             + state.prompt_sections.len()
             + state.tools.len()
-            + state.delegators.len()
     }
 
     /// Whether the host holds registrations that consume events.
@@ -1385,9 +1281,6 @@ impl HostInner {
                     retain_id(&mut state.prompt_sections, id);
                 }
                 RegistrationKind::Tool => withdraw_tool(&mut state, id),
-                RegistrationKind::Delegator => {
-                    retain_id(&mut state.delegators, id);
-                }
             }
         }
         self.publish_snapshot();
@@ -1476,65 +1369,6 @@ fn describe(decision: &HookDecision) -> String {
     }
 }
 
-#[async_trait]
-impl Hook for uva_steering::LoggingHook {
-    fn name(&self) -> &str {
-        "logging"
-    }
-
-    async fn observe(
-        &self,
-        event: &HookEvent,
-        _ctx: &HookContext<'_>,
-    ) -> HookDecision {
-        match event {
-            HookEvent::BeforeRun { agent_name, .. } => {
-                tracing::debug!(agent = %agent_name, "hook: agent start");
-            }
-            HookEvent::AfterRun { reason, .. } => {
-                tracing::debug!(reason = %reason, "hook: agent end");
-            }
-            HookEvent::BeforeProviderCall {
-                provider, model, ..
-            } => {
-                tracing::debug!(provider = %provider, model = %model, "hook: provider start");
-            }
-            HookEvent::AfterProviderCall {
-                provider,
-                model,
-                prompt_tokens,
-                completion_tokens,
-                ..
-            } => {
-                tracing::debug!(
-                    provider = %provider,
-                    model = %model,
-                    total_tokens = prompt_tokens + completion_tokens,
-                    "hook: provider end"
-                );
-            }
-            HookEvent::BeforeTool { tool_name, .. } => {
-                tracing::debug!(tool = %tool_name, "hook: tool start");
-            }
-            HookEvent::AfterTool {
-                tool_name,
-                is_error,
-                ..
-            } => {
-                tracing::debug!(tool = %tool_name, is_error, "hook: tool executed");
-            }
-            HookEvent::OnError { reason, .. } => {
-                tracing::debug!(error = %reason, "hook: error");
-            }
-            HookEvent::BeforeStep { .. }
-            | HookEvent::BeforeRequest { .. }
-            | HookEvent::AfterStep { .. }
-            | HookEvent::OnCompaction { .. } => {}
-        }
-        HookDecision::Allow
-    }
-}
-
 // -- seam-chain adapters -------------------------------------------------
 //
 // The typed registrations the seam chains dispatch. Each layer
@@ -1577,7 +1411,7 @@ async fn hook_layer(
     ctx: ChainCtx,
     next: ChainNext,
 ) -> ChainResult {
-    let Some(pass) = crate::seams::SeamPass::payload(&ctx) else {
+    let Some(pass) = HookPayload::payload(&ctx) else {
         return next(ctx).await;
     };
     let event = pass.event().clone();
@@ -1603,7 +1437,8 @@ async fn hook_layer(
         Some(host) => host.accept(&event, decision, &name),
         None => decision,
     };
-    rule(ctx, next, pass, decision).await
+    let veto = veto_row(&name, &decision, &event);
+    rule(ctx, next, pass, decision, veto).await
 }
 
 fn gate_adapter(
@@ -1629,7 +1464,7 @@ async fn gate_layer(
     ctx: ChainCtx,
     next: ChainNext,
 ) -> ChainResult {
-    let Some(pass) = crate::seams::SeamPass::payload(&ctx) else {
+    let Some(pass) = HookPayload::payload(&ctx) else {
         return next(ctx).await;
     };
     let event = pass.event().clone();
@@ -1652,7 +1487,8 @@ async fn gate_layer(
         Some(host) => host.accept(&event, decision, &name),
         None => decision,
     };
-    rule(ctx, next, pass, decision).await
+    let veto = veto_row(&name, &decision, &event);
+    rule(ctx, next, pass, decision, veto).await
 }
 
 fn request_transformer_adapter(
@@ -1681,7 +1517,7 @@ async fn request_transformer_layer(
     ctx: ChainCtx,
     next: ChainNext,
 ) -> ChainResult {
-    let Some(pass) = crate::seams::SeamPass::payload(&ctx) else {
+    let Some(pass) = HookPayload::payload(&ctx) else {
         return next(ctx).await;
     };
     let HookEvent::BeforeRequest { provider, params } = pass.event() else {
@@ -1713,7 +1549,7 @@ async fn request_transformer_layer(
             .await;
         }
     }
-    let rewritten = crate::seams::SeamPass::rewrite(
+    let rewritten = HookPayload::rewrite(
         &ctx,
         HookEvent::BeforeRequest {
             provider: provider.clone(),
@@ -1726,11 +1562,15 @@ async fn request_transformer_layer(
 // Apply one accepted decision to the chain: `Allow` continues,
 // `Ask` is recorded and continues, a deciding ruling short-circuits,
 // and `ReplaceParams` rewrites the request parameters in place.
+// A deciding ruling travels as a `Decided` value — the ruling plus
+// the veto row it owes — so the seam layer can record the veto
+// where the run's sink lives.
 async fn rule(
     ctx: ChainCtx,
     next: ChainNext,
-    pass: Arc<crate::seams::SeamPass>,
+    pass: Arc<HookPayload>,
     decision: HookDecision,
+    veto: Option<VetoRow>,
 ) -> ChainResult {
     match decision {
         HookDecision::Allow => next(ctx).await,
@@ -1740,7 +1580,7 @@ async fn rule(
         }
         HookDecision::ReplaceParams(params) => {
             if let HookEvent::BeforeRequest { provider, .. } = pass.event() {
-                let rewritten = crate::seams::SeamPass::rewrite(
+                let rewritten = HookPayload::rewrite(
                     &ctx,
                     HookEvent::BeforeRequest {
                         provider: provider.clone(),
@@ -1752,9 +1592,10 @@ async fn rule(
             next(ctx).await
         }
         deciding => Ok(uva_kernel::Outcome::ShortCircuit(
-            uva_kernel::EventValue::new(crate::seams::SeamRuling::from(
-                deciding,
-            )),
+            uva_kernel::EventValue::new(crate::seams::Decided {
+                ruling: crate::seams::SeamRuling::from(deciding),
+                veto,
+            }),
         )),
     }
 }

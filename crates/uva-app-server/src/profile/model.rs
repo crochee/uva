@@ -1,176 +1,208 @@
-//! The profile data model: entries, assembly segments, patch documents,
-//! and the error vocabulary shared by resolution and factory binding.
+//! The profile data model: plugin manifests, assembly segments, patch
+//! documents, and the error vocabulary shared by resolution and factory
+//! binding.
+//!
+//! The row shape is the dsh (DeepSeek Harness) entry model translated
+//! to TOML: every row is a [`Manifest`] carrying its own identity
+//! (`id`), the plugin it loads (`name`), its configuration, its
+//! enablement (`disabled`), its dependency declaration (`inject`), its
+//! service-interception config (`intercept`), and its service-scope
+//! isolation (`isolate`). A `group` row nests child rows in its
+//! `config` array and mounts as a runtime group plugin; a `disabled`
+//! bit anywhere on the ancestor chain keeps the subtree out of the
+//! assembly.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
 
-use serde::{
-    Deserialize,
-    Deserializer,
-    Serialize,
-    Serializer,
-    de::{self, MapAccess, Visitor},
-};
+use serde::Deserialize;
 use serde_json::Value;
-pub use uva::kernel::{
-    Capability,
-    Plugin,
-    PluginError,
-    PluginManifest,
-    RuntimeKind,
-};
+pub use uva::kernel::{Capability, Plugin, PluginError, PluginManifest, RuntimeKind};
 
 use super::PluginFactory;
 
-/// One row's enablement: on (the default), off, or delegated to a
-/// plugin-provided check.
+/// One service-scope isolation label on a row.
 ///
-/// Wire shape: `true` / absent for [`Enabled::On`], `false` for
-/// [`Enabled::Off`], and a table `{ service, check, arg }` for
-/// [`Enabled::Check`]. Any other shape is a parse error, never a
-/// silent ignore.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Enabled {
-    /// The row assembles. Wire: `true` or absent.
-    #[default]
-    On,
-    /// The row stays out of the fiber tree. Wire: `false`.
-    Off,
-    /// A plugin answers whether the row assembles.
-    Check(EnableCheck),
-}
-
-impl Serialize for Enabled {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::On => serializer.serialize_bool(true),
-            Self::Off => serializer.serialize_bool(false),
-            Self::Check(check) => {
-                use serde::ser::SerializeMap as _;
-                let mut map = serializer.serialize_map(Some(3))?;
-                map.serialize_entry("service", &check.service)?;
-                map.serialize_entry("check", &check.check)?;
-                if !check.arg.is_null() {
-                    map.serialize_entry("arg", &check.arg)?;
-                }
-                map.end()
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for Enabled {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct EnabledVisitor;
-
-        impl<'de> Visitor<'de> for EnabledVisitor {
-            type Value = Enabled;
-
-            fn expecting(
-                &self,
-                formatter: &mut std::fmt::Formatter<'_>,
-            ) -> std::fmt::Result {
-                formatter.write_str(
-                    "`true`, `false`, or a table with `service`, `check`, \
-                     and `arg`",
-                )
-            }
-
-            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
-            where
-                E: de::Error,
-            {
-                Ok(if value { Enabled::On } else { Enabled::Off })
-            }
-
-            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut service: Option<String> = None;
-                let mut check: Option<String> = None;
-                let mut arg = Value::Null;
-                while let Some(key) = map.next_key::<String>()? {
-                    match key.as_str() {
-                        "service" => service = Some(map.next_value()?),
-                        "check" => check = Some(map.next_value()?),
-                        "arg" => arg = map.next_value()?,
-                        other => {
-                            return Err(de::Error::unknown_field(
-                                other,
-                                &["service", "check", "arg"],
-                            ));
-                        }
-                    }
-                }
-                let service = service
-                    .ok_or_else(|| de::Error::missing_field("service"))?;
-                let check =
-                    check.ok_or_else(|| de::Error::missing_field("check"))?;
-                Ok(Enabled::Check(EnableCheck {
-                    service,
-                    check,
-                    arg,
-                }))
-            }
-        }
-
-        deserializer.deserialize_any(EnabledVisitor)
-    }
-}
-
-/// A delegated enablement check: the plugin service that answers it,
-/// the method it answers, and the judge's argument.
+/// dsh's `Dict<true | string>`: `true` gives the row a fresh private
+/// scope for that service (dsh `LocalRealm`); a string joins every row
+/// carrying the same label to one shared implementation slot (dsh
+/// `GlobalRealm`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnableCheck {
-    /// The kernel service key a judge provides `EnableChecks` under.
-    pub service: String,
-    /// The method name handed to the judge.
-    pub check: String,
-    /// The judge's argument (a skill id, a server name, …).
-    pub arg: Value,
+pub enum IsolateLabel {
+    /// A fresh scope private to this row.
+    Local,
+    /// A scope shared by every row naming the same label.
+    Shared(String),
 }
 
-/// One assembled plugin row.
+/// One configured plugin row in a profile document.
 ///
-/// `runtime` selects the loader (`native` rows are handed to the core
-/// loader, `ui-bundle` rows to the frontend loader), `config` is the
-/// final configuration after every layer has been applied and
-/// `capabilities` is the row's declared host-capability set.
+/// This is the dsh `EntryOptions` shape: the document states the whole
+/// tree membership, and the plugin's own manifest contributes only what
+/// the document cannot know (its service keys, version, schema). At the
+/// assembly boundary the loader resolves the **effective** dependency
+/// set as the union of the plugin manifest's `inject` and this row's
+/// `inject` — the row wins on a key present in both, and the document
+/// can never remove the plugin's inherent minimum.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Entry {
-    /// Stable plugin identity, unique within a profile.
+pub struct Manifest {
+    /// Stable row identity, unique within the document.
     pub id: String,
-    /// Where the plugin executes.
-    pub runtime: RuntimeKind,
-    /// The final configuration object for this row.
+    /// The plugin this row loads: the factory-directory key.
+    ///
+    /// Empty only on `group` rows, whose children live in `children`
+    /// (serialized as the row's `config` array, the dsh Group plugin
+    /// shape).
+    pub name: String,
+    /// The row's configuration object.
+    ///
+    /// `Null` — the document states no opinion and the factory default
+    /// applies. An explicit empty table is a statement ("empty
+    /// configuration"); the two are different layer statements. For a
+    /// group row this is always `Null`: children are held typed in
+    /// [`Manifest::children`] and serialized back into `config`.
     pub config: Value,
-    /// Host capabilities the row declares, if any.
+    /// Host capabilities the row grants the plugin, if any.
     pub capabilities: Vec<Capability>,
-    /// Whether the row assembles: on, off, or delegated to a plugin
-    /// check. The host filters the row out at the assembly boundary
-    /// before the fiber tree is built.
-    pub enabled: Enabled,
+    /// Whether this row is a nested group carrying children.
+    ///
+    /// A group mounts as a runtime group plugin owning its subtree's
+    /// scope; `disabled` on a group disables every descendant while the
+    /// group itself is always considered enabled (dsh
+    /// `Entry#disabled`).
+    pub group: bool,
+    /// The row's children; only group rows carry them.
+    pub children: Vec<Manifest>,
+    /// Whether this row (and, for a group, its descendants) stays out
+    /// of the assembly.
+    ///
+    /// The runtime writes this back as `true` when the row's fiber
+    /// unloads because it lost a dependency or disposed itself — the
+    /// document always reflects the real assembly (dsh loader
+    /// write-back).
+    pub disabled: bool,
+    /// The kernel service keys this row additionally depends on.
+    ///
+    /// `None` — the row states no opinion, the plugin manifest's
+    /// default applies. `Some(list)` — the keys join the plugin's own
+    /// set (the row wins on a key present in both).
+    pub inject: Option<Vec<String>>,
+    /// Per-service interception config this row carries.
+    ///
+    /// `None` — no opinion. `Some(map)` — each entry overlays the
+    /// service's intercept config for this row's subtree; children
+    /// inherit their ancestors' entries and override same-named keys
+    /// (dsh context intercept chain).
+    pub intercept: Option<BTreeMap<String, Value>>,
+    /// Which services this row reads through an isolated scope.
+    ///
+    /// `None` — no opinion. `Some(map)` — each entry names a service
+    /// key and its scope label (dsh `isolate` entry option).
+    pub isolate: Option<BTreeMap<String, IsolateLabel>>,
+}
+
+impl Manifest {
+    /// A plain row: no config, no capabilities, no opinions beyond
+    /// `id` and `name`.
+    #[must_use]
+    pub fn plain(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            config: Value::Null,
+            capabilities: Vec::new(),
+            group: false,
+            children: Vec::new(),
+            disabled: false,
+            inject: None,
+            intercept: None,
+            isolate: None,
+        }
+    }
+
+    /// The rows this one contributes to the core assembly.
+    ///
+    /// An enabled row contributes itself — a `group` row included: it
+    /// mounts as the runtime group plugin and its children mount
+    /// beneath it, they are **not** flattened into the parent's list.
+    /// A `disabled` bit anywhere on the ancestor chain keeps the whole
+    /// subtree out (dsh `Entry#disabled` walk); a disabled group is an
+    /// empty group and mounts nothing observable either way.
+    #[must_use]
+    pub fn assembled(&self, inherited_disabled: bool) -> Vec<&Manifest> {
+        if self.disabled || inherited_disabled {
+            Vec::new()
+        } else {
+            vec![self]
+        }
+    }
+
+    /// The rows at and under this row with `disabled` inheritance, for
+    /// loaders that project rows instead of mounting them (the frontend
+    /// has no group plugin): group rows contribute their children.
+    #[must_use]
+    pub fn projected(&self, inherited_disabled: bool) -> Vec<&Manifest> {
+        let effective = self.disabled || inherited_disabled;
+        if effective {
+            return Vec::new();
+        }
+        if self.group {
+            self.children
+                .iter()
+                .flat_map(|child| child.projected(effective))
+                .collect()
+        } else {
+            vec![self]
+        }
+    }
+
+    /// Every row at and under this row, disabled ones included.
+    #[must_use]
+    pub fn rows(&self) -> Vec<&Manifest> {
+        let mut result = vec![self];
+        for child in &self.children {
+            result.extend(child.rows());
+        }
+        result
+    }
 }
 
 /// A resolved profile: the ordered core assembly, the ordered UI
 /// assembly, and whether the process hot-reloads on file changes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Profile {
-    /// Rows the core loader mounts, in assembly order.
-    pub core: Vec<Entry>,
-    /// Rows the frontend loader reads, in assembly order.
-    pub ui: Vec<Entry>,
+    /// Rows the core loader reads, in document order.
+    pub core: Vec<Manifest>,
+    /// Rows the frontend loader reads, in document order.
+    pub ui: Vec<Manifest>,
     /// Whether a profile file change is picked up by a running process.
     pub hmr: bool,
+}
+
+impl Profile {
+    /// The core rows to mount: `disabled`-filtered with group
+    /// inheritance, in document order. Group rows are included — they
+    /// mount as the runtime group plugin carrying their children.
+    #[must_use]
+    pub fn core_rows(&self) -> Vec<&Manifest> {
+        self.core
+            .iter()
+            .flat_map(|row| row.assembled(false))
+            .collect()
+    }
+
+    /// The UI rows to assemble: flattened with group inheritance, in
+    /// document order — the frontend loader projects rows and has no
+    /// group plugin.
+    #[must_use]
+    pub fn ui_rows(&self) -> Vec<&Manifest> {
+        self.ui
+            .iter()
+            .flat_map(|row| row.projected(false))
+            .collect()
+    }
 }
 
 /// One `[[replace]]` row of a patch.
@@ -180,32 +212,50 @@ pub struct Profile {
 /// existing object. An omitted field keeps its previous value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryPatch {
-    /// The entry this replacement addresses.
+    /// The row this replacement addresses.
     pub id: String,
-    /// The new runtime, when the replacement changes it.
-    pub runtime: Option<RuntimeKind>,
-    /// The new configuration object, replacing the old one whole.
+    /// The new plugin name, when the replacement changes it.
+    pub name: Option<String>,
+    /// The new configuration object, replacing the old one whole. On a
+    /// group row this replaces the child list.
     pub config: Option<Value>,
     /// The new enablement, when the replacement changes it.
-    pub enabled: Option<Enabled>,
+    pub disabled: Option<bool>,
+    /// The new dependency declaration, replacing the old one whole.
+    ///
+    /// `None` — this layer states no opinion about the edges; `Some`
+    /// replaces the row's declaration (which itself unions with the
+    /// plugin manifest's default at the assembly boundary).
+    pub inject: Option<Vec<String>>,
 }
 
 /// A patch document.
 ///
-/// `replace` addresses existing rows, `insert` appends new ones, and
-/// `disabled` removes rows at resolution time. Patch rows are matched by
-/// `id`; an id that matches nothing is an error, never a silent ignore.
+/// `replace` addresses existing rows, `insert` appends new ones (with
+/// the segment they join), and `disabled` removes rows at resolution
+/// time. Patch rows are matched by `id`; an id that matches nothing is
+/// an error, never a silent ignore.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Patch {
-    /// Rows that replace existing entries.
+    /// Field replacements addressed by id.
     pub replace: Vec<EntryPatch>,
-    /// Rows appended to the assembly.
-    pub insert: Vec<Entry>,
-    /// Ids excluded from the resolved assembly.
+    /// New rows appended at resolution time, with their segment.
+    pub insert: Vec<PatchInsert>,
+    /// Row ids removed at resolution time.
     pub disabled: Vec<String>,
 }
 
-/// One ordered assembly layer.
+/// One `[[insert]]` row: the row and the segment it joins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatchInsert {
+    /// The segment the row joins.
+    pub segment: Segment,
+    /// The row itself.
+    pub row: Manifest,
+}
+
+/// A profile document contributes rows and an `hmr` flag; a patch
+/// document only addresses rows that already exist.
 ///
 /// The resolver applies layers in slice order —
 /// empty → bundle patch → profile patch → home patch — and applies the
@@ -238,26 +288,31 @@ pub enum ProfileError {
         /// The operating system's message.
         message: String,
     },
-    /// A row omitted `runtime`.
-    #[error("entry `{id}` does not declare a runtime")]
-    MissingRuntime {
-        /// The row without a runtime.
-        id: String,
-    },
-    /// A row named a runtime outside the two the host speaks.
-    #[error(
-        "unknown runtime `{value}`; accepted runtimes are native and \
-         ui-bundle"
-    )]
-    UnknownRuntime {
-        /// The rejected wire value.
-        value: String,
-    },
     /// A row had an empty id.
     #[error("an entry in {layer} has an empty id")]
     EmptyId {
         /// The layer being parsed.
         layer: String,
+    },
+    /// A non-group row omitted `name`.
+    #[error("entry `{id}` does not declare a plugin name")]
+    MissingName {
+        /// The row without a plugin name.
+        id: String,
+    },
+    /// A group row declared a plugin name.
+    #[error("group entry `{id}` must not declare a plugin name")]
+    NameOnGroup {
+        /// The group row carrying a name.
+        id: String,
+    },
+    /// A group row's `config` was not an array of child rows.
+    #[error("group entry `{id}` config must be an array of child rows: {message}")]
+    GroupConfig {
+        /// The group row.
+        id: String,
+        /// What was wrong with the array.
+        message: String,
     },
     /// One layer declared the same id twice.
     #[error("duplicate entry id `{id}` in one layer")]
@@ -271,43 +326,35 @@ pub enum ProfileError {
         /// The id that matched nothing.
         id: String,
     },
-    /// Two factories were registered for one id.
+    /// Two factories were registered for one name.
     #[error("duplicate plugin factory id `{id}`")]
     DuplicateFactoryId {
         /// The repeated factory id.
         id: String,
     },
-    /// A profile row has no registered factory.
-    #[error("unknown plugin id `{id}`; registered factories: {known:?}")]
+    /// A profile row names a plugin with no registered factory.
+    #[error("unknown plugin `{name}` (entry `{id}`); registered factories: {known:?}")]
     UnknownPluginId {
-        /// The id with no factory.
+        /// The row that named it.
         id: String,
+        /// The plugin name with no factory.
+        name: String,
         /// Every registered factory id, in sorted order.
         known: Vec<String>,
     },
-    /// The factory's manifest and the profile row disagree about the
-    /// runtime.
+    /// The plugin's manifest declares the other runtime than the row's
+    /// segment.
     #[error(
-        "plugin `{id}` manifest declares runtime `{manifest}`, but the \
-         entry declares `{entry}`"
+        "plugin `{id}` runs on the {manifest} runtime but its row sits in \
+         the {segment} segment"
     )]
-    RuntimeMismatch {
-        /// The plugin id.
+    SegmentMismatch {
+        /// The row id.
         id: String,
-        /// The runtime from the profile row.
-        entry: String,
-        /// The runtime from the manifest.
-        manifest: String,
-    },
-    /// The factory's manifest id differs from the requested id.
-    #[error(
-        "factory registered as `{entry}` returned a manifest for `{manifest}`"
-    )]
-    ManifestIdMismatch {
-        /// The id the profile asked for.
-        entry: String,
-        /// The id the manifest declares.
-        manifest: String,
+        /// The segment the row sits in.
+        segment: &'static str,
+        /// The runtime the manifest declares.
+        manifest: &'static str,
     },
     /// A core manifest declared a `ui.` service key.
     #[error(
@@ -357,29 +404,62 @@ struct WireSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WireEntry {
     #[serde(default)]
     id: String,
     #[serde(default)]
-    runtime: String,
+    name: String,
     #[serde(default)]
     config: Option<Value>,
     #[serde(default)]
     capabilities: Vec<Capability>,
     #[serde(default)]
-    enabled: Option<Enabled>,
+    group: bool,
+    #[serde(default)]
+    disabled: bool,
+    #[serde(default)]
+    inject: Option<Vec<String>>,
+    #[serde(default)]
+    intercept: Option<BTreeMap<String, Value>>,
+    #[serde(default)]
+    isolate: Option<BTreeMap<String, WireIsolateLabel>>,
 }
 
+/// The wire form of one isolation label: `true` or a label string.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum WireIsolateLabel {
+    /// `true` — a fresh row-private scope.
+    Bool(bool),
+    /// A label string — one shared scope per label.
+    Shared(String),
+}
+
+
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WireEntryPatch {
     #[serde(default)]
     id: String,
     #[serde(default)]
-    runtime: Option<String>,
+    name: Option<String>,
     #[serde(default)]
     config: Option<Value>,
     #[serde(default)]
-    enabled: Option<Enabled>,
+    disabled: Option<bool>,
+    #[serde(default)]
+    inject: Option<Vec<String>>,
+}
+
+/// One `[[insert]]` row: a full row plus the segment it lands in.
+#[derive(Debug, Deserialize)]
+struct WireInsert {
+    /// The segment the row joins: `core` (the default) or `ui`.
+    #[serde(default)]
+    segment: String,
+    #[serde(flatten)]
+    entry: WireEntry,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -387,33 +467,101 @@ struct WirePatch {
     #[serde(default)]
     replace: Vec<WireEntryPatch>,
     #[serde(default)]
-    insert: Vec<WireEntry>,
+    insert: Vec<WireInsert>,
     #[serde(default)]
     disabled: Vec<String>,
 }
 
-impl Entry {
+/// Parse a group row's `config` array into child manifests.
+///
+/// Shared by document parsing and patch application (a replacement's
+/// `config` on a group row replaces the child list whole).
+pub(crate) fn children_from_config(
+    id: &str,
+    config: Option<&Value>,
+    layer: &str,
+) -> Result<Vec<Manifest>, ProfileError> {
+    let Some(items) = config.map(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = items else {
+        return Err(ProfileError::GroupConfig {
+            id: id.to_owned(),
+            message: "group config must be an array".to_owned(),
+        });
+    };
+    items
+        .iter()
+        .map(|item| {
+            serde_json::from_value::<WireEntry>(item.clone()).map_err(
+                |error| ProfileError::GroupConfig {
+                    id: id.to_owned(),
+                    message: error.to_string(),
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .map(|child| Manifest::from_wire(child, layer))
+        .collect()
+}
+
+
+impl From<WireIsolateLabel> for IsolateLabel {
+    fn from(wire: WireIsolateLabel) -> Self {
+        match wire {
+            WireIsolateLabel::Shared(label) => Self::Shared(label),
+            WireIsolateLabel::Bool(_) => Self::Local,
+        }
+    }
+}
+
+impl Manifest {
     fn from_wire(wire: WireEntry, layer: &str) -> Result<Self, ProfileError> {
         if wire.id.trim().is_empty() {
             return Err(ProfileError::EmptyId {
                 layer: layer.to_owned(),
             });
         }
-        if wire.runtime.is_empty() {
-            return Err(ProfileError::MissingRuntime { id: wire.id });
-        }
+        let (name, config, children) = if wire.group {
+            if !wire.name.is_empty() {
+                return Err(ProfileError::NameOnGroup { id: wire.id });
+            }
+            // dsh Group plugin shape: the group's children ARE its
+            // config, an array of child rows.
+            let children = children_from_config(
+                &wire.id,
+                wire.config.as_ref(),
+                layer,
+            )?;
+            (String::new(), Value::Null, children)
+        } else if wire.name.trim().is_empty() {
+            return Err(ProfileError::MissingName { id: wire.id });
+        } else {
+            (wire.name, wire.config.unwrap_or(Value::Null), Vec::new())
+        };
         Ok(Self {
             id: wire.id,
-            runtime: parse_runtime(&wire.runtime)?,
+            name,
             // A document row without a `config` key has *no opinion*:
             // it inherits (`null`), the same value `to_toml` writes
             // back. An explicit empty table still means "empty
             // configuration" — the two are different layer statements,
             // and conflating them made the second `profile/set` after
             // a materialization remount the whole assembly.
-            config: wire.config.unwrap_or(Value::Null),
+            config,
             capabilities: wire.capabilities,
-            enabled: wire.enabled.unwrap_or_default(),
+            group: wire.group,
+            children,
+            disabled: wire.disabled,
+            // `inject` keeps its `None` when the row states no opinion:
+            // the plugin manifest's default then applies. An explicit
+            // empty list is a statement ("this row adds no edges").
+            inject: wire.inject,
+            intercept: wire.intercept,
+            isolate: wire.isolate.map(|map| {
+                map.into_iter().map(|(key, label)| (key, label.into())).collect()
+            }),
         })
     }
 }
@@ -422,8 +570,9 @@ impl Profile {
     /// Parse a profile TOML document.
     ///
     /// A missing `[core]` or `[ui]` section is valid and resolves to an
-    /// empty segment. Empty ids, missing or unknown runtimes, and
-    /// duplicate ids inside this one document are rejected here.
+    /// empty segment. Empty ids, rows without a plugin name, groups
+    /// with a name, a group config that is not an array of child rows,
+    /// and duplicate ids inside this one document are rejected here.
     ///
     /// # Errors
     ///
@@ -438,19 +587,15 @@ impl Profile {
             .core
             .entries
             .into_iter()
-            .map(|entry| Entry::from_wire(entry, "the profile"))
+            .map(|row| Manifest::from_wire(row, "the profile"))
             .collect::<Result<Vec<_>, _>>()?;
         let ui = wire
             .ui
             .entries
             .into_iter()
-            .map(|entry| Entry::from_wire(entry, "the profile"))
+            .map(|row| Manifest::from_wire(row, "the profile"))
             .collect::<Result<Vec<_>, _>>()?;
-        let profile = Self {
-            core,
-            ui,
-            hmr: wire.hmr,
-        };
+        let profile = Self { core, ui, hmr: wire.hmr };
         profile.validate_unique()?;
         Ok(profile)
     }
@@ -477,13 +622,10 @@ impl Profile {
         self.position(id).is_some()
     }
 
-    /// Return the entry named `id`, searching the core segment first.
+    /// Return the row named `id`, searching the core segment first.
     #[must_use]
-    pub fn find(&self, id: &str) -> Option<&Entry> {
-        self.core
-            .iter()
-            .chain(self.ui.iter())
-            .find(|entry| entry.id == id)
+    pub fn find(&self, id: &str) -> Option<&Manifest> {
+        self.all_rows().into_iter().find(|row| row.id == id)
     }
 
     /// Reject a duplicate id inside this document.
@@ -493,33 +635,47 @@ impl Profile {
     /// Returns [`ProfileError::DuplicateId`] naming the repeated id.
     pub fn validate_unique(&self) -> Result<(), ProfileError> {
         let mut seen = BTreeSet::new();
-        for entry in self.core.iter().chain(self.ui.iter()) {
-            if !seen.insert(entry.id.as_str()) {
-                return Err(ProfileError::DuplicateId {
-                    id: entry.id.clone(),
-                });
+        for row in self.all_rows() {
+            if !seen.insert(row.id.as_str()) {
+                return Err(ProfileError::DuplicateId { id: row.id.clone() });
             }
         }
         Ok(())
     }
 
-    pub(crate) fn position(&self, id: &str) -> Option<(Segment, usize)> {
-        if let Some(index) = self.core.iter().position(|entry| entry.id == id) {
-            return Some((Segment::Core, index));
-        }
-        self.ui
+    /// Every row in the document, disabled ones and group rows
+    /// included, core segment first.
+    #[must_use]
+    pub fn all_rows(&self) -> Vec<&Manifest> {
+        self.core
             .iter()
-            .position(|entry| entry.id == id)
-            .map(|index| (Segment::Ui, index))
+            .chain(self.ui.iter())
+            .flat_map(|row| row.rows())
+            .collect()
     }
+
+    pub(crate) fn position(&self, id: &str) -> Option<Segment> {
+        if self.core.iter().any(|row| contains_id(row, id)) {
+            return Some(Segment::Core);
+        }
+        if self.ui.iter().any(|row| contains_id(row, id)) {
+            return Some(Segment::Ui);
+        }
+        None
+    }
+}
+
+/// Whether `row` or any descendant carries `id`.
+fn contains_id(row: &Manifest, id: &str) -> bool {
+    row.rows().iter().any(|row| row.id == id)
 }
 
 impl Patch {
     /// Parse a patch TOML document.
     ///
     /// The document uses `[[replace]]` and `[[insert]]` tables plus a
-    /// `disabled = [...]` array. Empty ids and a repeated id inside this
-    /// one document are rejected.
+    /// `disabled = [...]` array. Empty ids and a repeated id inside
+    /// this one document are rejected.
     ///
     /// # Errors
     ///
@@ -537,25 +693,38 @@ impl Patch {
                     layer: "the patch".to_owned(),
                 });
             }
-            let runtime = match row.runtime {
-                Some(runtime) if runtime.is_empty() => {
-                    return Err(ProfileError::MissingRuntime { id: row.id });
-                }
-                Some(runtime) => Some(parse_runtime(&runtime)?),
-                None => None,
-            };
+            if let Some(name) = &row.name
+                && name.trim().is_empty()
+            {
+                return Err(ProfileError::MissingName { id: row.id });
+            }
             replace.push(EntryPatch {
                 id: row.id,
-                runtime,
+                name: row.name,
                 config: row.config,
-                enabled: row.enabled,
+                disabled: row.disabled,
+                inject: row.inject,
             });
         }
-        let insert = wire
-            .insert
-            .into_iter()
-            .map(|entry| Entry::from_wire(entry, "the patch"))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut insert = Vec::with_capacity(wire.insert.len());
+        for row in wire.insert {
+            let segment = match row.segment.as_str() {
+                "" | "core" => Segment::Core,
+                "ui" => Segment::Ui,
+                other => {
+                    return Err(ProfileError::Parse {
+                        message: format!(
+                            "unknown insert segment `{other}`; accepted: \
+                             core, ui"
+                        ),
+                    })
+                }
+            };
+            insert.push(PatchInsert {
+                segment,
+                row: Manifest::from_wire(row.entry, "the patch")?,
+            });
+        }
         let patch = Self {
             replace,
             insert,
@@ -593,7 +762,9 @@ impl Patch {
             .replace
             .iter()
             .map(|row| row.id.as_str())
-            .chain(self.insert.iter().map(|row| row.id.as_str()))
+            .chain(self.insert.iter().flat_map(|insertion| {
+                insertion.row.rows().into_iter().map(|row| row.id.as_str())
+            }))
         {
             if !seen.insert(id) {
                 return Err(ProfileError::DuplicateId { id: id.to_owned() });
@@ -603,51 +774,27 @@ impl Patch {
     }
 }
 
-/// Which profile segment an entry lives in.
+/// Which profile segment a row lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Segment {
+pub enum Segment {
     /// The core loader's segment.
     Core,
     /// The frontend loader's segment.
     Ui,
 }
 
-/// The wire name of a runtime.
-#[must_use]
-pub(crate) fn runtime_name(runtime: RuntimeKind) -> &'static str {
-    match runtime {
-        RuntimeKind::Native => "native",
-        RuntimeKind::UiBundle => "ui-bundle",
+impl Segment {
+    /// The segment's wire name.
+    #[must_use]
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Ui => "ui",
+        }
     }
 }
 
-/// Parse a runtime's wire name.
-///
-/// # Errors
-///
-/// Returns [`ProfileError::UnknownRuntime`] naming the value and the
-/// accepted set.
-pub(crate) fn parse_runtime(value: &str) -> Result<RuntimeKind, ProfileError> {
-    match value {
-        "native" => Ok(RuntimeKind::Native),
-        "ui-bundle" => Ok(RuntimeKind::UiBundle),
-        other => Err(ProfileError::UnknownRuntime {
-            value: other.to_owned(),
-        }),
-    }
-}
-
-/// Where a plugin row belongs, by runtime.
-#[must_use]
-pub(crate) fn segment_of(entry: &Entry) -> Segment {
-    if entry.runtime == RuntimeKind::UiBundle {
-        Segment::Ui
-    } else {
-        Segment::Core
-    }
-}
-
-/// A factory directory keyed by plugin id.
+/// A factory directory keyed by plugin name.
 #[derive(Default)]
 pub struct PluginFactories {
     by_id: BTreeMap<String, std::sync::Arc<dyn PluginFactory>>,
@@ -678,10 +825,10 @@ impl PluginFactories {
         Ok(())
     }
 
-    /// Look a factory up by id.
+    /// Look a factory up by plugin name.
     #[must_use]
-    pub fn get(&self, id: &str) -> Option<&std::sync::Arc<dyn PluginFactory>> {
-        self.by_id.get(id)
+    pub fn get(&self, name: &str) -> Option<&std::sync::Arc<dyn PluginFactory>> {
+        self.by_id.get(name)
     }
 
     /// Every registered factory id, in sorted order.
@@ -690,15 +837,16 @@ impl PluginFactories {
         self.by_id.keys().cloned().collect()
     }
 
-    /// The top-level config fields the factory marks volatile for `id`.
+    /// The top-level config fields the factory marks volatile for
+    /// `name`.
     ///
     /// A change to only these fields updates the value the plugin reads
-    /// next time but does not remount its fiber. An unknown id has no
+    /// next time but does not remount its fiber. An unknown name has no
     /// volatile fields.
     #[must_use]
-    pub fn volatile_fields(&self, id: &str) -> &'static [&'static str] {
+    pub fn volatile_fields(&self, name: &str) -> &'static [&'static str] {
         self.by_id
-            .get(id)
+            .get(name)
             .map(|factory| factory.volatile_fields())
             .unwrap_or(&[])
     }

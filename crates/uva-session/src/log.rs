@@ -3,9 +3,11 @@
 //! [`SessionLog`] is the object-safe view of a session's log that
 //! the agent loop and a host's controller accept. It names exactly
 //! the operations a run needs — read the rows, queue a typed row,
-//! flush the queue, repair a crashed tail — and nothing about the
+//! flush the queue, repair a crashed tail, close the log, and point
+//! the surface ledger at the run that writes — and nothing about the
 //! backend that provides them. [`LogWriter`](crate::LogWriter) is the
-//! implementation every in-process deployment uses.
+//! implementation every in-process deployment uses, and the only one:
+//! a host holds this seam, never the concrete writer.
 //!
 //! ## Two append paths, one ordinal source
 //!
@@ -23,10 +25,12 @@
 //! is what a status display and a resume check compare against; it is
 //! **not** an input to the fold, which numbers the rows it reads.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::{SessionError, SessionEvent};
+use crate::{SessionEndReason, SessionError, SessionEvent, SurfaceLedger};
 
 /// What a repair pass closed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -55,6 +59,25 @@ pub trait SessionLog: Send + Sync {
     ///
     /// Returns the backend's error when the log cannot be read.
     async fn read(&self) -> Result<Vec<Value>, SessionError>;
+
+    /// Point this log's surface ledger at the run that is writing.
+    ///
+    /// Every row the log makes durable is recorded in the ledger, in
+    /// the order it was written, so a compaction checkpoint resolves
+    /// its shadowed span against the same ordinals the fold
+    /// reproduces. The ledger belongs to the run while the log
+    /// outlives it, so each run attaches its own; a backend with no
+    /// surface ledger accepts the call and ignores it.
+    fn set_ledger(&self, ledger: Arc<SurfaceLedger>);
+
+    /// Seed the ledger [`set_ledger`](Self::set_ledger) attached with
+    /// the history the log already holds.
+    ///
+    /// The rows are numbered exactly the way the fold numbers them —
+    /// each row's own `seq` in a stamped log, positions in an old one
+    /// — so the ledger and the fold stay in step. A backend with no
+    /// surface ledger accepts the call and ignores it.
+    fn seed_ledger(&self, rows: &[Value]);
 
     /// Queue one typed row, stamping it with the next ordinal.
     ///
@@ -102,6 +125,21 @@ pub trait SessionLog: Send + Sync {
     /// Returns the backend's error when the batch could not be
     /// written.
     async fn flush(&self) -> Result<(), SessionError>;
+
+    /// Close the session's log: land every queued row, then tell the
+    /// backend the session ended.
+    ///
+    /// The flush is part of the close — a row the log accepted is
+    /// never lost to the close itself. This is the seam's only way to
+    /// end a log, so a host that holds it never needs the backend to
+    /// close one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backend's error when the queued rows could not be
+    /// written or the backend refused the close.
+    async fn close(&self, reason: SessionEndReason)
+    -> Result<(), SessionError>;
 
     /// Close an open tail turn left by a crash, then flush.
     ///

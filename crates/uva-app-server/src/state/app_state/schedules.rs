@@ -228,13 +228,10 @@ pub(crate) fn spawn_scheduler_driver(
             // tick's source of truth: unloading the plugin withdraws
             // it, and the loop stops instead of ticking a service the
             // deployment no longer mounts.
-            let Some(service) = state
-                .kernel
-                .get::<uva::scheduler::SchedulerService>(
+            let Some(service) =
+                state.assembly.service::<uva::scheduler::SchedulerService>(
                     uva::scheduler::KEY_SCHEDULER,
                 )
-                .ok()
-                .flatten()
             else {
                 break;
             };

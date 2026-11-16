@@ -57,7 +57,6 @@ use crate::{
     profile::{
         CapabilityAction,
         CapabilityDomain,
-        Enabled,
         ProfileAction,
         RowEdit,
     },
@@ -271,7 +270,7 @@ async fn create_agent(
     )
     .await
     .map_err(|e| e.to_string())?;
-    let entry = uva::harness::AgentEntry::new(agent);
+    let entry = uva::agent::AgentEntry::new(agent);
     state
         .agent_registry
         .put(entry)
@@ -918,16 +917,19 @@ fn profile_tool(state: Arc<AppState>) -> ServerTool {
                     "set" => {
                         let id = str_field(&args, "id")
                             .ok_or("set requires `id`")?;
-                        let enabled = args
-                            .get("enabled")
-                            .cloned()
-                            .map(serde_json::from_value::<Enabled>)
-                            .transpose()
-                            .map_err(|error| format!("enabled: {error}"))?;
+                        let disabled = match args.get("disabled") {
+                            None => None,
+                            Some(value) => Some(
+                                serde_json::from_value::<bool>(value.clone())
+                                    .map_err(|error| {
+                                        format!("disabled: {error}")
+                                    })?,
+                            ),
+                        };
                         let config = args.get("config").cloned();
-                        if enabled.is_none() && config.is_none() {
+                        if disabled.is_none() && config.is_none() {
                             return Err(
-                                "set requires `enabled` and/or `config`"
+                                "set requires `disabled` and/or `config`"
                                     .to_string(),
                             );
                         }
@@ -936,7 +938,7 @@ fn profile_tool(state: Arc<AppState>) -> ServerTool {
                                 "agent",
                                 ProfileAction::Edit(RowEdit::Set {
                                     id,
-                                    enabled,
+                                    disabled,
                                     config,
                                 }),
                             )

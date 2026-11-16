@@ -230,10 +230,7 @@ impl Executor for DefaultExecutor {
             let text = content_to_text(&response);
             // The step's answer is the model's turn of this step: one
             // `assistant_message` row through the session's writer.
-            sink.write_assistant_turn(&[ContentPart::Text(TextContent {
-                text: text.clone(),
-                cache_control: None,
-            })]);
+            sink.write_assistant_turn(&Message::assistant(text.clone()));
             return Ok(StepOutcome::completed(text));
         }
         Ok(StepOutcome::failed("executor iteration cap reached"))

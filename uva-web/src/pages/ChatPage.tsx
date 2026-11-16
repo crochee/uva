@@ -22,26 +22,21 @@ import { PromptPrefix } from '../components/chat/PromptPrefix';
 import { deriveArtifacts, deriveSubagents, deriveTodos } from '../lib/session-panel-data';
 import {
   cancelSession as apiCancelSession,
-  compactSession as apiCompactSession,
   FollowHttpError,
   createChatSession,
   followSession,
-  getSessionDetail,
-  getSessionUsage,
-  listModels as apiListModels,
   regenerate as apiRegenerate,
-  resumeSession as apiResumeSession,
   sendChatMessage,
   submitFeedback as apiSubmitFeedback,
   type AttachmentPart,
-  type ModelEntry,
 } from '../api/chat-stream';
+import { catalogApi, type ModelEntry } from '../api/catalog';
+import { sessionsApi } from '../api/sessions';
 import type { MessageSegment } from '../api/chat-message';
 import type {
   AgentDetail,
   ApprovalRequest,
   FollowSnapshot,
-  List,
   LiveTurn,
   ResumeDecision,
   ResumeStatus,
@@ -51,15 +46,20 @@ import type {
 } from '../api/types';
 import {
   carriesModelContent,
+  feedbackTarget,
+  isTimelineAnnotationOnly,
+  legacyRowType,
   messageParts,
   newRowProjection,
   projectRows,
+  selectLastAssistant,
   type RowProjection,
 } from '../lib/session-to-messages';
 import { useServerHealth, setServerHealth } from '../hooks/useServerHealth';
 import { useToast } from '../hooks/useToast';
 import { shortId } from '../lib/short-id';
-import { ApiError, api } from '../api/client';
+import { agentsApi } from '../api/agents';
+import { RpcError } from '../api/rpc';
 import './ChatPage.css';
 
 /**
@@ -117,10 +117,18 @@ function readFileAsDataUrl(file: File): Promise<string> {
  * that is not a boundary close. The log spells the discriminator as
  * `kind` on older writers and `phase` on newer ones, so both are read.
  */
+/** The row's payload read as a keyed object, or null when it is not one. */
+function rowData(row: SessionTurn): Record<string, unknown> | null {
+  const data = row.data;
+  return data !== null && data !== undefined && typeof data === 'object' && !Array.isArray(data)
+    ? (data as Record<string, unknown>)
+    : null;
+}
+
 function turnEndReason(row: SessionTurn): string | null {
   if (row.type !== 'turn') return null;
-  const data = row.data;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const data = rowData(row);
+  if (!data) return null;
   const phase =
     typeof data.phase === 'string' ? data.phase : typeof data.kind === 'string' ? data.kind : '';
   if (phase !== 'end') return null;
@@ -134,8 +142,8 @@ function turnEndReason(row: SessionTurn): string | null {
  */
 function stepStartIndex(row: SessionTurn): number | null {
   if (row.type !== 'step') return null;
-  const data = row.data;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const data = rowData(row);
+  if (!data) return null;
   const phase =
     typeof data.phase === 'string' ? data.phase : typeof data.kind === 'string' ? data.kind : '';
   if (phase !== 'start') return null;
@@ -151,14 +159,8 @@ function stepStartIndex(row: SessionTurn): number | null {
  * for the composer's local outbox and for matching a steer to its row.
  */
 function promptTextOf(row: SessionTurn): string {
-  const data = row.data;
-  if (
-    row.type === 'UserInput' &&
-    data &&
-    typeof data === 'object' &&
-    !Array.isArray(data) &&
-    typeof data.text === 'string'
-  ) {
+  const data = rowData(row);
+  if (legacyRowType(row) === 'UserInput' && typeof data?.text === 'string') {
     return data.text;
   }
   return messageParts(data)
@@ -263,7 +265,7 @@ interface QueuedMessage {
  * arrived.
  */
 function settleQueued(queued: QueuedMessage[], row: SessionTurn): QueuedMessage[] {
-  if (row.type !== 'user_message' && row.type !== 'UserInput') return queued;
+  if (row.type !== 'user_message' && legacyRowType(row) !== 'UserInput') return queued;
   const text = promptTextOf(row);
   const index = queued.findIndex((item) => item.text === text);
   if (index === -1) return queued;
@@ -338,8 +340,8 @@ function durableOfMessage(row: SessionTurn): TurnDurable {
 /** True for the `turn { start }` row that opens a run's turn. */
 function isTurnStart(row: SessionTurn): boolean {
   if (row.type !== 'turn') return false;
-  const data = row.data;
-  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const data = rowData(row);
+  if (!data) return false;
   const phase =
     typeof data.phase === 'string' ? data.phase : typeof data.kind === 'string' ? data.kind : '';
   return phase === 'start';
@@ -535,10 +537,14 @@ function windowReducer(state: ChatWindow, action: WindowAction): ChatWindow {
         const status = statusFromReason(reason);
         const messages = projection.messages.slice();
         for (let i = messages.length - 1; i >= 0; i -= 1) {
-          if (messages[i].role === 'assistant') {
-            messages[i] = { ...messages[i], status };
-            break;
-          }
+          const message = messages[i];
+          if (message.role !== 'assistant') continue;
+          // A timeline annotation (a trailing warning notice after a
+          // failed turn) is not the turn's answer: the failure status
+          // belongs on the newest real answer, if one exists.
+          if (isTimelineAnnotationOnly(message)) continue;
+          messages[i] = { ...message, status };
+          break;
         }
         projection = { ...projection, messages };
       }
@@ -713,7 +719,7 @@ function liveSegments(
       content: '',
       toolName: call.name,
       callContent: callBody,
-      ...(call.output !== undefined ? { resultContent: call.output } : {}),
+      ...(typeof call.output === 'string' ? { resultContent: call.output } : {}),
       toolPending: call.status === 'running',
       toolError: call.status === 'failed',
       toolUseId: call.call_id,
@@ -729,7 +735,7 @@ function liveSegments(
  * to do next.
  */
 function actionErrorText(err: unknown, fallback: string): string {
-  if (!(err instanceof ApiError)) {
+  if (!(err instanceof RpcError)) {
     return err instanceof Error ? err.message : fallback;
   }
   switch (err.code) {
@@ -757,7 +763,7 @@ function actionErrorText(err: unknown, fallback: string): string {
 /**
  * Main chat page.
  *
- * The transcript is server truth from `GET /api/v1/sessions/{id}/follow`:
+ * The transcript is server truth from `sessions/follow`:
  * the first frame replaces the window, durable rows append, and the
  * live projection renders the turn that is still in flight. Sending is a
  * REST action (`queue` or `steer`) whose result arrives through the
@@ -798,7 +804,7 @@ export function ChatPage() {
     let cancelled = false;
     (async () => {
       try {
-        const resp = await api.get<{ name: string; source: string }>('/api/v1/agents/default');
+        const resp = await agentsApi.defaultAgent();
         if (cancelled) return;
         setAgentError(null);
         setAgentName(resp.name);
@@ -963,6 +969,7 @@ export function ChatPage() {
       subagentDepth: message.subagentDepth,
       segments: message.segments as MessageSegment[],
       status: message.status,
+      ordinal: message.ordinal,
     }));
     if (win.live && liveMessageSegments.length > 0) {
       items.push({
@@ -1039,7 +1046,7 @@ export function ChatPage() {
 
   const refreshUsage = useCallback(async (id: string) => {
     try {
-      const usage = await getSessionUsage(id);
+      const usage = await sessionsApi.usage(id);
       dispatch({ kind: 'usage', usage });
     } catch {
       // The footer keeps the last known numbers; the next turn retries.
@@ -1153,7 +1160,8 @@ export function ChatPage() {
   useEffect(() => {
     if (!isServerAvailable) return;
     let cancelled = false;
-    apiListModels()
+    catalogApi
+      .models()
       .then((resp) => {
         if (cancelled) return;
         setModels(resp.models);
@@ -1172,8 +1180,8 @@ export function ChatPage() {
   useEffect(() => {
     if (!isServerAvailable) return;
     let cancelled = false;
-    api
-      .get<List<AgentDetail>>('/api/v1/agents')
+    agentsApi
+      .list()
       .then((resp) => {
         if (!cancelled) setAgents(resp.data);
       })
@@ -1253,7 +1261,7 @@ export function ChatPage() {
       const message = err instanceof Error ? err.message : String(err);
       setSubmitError(message);
       if (steerId) dispatch({ kind: 'steers-returned', ids: [steerId] });
-      if (!(err instanceof ApiError)) setServerHealth(false);
+      if (!(err instanceof RpcError)) setServerHealth(false);
     } finally {
       setSending(false);
     }
@@ -1370,7 +1378,7 @@ export function ChatPage() {
         return;
       }
       try {
-        await apiResumeSession(
+        await sessionsApi.resume(
           sessionId,
           {
             last_seq: win.cursor,
@@ -1385,7 +1393,7 @@ export function ChatPage() {
         setApprovalErrorCode(null);
       } catch (err) {
         setApprovalError(actionErrorText(err, 'Resume failed.'));
-        setApprovalErrorCode(err instanceof ApiError ? err.code : null);
+        setApprovalErrorCode(err instanceof RpcError ? err.code : null);
       } finally {
         setResuming(false);
       }
@@ -1412,7 +1420,7 @@ export function ChatPage() {
     if (!sessionId || compacting) return;
     setCompacting(true);
     try {
-      const result = await apiCompactSession(sessionId);
+      const result = await sessionsApi.compact(sessionId);
       pushToast({
         variant: result.committed ? 'success' : 'warning',
         message: result.committed
@@ -1444,7 +1452,7 @@ export function ChatPage() {
   const handleLoadHistory = async () => {
     if (!sessionId) return;
     try {
-      const detail = await getSessionDetail(sessionId);
+      const detail = await sessionsApi.get(sessionId);
       dispatch({
         kind: 'history',
         projection: projectRows(newRowProjection(sessionId), detail.history ?? []),
@@ -1459,16 +1467,19 @@ export function ChatPage() {
   };
 
   const handleFeedback = useCallback(
-    async (messageId: string, thumbsUp: boolean) => {
+    async (target: string, thumbsUp: boolean) => {
       if (!sessionId) return;
       try {
-        await apiSubmitFeedback(sessionId, messageId, thumbsUp);
+        await apiSubmitFeedback(sessionId, target, thumbsUp);
         pushToast({
           variant: 'success',
           message: thumbsUp ? 'Thanks for the feedback 👍' : 'Thanks for the feedback 👎',
           durationMs: 2000,
         });
       } catch (err) {
+        // The server refuses a target it cannot resolve against the
+        // session's log. The refusal is the reader's to see: a
+        // swallowed error would look like a rating that landed.
         pushToast({
           variant: 'error',
           message: `Feedback failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -1503,17 +1514,12 @@ export function ChatPage() {
   const panelArtifacts = useMemo(() => deriveArtifacts(viewMessages), [viewMessages]);
   const panelSubagents = useMemo(() => deriveSubagents(viewMessages), [viewMessages]);
 
-  const lastAssistant = useMemo(() => {
-    for (let i = viewMessages.length - 1; i >= 0; i -= 1) {
-      const message = viewMessages[i];
-      if (message.role !== 'assistant') continue;
-      // A compaction marker is a timeline note, not an answer: it must
-      // never become the target of Regenerate or feedback.
-      if (message.segments.every((segment) => segment.type === 'compaction')) continue;
-      return message;
-    }
-    return null;
-  }, [viewMessages]);
+  const lastAssistant = useMemo(() => selectLastAssistant(viewMessages), [viewMessages]);
+  // The rating target: the ordinal of the assistant row the last
+  // answer came from. `null` when the answer names no row in the
+  // log — the live projection, or a bubble no assistant row opened —
+  // and then there is nothing to rate, so the buttons stay away.
+  const lastAssistantTarget = useMemo(() => feedbackTarget(lastAssistant), [lastAssistant]);
   const canRegenerate =
     !isStreaming &&
     !awaitingApproval &&
@@ -1680,26 +1686,30 @@ export function ChatPage() {
               <span aria-hidden>↻</span>
               Regenerate
             </Button>
-            <Button
-              size="1"
-              variant="ghost"
-              color="gray"
-              onClick={() => void handleFeedback(lastAssistant.id, true)}
-              data-testid={`feedback-up-${lastAssistant.id}`}
-              aria-label="Mark response as helpful"
-            >
-              <span aria-hidden>👍</span>
-            </Button>
-            <Button
-              size="1"
-              variant="ghost"
-              color="gray"
-              onClick={() => void handleFeedback(lastAssistant.id, false)}
-              data-testid={`feedback-down-${lastAssistant.id}`}
-              aria-label="Mark response as unhelpful"
-            >
-              <span aria-hidden>👎</span>
-            </Button>
+            {lastAssistantTarget !== null && (
+              <>
+                <Button
+                  size="1"
+                  variant="ghost"
+                  color="gray"
+                  onClick={() => void handleFeedback(lastAssistantTarget, true)}
+                  data-testid={`feedback-up-${lastAssistantTarget}`}
+                  aria-label="Mark response as helpful"
+                >
+                  <span aria-hidden>👍</span>
+                </Button>
+                <Button
+                  size="1"
+                  variant="ghost"
+                  color="gray"
+                  onClick={() => void handleFeedback(lastAssistantTarget, false)}
+                  data-testid={`feedback-down-${lastAssistantTarget}`}
+                  aria-label="Mark response as unhelpful"
+                >
+                  <span aria-hidden>👎</span>
+                </Button>
+              </>
+            )}
           </div>
         )}
         {isStreaming && (
@@ -2004,7 +2014,7 @@ export function ChatPage() {
           <div className="nt-chat__context-meter" data-testid="context-meter">
             <span>
               上下文 {contextUsed !== undefined ? contextUsed.toLocaleString() : '—'}
-              {contextWindow !== undefined ? ` / ${contextWindow.toLocaleString()}` : ''}
+              {typeof contextWindow === 'number' ? ` / ${contextWindow.toLocaleString()}` : ''}
             </span>
             <span>
               会话 {win.usage ? win.usage.input_tokens.toLocaleString() : '—'} in ·{' '}

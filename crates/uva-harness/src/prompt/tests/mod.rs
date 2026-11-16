@@ -1,23 +1,17 @@
-//! Test suite for the prompt assembler.
+//! Test suite for the prompt assembly, harness side.
 //!
-//! Split into focused submodules by concern, so the public
-//! builder in the parent module stays a single, small file.
-//! Each submodule tests exactly one of the renderers (or the
-//! runtime-context snapshot seam), and the cross-cutting
-//! fixtures live in [`support`].
+//! The manifest's own renderers are tested in `uva-agent` beside the
+//! builder. What stays here is the half only the loop can drive: a
+//! plugin's `Host` registrations reaching a run's manifest
+//! ([`sections`]) and the runtime-context snapshot seam ([`snapshot`]).
+//! Cross-cutting fixtures live in [`support`].
 //!
 //! | Submodule          | What it covers                                            |
 //! |--------------------|-----------------------------------------------------------|
-//! | [`assemble`]       | The public `assemble` contract — order, purity, byte-stability, no-runtime-facts |
-//! | [`identity`]       | The `<identity>` renderer: display_name fallback, empty fields |
-//! | [`skills_agents`]  | The `<available_skills>` / `<available_agents>` renderers and their absence rules |
 //! | [`sections`]       | Plugin prompt sections: host registrations, registration order, placement, empty title |
-//! | [`snapshot`]       | The `RuntimeContext` snapshot seam: supersession frame, git status, clock injection |
+//! | [`snapshot`]       | The `RuntimeContext` snapshot seam: supersession frame, clock injection |
 //! | [`support`]        | Shared fixtures (`descriptor_with_instructions`, `peer_descriptor`, `fixed_runtime_context`) |
 
-mod assemble;
-mod identity;
 mod sections;
-mod skills_agents;
 mod snapshot;
 mod support;

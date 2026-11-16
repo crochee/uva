@@ -9,8 +9,8 @@
 //! the replace is durable.
 //!
 //! The plan is made over the transcript the loop already holds
-//! ([`RunState::messages`], index-parallel with its provenance), so a
-//! pass costs no log read; only a committed replace is written.
+//! ([`RunState::transcript`], index-parallel with its provenance), so
+//! a pass costs no log read; only a committed replace is written.
 //!
 //! The harness also cannot enforce pruning for a custom [`Compactor`]:
 //! `Compactor::summarize` owns the request it sends. The default
@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use tracing::{debug, warn};
+use uva_events::{SessionEndReason, SystemEvent, WarningKind};
 use uva_provider::Message;
 use uva_session::{
     CompactionError,
@@ -38,10 +39,7 @@ use uva_session::{
 };
 
 use super::ReActLoop;
-use crate::{
-    agent::re_act::state::RunState,
-    events::{SessionEndReason, SystemEvent, WarningKind},
-};
+use crate::agent::re_act::state::RunState;
 
 // The reason a compaction pass names in its log-only rows.
 const COMPACT_REASON: &str = "context_pressure";
@@ -68,9 +66,30 @@ pub(super) async fn compact(
     let Some(writer) = this.caps.env.log_writer.as_ref() else {
         return Ok(());
     };
+    // A surface whose ordinals do not describe its messages has no
+    // provenance to cite: a plan over it would name rows it does not
+    // shadow, and the replace would cite rows the log never wrote.
+    if !session.transcript.is_citable() {
+        warn!(
+            iteration,
+            "compaction skipped: the surface has no provenance to cite"
+        );
+        return Ok(());
+    }
+    // A surface that holds a user turn back is not final: the turn
+    // joins it when the open call is answered, so the span a plan
+    // names is not the span the fold will see. The fold refuses such
+    // a compaction, so the loop does not write one.
+    if session.transcript.holds_turn() {
+        warn!(
+            iteration,
+            "compaction skipped: the surface holds a user turn back"
+        );
+        return Ok(());
+    }
     let Some(plan) = plan_pass(
-        &session.messages,
-        &session.surface_seqs,
+        session.transcript.messages(),
+        session.transcript.surface_seqs(),
         session.last_compaction,
         compactor.as_ref(),
         this.cfg.context_window,
@@ -147,16 +166,11 @@ async fn finish(
             if let Some(seq) = seq {
                 let start = plan.range.start;
                 let end = plan.range.end;
-                // `Arc::make_mut` clones the transcript only when
-                // somebody else still holds it. The run owns the only
-                // reference in the common case, so the replace costs
-                // the splice instead of a copy of the whole history.
-                let messages = Arc::make_mut(&mut session.messages);
-                messages.splice(
+                session.transcript.splice_compaction(
                     start..end,
-                    [Message::assistant(outcome.summary.clone())],
+                    Message::assistant(outcome.summary.clone()),
+                    seq,
                 );
-                session.surface_seqs.splice(start..end, [seq]);
                 session.last_compaction = Some(seq);
             }
             this.sink.system(SystemEvent::CompactionFinished {

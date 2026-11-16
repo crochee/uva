@@ -1,6 +1,6 @@
 //! Agent registry HTTP handlers.
 //!
-//! Thin CRUD layer over the existing [`AgentRegistry`](uva::harness::AgentRegistry):
+//! Thin CRUD layer over the existing [`AgentRegistry`](uva::agent::AgentRegistry):
 //!
 //! - `POST /agents` instantiates a [`ReActAgent`](uva::harness::ReActAgent) bound to the
 //!   supplied descriptor and registers it. No new types —
@@ -19,10 +19,11 @@
 use std::sync::Arc;
 
 use parking_lot::RwLock;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uva::{
+    agent::{Agent, AgentEntry},
     core::{Error, agent::AgentDescriptor, registry::Registry},
-    harness::agent::{Agent, AgentEntry},
 };
 
 use super::helpers::paginate;
@@ -83,7 +84,7 @@ fn default_version() -> String {
     "0.1.0".to_string()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct AgentDetail {
     pub name: String,
     pub description: String,
@@ -163,8 +164,8 @@ pub(crate) async fn build_react_agent(
     max_iterations: Option<usize>,
 ) -> Result<std::sync::Arc<dyn Agent>, String> {
     // Built through the mounted `agentLoop` service: the factory's
-    // defaults (delegators, strategy, restriction, context manager,
-    // spawner) apply, and only the member's own inputs are set
+    // defaults (strategy, restriction, context manager, spawner)
+    // apply, and only the member's own inputs are set
     // here. Without the service (an unloaded `agent-loop` row)
     // there is nothing sound to register.
     let factory = state.agent_loop().ok_or_else(|| {
@@ -186,12 +187,10 @@ pub(crate) async fn build_react_agent(
         // default (resolved from `agents.<name>.max_steps`)
         // wins via the session factory.
         max_iterations: max_iterations.unwrap_or(state.default_max_iterations),
-        delegators: Vec::new(),
         tool_surface: None,
         strategy: None,
         tool_restriction: None,
         log_writer: None,
-        subagent_writers: None,
         context_manager: None,
         // No per-run override: a run on the deployment's default
         // provider shares the factory's compactor when a policy

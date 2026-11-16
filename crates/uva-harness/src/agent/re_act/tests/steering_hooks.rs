@@ -367,3 +367,103 @@ async fn after_tool_success_carries_the_real_call_id() {
         "the success-path AfterTool must carry the real call id"
     );
 }
+
+// A hook veto states its fact twice today: the host writes the
+// durable `hook_block` row, and the loop still publishes the live
+// `Warning{Guard}` for the same veto. That duplication is deliberate:
+// a foreign kernel middleware can short-circuit the same seam with a
+// `Block` that writes no row, and the loop cannot tell the two apart,
+// so the live warning has to stay for the one that has nothing else.
+// No surface renders it (both surfaces read the row), so the second
+// copy costs nothing today. Pins the documented exception.
+#[tokio::test]
+async fn a_hook_veto_writes_the_row_and_still_publishes_the_live_warning() {
+    use uva_core::SystemClock;
+    use uva_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
+
+    struct BlockEcho;
+
+    #[async_trait]
+    impl Hook for BlockEcho {
+        fn name(&self) -> &str {
+            "block-echo"
+        }
+
+        async fn observe(
+            &self,
+            event: &HookEvent,
+            _ctx: &HookContext<'_>,
+        ) -> HookDecision {
+            match event {
+                HookEvent::BeforeTool { tool_name, .. }
+                    if tool_name == "echo" =>
+                {
+                    HookDecision::Block {
+                        reason: "echo is not allowed here".to_string(),
+                    }
+                }
+                _ => HookDecision::Allow,
+            }
+        }
+    }
+
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let mut host = Host::new();
+    let _blocker = host.hook(Arc::new(BlockEcho));
+
+    let tool_use = ToolUse {
+        id: "c1".to_string(),
+        name: "echo".to_string(),
+        input: json!({}),
+    };
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![tool_use]),
+        done_chunk("noted"),
+    ]));
+    let (registry, _executions) = echo_registry();
+
+    let agent = ReActAgent::new(provider, registry)
+        .with_host(host)
+        .expect("bind the host")
+        .with_log_writer(writer);
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(tokio_util::sync::CancellationToken::new()),
+        )
+        .await;
+    let mut events = Vec::new();
+    while let Some(ev) = futures::StreamExt::next(&mut stream).await {
+        events.push(ev);
+    }
+
+    let rows = sink.read().await.expect("read");
+    let blocks: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "hook_block")
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the hook veto writes exactly one hook_block row: {rows:#?}"
+    );
+    assert_eq!(blocks[0]["data"]["hook"], "block-echo");
+    assert_eq!(blocks[0]["data"]["reason"], "echo is not allowed here");
+    assert_eq!(blocks[0]["data"]["tool"], "echo");
+    assert_eq!(blocks[0]["data"]["call_id"], "c1");
+
+    assert!(
+        events.iter().any(|e| {
+            matches!(
+                e,
+                AgentEvent::System(SystemEvent::Warning {
+                    kind: WarningKind::Guard,
+                    ..
+                })
+            )
+        }),
+        "the live guard warning still fires for a hook veto — it is \
+         the only notice a foreign middleware's block has: {events:?}"
+    );
+}

@@ -5,7 +5,7 @@
 //! would surface as silent "wrong agent" responses, so
 //! every branch is pinned here.
 
-use uva::{core::registry::Registry, harness::AgentRegistry};
+use uva::{agent::AgentRegistry, core::registry::Registry};
 
 use crate::state::{AppState, tests::support::stub_entry};
 

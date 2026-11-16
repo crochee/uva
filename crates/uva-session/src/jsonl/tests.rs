@@ -547,6 +547,44 @@ async fn jsonl_sink_reads_a_v2_log() {
     assert_eq!(events[1]["i"], 1);
 }
 
+/// A `feedback` row written before the rating's target changed
+/// meaning still reads.
+///
+/// The target is the rated row's ordinal now; a row written before
+/// that change carries a client-side label in the same field (the
+/// browser's UUID, the TUI's `msg-<n>` count). The row's **shape**
+/// did not change — only what the field holds — so the log's version
+/// does not move and the old row still decodes.
+#[tokio::test]
+async fn a_v2_feedback_row_written_before_the_meaning_changed_still_reads() {
+    let dir = temp_dir().join("s_v2_feedback");
+    write_versioned_log(
+        &dir,
+        2,
+        &[json!({
+            "type": "feedback",
+            "seq": 3,
+            "ts": "2026-10-27T09:14:04Z",
+            "message_id": "msg-1",
+            "thumbs_up": true,
+        })],
+    );
+    let sink = JsonlSessionSink::new("s_v2_feedback", dir);
+    let events = sink.read().await.unwrap();
+    assert_eq!(events.len(), 1, "the old row is still readable");
+    let event = crate::SessionEvent::from_value(&events[0])
+        .expect("the old feedback row is still a typed row");
+    assert!(
+        matches!(
+            &event,
+            crate::SessionEvent::Feedback {
+                message_id, ..
+            } if message_id == "msg-1"
+        ),
+        "the old row keeps its client-side label: {event:?}"
+    );
+}
+
 // -----------------------------------------------------------------
 // Idempotency
 // -----------------------------------------------------------------

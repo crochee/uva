@@ -44,7 +44,7 @@
 import { contentText, extractImages, filesFromPersistedAttachments } from '../api/chat-message';
 import { stripAttachmentSegments } from './strip-attachment-segments';
 import type { ChatFile, ChatImage, CompactionInfo } from '../api/chat-message';
-import type { SessionArtifact, SessionDetail, SessionTurn } from '../api/types';
+import type { SessionArtifact, SessionDetail, SessionEventType, SessionTurn } from '../api/types';
 
 export interface ChatMessageLike {
   id: string;
@@ -56,6 +56,17 @@ export interface ChatMessageLike {
   segments: ChatSegmentLike[];
   sessionId?: string;
   status?: string;
+  /**
+   * The ordinal of the assistant row this message came from — that
+   * row's `seq`, in decimal.
+   *
+   * The row's identity in the session log, and the only thing a
+   * `chat/feedback` target can name: the server resolves the target
+   * against the log's own rows. `undefined` when no assistant row
+   * landed in this message with an ordinal of its own — the live
+   * projection, and a bubble that only a tool result opened.
+   */
+  ordinal?: number;
 }
 
 // Internal type used only within this module;
@@ -71,6 +82,8 @@ interface ChatSegmentLike {
     | 'tool_block'
     | 'progress'
     | 'notice'
+    | 'warning'
+    | 'hook_block'
     | 'compaction';
   content: string;
   /** When type === 'compaction': the summary and the span it
@@ -104,43 +117,36 @@ interface ChatSegmentLike {
   toolUseId?: string;
 }
 
-/** Event type discriminators carried on each durable
- *  `SessionTurn` envelope (see `SessionTurn` in
- *  `src/api/types.ts` and the `event-durability-classification`
- *  spec). New history messages use these tag values; legacy
- *  `Artifact`s used the natural-shape detection the
- *  `chat-stream` module still owns. */
+/** Event type discriminators carried on each durable `SessionTurn`
+ *  envelope. The typed vocabulary now arrives as the generated
+ *  `SessionEventType` union (see `SessionTurn` in `src/api/types.ts`)
+ *  and is accounted for in `TYPED_ROW_TREATMENT`; what stays here is
+ *  the legacy envelope dialect, which predates that union and is
+ *  read through `legacyRowType`. */
 const EVENT_USER_INPUT = 'UserInput';
+/** The typed turn record this build writes: `data` is the provider
+ *  message the model saw, and the turn's attachment refs ride the
+ *  row's own `attachments` field. */
+const EVENT_USER_MESSAGE = 'user_message';
 const EVENT_MODEL = 'Model';
-/** Durable row for one assistant turn: `data` is a whole provider
- *  `Message` — the turn's text and its tool calls together — so the
- *  row projects onto ONE assistant message. */
-const EVENT_ASSISTANT_MESSAGE = 'assistant_message';
-/** Durable row for one tool outcome: `data` is the tool message the
- *  run committed — the tool's output plus the id of the call it
- *  answers. */
-const EVENT_TOOL_RESULT = 'tool_result';
-/** Recursive sub-agent trace envelope: `data` is
- *  `[AgentMeta, inner AgentEvent]`. Durable inner content is
+/** The legacy recursive sub-agent trace envelope: `data` is
+ *  `[child metadata, inner event]`. Durable inner content is
  *  persisted verbatim, so history replay reconstructs
- *  delegated turns the same way the live stream shows them. */
+ *  delegated turns the same way the live stream shows them.
+ *  No build writes this envelope any more — a delegated child
+ *  lives in its own session — but logs written before the
+ *  delegation channel's retirement still carry it, so the fold
+ *  keeps reading them. */
 const EVENT_AGENT = 'Agent';
-/** Delegation markers the sub-agent session router writes into
- *  the PARENT's log: `subagent_enter` names the child session and
- *  peer agent, `subagent_exit` carries the terminal status. The
- *  child's own content lives in its own session — the parent
- *  keeps the link, not the trace. */
-const EVENT_SUBAGENT_ENTER = 'subagent_enter';
-const EVENT_SUBAGENT_EXIT = 'subagent_exit';
-/** A committed compaction: `data.summary` is the replacement text and
- *  `surface_op` names the span it shadowed. It produces a timeline
- *  marker, not a replace: the reader can still see what was compacted
- *  away and why older turns stopped being sent. */
-const EVENT_COMPACTION = 'compaction';
-/** One durable plugin row: `kind` is the plugin's own event name and
- *  `payload` its structured body. Rendered as a notice — the row is
- *  provenance, not a model turn. */
-const EVENT_PLUGIN = 'plugin';
+
+/** The `type` value of a durable row, widened past the typed
+ *  vocabulary. Rows written before the typed writer carry the legacy
+ *  envelope dialect (`UserInput` / `Model` / `Agent`) — strings
+ *  outside `SessionEventType` — so a reader that still serves those
+ *  logs compares through this widening instead of the closed union. */
+export function legacyRowType(row: SessionTurn): string | null | undefined {
+  return row.type;
+}
 
 /** Discriminators on the inner `ContentPart` carried by
  *  `Model` events. */
@@ -358,6 +364,13 @@ export function carriesModelContent(message: ChatMessageLike): boolean {
  * already exists. Mirrors the append rules used by the live
  * chat stream so the reconstructed transcript renders the same
  * way.
+ *
+ * `ordinal` is the ordinal of the assistant row the text came from.
+ * It is stamped on the message the text lands in, so the message
+ * names the row it is about — the only thing a rating can name — and
+ * only when the row is **answer-bearing**: a row whose only content
+ * is reasoning renders no line in the TUI, so the TUI's
+ * `resume_material` keeps the previous answer's ordinal there.
  */
 function appendAgentSegment(
   messages: ChatMessageLike[],
@@ -365,10 +378,25 @@ function appendAgentSegment(
   kind: 'text' | 'thinking',
   sessionId: string,
   target?: ChatMessageLike,
+  ordinal?: number,
 ): void {
   if (!text) return;
+  // Only an answer-bearing row names a rating target. A reasoning-only
+  // row renders no line in the TUI, so `resume_material` keeps the
+  // previous answer's ordinal there; a bubble whose only content is
+  // reasoning therefore names no row at all — there is no answer to
+  // rate.
+  const answerOrdinal = kind === 'text' ? ordinal : undefined;
   const owner = mutableAssistantTarget(messages, target);
   if (owner) {
+    // Last-wins over answer-bearing rows: a bubble that spans several
+    // assistant rows is one message, and the ordinal it offers a
+    // rating is the newest answer-bearing row it holds — the same row
+    // the TUI's `resume_material` names, so one thumbs-up lands on the
+    // same line in both surfaces.
+    if (answerOrdinal !== undefined) {
+      owner.ordinal = answerOrdinal;
+    }
     const segments = owner.segments;
     const tail = segments[segments.length - 1];
     if (tail && tail.type === kind) {
@@ -392,6 +420,7 @@ function appendAgentSegment(
     segments: [{ id: crypto.randomUUID(), type: kind, content: text }],
     sessionId,
     status: 'completed',
+    ordinal: answerOrdinal,
   });
 }
 
@@ -415,6 +444,7 @@ function appendToolCall(
   payload: Record<string, unknown>,
   sessionId: string,
   target?: ChatMessageLike,
+  ordinal?: number,
 ): void {
   const toolName = typeof payload.name === 'string' ? payload.name : undefined;
   const input = payload.input;
@@ -440,6 +470,13 @@ function appendToolCall(
   };
   const owner = mutableAssistantTarget(messages, target);
   if (owner) {
+    // Last-wins: a bubble that spans several assistant rows is one
+    // message, and the ordinal it offers a rating is the newest row
+    // it holds — the same row the TUI's `resume_material` names, so
+    // one thumbs-up lands on the same line in both surfaces.
+    if (ordinal !== undefined) {
+      owner.ordinal = ordinal;
+    }
     owner.segments.push(segment);
     return;
   }
@@ -450,6 +487,7 @@ function appendToolCall(
     segments: [segment],
     sessionId,
     status: 'completed',
+    ordinal,
   });
 }
 
@@ -581,16 +619,20 @@ export function messageParts(payload: unknown): Record<string, unknown>[] {
  * provided the segment lands in that message (used for
  * sub-agent bubbles); otherwise the trailing assistant turn
  * absorbs it, matching the live-stream reducer.
+ *
+ * `ordinal` is the ordinal of the assistant row the part came from;
+ * it is stamped on the message the part lands in.
  */
 function applyContentPart(
   data: Record<string, unknown>,
   sessionId: string,
   out: ChatMessageLike[],
   target?: ChatMessageLike,
+  ordinal?: number,
 ): void {
   const kind = typeof data.type === 'string' ? data.type : '';
   if (kind === PART_TOOL_USE) {
-    appendToolCall(out, data, sessionId, target);
+    appendToolCall(out, data, sessionId, target, ordinal);
     return;
   }
   if (kind === PART_TOOL_RESULT) {
@@ -607,12 +649,12 @@ function applyContentPart(
     // assistant's text segment, creating the appearance
     // of a duplicate tool turn.
     if (isToolEchoText(text)) return;
-    appendAgentSegment(out, text, 'text', sessionId, target);
+    appendAgentSegment(out, text, 'text', sessionId, target, ordinal);
     return;
   }
   if (kind === PART_REASONING) {
     const text = typeof data.text === 'string' ? data.text : '';
-    appendAgentSegment(out, text, 'thinking', sessionId, target);
+    appendAgentSegment(out, text, 'thinking', sessionId, target, ordinal);
   }
 }
 
@@ -686,12 +728,71 @@ function applyToolResultMessage(
 }
 
 /**
- * Convert one history entry into chat messages. A `UserInput`
- * envelope produces one user message — its text plus one chip per
- * attachment reference the row carries; `Model` envelopes dispatch
- * on the inner `ContentPart.type` — text appends to the trailing
- * assistant turn (coalesced), `tool_use` / `tool_result` drive
- * the tool-block pairing logic above.
+ * Fold one `tool_output` row: a partial-output chunk of a running
+ * tool call.
+ *
+ * This is the reload's copy of what the live projection streamed.
+ * The row is log-only — it never reaches the model — but the
+ * transcript reader uses it exactly as the live frames did: the
+ * chunk extends the pending tool block's output. When the call's
+ * `tool_result` row lands it replaces the preview with the settled
+ * output, so a finished call reads as its committed result and a
+ * call the process died in the middle of still shows how far it
+ * got.
+ */
+function applyToolOutputRow(entry: SessionTurn, out: ChatMessageLike[]): void {
+  const data = toRecord(entry.data);
+  const rawOutput = data ? data.output : undefined;
+  const chunk = typeof rawOutput === 'string' ? rawOutput : '';
+  if (!chunk) return;
+  const callId = entry.call_id ?? undefined;
+  const owner = mutableAssistantTarget(out);
+  if (!owner) return;
+  let matchIdx = -1;
+  let fallback = -1;
+  for (let i = 0; i < owner.segments.length; i += 1) {
+    const segment = owner.segments[i];
+    if (segment.type !== 'tool_block' || segment.toolPending !== true) continue;
+    if (callId !== undefined && segment.toolUseId === callId) {
+      matchIdx = i;
+      break;
+    }
+    fallback = i;
+  }
+  if (matchIdx === -1) matchIdx = fallback;
+  if (matchIdx === -1) return;
+  const segment = owner.segments[matchIdx];
+  owner.segments[matchIdx] = {
+    ...segment,
+    resultContent: `${segment.resultContent ?? ''}${chunk}`,
+    // Still pending: the chunk is what the call has produced so far,
+    // not its answer.
+    toolPending: true,
+  };
+}
+
+/**
+ * How the projection folds one durable row.
+ *
+ * Two dialects reach this fold:
+ *
+ * - the **legacy envelope dialect** (`UserInput` / `Model` /
+ *   `Agent` on `type`) predates the typed vocabulary; those rows
+ *   are compared through [`legacyRowType`], because their strings
+ *   are outside `SessionEventType`.
+ * - the **typed vocabulary** — every tag the server can write — is
+ *   accounted for in [`TYPED_ROW_TREATMENT`]: each tag either
+ *   renders (a handler) or is ignored-by-design (`null`). The
+ *   table is a `Record` over the generated `SessionEventType`
+ *   union, so a tag added to the vocabulary fails `tsc` until the
+ *   table says what to do with the row. Silence is never the
+ *   default.
+ *
+ * A `UserInput` envelope produces one user message — its text plus
+ * one chip per attachment reference the row carries; `Model`
+ * envelopes dispatch on the inner `ContentPart.type` — text
+ * appends to the trailing assistant turn (coalesced), `tool_use` /
+ * `tool_result` drive the tool-block pairing logic above.
  *
  * Each `Model` envelope carries exactly one `ContentPart` on the
  * wire (the controller writes one event per agent frame), so a
@@ -703,230 +804,446 @@ function applyToolResultMessage(
  * tool's outcome. Both land on the same segments the `Model`
  * envelopes produced.
  *
- * `Agent` envelopes (`data` = `[AgentMeta, inner AgentEvent]`)
- * reconstruct the delegated child's durable content into its own
- * `role: 'subagent'` bubble, mirroring the live stream's
- * sub-agent rendering. Inner `System` / `ModelDone` frames are
- * lifecycle noise and were never persisted as durable content,
- * so only nested `Model` parts are dispatched.
+ * The legacy `Agent` envelope (`data` = `[child metadata, inner
+ * event]`) reconstructs the delegated child's durable content
+ * into its own `role: 'subagent'` bubble, mirroring the live
+ * stream's sub-agent rendering. Inner `System` / `ModelDone`
+ * frames are lifecycle noise and were never persisted as durable
+ * content, so only nested `Model` parts are dispatched.
  */
-function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
-  const envelope = entry.type;
-  const data = entry.data;
 
-  if (envelope === EVENT_USER_INPUT) {
-    const obj = toRecord(data);
-    // A `UserInput` row is the controller's prompt record
-    // (`{"text": …}`). The session controller deliberately does
-    // NOT persist user image/audio/document BYTES — a
-    // multi-megabyte `data:` URI per turn would bloat the JSONL
-    // log — so a turn that carried attachments writes
-    // `data.attachments` beside the text: one reference per
-    // attachment (`{kind, name, mime_type, byte_len}`), which is
-    // everything a chip needs and nothing more. Absent for a
-    // text-only turn, and absent entirely in logs written before
-    // the references landed.
-    const text = obj && typeof obj.text === 'string' ? obj.text : '';
-    const files = obj ? filesFromPersistedAttachments(obj.attachments) : [];
-    // A file-only send writes a row with no text; it must still
-    // produce the bubble, otherwise the turn reads as if the user
-    // sent nothing at all.
-    if (!text && files.length === 0) return;
-    out.push({
-      id: crypto.randomUUID(),
-      role: 'user',
-      segments: [
-        {
-          id: crypto.randomUUID(),
-          type: 'text',
-          content: text,
-          files: files.length > 0 ? files : undefined,
-        },
-      ],
-    });
-    return;
-  }
+/** Fold one legacy `UserInput` row (`data` = `{"text": …}`). */
+function applyLegacyUserInputRow(entry: SessionTurn, out: ChatMessageLike[]): void {
+  const obj = toRecord(entry.data);
+  // A `UserInput` row is the controller's prompt record
+  // (`{"text": …}`). The session controller deliberately does
+  // NOT persist user image/audio/document BYTES — a
+  // multi-megabyte `data:` URI per turn would bloat the JSONL
+  // log — so a turn that carried attachments writes
+  // `data.attachments` beside the text: one reference per
+  // attachment (`{kind, name, mime_type, byte_len}`), which is
+  // everything a chip needs and nothing more. Absent for a
+  // text-only turn, and absent entirely in logs written before
+  // the references landed.
+  const text = obj && typeof obj.text === 'string' ? obj.text : '';
+  const files = obj ? filesFromPersistedAttachments(obj.attachments) : [];
+  // A file-only send writes a row with no text; it must still
+  // produce the bubble, otherwise the turn reads as if the user
+  // sent nothing at all.
+  if (!text && files.length === 0) return;
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'text',
+        content: text,
+        files: files.length > 0 ? files : undefined,
+      },
+    ],
+  });
+}
 
-  if (envelope === EVENT_COMPACTION) {
-    const obj = toRecord(data);
-    const summary = obj && typeof obj.summary === 'string' ? obj.summary : '';
-    const shadowedTokens =
-      obj && typeof obj.shadowed_token_count === 'number' ? obj.shadowed_token_count : undefined;
-    const op = entry.surface_op;
-    out.push({
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      segments: [
-        {
-          id: crypto.randomUUID(),
-          type: 'compaction',
-          content: summary,
-          compaction: {
-            summary,
-            ...(op?.start !== undefined ? { start: op.start } : {}),
-            ...(op?.end !== undefined ? { end: op.end } : {}),
-            ...(op?.start !== undefined && op?.end !== undefined
-              ? { shadowedMessages: op.end - op.start }
-              : {}),
-            ...(shadowedTokens !== undefined ? { shadowedTokens } : {}),
-            ...(op?.source_event_seqs && op.source_event_seqs.length > 0
-              ? {
-                  firstSeq: Math.min(...op.source_event_seqs),
-                  lastSeq: Math.max(...op.source_event_seqs),
-                }
-              : {}),
-          },
-        },
-      ],
-      sessionId,
-      status: 'completed',
-    });
-    return;
-  }
-
-  if (envelope === EVENT_PLUGIN) {
-    const obj = toRecord(data);
-    const kind = obj && typeof obj.kind === 'string' && obj.kind ? obj.kind : 'unnamed';
-    const payload = obj && obj.payload !== undefined ? JSON.stringify(obj.payload) : '';
-    out.push({
-      id: crypto.randomUUID(),
-      role: 'assistant',
-      segments: [
-        {
-          id: crypto.randomUUID(),
-          type: 'notice',
-          content: payload
-            ? `插件事件 **${kind}** · \`${payload.slice(0, 200)}\``
-            : `插件事件 **${kind}**`,
-        },
-      ],
-      sessionId,
-      status: 'completed',
-    });
-    return;
-  }
-
-  if (envelope === EVENT_SUBAGENT_ENTER) {
-    const obj = toRecord(data);
-    const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
-    const agent = typeof obj?.agent_name === 'string' ? obj.agent_name : 'unknown';
-    const depth = typeof obj?.depth === 'number' ? obj.depth : 1;
-    const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
-    out.push({
-      id: crypto.randomUUID(),
-      role: 'subagent',
-      subagentDepth: depth,
-      subagentKey: childId ?? undefined,
-      segments: [
-        {
-          id: crypto.randomUUID(),
-          type: 'notice',
-          content: `已委派子代理 **${agent}**。${link}`,
-        },
-      ],
-    });
-    return;
-  }
-
-  if (envelope === EVENT_SUBAGENT_EXIT) {
-    const obj = toRecord(data);
-    const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
-    const status = typeof obj?.status === 'string' ? obj.status : 'completed';
-    const label = status === 'completed' ? '已完成' : status === 'cancelled' ? '已取消' : '未完成';
-    const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
-    out.push({
-      id: crypto.randomUUID(),
-      role: 'subagent',
-      subagentKey: childId ?? undefined,
-      segments: [
-        {
-          id: crypto.randomUUID(),
-          type: 'notice',
-          content: `子代理${label}。${link}`,
-        },
-      ],
-    });
-    return;
-  }
-
-  if (envelope === EVENT_AGENT) {
-    // `data` = `[AgentMeta, inner AgentEvent]`; nested `Agent`
-    // payloads (a sub-agent that itself delegated) are unwrapped
-    // to the innermost non-Agent event so the deepest durable
-    // content lands on the innermost child's bubble.
-    if (!Array.isArray(data) || data.length < 2) return;
-    let meta = data[0] as Record<string, unknown> | undefined;
-    let inner: unknown = data[1];
-    while (
-      inner &&
-      typeof inner === 'object' &&
-      !Array.isArray(inner) &&
-      (inner as Record<string, unknown>).type === EVENT_AGENT
-    ) {
-      const nested = (inner as Record<string, unknown>).data;
-      if (!Array.isArray(nested) || nested.length < 2) {
-        inner = undefined;
-        break;
-      }
-      meta = nested[0] as Record<string, unknown>;
-      inner = nested[1];
-    }
-    if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return;
-    const innerRecord = inner as Record<string, unknown>;
-    if (innerRecord.type !== EVENT_MODEL) return;
-    const part = toRecord(innerRecord.data);
-    if (!part) return;
-    const metaRecord = meta ?? {};
-    const childId =
-      typeof metaRecord.child_session_id === 'string' && metaRecord.child_session_id.length > 0
-        ? metaRecord.child_session_id
-        : undefined;
-    const depth = typeof metaRecord.parent_depth === 'number' ? metaRecord.parent_depth : 1;
-    const childKey = childId ?? `subagent:d${depth}`;
-    // Silent skip: the parent transcript does not render subagent
-    // content. The `task` tool's SubagentSummary (link card
-    // mounted on the tool_block) is the user's only entry point
-    // to the child from this transcript; the child's full trace
-    // lives at `/chat/<childId>`, where the unwrapped log
-    // goes through `EVENT_MODEL` and is rendered in full.
-    //
-    // The underlying event rows are still in the session log (not
-    // deleted). To restore the embedded rendering in the future,
-    // re-introduce `ensureSubagentTarget` and dispatch
-    // `applyContentPart(part, sessionId, out, target)` again — it
-    // is not a one-line revert because the target plumbing runs
-    // through `appendAgentSegment` / `appendToolCall` /
-    // `appendToolResult`.
-    void childKey;
-    return;
-  }
-
-  if (envelope === EVENT_ASSISTANT_MESSAGE) {
-    // One assistant turn is one durable row: `data` is the whole
-    // provider `Message`, so its parts expand into the turn's
-    // segments — text into the text segment, `tool_use` into a
-    // tool block. The parts go through the same dispatch the
-    // legacy `Model` rows use, so the tool pairing rules live in
-    // one place and the turn renders the way the live stream
-    // rendered it.
-    for (const part of messageParts(data)) {
-      applyContentPart(part, sessionId, out);
-    }
-    return;
-  }
-
-  if (envelope === EVENT_TOOL_RESULT) {
-    applyToolResultMessage(entry, sessionId, out);
-    return;
-  }
-
-  if (envelope !== EVENT_MODEL) return;
-  const obj = toRecord(data);
+/** Fold one legacy `Model` row (`data` = one `ContentPart`). */
+function applyLegacyModelRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
+  const obj = toRecord(entry.data);
   if (!obj) return;
   applyContentPart(obj, sessionId, out);
 }
 
+/** Fold one legacy `Agent` row (`data` = `[child metadata, event]`). */
+function applyLegacyAgentRow(entry: SessionTurn): void {
+  // `data` = `[child metadata, inner event]`; nested `Agent`
+  // payloads (a sub-agent that itself delegated) are unwrapped
+  // to the innermost non-Agent event so the deepest durable
+  // content lands on the innermost child's bubble.
+  const data = entry.data;
+  if (!Array.isArray(data) || data.length < 2) return;
+  let meta = data[0] as Record<string, unknown> | undefined;
+  let inner: unknown = data[1];
+  while (
+    inner &&
+    typeof inner === 'object' &&
+    !Array.isArray(inner) &&
+    (inner as Record<string, unknown>).type === EVENT_AGENT
+  ) {
+    const nested = (inner as Record<string, unknown>).data;
+    if (!Array.isArray(nested) || nested.length < 2) {
+      inner = undefined;
+      break;
+    }
+    meta = nested[0] as Record<string, unknown>;
+    inner = nested[1];
+  }
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return;
+  const innerRecord = inner as Record<string, unknown>;
+  if (innerRecord.type !== EVENT_MODEL) return;
+  const part = toRecord(innerRecord.data);
+  if (!part) return;
+  const metaRecord = meta ?? {};
+  const childId =
+    typeof metaRecord.child_session_id === 'string' && metaRecord.child_session_id.length > 0
+      ? metaRecord.child_session_id
+      : undefined;
+  const depth = typeof metaRecord.parent_depth === 'number' ? metaRecord.parent_depth : 1;
+  const childKey = childId ?? `subagent:d${depth}`;
+  // Silent skip: the parent transcript does not render subagent
+  // content. The `task` tool's SubagentSummary (link card
+  // mounted on the tool_block) is the user's only entry point
+  // to the child from this transcript; the child's full trace
+  // lives at `/chat/<childId>`, where the unwrapped log
+  // goes through `EVENT_MODEL` and is rendered in full.
+  //
+  // The underlying event rows are still in the session log (not
+  // deleted). To restore the embedded rendering in the future,
+  // re-introduce `ensureSubagentTarget` and dispatch
+  // `applyContentPart(part, sessionId, out, target)` again — it
+  // is not a one-line revert because the target plumbing runs
+  // through `appendAgentSegment` / `appendToolCall` /
+  // `appendToolResult`.
+  void childKey;
+}
+
+/** Fold one `user_message` row: `data` is the provider message the
+ *  controller wrote for the turn — its text in the content parts —
+ *  and the attachment references ride the row's own `attachments`
+ *  field rather than inside the payload. */
+function applyUserMessageRow(entry: SessionTurn, out: ChatMessageLike[]): void {
+  const text = messageParts(entry.data)
+    .filter((part) => part.type === PART_TEXT && typeof part.text === 'string')
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('');
+  const files = filesFromPersistedAttachments(entry.attachments);
+  // A file-only turn writes a row with no text; it must still
+  // produce the bubble, otherwise the turn reads as if the user
+  // sent nothing at all.
+  if (!text && files.length === 0) return;
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'user',
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'text',
+        content: text,
+        files: files.length > 0 ? files : undefined,
+      },
+    ],
+  });
+}
+
+/** Fold one `assistant_message` row: `data` is the whole provider
+ *  `Message`, so its parts expand into the turn's segments — text
+ *  into the text segment, `tool_use` into a tool block. The parts
+ *  go through the same dispatch the legacy `Model` rows use, so
+ *  the tool pairing rules live in one place and the turn renders
+ *  the way the live stream rendered it.
+ *
+ *  The row's ordinal rides along: it is the answer's identity in the
+ *  session log, and the only thing a rating of that answer can
+ *  name. A row without one (an old log) stamps nothing. */
+function applyAssistantMessageRow(
+  entry: SessionTurn,
+  sessionId: string,
+  out: ChatMessageLike[],
+): void {
+  const ordinal = typeof entry.seq === 'number' ? entry.seq : undefined;
+  for (const part of messageParts(entry.data)) {
+    applyContentPart(part, sessionId, out, undefined, ordinal);
+  }
+}
+
+/** Fold one `compaction` row: `data.summary` is the replacement text
+ *  and `surface_op` names the span it shadowed. It produces a
+ *  timeline marker, not a replace — the reader can still see what
+ *  was compacted away and why older turns stopped being sent. */
+function applyCompactionRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
+  const obj = toRecord(entry.data);
+  const summary = obj && typeof obj.summary === 'string' ? obj.summary : '';
+  const shadowedTokens =
+    obj && typeof obj.shadowed_token_count === 'number' ? obj.shadowed_token_count : undefined;
+  const op = replaceOp(entry.surface_op);
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'compaction',
+        content: summary,
+        compaction: {
+          summary,
+          ...(op?.start !== undefined ? { start: op.start } : {}),
+          ...(op?.end !== undefined ? { end: op.end } : {}),
+          ...(op?.start !== undefined && op?.end !== undefined
+            ? { shadowedMessages: op.end - op.start }
+            : {}),
+          ...(shadowedTokens !== undefined ? { shadowedTokens } : {}),
+          ...(op?.source_event_seqs && op.source_event_seqs.length > 0
+            ? {
+                firstSeq: Math.min(...op.source_event_seqs),
+                lastSeq: Math.max(...op.source_event_seqs),
+              }
+            : {}),
+        },
+      },
+    ],
+    sessionId,
+    status: 'completed',
+  });
+}
+
+/** Fold one `plugin` row: `kind` is the plugin's own event name and
+ *  `payload` its structured body. Rendered as a notice — the row is
+ *  provenance, not a model turn. */
+function applyPluginRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
+  const obj = toRecord(entry.data);
+  const kind = obj && typeof obj.kind === 'string' && obj.kind ? obj.kind : 'unnamed';
+  const payload = obj && obj.payload !== undefined ? JSON.stringify(obj.payload) : '';
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'notice',
+        content: payload
+          ? `插件事件 **${kind}** · \`${payload.slice(0, 200)}\``
+          : `插件事件 **${kind}**`,
+      },
+    ],
+    sessionId,
+    status: 'completed',
+  });
+}
+
+/** Fold one `subagent_enter` row: the delegation marker the
+ *  sub-agent session router writes into the PARENT's log — the child
+ *  session id and peer agent. The child's own content lives in its
+ *  own session; the parent keeps the link, not the trace. */
+function applySubagentEnterRow(out: ChatMessageLike[], entry: SessionTurn): void {
+  const obj = toRecord(entry.data);
+  const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
+  const agent = typeof obj?.agent_name === 'string' ? obj.agent_name : 'unknown';
+  const depth = typeof obj?.depth === 'number' ? obj.depth : 1;
+  const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'subagent',
+    subagentDepth: depth,
+    subagentKey: childId ?? undefined,
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'notice',
+        content: `已委派子代理 **${agent}**。${link}`,
+      },
+    ],
+  });
+}
+
+/** Fold one `subagent_exit` row: the parent-log marker carrying the
+ *  child's terminal status. */
+function applySubagentExitRow(out: ChatMessageLike[], entry: SessionTurn): void {
+  const obj = toRecord(entry.data);
+  const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
+  const status = typeof obj?.status === 'string' ? obj.status : 'completed';
+  const label = status === 'completed' ? '已完成' : status === 'cancelled' ? '已取消' : '未完成';
+  const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'subagent',
+    subagentKey: childId ?? undefined,
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'notice',
+        content: `子代理${label}。${link}`,
+      },
+    ],
+  });
+}
+
+/** Fold one `warning` row: a durable fact about the session the
+ *  runtime could not report any other way (`data.kind` is a stable
+ *  slug — `strict_fold_refused`, `config_drift` — and
+ *  `data.message` says what happened). Rendered as a one-line
+ *  transcript notice, not a bubble and not a toast: a toast is for
+ *  ephemeral things, and the fact outlives the turn. */
+function applyWarningRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
+  const obj = toRecord(entry.data);
+  const message = obj && typeof obj.message === 'string' && obj.message ? obj.message : null;
+  const kind = obj && typeof obj.kind === 'string' && obj.kind ? obj.kind : null;
+  const content = message ?? (kind ? `会话告警（${kind}）` : '会话告警');
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    segments: [
+      {
+        id: crypto.randomUUID(),
+        type: 'warning',
+        content,
+      },
+    ],
+    sessionId,
+    status: 'completed',
+  });
+}
+
+/** Fold one `hook_block` row: a policy refused a tool call. The row
+ *  names the policy (`data.hook`), the reason it gave
+ *  (`data.reason`) and the call it refused (`data.tool`).
+ *
+ *  It is its own segment type, not the `warning` one: a warning is a
+ *  lifecycle fact about the session, a hook block is a policy that
+ *  stopped a tool call — the reader tells them apart, so the page
+ *  draws them apart.
+ *
+ *  The harness writes the row **between** the assistant row that
+ *  proposed the call and the `tool_result` row that answers it, so a
+ *  fresh message here would fence that pair: `hook_block` carries no
+ *  model content, `mutableAssistantTarget` would stop at it, and the
+ *  error result would land as a bubble of its own while the call's
+ *  tool block stayed pending forever. The notice therefore joins the
+ *  assistant bubble it belongs to whenever one is open, and only
+ *  stands alone when there is nothing to join. */
+function applyHookBlockRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
+  const obj = toRecord(entry.data);
+  const hook = obj && typeof obj.hook === 'string' && obj.hook ? obj.hook : null;
+  const reason = obj && typeof obj.reason === 'string' && obj.reason ? obj.reason : null;
+  const tool = obj && typeof obj.tool === 'string' && obj.tool ? obj.tool : null;
+  const segment: ChatSegmentLike = {
+    id: crypto.randomUUID(),
+    type: 'hook_block',
+    content: hookBlockNotice(hook, tool, reason),
+  };
+  const owner = mutableAssistantTarget(out);
+  if (owner) {
+    owner.segments.push(segment);
+    return;
+  }
+  out.push({
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    segments: [segment],
+    sessionId,
+    status: 'completed',
+  });
+}
+
+/** The one line a policy block reads as: the glyph, the policy that
+ *  refused, the call it refused and the reason it gave. */
+function hookBlockNotice(hook: string | null, tool: string | null, reason: string | null): string {
+  const named = hook && tool ? `${hook} 拦截了 ${tool}` : (hook ?? tool);
+  const parts = [named, reason].filter((part): part is string => part !== null && part !== '');
+  return `⛔ 策略拦截${parts.length > 0 ? ` · ${parts.join(' — ')}` : ''}`;
+}
+
+/** What one tag of the typed row vocabulary does when the
+ *  projection folds it: a handler renders the row; `null` is
+ *  ignored-by-design — log-only bookkeeping the transcript
+ *  deliberately does not show. Exhaustive over the generated
+ *  `SessionEventType` union: a tag added to the vocabulary fails
+ *  `tsc` until this table accounts for it. */
+type TypedRowHandler = (entry: SessionTurn, sessionId: string, out: ChatMessageLike[]) => void;
+
+/** The accounting of every tag in the wire vocabulary. */
+const TYPED_ROW_TREATMENT: Record<SessionEventType, TypedRowHandler | null> = {
+  user_message: (entry, _sessionId, out) => applyUserMessageRow(entry, out),
+  assistant_message: applyAssistantMessageRow,
+  tool_result: applyToolResultMessage,
+  // The durable half of a streamed chunk: the reload's copy of what
+  // the live projection showed while the call ran.
+  tool_output: (entry, _sessionId, out) => applyToolOutputRow(entry, out),
+  compaction: applyCompactionRow,
+  warning: applyWarningRow,
+  hook_block: applyHookBlockRow,
+  plugin: applyPluginRow,
+  subagent_enter: (entry, _sessionId, out) => applySubagentEnterRow(out, entry),
+  subagent_exit: (entry, _sessionId, out) => applySubagentExitRow(out, entry),
+  // ---- ignored by design ----------------------------------
+  // Streamed deltas of the running turn; the durable
+  // `assistant_message` row renders the finished turn.
+  assistant_chunk: null,
+  // Compaction lifecycle bookkeeping; the committed `compaction`
+  // row is the marker the timeline shows.
+  compaction_start: null,
+  compaction_summary: null,
+  compaction_end: null,
+  // A tool call rides its turn's `assistant_message` parts; no
+  // separate transcript row.
+  tool_call: null,
+  // Loop bookkeeping; `ChatPage` reads `step` for scroll hints
+  // and `turn` for turn state, outside the message projection.
+  step: null,
+  turn: null,
+  iteration: null,
+  // Policy provenance, not transcript content.
+  steering_guard: null,
+  steering_hint: null,
+  // The provider envelope a request ran under.
+  request_header: null,
+  // Approvals reach the UI through the live `interrupts` window
+  // and `ApprovalCard`, not through the transcript.
+  approval_asked: null,
+  approval_decided: null,
+  approval_granted: null,
+  // Executor bookkeeping.
+  tool_dispatch: null,
+  // Resume fingerprint; never transcript content.
+  request_snapshot: null,
+  // Counters; the context meter carries them.
+  usage: null,
+  // Run configuration.
+  sandbox_mode: null,
+  // Writer lifecycle.
+  session_shutdown: null,
+  // Result-transform provenance.
+  tool_result_transformed: null,
+  // The consumed `user_message` row renders the turn these book.
+  parked_prompt: null,
+  park_consumed: null,
+  // Log-only by design: never model-visible.
+  feedback: null,
+};
+
+function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
+  // The legacy envelope dialect first: those rows pre-date the
+  // typed vocabulary, so their `type` strings are read through the
+  // widening, not the closed union.
+  const envelope = legacyRowType(entry);
+  if (envelope === EVENT_USER_INPUT) {
+    applyLegacyUserInputRow(entry, out);
+    return;
+  }
+  if (envelope === EVENT_AGENT) {
+    applyLegacyAgentRow(entry);
+    return;
+  }
+  if (envelope === EVENT_MODEL) {
+    applyLegacyModelRow(entry, sessionId, out);
+    return;
+  }
+  const tag = entry.type;
+  if (tag === null || tag === undefined) return;
+  // The `?.` is version-skew armour only: the table is total over
+  // the union the contract generated, so within one build every
+  // tag resolves.
+  TYPED_ROW_TREATMENT[tag]?.(entry, sessionId, out);
+}
+
 /** Narrow the union `data` shape to a JSON object, or `null`. */
+/**
+ * The replace range a `surface_op` carries, or null when the op is the
+ * append form (`"append"` on the wire).
+ */
+function replaceOp(
+  op: SessionTurn['surface_op'],
+): { start: number; end: number; source_event_seqs: number[] } | null {
+  return op !== null && op !== undefined && typeof op === 'object' ? op : null;
+}
+
 function toRecord(data: unknown): Record<string, unknown> | null {
   return data !== null && typeof data === 'object' && !Array.isArray(data)
     ? (data as Record<string, unknown>)
@@ -962,17 +1279,18 @@ export function newRowProjection(sessionId: string): RowProjection {
  * from `newRowProjection(sessionId)` and passes the whole baseline.
  *
  * The output preserves the on-wire ordering of events, with one
- * exception: a `UserInput` row carrying a `surface_op` replace (the row
- * a regenerate persists) first drops the messages its cited seqs
- * shadow, so a rerun shows the replacement story — one prompt bubble,
- * the new answer. A `compaction` row produces a marker instead of a
+ * exception: a `UserInput` or `user_message` row carrying a
+ * `surface_op` replace (the row a regenerate persists) first drops the
+ * messages its cited seqs shadow, so a rerun shows the replacement
+ * story — one prompt bubble, the new answer. The `"append"` string form
+ * shadows nothing. A `compaction` row produces a marker instead of a
  * replace, so the reader can still see the span that was compacted.
  */
 export function projectRows(state: RowProjection, rows: ReadonlyArray<SessionTurn>): RowProjection {
   const messages = state.messages.slice();
   const sources = state.sources.slice();
   for (const entry of rows) {
-    if (entry.type === EVENT_USER_INPUT) {
+    if (legacyRowType(entry) === EVENT_USER_INPUT || entry.type === EVENT_USER_MESSAGE) {
       dropReplacedTurn(entry, messages, sources);
     }
     const before = messages.length;
@@ -997,7 +1315,7 @@ export function projectRows(state: RowProjection, rows: ReadonlyArray<SessionTur
  * regenerated turn's delegation traces go with its answer.
  */
 function dropReplacedTurn(entry: SessionTurn, out: ChatMessageLike[], sources: number[]): void {
-  const seqs = entry.surface_op?.source_event_seqs;
+  const seqs = replaceOp(entry.surface_op)?.source_event_seqs;
   if (!seqs || seqs.length === 0) return;
   const lo = Math.min(...seqs);
   const hi = Math.max(...seqs);
@@ -1044,7 +1362,7 @@ function artifactsToAssistantMessage(
     ) {
       let group = groups.get(toolUseId);
       if (!group) {
-        group = { toolUseId, toolName: art.metadata?.tool_name };
+        group = { toolUseId, toolName: art.metadata?.tool_name ?? undefined };
         groups.set(toolUseId, group);
       }
       if (kind === LEGACY_ARTIFACT_KIND_TOOL_CALL) {
@@ -1196,6 +1514,69 @@ export function firstUserPromptText(messages: ReadonlyArray<ChatMessageLike>): s
     if (text) return text;
   }
   return null;
+}
+
+/**
+ * A timeline annotation the transcript renders in-line — a
+ * compaction marker, a warning notice, a subagent delegation
+ * note. A fact about the session, never an answer: it must not
+ * become the target of Regenerate, feedback, or turn-end status
+ * painting.
+ */
+const TIMELINE_ANNOTATION_SEGMENT_TYPES: Record<string, true> = {
+  compaction: true,
+  warning: true,
+  notice: true,
+  hook_block: true,
+};
+
+/** The shape both helpers need: any message-like row with typed segments. */
+interface SegmentbearingMessage {
+  role: string;
+  segments: ReadonlyArray<{ type: string }>;
+}
+
+/** True when a message carries only timeline annotations. */
+export function isTimelineAnnotationOnly(message: SegmentbearingMessage): boolean {
+  return (
+    message.segments.length > 0 &&
+    message.segments.every((segment) => TIMELINE_ANNOTATION_SEGMENT_TYPES[segment.type] === true)
+  );
+}
+
+/**
+ * The Regenerate/feedback target: the newest assistant message
+ * that is an answer. Timeline annotations are skipped: after a
+ * failed turn the last assistant row can be a warning notice, and
+ * its fabricated id must never reach `chat/feedback`.
+ */
+export function selectLastAssistant<T extends SegmentbearingMessage>(
+  messages: ReadonlyArray<T>,
+): T | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role !== 'assistant') continue;
+    if (isTimelineAnnotationOnly(message)) continue;
+    return message;
+  }
+  return null;
+}
+
+/**
+ * The `chat/feedback` target for a message: the ordinal of the
+ * assistant row it came from, in decimal.
+ *
+ * The server resolves the target against the session's own rows and
+ * refuses one that names no row, so a target that names nothing is
+ * not worth sending: `null` when the message carries no ordinal —
+ * the live projection, and a bubble no assistant row opened. The
+ * rating buttons stay away rather than the server refusing a target
+ * that names nothing.
+ */
+export function feedbackTarget(message: { ordinal?: number } | null | undefined): string | null {
+  if (!message) return null;
+  if (typeof message.ordinal !== 'number') return null;
+  return String(message.ordinal);
 }
 
 /**

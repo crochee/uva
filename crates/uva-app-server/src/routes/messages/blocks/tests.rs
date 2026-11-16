@@ -570,20 +570,6 @@ fn message_start_is_an_empty_assistant_message() {
     assert_eq!(message.usage.input_tokens, 0);
 }
 
-/// A subagent's wrapped trace is not this message's content.
-#[test]
-fn subagent_events_are_ignored() {
-    let inner = text_event("child answer");
-    let wrapped = AgentEvent::Agent(
-        uva::harness::AgentMeta::new("parent", "child", 1),
-        Box::new(inner),
-    );
-    let (mut turn, frames) = fold(&[wrapped]);
-    assert!(frames.is_empty(), "a child trace must produce no frames");
-    turn.finish();
-    assert!(turn.message().content.is_empty());
-}
-
 /// A streamed run publishes the protocol's event sequence on the
 /// process's outbound channel — the same names, the same payloads and
 /// the same order the SSE stream used to carry.

@@ -32,7 +32,16 @@ pub enum ExecutionMode {
 /// itself is neither safe nor dangerous, and the policy — not the
 /// enum — decides what to do with it.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    Serialize,
+    Deserialize,
+    schemars_derive::JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Risk {

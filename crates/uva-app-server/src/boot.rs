@@ -60,17 +60,13 @@ pub async fn boot_core(
     Ok(BootedCore { state, address })
 }
 
-/// Render a resolved profile with each core row's manifest services.
+/// Render a resolved profile with each core row's effective services.
 ///
 /// The factory directory carries the concrete plugins' manifests, so
-/// `provides` / `inject` are what the kernel will order and bind. A row
-/// with no registered factory prints explicit empty lists.
-///
-/// # Errors
-///
-/// Returns [`ProfileError`] when a registered factory's manifest names a
-/// different id than the row it is bound to.
-pub fn dump_profile(profile: &Profile) -> Result<String, ProfileError> {
+/// `provides` is what the plugin registers and `inject` is the
+/// effective union (factory manifest ∪ row declaration). A row with
+/// no registered factory prints explicit empty lists.
+pub fn dump_profile(profile: &Profile) -> String {
     let factories = crate::composition::kernel::dump_factories();
     dump_with_manifests(profile, &factories)
 }

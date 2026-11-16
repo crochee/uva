@@ -1,0 +1,120 @@
+hmr = true
+
+[[core.entries]]
+id = "tool-registry"
+runtime = "native"
+
+[[core.entries]]
+id = "tool-read"
+runtime = "native"
+
+[[core.entries]]
+id = "tool-write"
+runtime = "native"
+
+[[core.entries]]
+id = "tool-shell"
+runtime = "native"
+
+[[core.entries]]
+id = "tool-todo"
+runtime = "native"
+
+[[core.entries]]
+id = "tool-web"
+runtime = "native"
+
+[[core.entries]]
+id = "model-adapter"
+runtime = "native"
+
+[core.entries.config.workspace]
+default_model = "MiniMax-M2.7"
+default_provider = "openai"
+
+[core.entries.config.workspace.providers.anthropic]
+api_key_env = "UVA_PROVIDER_API_KEY_ANTHROPIC"
+base_url = "https://api.deepseek.com/anthropic"
+context_window = 128000
+default_model = "deepseek-flash"
+max_output_tokens = 8192
+supports_reasoning = false
+supports_streaming = true
+supports_tools = true
+type = "anthropic"
+
+[core.entries.config.workspace.providers.openai]
+api_key_env = "UVA_PROVIDER_API_KEY_OPENAI"
+base_url = "https://api.minimaxi.com/v1"
+context_window = 128000
+default_model = "MiniMax-M2.7"
+max_output_tokens = 8192
+supports_reasoning = false
+supports_streaming = true
+supports_tools = true
+type = "openai"
+
+[[core.entries]]
+id = "memory"
+runtime = "native"
+
+[[core.entries]]
+id = "search"
+runtime = "native"
+
+[[core.entries]]
+id = "session-store"
+runtime = "native"
+
+[[core.entries]]
+id = "sandbox"
+runtime = "native"
+
+[[core.entries]]
+id = "tool-task"
+runtime = "native"
+
+[[core.entries]]
+id = "context-compactor"
+runtime = "native"
+
+[[core.entries]]
+id = "approval"
+runtime = "native"
+
+[[core.entries]]
+id = "skills"
+runtime = "native"
+
+[[core.entries]]
+id = "hooks"
+runtime = "native"
+
+[[core.entries]]
+id = "agent-loop"
+runtime = "native"
+
+[core.entries.config]
+
+[[core.entries]]
+id = "mcp"
+runtime = "native"
+
+[[core.entries]]
+id = "eval"
+runtime = "native"
+
+[[core.entries]]
+id = "scheduler"
+runtime = "native"
+
+[[core.entries]]
+id = "schedule-tool"
+runtime = "native"
+
+[[core.entries]]
+id = "attachments"
+runtime = "native"
+
+[ui]
+entries = []

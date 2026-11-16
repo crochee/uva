@@ -13,7 +13,6 @@
 //! | `shell` | [`mod@shell`] | run a process, under the OS execution policy it owns |
 //! | `todo` | [`mod@todo`] | the `TodoWrite` task list |
 //! | `web` | [`mod@web`] | fetch a URL — the only tool that pulls an HTTP client |
-//! | `task` | [`mod@task`] | delegate to a registered peer agent |
 //! | `scheduler` | [`mod@scheduler`] | schedule a job |
 //! | `search` | [`mod@search`] | query the host's cross-domain search registry |
 //! | `memo` | [`mod@memo`] | memoise any tool's results |
@@ -28,9 +27,13 @@
 //! ## Dependencies travel with their tool
 //!
 //! A tool's own dependencies are optional and are opened by that tool's
-//! feature: `web` is the only feature that brings an HTTP client,
-//! `task` is the only one that brings the agent harness, and the
-//! default build (no feature) pulls no tool at all.
+//! feature: `web` is the only feature that brings an HTTP client, and
+//! the default build (no feature) pulls no tool at all.
+//!
+//! The `task` tool — the one that runs a registered peer agent as a
+//! child run — lives in its own crate, [`uva-tool-task`](../uva-tool-task),
+//! because it needs the agent vocabulary rather than the tool trait
+//! alone.
 
 #[cfg(feature = "memo")]
 pub use memo::{
@@ -68,8 +71,6 @@ pub use shell::{
     ShellTool,
     ShellToolPlugin,
 };
-#[cfg(feature = "task")]
-pub use task::{KEY_SUBAGENTS, SubagentPlugin, TaskDelegator};
 #[cfg(feature = "todo")]
 pub use todo::{TodoWriteTool, TodoWriteToolPlugin};
 #[cfg(feature = "web")]
@@ -87,8 +88,6 @@ pub mod scheduler;
 pub mod search;
 #[cfg(feature = "shell")]
 pub mod shell;
-#[cfg(feature = "task")]
-pub mod task;
 #[cfg(feature = "todo")]
 pub mod todo;
 #[cfg(feature = "web")]

@@ -17,8 +17,8 @@
 | :--- | :--- |
 | `crates/uva-core/` / `crates/uva-macros/` | 核心 trait（`CancelToken` / `Spawner` / `Clock` / `IdGen` / `Registry`）；proc-macro `#[derive(Tool)]` |
 | `crates/uva-provider/` | 模型适配（Anthropic / OpenAI compatible），wire type 与 streaming |
-| `crates/uva-tool/` / 8 个 tool plugin crate | 工具范式 + 离线工具集 |
-| `crates/uva-harness/` | ReAct 循环 + `Agent` / `ToolInterceptor` / strategy seam |
+| `crates/uva-tool/` / `uva-tool-plugins` / `uva-tool-task` | 工具范式 + 离线工具集 |
+| `crates/uva-harness/` | ReAct 循环 + `Agent` / strategy seam |
 | `crates/uva-app-server/` | axum HTTP / SSE / `config.yaml` 加载 + 启动 |
 | `uva-web/` | React / TS UI；MCP 浏览器面 |
 | `.github/workflows/` / `Makefile` / `scripts/` | CI / 自动化 / 棘轮 |

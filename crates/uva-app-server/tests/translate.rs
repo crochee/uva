@@ -30,9 +30,18 @@ providers:
 cache:
   enabled: true
   threshold: 0.5
+default_agent: "default"
 agents:
   default:
     max_steps: 12
+    strategy: "chain-of-thought"
+    allowed_tools: ["read", "write"]
+    denied_tools: ["shell"]
+    compaction:
+      enabled: true
+      reserve_tokens: 1024
+      keep_recent_tokens: 512
+      min_messages_between_compaction: 4
 "#,
     )
     .expect("write fixture");
@@ -97,6 +106,64 @@ fn translate_writes_a_profile_with_the_model_adapter_row() {
         "an absent section stays absent"
     );
     assert_eq!(parsed.workspace.default_provider, "demo-echo");
+}
+
+/// The document layer is authoritative: a row the document does not
+/// name is a plugin the deployment does not mount. A migration that
+/// emitted only the migrated row would boot into a deployment without
+/// the tool registry and without the agent loop — the boot fails on
+/// the missing `tools` service — so the output must carry the whole
+/// assembly.
+#[test]
+fn the_translated_document_carries_the_whole_assembly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = fixture_yaml(dir.path());
+    let out = dir.path().join("profile.toml");
+    run_translate(&config, &out);
+
+    let text = std::fs::read_to_string(&out).expect("the output file");
+    let profile = uva_app_server::profile::Profile::from_toml_str(&text)
+        .expect("the output parses as a profile");
+    let ids: Vec<&str> = profile.core.iter().map(|e| e.id.as_str()).collect();
+    for expected in [
+        "tool-registry",
+        "session-store",
+        "hooks",
+        "model-adapter",
+        "agent-loop",
+    ] {
+        assert!(
+            ids.contains(&expected),
+            "the document keeps `{expected}`: {ids:?}"
+        );
+    }
+
+    // The agent-loop row states the loop the config file described:
+    // the strategy alias, the allow/deny lists, the compaction policy.
+    let loop_row = profile
+        .core
+        .iter()
+        .find(|entry| entry.id == "agent-loop")
+        .expect("the agent-loop row is present");
+    assert_eq!(loop_row.config["strategy"], "chain-of-thought");
+    assert_eq!(
+        loop_row.config["tool_restriction"]["allow"],
+        serde_json::json!(["read", "write"])
+    );
+    assert_eq!(
+        loop_row.config["tool_restriction"]["deny"],
+        serde_json::json!(["shell"])
+    );
+    assert_eq!(loop_row.config["compaction"]["enabled"], true);
+
+    // Every row the migration does not touch keeps no config of its
+    // own: the built-in defaults build it.
+    let untouched = profile
+        .core
+        .iter()
+        .filter(|entry| entry.id != "model-adapter" && entry.id != "agent-loop")
+        .all(|entry| entry.config.is_null());
+    assert!(untouched, "only the migrated rows carry a config");
 }
 
 #[test]

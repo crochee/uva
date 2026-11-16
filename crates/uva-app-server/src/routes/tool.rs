@@ -1,5 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use uva::core::{
     Error,
@@ -22,13 +23,13 @@ use crate::{
 /// Sortable fields for the tools list endpoint.
 const TOOL_SORT_WHITELIST: &[&str] = &["name"];
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct ToolDetail {
     pub name: String,
     pub description: String,

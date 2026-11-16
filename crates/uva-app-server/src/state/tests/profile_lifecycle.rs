@@ -24,12 +24,12 @@ use crate::{
 async fn state(dir: &Path) -> AppState {
     let registry = SessionRegistry::new(dir.join("sessions"));
     let mut state = AppState::for_test(registry, dir.to_path_buf()).await;
-    state.profile_store = Some(ProfileStore {
+    state.assembly.set_store(Some(ProfileStore {
         bundle: None,
         doc: dir.join("profile.toml"),
         home: None,
         overlay: None,
-    });
+    }));
     state
 }
 
@@ -55,9 +55,9 @@ async fn one_disabled_row_withdraws_the_capability_and_its_block() {
     // The capability face: the skills service is mounted today.
     assert!(
         state
-            .kernel
-            .require::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
-            .is_ok(),
+            .assembly
+            .service::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
+            .is_some(),
         "the fixture mounts skills"
     );
 
@@ -96,9 +96,9 @@ async fn one_disabled_row_withdraws_the_capability_and_its_block() {
         .expect("the disabled rows reload");
     assert!(
         state
-            .kernel
-            .require::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
-            .is_err(),
+            .assembly
+            .service::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
+            .is_none(),
         "the disabled row withdraws its capability"
     );
     assert!(

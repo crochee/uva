@@ -12,6 +12,12 @@ members = [
     "crates/uva-skill",
     "crates/uva-session",
     "crates/uva-steering",
+    "crates/uva-approval",
+    "crates/uva-events",
+    "crates/uva-agent",
+    "crates/uva-hook",
+    "crates/uva-hook-plugins",
+    "crates/uva-tool-task",
     "crates/uva-harness",
     "crates/uva-core-tokio",
     "crates/uva-app-server",
@@ -43,6 +49,30 @@ uva-policy-plugins = { path = "crates/uva-policy-plugins", version = "0.1", defa
 uva-skill = { path = "crates/uva-skill", version = "0.1" }
  uva-steering = { path = "crates/uva-steering", version = "0.1" }
 uva-session = { path = "crates/uva-session", version = "0.1" }
+# The approval vocabulary and decision functions, sunk out of the
+# harness; the harness root re-exports every name, so consumers keep
+# their import paths.
+uva-approval = { path = "crates/uva-approval", version = "0.1" }
+# The run-event vocabulary (`AgentEvent` / `SystemEvent` /
+# `WarningKind`) sunk out of the harness; the harness root re-exports
+# every name, so consumers keep their import paths.
+uva-events = { path = "crates/uva-events", version = "0.1" }
+# The agent vocabulary (`Agent` / `AgentInput` / the steer inboxes / the
+# peer registry / the child-session writer source / the prompt
+# manifest) sunk out of the harness; the harness root re-exports every
+# name, so consumers keep their import paths.
+uva-agent = { path = "crates/uva-agent", version = "0.1" }
+# The interception contract (hook/gate/transformer traits, the seven
+# mount-point keys, the decoupled HookContext and HookPayload) sunk
+# below the harness; the harness re-exports every name, so consumers
+# keep their import paths.
+uva-hook = { path = "crates/uva-hook", version = "0.1" }
+# The hook implementations (reflection, result redaction, risk-graded
+# traffic light), one feature per hook.
+uva-hook-plugins = { path = "crates/uva-hook-plugins", version = "0.1", default-features = false }
+# The `task` tool as a plain tool: runs a registered peer as a child
+# run. Depends on the agent/event vocabulary, never on the harness.
+uva-tool-task = { path = "crates/uva-tool-task", version = "0.1" }
 uva-harness = { path = "crates/uva-harness", version = "0.1" }
 uva-core-tokio = { path = "crates/uva-core-tokio", version = "0.1" }
 uva-app-server = { path = "crates/uva-app-server", version = "0.1" }
@@ -99,7 +129,15 @@ async-stream = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 toml = "0.8"
-schemars = { version = "1.2", features = ["derive", "preserve_order"] }
+# `chrono04` gives `chrono::DateTime` a `JsonSchema`: every wire type
+# that carries an instant (`Job`, `EvalReport`, the profile event)
+# serializes it as an RFC 3339 string, so the schema must describe a
+# string rather than refuse the type.
+schemars = { version = "1.2", features = [
+  "derive",
+  "preserve_order",
+  "chrono04",
+] }
 schemars_derive = "1.2"
 
 # Error handling

@@ -8,6 +8,7 @@ use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use uva_core::SystemClock;
+use uva_events::{SessionEndReason, SystemEvent, WarningKind};
 use uva_provider::{ContentPart, Role, ToolUse};
 use uva_session::{
     LogWriter,
@@ -19,17 +20,14 @@ use uva_steering::{HookDecision, HookEvent, RequestParams};
 use uva_tool::ToolOutput;
 
 use super::{support::*, *};
-use crate::{
-    agent::host::{
-        Gate,
-        Hook,
-        HookContext,
-        Host,
-        PromptSection,
-        RequestTransformer,
-        ResultTransformer,
-    },
-    events::{SessionEndReason, SystemEvent},
+use crate::agent::host::{
+    Gate,
+    Hook,
+    HookContext,
+    Host,
+    PromptSection,
+    RequestTransformer,
+    ResultTransformer,
 };
 
 // An observer that vetoes the `echo` tool.
@@ -54,6 +52,74 @@ impl Hook for EchoBlocker {
             }
             _ => HookDecision::Allow,
         }
+    }
+}
+
+// A gate installed through the contract crate's external registry.
+struct RegistryBlocker;
+
+#[async_trait]
+impl Gate for RegistryBlocker {
+    fn name(&self) -> &str {
+        "registry-blocker"
+    }
+
+    async fn check(
+        &self,
+        event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> Result<HookDecision, String> {
+        match event {
+            HookEvent::BeforeTool { tool_name, .. } if tool_name == "echo" => {
+                Ok(HookDecision::Block {
+                    reason: "the registry denied echo".to_string(),
+                })
+            }
+            _ => Ok(HookDecision::Allow),
+        }
+    }
+}
+
+// A gate that ends the run instead of blocking the call.
+struct RegistryTerminator;
+
+#[async_trait]
+impl Gate for RegistryTerminator {
+    fn name(&self) -> &str {
+        "registry-terminator"
+    }
+
+    async fn check(
+        &self,
+        event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> Result<HookDecision, String> {
+        match event {
+            HookEvent::BeforeTool { tool_name, .. } if tool_name == "echo" => {
+                Ok(HookDecision::Terminate {
+                    reason: "the registry ended the run".to_string(),
+                })
+            }
+            _ => Ok(HookDecision::Allow),
+        }
+    }
+}
+
+// A gate that cannot answer, on an observational point.
+struct FailingObserverGate;
+
+#[async_trait]
+impl Gate for FailingObserverGate {
+    fn name(&self) -> &str {
+        "registry-observer"
+    }
+
+    async fn check(
+        &self,
+        _event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> Result<HookDecision, String> {
+        Err("the observer has no answer".to_string())
     }
 }
 
@@ -167,6 +233,248 @@ async fn a_host_observer_blocks_a_tool_call() {
         "the denial must carry the policy prefix: {:?}",
         committed.content
     );
+}
+
+// A hook veto is a durable fact: the log carries a `hook_block` row
+// naming the hook that refused the call and the reason it gave, so
+// a reloaded session says which policy blocked the call — the
+// model-visible tool result only says that *something* did.
+#[tokio::test]
+async fn a_hook_veto_writes_a_hook_block_row() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let mut host = Host::new();
+    let _observer = host.hook(Arc::new(EchoBlocker));
+
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![echo_tool_call()]),
+        done_chunk("blocked noted"),
+    ]));
+    let (registry, _executions) = echo_registry();
+    let agent = ReActAgent::new(provider, registry)
+        .with_host(host)
+        .expect("bind the host")
+        .with_log_writer(writer);
+
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while stream.next().await.is_some() {}
+
+    let rows = sink.read().await.expect("read");
+    let blocks: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "hook_block")
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the veto writes exactly one hook_block row: {rows:#?}"
+    );
+    assert_eq!(blocks[0]["data"]["hook"], "echo-blocker");
+    assert_eq!(blocks[0]["data"]["reason"], "echo is not allowed here");
+    assert_eq!(blocks[0]["data"]["tool"], "echo");
+    assert_eq!(blocks[0]["data"]["call_id"], "c1");
+}
+
+// An external registration goes through the same arbitration and the
+// same durable row: the contract crate's registry is not a second,
+// quieter interception path.
+#[tokio::test]
+async fn an_external_registry_veto_writes_a_hook_block_row() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let registry = uva_hook::HookRegistry::new();
+    let _registration = registry
+        .register_gate(uva_hook::seam::TOOL_PRE, Arc::new(RegistryBlocker))
+        .expect("the external gate registers");
+
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![echo_tool_call()]),
+        done_chunk("blocked noted"),
+    ]));
+    let (tool_registry, executions) = echo_registry();
+    let agent = ReActAgent::new(provider, tool_registry)
+        .with_hook_registry(registry)
+        .with_log_writer(writer);
+
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while stream.next().await.is_some() {}
+
+    assert_eq!(*executions.lock(), 0, "the vetoed call does not run");
+    let rows = sink.read().await.expect("read");
+    let blocks: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "hook_block")
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the external veto writes exactly one hook_block row: {rows:#?}"
+    );
+    assert_eq!(blocks[0]["data"]["hook"], "registry-blocker");
+    assert_eq!(blocks[0]["data"]["reason"], "the registry denied echo");
+    assert_eq!(blocks[0]["data"]["tool"], "echo");
+    assert_eq!(blocks[0]["data"]["call_id"], "c1");
+}
+
+// `Terminate` refuses the call too — the model reads
+// `[terminated by policy]` — so it owes the same durable row. Without
+// it a reloaded session could not answer "who ended this call".
+#[tokio::test]
+async fn an_external_registry_termination_writes_a_hook_block_row() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let registry = uva_hook::HookRegistry::new();
+    let _registration = registry
+        .register_gate(uva_hook::seam::TOOL_PRE, Arc::new(RegistryTerminator))
+        .expect("the external gate registers");
+
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![echo_tool_call()]),
+        done_chunk("terminated noted"),
+    ]));
+    let (tool_registry, executions) = echo_registry();
+    let agent = ReActAgent::new(provider, tool_registry)
+        .with_hook_registry(registry)
+        .with_log_writer(writer);
+
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while stream.next().await.is_some() {}
+
+    assert_eq!(*executions.lock(), 0, "the refused call does not run");
+    let rows = sink.read().await.expect("read");
+    let blocks: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "hook_block")
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the termination writes exactly one hook_block row: {rows:#?}"
+    );
+    assert_eq!(blocks[0]["data"]["hook"], "registry-terminator");
+    assert_eq!(blocks[0]["data"]["reason"], "the registry ended the run");
+    assert_eq!(blocks[0]["data"]["tool"], "echo");
+    assert_eq!(blocks[0]["data"]["call_id"], "c1");
+}
+
+// `llm/result` accepts no denial, so a gate that cannot answer there
+// cannot refuse the pass — but the failure must not vanish into
+// silence either: the dispatch reports it and the run publishes a
+// `hook` warning naming the gate (the session controller persists a
+// warning as a durable row, like every other harness warning).
+#[tokio::test]
+async fn a_gate_failure_at_an_observational_point_surfaces_a_warning() {
+    let registry = uva_hook::HookRegistry::new();
+    let _registration = registry
+        .register_gate(
+            uva_hook::seam::LLM_RESULT,
+            Arc::new(FailingObserverGate),
+        )
+        .expect("the external gate registers");
+
+    let provider = Arc::new(CapturingProvider::new(vec![done_chunk("done")]));
+    let (tool_registry, _executions) = echo_registry();
+    let agent =
+        ReActAgent::new(provider, tool_registry).with_hook_registry(registry);
+
+    let mut stream = agent
+        .run(
+            AgentInput::text("say done"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event);
+    }
+
+    let messages: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::System(SystemEvent::Warning {
+                kind: WarningKind::Hook,
+                message,
+                ..
+            }) => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        messages.len(),
+        1,
+        "the failure is reported once, as a hook warning: {events:#?}"
+    );
+    assert!(messages[0].contains("registry-observer"), "{}", messages[0]);
+    assert!(
+        messages[0].contains("the observer has no answer"),
+        "{}",
+        messages[0]
+    );
+}
+
+// The `hook_block` row is log-only: the model-visible surface is
+// the same with the row and without it.
+#[tokio::test]
+async fn a_hook_block_row_leaves_the_folded_surface_unchanged() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let mut host = Host::new();
+    let _observer = host.hook(Arc::new(EchoBlocker));
+
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![echo_tool_call()]),
+        done_chunk("blocked noted"),
+    ]));
+    let (registry, _executions) = echo_registry();
+    let agent = ReActAgent::new(provider, registry)
+        .with_host(host)
+        .expect("bind the host")
+        .with_log_writer(writer);
+
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while stream.next().await.is_some() {}
+
+    let rows = sink.read().await.expect("read");
+    let events: Vec<SessionEvent> =
+        rows.iter().filter_map(SessionEvent::from_value).collect();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::HookBlock { .. })),
+        "the run wrote a hook_block row: {rows:#?}"
+    );
+    let without: Vec<SessionEvent> = events
+        .iter()
+        .filter(|event| !matches!(event, SessionEvent::HookBlock { .. }))
+        .cloned()
+        .collect();
+    let with_row = uva_session::fold_surface(&events).expect("fold");
+    let without_row = uva_session::fold_surface(&without).expect("fold");
+    assert_eq!(
+        with_row.messages, without_row.messages,
+        "the log-only row must not change the transcript the model sees"
+    );
+    assert_eq!(with_row.surface_seqs, without_row.surface_seqs);
 }
 
 #[tokio::test]

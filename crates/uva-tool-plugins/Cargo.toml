@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
-description = "The shipped tool plugins: read, write, shell, todo, web, task, scheduler, search and memo — one module and one feature per tool."
+description = "The shipped tool plugins: read, write, shell, todo, web, scheduler, search and memo — one module and one feature per tool."
 homepage.workspace = true
 documentation.workspace = true
 
@@ -17,12 +17,9 @@ write = []
 shell = ["dep:libc"]
 todo = []
 web = ["dep:reqwest", "dep:url", "dep:uva-core"]
-task = ["dep:uva-harness", "dep:uva-provider", "dep:uva-core"]
 scheduler = ["dep:uva-scheduler", "dep:uva-core"]
 search = ["dep:uva-search"]
 memo = ["dep:blake3", "dep:uva-core"]
-# The `task` tool's tracing bridge and the scheduler's cron parser.
-otel = ["dep:opentelemetry"]
 cron = ["scheduler", "uva-scheduler/cron"]
 
 [dependencies]
@@ -43,15 +40,12 @@ tokio = { workspace = true, features = [
 ] }
 # --- per-tool, optional: a tool's dependency is opened by its feature ---
 uva-core = { workspace = true, optional = true }
-uva-provider = { workspace = true, optional = true }
-uva-harness = { workspace = true, optional = true }
 uva-scheduler = { workspace = true, optional = true }
 uva-search = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
-opentelemetry = { workspace = true, features = ["trace"], optional = true }
 # --- shared by several tools ---
 chrono.workspace = true
 futures.workspace = true
@@ -89,12 +83,6 @@ required-features = ["shell"]
 name = "allowlist"
 required-features = ["web"]
 [[example]]
-name = "delegation_gate"
-required-features = ["task"]
-[[example]]
-name = "worktree_isolation"
-required-features = ["task"]
-[[example]]
 name = "schedule_jobs"
 required-features = ["scheduler"]
 [[example]]
@@ -122,20 +110,11 @@ required-features = ["todo"]
 name = "web-plugin"
 required-features = ["web"]
 [[test]]
-name = "task-plugin"
-required-features = ["task"]
-[[test]]
 name = "scheduler-plugin"
 required-features = ["scheduler"]
 [[test]]
 name = "schedule_tool"
 required-features = ["scheduler"]
-[[test]]
-name = "delegation"
-required-features = ["task"]
-[[test]]
-name = "worktree_through_seam"
-required-features = ["task"]
 [[test]]
 name = "sandbox_smoke"
 required-features = ["shell"]

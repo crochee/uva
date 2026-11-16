@@ -67,7 +67,12 @@ uva = { workspace = true, features = [
   "tool-search",
   "session",
   "steering",
+  "approval",
+  "agent",
   "harness",
+  # The `hooks` row publishes the external hook registry the loop
+  # injects; the composition names the module directly.
+  "hook",
   # The server is the repo's tokio host: it installs the runtime's
   # implementations of the `Sleeper` / `Spawner` seams (a retry
   # backoff costs a timer entry, not an OS thread).

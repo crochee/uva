@@ -13,7 +13,7 @@ use std::{path::PathBuf, sync::Arc};
 /// model, and the resume needs that exact handle back.
 pub use uva::provider::ProviderResolver;
 use uva::{
-    harness::PromptContext,
+    agent::PromptContext,
     provider::traits::ModelProvider,
     tool::registry::ToolRegistry,
 };
@@ -59,14 +59,14 @@ pub struct RunDependencies {
     /// System prompt injected as the first message of every
     /// conversation. The ReAct loop builds its own system
     /// prompt from the descriptor via
-    /// [`uva::harness::PromptContext::assemble`]; this
+    /// [`uva::agent::PromptContext::assemble`]; this
     /// field is the legacy/default fallback for callers that
     /// do not supply an explicit descriptor.
     pub system_prompt: String,
     /// Prompt-context manifest (skills + peer agents + tool
     /// definitions). Empty by default; populated by the server
     /// from the workspace's `.agents/skills/` directory and the
-    /// registered [`AgentRegistry`](uva::harness::AgentRegistry) at startup.
+    /// registered [`AgentRegistry`](uva::agent::AgentRegistry) at startup.
     ///
     /// Stored as `Arc<PromptContext>` so cloning the
     /// [`RunDependencies`] (which the [`crate::state::AppState`]
@@ -74,12 +74,12 @@ pub struct RunDependencies {
     /// of deep-cloning the skills + peer-agents lists. The
     /// manifest is read-only after boot, so this is safe across
     /// concurrent dispatches.
-    pub prompt_context: Arc<uva::harness::PromptContext>,
+    pub prompt_context: Arc<uva::agent::PromptContext>,
     /// Multi-agent registry. Held by reference so the run
     /// factory can resolve the configured agent synchronously
     /// inside `build_run_config` without going through an
     /// async dispatch boundary.
-    pub agent_registry: Option<Arc<uva::harness::AgentRegistry>>,
+    pub agent_registry: Option<Arc<uva::agent::AgentRegistry>>,
     pub default_agent_name: Option<Arc<parking_lot::RwLock<Option<String>>>>,
     /// Wall-clock source for the session log's `ts` fields and for
     /// the operation snapshots this deployment publishes. Default
@@ -118,8 +118,6 @@ pub struct RunDependencies {
     /// parent — the child's answer still reaches the model through
     /// the `task` tool result. The server installs the process-wide
     /// router so every child gets a first-class session.
-    pub subagent_router:
-        Option<Arc<crate::session::subagent_router::SubagentRouter>>,
     /// The node's cluster bus + identity. Every controller publishes
     /// its frames here and holds its session lease through it; the
     /// test-only default is an in-process [`LocalBus`].
@@ -150,16 +148,6 @@ pub struct RunDependencies {
 }
 
 impl RunDependencies {
-    /// Builder: install the sub-agent session router.
-    #[must_use]
-    pub fn with_subagent_router(
-        mut self,
-        router: Option<Arc<crate::session::subagent_router::SubagentRouter>>,
-    ) -> Self {
-        self.subagent_router = router;
-        self
-    }
-
     /// Install this node's cluster bus + identity. The local default
     /// keeps every test and embedder working unchanged.
     #[must_use]
@@ -217,7 +205,6 @@ impl RunDependencies {
             tool_surface: None,
             agent_loop: None,
             usage_metrics: Arc::new(UsageMetrics::default()),
-            subagent_router: None,
             cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
             attachment_store: Arc::new(
                 uva::attachment::AttachmentStore::default(),
@@ -313,7 +300,7 @@ impl RunDependencies {
     /// synchronously inside `build_run_config`.
     pub fn with_agent_registry(
         mut self,
-        registry: Arc<uva::harness::AgentRegistry>,
+        registry: Arc<uva::agent::AgentRegistry>,
         default_agent_name: Arc<parking_lot::RwLock<Option<String>>>,
     ) -> Self {
         self.agent_registry = Some(registry);

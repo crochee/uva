@@ -6,8 +6,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use dashmap::DashMap;
 use uva::{
+    agent::{AgentEntry, AgentRegistry},
     core::{Clock, registry::Registry},
-    harness::{AgentEntry, AgentRegistry},
     provider::{config::WorkspaceConfig, traits::ModelProvider},
     session::{
         JsonlSessionSearch,
@@ -18,8 +18,11 @@ use uva::{
     tool::ToolRegistry,
 };
 
+#[cfg(any(test, feature = "test-utils"))]
+use super::tools::AppliedToolSurface;
 use super::{
     AppState,
+    Assembly,
     EvalsState,
     McpRuntime,
     ProviderCatalogue,
@@ -29,12 +32,12 @@ use super::{
 };
 use crate::{
     composition::kernel::{BootServices, mount_profile, native_profile},
-    profile::Profile,
+    profile::{Profile, ProfileStore},
     state::boot::{
+        agent_loop_row_config,
         apply_tools_config,
         load_default_compaction,
         load_default_max_iterations,
-        load_default_strategy_alias,
         load_default_tool_restriction,
         register_configured_mcp_servers,
         warn_unapplied_agent_keys,
@@ -52,6 +55,98 @@ fn load_workspace_config(
 ) -> Result<WorkspaceConfig, anyhow::Error> {
     WorkspaceConfig::load_from_dir(workspace_root)
         .map_err(|e| anyhow::anyhow!(e.to_string()))
+}
+
+/// The provider surface the assembler installs after the mount.
+///
+/// The two constructors differ here and only here on providers: the
+/// deployment reads the services its `model-adapter` row published, the
+/// fixture installs the in-memory fake it built.
+pub(crate) enum ProviderSeam {
+    /// Read the mounted `model-adapter` row's services: the catalogue
+    /// (`llm`) and the tier-1-wrapped default handle (`llm.default`).
+    Mounted,
+    /// Install the caller's catalogue, default handle, and workspace
+    /// configuration. The fixture builds all three around its fake so
+    /// `model: None` resolves in a test.
+    #[cfg(any(test, feature = "test-utils"))]
+    Injected {
+        /// The catalogue every resolution path reads.
+        catalogue: Arc<ProviderCatalogue>,
+        /// The default handle `model: None` resolves to.
+        default_provider: Arc<dyn ModelProvider>,
+        /// The workspace the injected catalogue was built from.
+        workspace: WorkspaceConfig,
+    },
+}
+
+/// The lifecycle extras a boot installs around the mount.
+///
+/// Everything else the two constructors differ on is a value in
+/// [`BootInputs`]; these are the *actions* only the deployment performs.
+#[derive(Clone, Copy)]
+pub(crate) enum BootMode {
+    /// The deployment: connect the configured MCP servers through the
+    /// mounted supervisor and drive its reconnect loop, apply the
+    /// `[tools]` config to the registry, and register the default
+    /// member through the mounted loop.
+    Deployment,
+    /// The fixture: no configured servers, no host policy, and its own
+    /// canonical descriptor registered before the call. The tool
+    /// surface stays empty.
+    #[cfg(any(test, feature = "test-utils"))]
+    Fixture,
+}
+
+/// The inputs the shared assembler needs.
+///
+/// One field per thing the deployment boot and the fixture resolve
+/// differently. The assembler owns everything they resolve the same
+/// way: the clock, the mount, the service reads, the session router,
+/// and the state literal.
+pub(crate) struct BootInputs {
+    /// The workspace the rows build their files from.
+    pub(crate) workspace_root: PathBuf,
+    /// The resolved deployment configuration, kept on the state.
+    pub(crate) server_config: Option<crate::config::ServerConfig>,
+    /// The materialized profile document to mount. The fixture's
+    /// `model-adapter` row carries its demo provider; the deployment's
+    /// rows carry what the boot materialized from the config.
+    pub(crate) profile: Profile,
+    /// The transactional write path's document store; `None` in
+    /// fixtures.
+    pub(crate) profile_store: Option<ProfileStore>,
+    /// The default model name the loop and the compaction plugin read.
+    pub(crate) default_model: String,
+    /// Where the provider surface comes from.
+    pub(crate) providers: ProviderSeam,
+    /// The one tool registry, before the mount publishes it.
+    pub(crate) tool_registry: Arc<ToolRegistry>,
+    /// The one peer-agent registry, before the mount reads it.
+    pub(crate) agent_registry: Arc<AgentRegistry>,
+    /// The one harness host; the deployment's carries the policy, the
+    /// fixture's binds its registry and composes no plugins.
+    pub(crate) plugin_host: uva::harness::Host,
+    /// The session search service over `<workspace>/sessions`.
+    pub(crate) session_search: SharedSessionSearch,
+    /// The session-store row's directory; `None` keeps the row's
+    /// default.
+    pub(crate) sessions_dir: Option<PathBuf>,
+    /// The default compaction policy; also the mount's compaction
+    /// input.
+    pub(crate) default_compaction: Option<uva::session::CompactionSettings>,
+    /// The operations endpoints the config resolved.
+    pub(crate) operations_config: Arc<crate::config::OperationEndpointConfig>,
+    /// The configured default agent name.
+    pub(crate) default_agent_name: Option<String>,
+    /// The per-run iteration cap.
+    pub(crate) default_max_iterations: usize,
+    /// The cluster bus the deployment resolved from its config.
+    pub(crate) cluster: Arc<crate::cluster::ClusterRuntime>,
+    /// The RPC runtime: connected, or detached for a fixture.
+    pub(crate) rpc: Arc<crate::rpc::RpcRuntime>,
+    /// Which lifecycle extras to install.
+    pub(crate) mode: BootMode,
 }
 
 impl AppState {
@@ -123,12 +218,6 @@ impl AppState {
             }
         }
 
-        // One clock for the whole process: every timestamped
-        // component (session log rows, operation snapshots, the
-        // attachment store, the MCP supervisor's tick) reads it from
-        // here rather than calling the wall clock itself.
-        let clock = uva::core::SharedClock::system();
-
         // The store walk and every session's fs writes run on the
         // tokio blocking pool (the seams' defaults are runtime-free
         // but pay one OS thread per call).
@@ -157,14 +246,6 @@ impl AppState {
             default_tool_restriction,
         } = Self::load_per_section_config(&server_config);
 
-        // Default system prompt. The ReAct loop builds its
-        // own system prompt per-dispatch via
-        // `uva::harness::PromptContext::assemble`, so
-        // this is only the legacy/default fallback for
-        // callers that read `AppState::system_prompt`
-        // directly without an explicit descriptor.
-        let system_prompt = uva::harness::DEFAULT_SYSTEM_PROMPT.to_string();
-
         // Seed the workflow skills on disk so the v1 HTTP
         // `GET /api/v1/skills` endpoint—which scans the workspace's
         // `.agents/skills/` directory—has visible data on a fresh
@@ -189,10 +270,10 @@ impl AppState {
         // runs too.
         let plugin_host =
             uva::harness::Host::default_policy(workspace_root.clone());
-        // The peer registry exists before the mount: the `task`
-        // delegator the `subagents` service publishes resolves names
-        // through it, and the default member is registered into it
-        // after the tool surface has settled.
+        // The peer registry exists before the mount: the `tool-task`
+        // row's `task` tool resolves names through it, and the default
+        // member is registered into it after the tool surface has
+        // settled.
         let agent_registry = Arc::new(AgentRegistry::new());
 
         // The effective core assembly: the resolved profile when it
@@ -246,79 +327,191 @@ impl AppState {
             agent_loop_config,
         );
 
-        // Mount the selected plugin set. `build_plugins` resolves every
-        // row through the factory directory and `mount_all`
-        // validates, orders, and mounts the group; the handles live on
-        // `AppState` for the process lifetime (and for the HMR remount
-        // loop).
-        //
-        // What the boot still owns are the **containers**: the one
-        // tool registry, the peer-agent registry, and the harness
-        // host. Every capability — the delegation backend, the
-        // approval stance, the session index, the loop's defaults —
-        // is built by the row that publishes it.
+        // The assembler mounts the selected plugin set, resolves the
+        // services the rows published, and assembles the state. The
+        // deployment's inputs are the ones the pre-steps above
+        // resolved; the lifecycle extras only a deployment installs
+        // (configured MCP servers, the `[tools]` surface, the loop's
+        // default member) ride on [`BootMode::Deployment`].
+        let cluster_config = server_config
+            .as_ref()
+            .map(|c| c.cluster.clone())
+            .unwrap_or_default();
+        let cluster = Arc::new(
+            crate::cluster::ClusterRuntime::from_config(&cluster_config)
+                .await
+                .map_err(|e| format!("[cluster] {e}"))?,
+        );
+        // The state handle is bound before the self-management
+        // registration below—its tools close over the Arc.
+        let state = Arc::new(
+            Self::assemble(BootInputs {
+                workspace_root,
+                server_config,
+                profile: effective_profile,
+                profile_store,
+                default_model,
+                providers: ProviderSeam::Mounted,
+                tool_registry,
+                agent_registry,
+                plugin_host,
+                session_search,
+                sessions_dir: None,
+                default_compaction,
+                operations_config,
+                default_agent_name: default_agent_name_value,
+                default_max_iterations,
+                cluster,
+                rpc: Arc::new(crate::rpc::RpcRuntime::new()),
+                mode: BootMode::Deployment,
+            })
+            .await?,
+        );
+        // The self-management MCP server needs the finished state
+        // handle (its tools call back into it), so it registers
+        // after construction—the shared registry makes the tools
+        // visible to every later run.
+        super::self_mcp::register_self_mcp(&state).await;
+        // One process-wide control consumer: applies registry
+        // mutations from peer nodes and forwards remote ops to the
+        // local controller that owns the session.
+        super::cluster_ops::spawn_control_dispatcher(Arc::clone(&state));
+        // The dead-controller sweep behind the exit notification:
+        // weak on the state, so it ends with it instead of
+        // outliving it (the exit notification itself needs no
+        // task — the controller's loop runs it).
+        super::sessions::spawn_dead_session_reaper(Arc::downgrade(&state));
+        // The layout's definitions become live agents: the files
+        // are the storage, the registry is the runtime's view of
+        // them. Registered here — after the state exists (the
+        // builder closes over it), before the scheduler starts (a
+        // task's agent target must resolve by then).
+        super::super::boot::register_file_agents(&state).await;
+        // `tasks/<name>/task.md` declarations sync into the store by
+        // name; an active store entry with no declaration is
+        // exported back to a file, so the store never holds state
+        // the layout cannot show.
+        super::tasks::sync_task_declarations(&state);
+        // The background scheduler tick: one leader per deployment.
+        super::schedules::spawn_scheduler_driver(Arc::clone(&state));
+        Ok(state)
+    }
+
+    /// Mount `input.profile`, resolve the services its rows published,
+    /// and assemble the state.
+    ///
+    /// This is the one construction path: [`AppState::new`] and
+    /// [`AppState::for_test`] both land here, so a field added to the
+    /// state cannot be wired in one boot and forgotten in the other.
+    /// Everything they resolve differently arrives in [`BootInputs`];
+    /// everything they resolve the same way — the clock, the mount,
+    /// the provider resolution, the session router, the literal — is
+    /// owned here.
+    ///
+    /// [`AppState::new`]: Self::new
+    /// [`AppState::for_test`]: Self::for_test
+    pub(crate) async fn assemble(input: BootInputs) -> Result<Self, String> {
+        // One clock for the whole process: every timestamped
+        // component (session log rows, operation snapshots, the
+        // attachment store, the MCP supervisor's tick) reads it from
+        // here rather than calling the wall clock itself.
+        let clock = uva::core::SharedClock::system();
+
+        // Sub-agent session state: the router the controller/persist
+        // path uses and the writer slot the `tool-task` row reads. The
+        // slot is empty until the mount publishes `sessions`; nothing
+        // opens a child before boot finishes.
+        let active_sessions = Arc::new(crate::state::ActiveSessions::new());
+        let subagent_writer_slot = Arc::new(
+            crate::session::subagent_router::SubagentWriterSlot::new(),
+        );
+        // The control surface's view of the sessions: empty until the
+        // mount publishes `sessions`, exactly like the writer slot.
+        let session_index_slot =
+            Arc::new(crate::session::session_index::SessionIndexSlot::new());
+
+        // The containers the mount hands the rows: the one tool
+        // registry, the peer-agent registry, the harness host and the
+        // child-session writer slot. Every capability — the `task`
+        // tool brick, the approval stance, the session index, the
+        // loop's defaults — is built by the row that publishes it.
+        // One set of counters for the whole process, created before
+        // the mount: the `tool-task` row reports delegated children
+        // into the same atomics the session controllers write, and
+        // `AppState` publishes them to `/api/v1/chat/usage`.
+        let usage_metrics = Arc::new(UsageMetrics::default());
         let boot_services = Arc::new(BootServices {
-            tool_registry: Arc::clone(&tool_registry),
-            agent_registry: Arc::clone(&agent_registry),
-            plugin_host: plugin_host.clone(),
+            tool_registry: Arc::clone(&input.tool_registry),
+            agent_registry: Arc::clone(&input.agent_registry),
+            subagent_writers: Arc::clone(&subagent_writer_slot),
+            session_index: Arc::clone(&session_index_slot),
+            usage: Arc::clone(&usage_metrics),
+            plugin_host: input.plugin_host.clone(),
         });
         let (kernel, mounted) = mount_profile(
             Arc::clone(&boot_services),
-            &effective_profile,
+            &input.profile,
             clock.clone(),
             crate::composition::kernel::BootExtras {
-                workspace_root: workspace_root.clone(),
+                workspace_root: input.workspace_root.clone(),
                 blocking: Some(crate::spawner::server_blocking()),
                 compaction: Some(uva::session::CompactionPluginConfig {
-                    model: default_model.clone(),
-                    settings: default_compaction.unwrap_or_default(),
+                    model: input.default_model.clone(),
+                    settings: input.default_compaction.unwrap_or_default(),
                 }),
-                sessions_dir: None,
+                sessions_dir: input.sessions_dir.clone(),
             },
         )
         .map_err(|error| error.to_string())?;
 
         // The effective assembly the mounted tree corresponds to: the
-        // enabled rows only. The boot passes the raw (materialized)
-        // profile to `mount_profile`, which filters and mounts it in two
-        // waves; recomputing the same filter here is idempotent and is
-        // what the HMR diff and the settings page diff against.
-        let assembly = {
-            let checks = crate::profile::KernelChecks(&kernel);
-            crate::profile::effective(&effective_profile, &checks).profile
-        };
+        // assembled rows only. `mount_profile` filters and mounts the
+        // raw profile; recomputing the same filter here is idempotent
+        // and is what the HMR diff and the settings page diff against.
+        let assembly = crate::profile::effective(&input.profile);
         // The UI segment is assembled from the effective rows, so a
         // `ui-bundle` row switched off never reaches the loader.
         let ui_tree = crate::ui::tree::load_ui_tree(&assembly.ui)
             .map_err(|error| error.to_string())?;
 
-        // The cross-domain search service is the `search` profile
-        // row: its plugin builds the six-domain service from the
-        // injected `tools`/`memory` services and registers the
-        // model-facing `search` tool.
-
         // The `model-adapter` services are the authoritative provider
         // surface: `llm` carries the catalogue, `llm.default` the
-        // tier-1-wrapped default handle. A config-driven profile row
-        // replaces the pre-mount values read above; AppState keeps
-        // reading its own fields, now sourced from the services.
-        let provider_catalogue = kernel
-            .require::<ProviderCatalogue>(uva::provider::KEY_LLM)
-            .map_err(|error| {
-                format!("the llm service is unavailable after mount: {error}")
-            })?;
-        let default_provider = kernel
-            .require::<Arc<dyn ModelProvider>>(uva::provider::KEY_LLM_DEFAULT)
-            .map_err(|error| {
-                format!(
-                    "the llm.default service is unavailable after mount: \
-                     {error}"
-                )
-            })
-            .map(|wrapped| Arc::clone(&*wrapped))?;
-        let workspace_config = provider_catalogue.workspace().clone();
-        // The capability services the rows published. The boot only
-        // resolves them for the projection layer (`AppState` fields,
+        // tier-1-wrapped default handle. The fixture installs the
+        // catalogue it built instead.
+        let (provider_catalogue, default_provider, workspace_config) =
+            match input.providers {
+                ProviderSeam::Mounted => {
+                    let catalogue = kernel
+                        .require::<ProviderCatalogue>(uva::provider::KEY_LLM)
+                        .map_err(|error| {
+                            format!(
+                                "the llm service is unavailable after \
+                                 mount: {error}"
+                            )
+                        })?;
+                    let provider = kernel
+                        .require::<Arc<dyn ModelProvider>>(
+                            uva::provider::KEY_LLM_DEFAULT,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "the llm.default service is unavailable \
+                                 after mount: {error}"
+                            )
+                        })
+                        .map(|wrapped| Arc::clone(&*wrapped))?;
+                    let workspace = catalogue.workspace().clone();
+                    (catalogue, provider, workspace)
+                }
+                #[cfg(any(test, feature = "test-utils"))]
+                ProviderSeam::Injected {
+                    catalogue,
+                    default_provider,
+                    workspace,
+                } => (catalogue, default_provider, workspace),
+            };
+        // The capability services the rows published. They are
+        // resolved for the projection layer (`AppState` fields,
         // routes) — construction happened inside each plugin's
         // `apply`.
         let tool_registry = kernel
@@ -333,6 +526,27 @@ impl AppState {
                     "the sessions service is unavailable after mount: {error}"
                 )
             })?;
+        // The mount published `sessions`: build the child-session
+        // router over it, then hand its writer source to the already
+        // mounted `tool-task` tool through the slot.
+        let subagent_router =
+            Arc::new(crate::session::subagent_router::SubagentRouter::new(
+                Arc::clone(&session_manager),
+            ));
+        subagent_writer_slot.set(Arc::new(
+            crate::session::subagent_router::SessionSubagentWriters::new(
+                Arc::clone(&subagent_router),
+                Arc::clone(&session_manager),
+            ),
+        ));
+        // The control surface reads the same sessions: the roster is
+        // rebuilt from their logs, and a cold wake writes the woken
+        // child's next round into its own session.
+        session_index_slot.set(Arc::new(
+            crate::session::session_index::ServerSessionIndex::new(Arc::clone(
+                &session_manager,
+            )),
+        ));
         let attachment_store = kernel
             .require::<uva::attachment::AttachmentStore>(
                 uva::attachment::KEY_ATTACHMENTS,
@@ -366,25 +580,35 @@ impl AppState {
 
         // R21/R30: connect the configured MCP servers through the
         // mounted supervisor; a server that fails to start is logged
-        // with its health state and skipped.
-        let (mcp_clients, mcp_health) = register_configured_mcp_servers(
-            Arc::clone(&mcp_supervisor),
-            tool_registry.as_ref(),
-            clock.now(),
-            &workspace_root,
-        )
-        .await;
-        // Smaller per-request load: MCP tools advertise name +
-        // description (`Deferred`) and promote their schema on the
-        // first call. Only `Direct` flips, so an operator's explicit
-        // verdict stands.
-        for d in tool_registry.descriptors().iter().filter(|d| {
-            d.name.starts_with("mcp__")
-                && d.exposure == uva::tool::ToolExposure::Direct
-        }) {
-            tool_registry
-                .set_exposure(&d.name, uva::tool::ToolExposure::Deferred);
-        }
+        // with its health state and skipped. The fixture configures no
+        // servers and drives the supervisor itself.
+        let mcp_registration = match input.mode {
+            BootMode::Deployment => {
+                let registration = register_configured_mcp_servers(
+                    Arc::clone(&mcp_supervisor),
+                    tool_registry.as_ref(),
+                    clock.now(),
+                    &input.workspace_root,
+                )
+                .await;
+                // Smaller per-request load: MCP tools advertise name +
+                // description (`Deferred`) and promote their schema on
+                // the first call. Only `Direct` flips, so an operator's
+                // explicit verdict stands.
+                for d in tool_registry.descriptors().iter().filter(|d| {
+                    d.name.starts_with("mcp__")
+                        && d.exposure == uva::tool::ToolExposure::Direct
+                }) {
+                    tool_registry.set_exposure(
+                        &d.name,
+                        uva::tool::ToolExposure::Deferred,
+                    );
+                }
+                Some(registration)
+            }
+            #[cfg(any(test, feature = "test-utils"))]
+            BootMode::Fixture => None,
+        };
 
         // The route surfaces read the same store/engine the plugins
         // published: one schedule store, one eval runner.
@@ -393,7 +617,7 @@ impl AppState {
             clock.clone(),
         );
         let evals = EvalsState::build_with_runner(
-            &workspace_root,
+            &input.workspace_root,
             Arc::clone(&eval_runner),
         );
 
@@ -410,105 +634,89 @@ impl AppState {
                      {error}; the profile must include the `agent-loop` row"
                 )
             })?;
-        let profile_snapshot = effective_profile.clone();
 
         // The supervisor's reconnect loop is the boot's to drive: one
         // tick resolves the `mcp` service, so unloading the plugin
         // stops the loop (the next `get` fails) and the explicit
         // teardown path withdraws the generations.
-        let mcp = McpRuntime::start(
-            kernel.clone(),
-            Arc::clone(&tool_registry),
-            Arc::clone(&mcp_supervisor),
-            mcp_clients,
-            mcp_health,
-            clock.clone(),
-        );
+        let mcp = match mcp_registration {
+            Some((mcp_clients, mcp_health)) => McpRuntime::start(
+                kernel.clone(),
+                Arc::clone(&tool_registry),
+                mcp_supervisor,
+                mcp_clients,
+                mcp_health,
+                clock.clone(),
+            ),
+            None => McpRuntime::detached(mcp_supervisor),
+        };
 
         // R34 (Task 16): apply the deployment's `[tools]` surface after
         // every registration source has had its say — builtins, the
         // mounted `skills` / `mcp` / `schedule-tool` plugins, and the
         // composition's host plugins. Unknown names are warnings,
-        // never boot failures — see `apply_tools_config`.
-        let tool_surface = apply_tools_config(
-            tool_registry.as_ref(),
-            &server_config
-                .as_ref()
-                .map(|c| c.tools.clone())
-                .unwrap_or_default(),
-        );
-        Self::build_default_agent(
-            &kernel,
-            &default_provider,
-            &tool_registry,
-            tool_surface.policy(),
-            default_max_iterations,
-            plugin_host.clone(),
-            Arc::clone(&agent_registry),
-        )
-        .await;
+        // never boot failures — see `apply_tools_config`. The fixture
+        // composes no host plugins, so its surface stays empty.
+        let tool_surface = match input.mode {
+            BootMode::Deployment => apply_tools_config(
+                tool_registry.as_ref(),
+                &input
+                    .server_config
+                    .as_ref()
+                    .map(|c| c.tools.clone())
+                    .unwrap_or_default(),
+            ),
+            #[cfg(any(test, feature = "test-utils"))]
+            BootMode::Fixture => AppliedToolSurface::default(),
+        };
+        if matches!(input.mode, BootMode::Deployment) {
+            Self::build_default_agent(
+                &kernel,
+                &default_provider,
+                &tool_registry,
+                tool_surface.policy(),
+                input.default_max_iterations,
+                input.plugin_host.clone(),
+                Arc::clone(&input.agent_registry),
+            )
+            .await;
+        }
 
-        // Tool schemas travel on the completion request's `tools`
-        // channel, not in the prompt. The prompt manifest is a live
-        // service snapshot (`AppState::prompt_context`), rebuilt per
-        // session/agent build so a skills remount reaches the next
-        // build.
-
-        // Sub-agent session router over the same registry + cache
-        // the HTTP surface uses: delegated children get sessions
-        // exactly like user conversations (one code path for both).
-        let active_sessions = Arc::new(crate::state::ActiveSessions::new());
-        let subagent_router =
-            Arc::new(crate::session::subagent_router::SubagentRouter::new(
-                Arc::clone(&session_manager),
-                Arc::clone(&active_sessions),
-            ));
-        // The cluster bus: `mode = "local"` (default) is the
-        // in-process bus; `mode = "redis"` fails the boot when the
-        // bus is unreachable, because a multi-node deployment that
-        // cannot coordinate must not serve split-brain sessions.
-        let cluster_config = server_config
-            .as_ref()
-            .map(|c| c.cluster.clone())
-            .unwrap_or_default();
-        let cluster =
-            crate::cluster::ClusterRuntime::from_config(&cluster_config)
-                .await
-                .map_err(|e| format!("[cluster] {e}"))?;
-        let cluster = Arc::new(cluster);
-        // The state handle is bound before the self-management
-        // registration below—its tools close over the Arc.
-        let state = Arc::new_cyclic(|_weak| Self {
+        Ok(Self {
             clock,
-            cluster,
+            cluster: input.cluster,
             tool_registry,
-            agent_registry,
-            session_search,
+            agent_registry: input.agent_registry,
+            session_search: input.session_search,
             session_manager,
-            workspace_root,
-            default_model,
+            workspace_root: input.workspace_root,
+            default_model: input.default_model,
             workspace_config: parking_lot::RwLock::new(workspace_config),
             default_provider: parking_lot::RwLock::new(default_provider),
-            provider_catalogue: parking_lot::RwLock::new(Arc::clone(
-                &provider_catalogue,
-            )),
-            operations_config,
-            system_prompt,
-            server_config,
-            default_max_iterations,
-            default_compaction,
+            provider_catalogue: parking_lot::RwLock::new(provider_catalogue),
+            operations_config: input.operations_config,
+            // The ReAct loop builds its own system prompt per-dispatch
+            // via `uva::agent::PromptContext::assemble`; this is the
+            // legacy default for callers that read
+            // `AppState::system_prompt` directly.
+            system_prompt: uva::agent::DEFAULT_SYSTEM_PROMPT.to_string(),
+            server_config: input.server_config,
+            default_max_iterations: input.default_max_iterations,
+            default_compaction: input.default_compaction,
             tool_surface,
             tool_defs_cache: parking_lot::RwLock::new(None),
-            kernel,
-            boot_services,
-            mount: parking_lot::Mutex::new(mounted.into_groups()),
-            profile: parking_lot::RwLock::new(profile_snapshot),
-            assembly: parking_lot::RwLock::new(assembly),
-            profile_store,
-            profile_write: tokio::sync::Mutex::new(()),
-            ui_tree: parking_lot::RwLock::new(ui_tree),
             mcp,
-            plugin_host,
+            assembly: Assembly::new(
+                kernel,
+                boot_services,
+                mounted.realms(),
+                mounted.into_groups(),
+                input.profile,
+                assembly,
+                input.profile_store,
+                ui_tree,
+            ),
+            plugin_host: input.plugin_host,
             #[cfg(any(test, feature = "test-utils"))]
             provider_override: parking_lot::Mutex::new(None),
             #[cfg(any(test, feature = "test-utils"))]
@@ -518,42 +726,14 @@ impl AppState {
             spawn_gate_timeout: super::sessions::COLD_OPEN_GATE_TIMEOUT,
             subagent_router,
             default_agent_name: parking_lot::RwLock::new(
-                default_agent_name_value,
+                input.default_agent_name,
             ),
-            usage_metrics: Arc::new(UsageMetrics::default()),
+            usage_metrics,
             attachment_store,
             schedules,
             evals,
-            rpc: Arc::new(crate::rpc::RpcRuntime::new()),
-        });
-        // The self-management MCP server needs the finished state
-        // handle (its tools call back into it), so it registers
-        // after construction—the shared registry makes the tools
-        // visible to every later run.
-        super::self_mcp::register_self_mcp(&state).await;
-        // One process-wide control consumer: applies registry
-        // mutations from peer nodes and forwards remote ops to the
-        // local controller that owns the session.
-        super::cluster_ops::spawn_control_dispatcher(Arc::clone(&state));
-        // The dead-controller sweep behind the exit notification:
-        // weak on the state, so it ends with it instead of
-        // outliving it (the exit notification itself needs no
-        // task — the controller's loop runs it).
-        super::sessions::spawn_dead_session_reaper(Arc::downgrade(&state));
-        // The layout's definitions become live agents: the files
-        // are the storage, the registry is the runtime's view of
-        // them. Registered here — after the state exists (the
-        // builder closes over it), before the scheduler starts (a
-        // task's agent target must resolve by then).
-        super::super::boot::register_file_agents(&state).await;
-        // `tasks/<name>/task.md` declarations sync into the store by
-        // name; an active store entry with no declaration is
-        // exported back to a file, so the store never holds state
-        // the layout cannot show.
-        super::tasks::sync_task_declarations(&state);
-        // The background scheduler tick: one leader per deployment.
-        super::schedules::spawn_scheduler_driver(Arc::clone(&state));
-        Ok(state)
+            rpc: input.rpc,
+        })
     }
 }
 
@@ -642,9 +822,9 @@ impl AppState {
     /// The deployment's host is passed in: the boot built its policy
     /// and composed the plugins into it, `AppState` keeps it, and this
     /// agent gets a clone — the same handle every run will get. The
-    /// registry comes in too: the `subagents` plugin's delegator was
-    /// built over it before the mount, so the boot creates it once and
-    /// this call only registers the default member.
+    /// registry comes in too: the `tool-task` row's tool was built
+    /// over it before the mount, so the boot creates it once and this
+    /// call only registers the default member.
     #[allow(clippy::too_many_arguments)]
     async fn build_default_agent(
         kernel: &uva::kernel::Context,
@@ -657,8 +837,8 @@ impl AppState {
     ) -> Arc<AgentRegistry> {
         // The default member is built through the mounted
         // `agentLoop` service, exactly like a session run: the
-        // factory's defaults (delegators, strategy, restriction,
-        // context manager, spawner, compactor) apply, and only the
+        // factory's defaults (strategy, restriction, context manager,
+        // spawner, compactor) apply, and only the
         // member's own inputs are set here.
         let factory = kernel
             .require::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
@@ -676,18 +856,16 @@ impl AppState {
                     tool_registry: Arc::clone(tool_registry),
                     workspace_root: std::path::PathBuf::new(),
                     descriptor: uva::harness::default_descriptor(
-                        uva::harness::DEFAULT_SYSTEM_PROMPT.to_string(),
+                        uva::agent::DEFAULT_SYSTEM_PROMPT.to_string(),
                     ),
                     prompt_context: Arc::new(
-                        uva::harness::PromptContext::default(),
+                        uva::agent::PromptContext::default(),
                     ),
                     max_iterations: default_max_iterations,
-                    delegators: Vec::new(),
                     tool_surface: tool_surface_policy,
                     strategy: None,
                     tool_restriction: None,
                     log_writer: None,
-                    subagent_writers: None,
                     context_manager: None,
                     compactor: None,
                     host: Some(plugin_host),
@@ -773,49 +951,4 @@ pub(crate) fn materialize_row_config(
     if empty {
         row.config = config;
     }
-}
-
-/// The `agent-loop` assembly input: the deployment's agent table,
-/// materialized into the row's `config`.
-///
-/// The row owns its loop, so the boot hands the row the **values** the
-/// agent table carries, not pre-built objects: the strategy alias (the
-/// row resolves it), the allow/deny tool lists, and the compaction
-/// policy. An absent value is `null` — "the deployment configured
-/// nothing", which is not the same as an empty value.
-///
-/// The profile wins: the boot only fills a row whose config is empty.
-pub(crate) fn agent_loop_row_config(
-    server_config: Option<&crate::config::ServerConfig>,
-    default_agent_name: Option<&str>,
-    restriction: Option<&uva::tool::ToolRestriction>,
-    compaction: Option<uva::session::CompactionSettings>,
-) -> serde_json::Value {
-    let strategy =
-        load_default_strategy_alias(server_config, default_agent_name);
-    let tool_restriction = restriction.map(|restriction| {
-        serde_json::to_value(restriction).unwrap_or_else(|error| {
-            tracing::warn!(
-                error = %error,
-                "the agent-loop row's tool restriction does not \
-                 serialize; the row keeps no restriction"
-            );
-            serde_json::Value::Null
-        })
-    });
-    let compaction = compaction.map(|settings| {
-        serde_json::to_value(settings).unwrap_or_else(|error| {
-            tracing::warn!(
-                error = %error,
-                "the agent-loop row's compaction settings do not \
-                 serialize; the row keeps no compactor"
-            );
-            serde_json::Value::Null
-        })
-    });
-    serde_json::json!({
-        "strategy": strategy,
-        "tool_restriction": tool_restriction,
-        "compaction": compaction,
-    })
 }

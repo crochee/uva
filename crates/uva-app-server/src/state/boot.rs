@@ -11,8 +11,8 @@
 use std::sync::Arc;
 
 use uva::{
+    agent::{AgentRegistry, PromptContext},
     core::registry::{Registry as _, RegistryItem},
-    harness::{AgentRegistry, PromptContext},
     tool::ToolRegistry,
 };
 
@@ -183,6 +183,54 @@ pub(crate) fn load_default_strategy_alias(
     cfg?.agents.get(name)?.strategy.clone()
 }
 
+/// The `agent-loop` assembly input: the deployment's agent table,
+/// materialized into the row's `config`.
+///
+/// The row owns its loop, so the boot hands the row the **values** the
+/// agent table carries, not pre-built objects: the strategy alias (the
+/// row resolves it), the allow/deny tool lists, and the compaction
+/// policy. An absent value is `null` — "the deployment configured
+/// nothing", which is not the same as an empty value.
+///
+/// The profile wins: the boot only fills a row whose config is empty.
+///
+/// The translator resolves the same values, so a migrated deployment's
+/// document states the loop the config file described.
+pub(crate) fn agent_loop_row_config(
+    server_config: Option<&crate::config::ServerConfig>,
+    default_agent_name: Option<&str>,
+    restriction: Option<&uva::tool::ToolRestriction>,
+    compaction: Option<uva::session::CompactionSettings>,
+) -> serde_json::Value {
+    let strategy =
+        load_default_strategy_alias(server_config, default_agent_name);
+    let tool_restriction = restriction.map(|restriction| {
+        serde_json::to_value(restriction).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "the agent-loop row's tool restriction does not \
+                 serialize; the row keeps no restriction"
+            );
+            serde_json::Value::Null
+        })
+    });
+    let compaction = compaction.map(|settings| {
+        serde_json::to_value(settings).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                "the agent-loop row's compaction settings do not \
+                 serialize; the row keeps no compactor"
+            );
+            serde_json::Value::Null
+        })
+    });
+    serde_json::json!({
+        "strategy": strategy,
+        "tool_restriction": tool_restriction,
+        "compaction": compaction,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // MCP server registration (R21/R30)
 // ---------------------------------------------------------------------------
@@ -295,7 +343,7 @@ pub(crate) async fn register_file_agents(state: &crate::state::AppState) {
                 continue;
             }
         };
-        let entry = uva::harness::agent::AgentEntry::new(agent);
+        let entry = uva::agent::AgentEntry::new(agent);
         if let Err(error) =
             futures::executor::block_on(state.agent_registry.put(entry))
         {
@@ -551,28 +599,26 @@ fn apply_surface_list(
 /// directory walk: the plugin publishes the deployment's one
 /// [`SkillRegistry`](uva::skill::SkillRegistry), the `skill` tool
 /// registers into the same registry, and unloading the plugin removes
-/// both the service and the `<available_skills>` block. An absent or
-/// unloaded service contributes no skills — the block is then omitted,
-/// exactly as it is for a deployment with no skill files.
+/// both the service and the `<available_skills>` block. The caller
+/// hands the mounted service over — the assembly owns the kernel, so
+/// the resolver reads it there. An absent or unloaded service
+/// contributes no skills — the block is then omitted, exactly as it is
+/// for a deployment with no skill files.
 ///
 /// Peer agents are snapshotted from the live `AgentRegistry`
 /// inline; the caller-supplied `self_name` is excluded so the
 /// running agent never sees itself as a handoff target.
 pub(crate) async fn build_prompt_context(
-    kernel: &uva::kernel::Context,
+    skills: Option<Arc<uva::skill::SkillRegistry>>,
     agent_registry: &Arc<AgentRegistry>,
     self_name: &str,
 ) -> PromptContext {
     let mut ctx = PromptContext::default();
 
-    // Skills: the service is the source of truth. A read failure is
+    // Skills: the service is the source of truth. An absent service is
     // treated as "no service" — the prompt keeps its text and simply
     // advertises no skills rather than failing the agent build.
-    if let Some(registry) = kernel
-        .get::<uva::skill::SkillRegistry>(uva::skill::KEY_SKILLS)
-        .ok()
-        .flatten()
-    {
+    if let Some(registry) = skills {
         for skill in registry.collect().await.skills {
             ctx = ctx
                 .with_skill(skill.name.clone(), skill.effective_description());

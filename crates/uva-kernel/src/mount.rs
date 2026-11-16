@@ -16,6 +16,7 @@ use crate::{
     effect::EffectHandle,
     error::{MountError, PluginError},
     manifest::PLUGIN_PROTOCOL_VERSION,
+    mount_ctx::{MountRow, Realms, derive_context},
     plugin::Plugin,
 };
 
@@ -26,7 +27,9 @@ use crate::{
 /// Plugins mount in dependency order: a plugin whose `inject` key is
 /// provided inside the group mounts after its provider. Ties keep the
 /// declaration order of `plugins`, so a group with no edges mounts
-/// exactly as passed.
+/// exactly as passed. An `inject` key no group member provides is
+/// simply not an ordering constraint — the row mounts at its declared
+/// position and its fiber waits (dsh fiber PENDING).
 ///
 /// # Validation
 ///
@@ -37,41 +40,32 @@ use crate::{
 ///   ([`PLUGIN_PROTOCOL_VERSION`]);
 /// - no manifest lists the same `provides` key twice;
 /// - no two plugins provide the same service key;
-/// - every `inject` key is either provided inside the group or already
-///   available in the parent context;
 /// - the `inject` edges are acyclic (the error lists the plugins left
 ///   in the cycle).
 ///
-/// # Parent availability
+/// A missing dependency is **not** a mount failure: the fiber stays
+/// [`PluginState::Pending`] and activates when a provider appears (or
+/// never, which the host's boot audit reports). This is dsh's loader
+/// semantics — the kernel parks instead of rejecting.
 ///
-/// A dependency outside the group is probed with
-/// [`ReflectService::get_value`](cordis::ReflectService::get_value) on
-/// [`Context::inner`], which resolves in the context's own isolation
-/// scope. The probe is deliberately **not**
-/// [`ReflectService::services`](cordis::ReflectService::services): that
-/// lists implementations from *every* isolation scope, so a sibling
-/// scope's service would falsely satisfy a dependency. The strict read
-/// also returns `None` while the provider fiber is loading or unloading;
-/// such a read is reported as a missing dependency rather than silently
-/// accepted.
+/// # Row contexts
 ///
-/// A service registered with `provide_checked` whose predicate is
-/// currently false still probes as present: the strict read returns the
-/// value without evaluating the predicate. The consumer's fiber then
-/// stays `Pending`, and `mount_all` surfaces that as
-/// [`MountError::PluginInactive`] after the mount attempt; the strict
-/// read itself remains the correct scope-aware probe.
+/// [`mount_all_with`] additionally derives each row's mount context
+/// from its [`MountRow`]: isolated service scopes (fresh per row, or
+/// shared through a [`Realms`] label registry) and intercept
+/// configuration overlays. Children a group plugin mounts through the
+/// same API inherit the group's derivation, dsh's context chain.
 ///
 /// # Failure
 ///
-/// If a plugin's [`apply`](Plugin::apply) fails (including by panicking),
-/// the failed fiber is disposed first — withdrawing anything it
-/// registered before failing — then every previously mounted plugin's
-/// tracked effect handles are dropped in reverse, and finally their
-/// fibers are disposed in reverse. The error names the plugin and
-/// carries its own [`PluginError`]. A disposal failure during the
-/// rollback is logged with `tracing::warn!` and does not replace the
-/// original error.
+/// If a plugin's [`apply`](Plugin::apply) fails (including by
+/// panicking), the failed fiber is disposed first — withdrawing
+/// anything it registered before failing — then every previously
+/// mounted plugin's tracked effect handles are dropped in reverse, and
+/// finally their fibers are disposed in reverse. The error names the
+/// plugin and carries its own [`PluginError`]. A disposal failure
+/// during the rollback is logged with `tracing::warn!` and does not
+/// replace the original error.
 ///
 /// # Unloading
 ///
@@ -80,7 +74,9 @@ use crate::{
 /// reverse (revoking each registration exactly once, clones included),
 /// then disposes the fibers in reverse. An effect a plugin did not
 /// return stays owned by its fiber, so cleanup still runs exactly once
-/// when that fiber is disposed.
+/// when that fiber is disposed. A fiber that activates late (it was
+/// parked, its provider arrived) has its handles drained from the
+/// activation slot at teardown.
 ///
 /// A host that unloads one plugin without unmounting the group calls
 /// [`MountHandle::dispose_plugin`]: that plugin's handles and fiber go,
@@ -90,20 +86,40 @@ pub fn mount_all(
     ctx: &Context,
     plugins: &[Arc<dyn Plugin>],
 ) -> Result<MountHandle, MountError> {
-    validate(ctx, plugins)?;
-    let order = topological_order(plugins)?;
-    let mut fibers = Vec::with_capacity(order.len());
-    let mut effects: Vec<Vec<EffectHandle>> = Vec::with_capacity(order.len());
+    let rows: Vec<(Arc<dyn Plugin>, MountRow)> = plugins
+        .iter()
+        .map(|plugin| (Arc::clone(plugin), MountRow::default()))
+        .collect();
+    mount_all_with(ctx, &Realms::default(), &rows)
+}
+
+/// Mount a group of plugins with each row's context derivation.
+///
+/// Rows pair the plugin with its [`MountRow`] (isolation scopes,
+/// intercept overlays); a row without an opinion mounts under `ctx`
+/// unchanged. This is also the child-mount primitive a group plugin
+/// calls from its own [`Plugin::apply`] — passing its fiber context as
+/// `ctx` mounts the children beneath the group's fiber.
+pub fn mount_all_with(
+    ctx: &Context,
+    realms: &Realms,
+    rows: &[(Arc<dyn Plugin>, MountRow)],
+) -> Result<MountHandle, MountError> {
+    let plugins: Vec<Arc<dyn Plugin>> =
+        rows.iter().map(|(plugin, _)| Arc::clone(plugin)).collect();
+    validate(&plugins)?;
+    let order = topological_order(&plugins)?;
+    let mut entries: Vec<MountedEntry> = Vec::with_capacity(order.len());
 
     for index in order {
         let plugin = Arc::clone(&plugins[index]);
         let plugin_id = plugin.manifest().id.clone();
         let failure: Arc<Mutex<Option<PluginError>>> =
             Arc::new(Mutex::new(None));
-        let applied: Arc<Mutex<Option<Vec<EffectHandle>>>> =
-            Arc::new(Mutex::new(None));
+        let applied: ActivationSlot = Arc::new(Mutex::new(None));
         let failure_slot = Arc::clone(&failure);
         let applied_slot = Arc::clone(&applied);
+        let mount_ctx = derive_context(ctx, realms, &rows[index].1);
         let handle = plugin_sync::<(), _>(
             plugin_id.clone(),
             Inject::new(plugin.manifest().inject.iter().cloned()),
@@ -137,12 +153,19 @@ pub fn mount_all(
             },
         );
 
-        let fiber = ctx.inner().plugin(handle, ());
-        let applied = take_effects(&applied);
+        let fiber = mount_ctx.inner().plugin(handle, ());
+        let applied_handles = take_effects(&applied);
         match fiber.state() {
-            FiberState::Active => {
-                effects.push(applied);
-                fibers.push(fiber);
+            // Pending is dsh's missing-dependency semantics: the fiber
+            // parks and activates when its provider appears. Its
+            // handles land in the activation slot and are drained at
+            // teardown.
+            FiberState::Active | FiberState::Pending => {
+                entries.push(MountedEntry {
+                    effects: applied_handles,
+                    slot: applied,
+                    fiber,
+                });
             }
             FiberState::Failed => {
                 let source = failure
@@ -159,15 +182,21 @@ pub fn mount_all(
                                 }),
                         )
                     });
-                effects.push(applied);
-                fibers.push(fiber);
-                rollback(&mut effects, &mut fibers);
+                entries.push(MountedEntry {
+                    effects: applied_handles,
+                    slot: applied,
+                    fiber,
+                });
+                rollback(&mut entries);
                 return Err(MountError::ApplyFailed { plugin_id, source });
             }
             state => {
-                effects.push(applied);
-                fibers.push(fiber);
-                rollback(&mut effects, &mut fibers);
+                entries.push(MountedEntry {
+                    effects: applied_handles,
+                    slot: applied,
+                    fiber,
+                });
+                rollback(&mut entries);
                 return Err(MountError::PluginInactive {
                     plugin_id,
                     state: format!("{state:?}"),
@@ -176,7 +205,7 @@ pub fn mount_all(
         }
     }
 
-    Ok(MountHandle { effects, fibers })
+    Ok(MountHandle { entries })
 }
 
 /// Lifecycle state of one plugin owned by a [`MountHandle`].
@@ -231,29 +260,48 @@ pub struct MountHandle {
     /// One entry per mounted plugin, in mount order. The group keeps
     /// each plugin's returned handles together so a single plugin can
     /// be disposed without disturbing its siblings.
-    effects: Vec<Vec<EffectHandle>>,
-    fibers: Vec<Fiber>,
+    entries: Vec<MountedEntry>,
+}
+
+/// Where a plugin's [`apply`](Plugin::apply) deposits the handles it
+/// returns.
+type ActivationSlot = Arc<Mutex<Option<Vec<EffectHandle>>>>;
+
+/// One mounted plugin: its fiber, the handles already drained from the
+/// activation slot, and the slot itself — a fiber that mounted while
+/// parked (`Pending`) deposits its handles there when it activates
+/// later, and teardown drains it so those registrations are revoked
+/// exactly once too.
+#[derive(Debug)]
+struct MountedEntry {
+    /// Handles drained at mount time; empty for a parked fiber.
+    effects: Vec<EffectHandle>,
+    /// The activation slot, drained at teardown.
+    slot: ActivationSlot,
+    /// The plugin's fiber.
+    fiber: Fiber,
 }
 
 impl MountHandle {
     /// Number of plugins this handle owns.
     pub fn len(&self) -> usize {
-        self.fibers.len()
+        self.entries.len()
     }
 
     /// Whether this handle owns no plugins (an empty mount group).
     pub fn is_empty(&self) -> bool {
-        self.fibers.is_empty()
+        self.entries.is_empty()
     }
 
     /// The state of the mounted plugin named `id`, or `None` when this
     /// handle does not own it.
     pub fn plugin_state(&self, id: &str) -> Option<PluginState> {
-        self.fiber_index(id)
-            .map(|index| self.fibers[index].state().into())
+        self.entry_index(id)
+            .map(|index| self.entries[index].fiber.state().into())
     }
 
-    /// Dispose one plugin: drop the effect handles it returned, then
+    /// Dispose one plugin: drop the effect handles it returned (its
+    /// activation slot drained first, in case it activated late), then
     /// dispose its fiber.
     ///
     /// Consumers that injected a service the plugin provided are parked
@@ -262,49 +310,51 @@ impl MountHandle {
     /// plugin with that id is owned (including a second call for an id
     /// already disposed), so disposal is idempotent.
     pub fn dispose_plugin(&mut self, id: &str) -> bool {
-        let Some(index) = self.fiber_index(id) else {
+        let Some(index) = self.entry_index(id) else {
             return false;
         };
-        let mut effects = self.effects.remove(index);
-        while let Some(effect) = effects.pop() {
-            drop(effect);
-        }
-        let fiber = self.fibers.remove(index);
-        dispose_fiber(fiber);
+        let entry = self.entries.remove(index);
+        dispose_entry(entry);
         true
     }
 
-    fn fiber_index(&self, id: &str) -> Option<usize> {
-        self.fibers.iter().position(|fiber| fiber.name() == id)
+    fn entry_index(&self, id: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.fiber.name() == id)
     }
 }
 
 impl Drop for MountHandle {
     fn drop(&mut self) {
-        for effects in self.effects.iter_mut().rev() {
-            while let Some(effect) = effects.pop() {
-                drop(effect);
-            }
+        for entry in self.entries.drain(..).rev() {
+            dispose_entry(entry);
         }
-        dispose_reverse(&mut self.fibers);
     }
+}
+
+/// Drop one entry's handles (its activation slot drained first, in
+/// case the fiber activated late), then dispose its fiber.
+fn dispose_entry(mut entry: MountedEntry) {
+    let late = take_effects(&entry.slot);
+    for effect in late {
+        drop(effect);
+    }
+    while let Some(effect) = entry.effects.pop() {
+        drop(effect);
+    }
+    dispose_fiber(entry.fiber);
 }
 
 /// Roll back a group whose current (last) plugin did not activate.
 ///
-/// The failed fiber is disposed first, then the tracked effect handles
-/// of the previous plugins are dropped in reverse, then their fibers are
+/// The failed fiber is disposed first, then the previous plugins'
+/// tracked effect handles are dropped in reverse, then their fibers are
 /// disposed in reverse.
-fn rollback(effects: &mut Vec<Vec<EffectHandle>>, fibers: &mut Vec<Fiber>) {
-    if let Some(failed) = fibers.pop() {
-        dispose_fiber(failed);
+fn rollback(entries: &mut Vec<MountedEntry>) {
+    while let Some(entry) = entries.pop() {
+        dispose_entry(entry);
     }
-    while let Some(mut group) = effects.pop() {
-        while let Some(effect) = group.pop() {
-            drop(effect);
-        }
-    }
-    dispose_reverse(fibers);
 }
 
 /// Take the handles a plugin returned from its activation slot.
@@ -327,13 +377,6 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("panic with a non-string payload")
 }
 
-/// Dispose fibers last-in, first-out. Disposal is idempotent, so a fiber
-/// whose tracked handles were already dropped is safe to include.
-fn dispose_reverse(fibers: &mut Vec<Fiber>) {
-    while let Some(fiber) = fibers.pop() {
-        dispose_fiber(fiber);
-    }
-}
 
 /// Dispose one fiber, logging rather than propagating a failure (this is
 /// called from rollback paths and destructors).
@@ -348,10 +391,7 @@ fn dispose_fiber(fiber: Fiber) {
 }
 
 /// Run every check that must pass before the first plugin starts.
-fn validate(
-    ctx: &Context,
-    plugins: &[Arc<dyn Plugin>],
-) -> Result<(), MountError> {
+fn validate(plugins: &[Arc<dyn Plugin>]) -> Result<(), MountError> {
     let mut ids = HashSet::with_capacity(plugins.len());
     let mut providers: HashMap<&str, &str> = HashMap::new();
 
@@ -396,7 +436,6 @@ fn validate(
         }
     }
 
-    check_dependencies(ctx, plugins, &providers)?;
     Ok(())
 }
 
@@ -418,42 +457,15 @@ fn protocol_compatible(version: &str) -> bool {
         .and_then(|major| major.parse::<u64>().ok())
         == Some(host_major)
 }
-
-/// Reject an `inject` key that neither the group nor the parent provides.
-fn check_dependencies(
-    ctx: &Context,
-    plugins: &[Arc<dyn Plugin>],
-    providers: &HashMap<&str, &str>,
-) -> Result<(), MountError> {
-    for plugin in plugins {
-        let manifest = plugin.manifest();
-        let mut missing = Vec::new();
-        let mut seen = HashSet::new();
-
-        for key in &manifest.inject {
-            if providers.contains_key(key.as_str())
-                || !seen.insert(key.as_str())
-            {
-                continue;
-            }
-            if parent_service_available(ctx, key) {
-                continue;
-            }
-            missing.push(key.clone());
-        }
-
-        if !missing.is_empty() {
-            return Err(MountError::MissingDependency {
-                plugin_id: manifest.id.clone(),
-                keys: missing,
-            });
-        }
-    }
-    Ok(())
-}
-
 /// Probe the parent context for a service in its own isolation scope.
-fn parent_service_available(ctx: &Context, key: &str) -> bool {
+///
+/// Used by hosts for boot audits: a row whose `inject` key resolves
+/// here is satisfied by an ancestor scope even though no group member
+/// provides it. The strict read matches the kernel's scope model (a
+/// sibling isolate's service does not satisfy this row) and returns
+/// `false` while the provider fiber is still loading.
+#[must_use]
+pub fn parent_service_available(ctx: &Context, key: &str) -> bool {
     matches!(ctx.inner().reflect().get_value(key), Ok(Some(_)))
 }
 

@@ -5,9 +5,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 use uva_context::AgentState;
+use uva_core::SystemClock;
 use uva_provider::{ContentPart, TokenUsage};
+use uva_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use uva_steering::{GuardResult, HookDecision, HookEvent};
 use uva_test_support::FakeTool;
 use uva_tool::ToolRegistry;
@@ -16,7 +20,7 @@ use super::{support::*, *};
 use crate::agent::host::{Hook, HookContext, Host};
 
 #[tokio::test]
-async fn guard_denial_surfaces_as_error_result_and_warning() {
+async fn guard_denial_surfaces_as_error_result_without_a_live_warning() {
     let tool_use = ToolUse {
         id: "c1".to_string(),
         name: "echo".to_string(),
@@ -60,22 +64,21 @@ async fn guard_denial_surfaces_as_error_result_and_warning() {
         "denial text should carry guard name + reason, got: {text}"
     );
 
-    let guard_warnings: Vec<_> = events
+    // The veto's live `Warning{Guard}` is retired: the durable
+    // `hook_block` row says the same veto and reaches every surface
+    // through the log — keeping both would state one fact twice, in
+    // two vocabularies. The retirement must be real: no Guard warning
+    // fires, and no other warning replaces it.
+    let warnings: Vec<_> = events
         .iter()
         .filter(|e| {
-            matches!(
-                e,
-                AgentEvent::System(SystemEvent::Warning {
-                    kind: WarningKind::Guard,
-                    ..
-                })
-            )
+            matches!(e, AgentEvent::System(SystemEvent::Warning { .. }))
         })
         .collect();
-    assert_eq!(
-        guard_warnings.len(),
-        1,
-        "expected exactly one Guard warning event"
+    assert!(
+        warnings.is_empty(),
+        "a guard veto publishes no live warning — the `hook_block` row \
+         is the fact — got {warnings:?}"
     );
 
     // The session still ends Completed — denials are
@@ -86,6 +89,113 @@ async fn guard_denial_surfaces_as_error_result_and_warning() {
             reason: SessionEndReason::Completed,
         }))
     ));
+}
+
+// A guard veto is a policy block too: the log keeps the guard's
+// name and its reason, so a reloaded session says which policy
+// refused the call.
+#[tokio::test]
+async fn a_guard_denial_writes_a_hook_block_row() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let tool_use = ToolUse {
+        id: "c1".to_string(),
+        name: "echo".to_string(),
+        input: json!({}),
+    };
+    let provider = Arc::new(ScriptedStreamProvider::new(vec![
+        tool_call_response(vec![tool_use.clone()]),
+        empty_response(),
+    ]));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(FakeTool::new(
+        "echo", "echoed",
+    ))));
+    let mut host = Host::new();
+    let _guard = host.guard(Arc::new(DenyEchoGuard));
+
+    let agent = ReActAgent::new(provider, registry)
+        .with_host(host)
+        .expect("bind the host")
+        .with_log_writer(writer);
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    while stream.next().await.is_some() {}
+
+    let rows = sink.read().await.expect("read");
+    let blocks: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["type"] == "hook_block")
+        .collect();
+    assert_eq!(
+        blocks.len(),
+        1,
+        "the guard's veto writes exactly one hook_block row: {rows:#?}"
+    );
+    assert_eq!(blocks[0]["data"]["hook"], "deny_echo");
+    assert_eq!(blocks[0]["data"]["reason"], "echo is disabled for this run");
+    assert_eq!(blocks[0]["data"]["tool"], "echo");
+    assert_eq!(blocks[0]["data"]["call_id"], "c1");
+}
+
+// The `hook_block` row is not a reload-only fact: it is queued at the
+// veto and flushed with the veto's own tool result, so a client
+// reading the log while the run is still going — a `follow`
+// subscriber's row poll — already sees it. That is what makes the
+// live timeline and the reloaded one show the same notice.
+#[tokio::test]
+async fn the_hook_block_row_is_on_disk_before_the_run_ends() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let tool_use = ToolUse {
+        id: "c1".to_string(),
+        name: "echo".to_string(),
+        input: json!({}),
+    };
+    let provider = Arc::new(ScriptedStreamProvider::new(vec![
+        tool_call_response(vec![tool_use.clone()]),
+        empty_response(),
+    ]));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(FakeTool::new(
+        "echo", "echoed",
+    ))));
+    let mut host = Host::new();
+    let _guard = host.guard(Arc::new(DenyEchoGuard));
+
+    let agent = ReActAgent::new(provider, registry)
+        .with_host(host)
+        .expect("bind the host")
+        .with_log_writer(writer);
+    let mut stream = agent
+        .run(
+            AgentInput::text("run echo"),
+            Arc::new(CancellationToken::new()),
+        )
+        .await;
+    // Sample the log at the veto's own tool result — the row the
+    // commit path flushes on its way out, one event before the run's
+    // final boundary.
+    let mut sampled: Option<Vec<Value>> = None;
+    while let Some(event) = stream.next().await {
+        if matches!(
+            &event,
+            AgentEvent::Model(ContentPart::ToolResult(result))
+                if result.is_error.unwrap_or(false)
+        ) && sampled.is_none()
+        {
+            sampled = Some(sink.read().await.expect("read the log mid-run"));
+        }
+    }
+    let rows = sampled.expect("the veto's tool result event fired");
+    assert!(
+        rows.iter().any(|row| row["type"] == "hook_block"),
+        "the hook_block row is durable while the run is live: {rows:#?}"
+    );
 }
 
 // Pins the denial wire string and the veto-epilogue order: the tracker must see

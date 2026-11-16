@@ -13,6 +13,33 @@ fn text_row(kind: &str, seq: u64, text: &str) -> Value {
     })
 }
 
+/// An assistant row whose only content is reasoning: it renders no
+/// line, so the turn it belongs to names no answer of its own.
+fn reasoning_row(seq: u64, text: &str) -> Value {
+    json!({
+        "type": "assistant_message",
+        "seq": seq,
+        "data": {
+            "content": { "Single": { "type": "reasoning", "text": text } },
+        },
+    })
+}
+
+/// A row whose content holds two text parts: the pieces of one
+/// message, not one glued word.
+fn multi_text_row(kind: &str, seq: u64, first: &str, second: &str) -> Value {
+    json!({
+        "type": kind,
+        "seq": seq,
+        "data": {
+            "content": { "Multi": [
+                { "type": "text", "text": first },
+                { "type": "text", "text": second },
+            ] },
+        },
+    })
+}
+
 fn turn_end() -> Value {
     json!({
         "type": "turn",
@@ -138,6 +165,60 @@ fn the_assistant_row_replaces_the_live_copy() {
     });
     assert!(app.live_text().is_empty());
     assert_eq!(app.messages().last().expect("a line").text, "partial");
+}
+
+/// A row with two text parts renders them as the pieces they are: the
+/// parts join with a space, so the line reads as words instead of one
+/// glued word.
+#[test]
+fn a_row_with_two_text_parts_renders_them_separated() {
+    let mut app = App::new();
+    app.apply(follow(vec![
+        multi_text_row("user_message", 4, "part one", "part two"),
+        multi_text_row("assistant_message", 5, "part one", "part two"),
+    ]));
+
+    let lines = app.messages();
+    assert_eq!(lines[0].text, "part one part two");
+    assert_eq!(lines[1].text, "part one part two");
+}
+
+/// The live copy is compared in the server's shape — the streamed
+/// pieces concatenated — so a row whose parts arrive separately still
+/// replaces it, while the row's own line joins the parts with a
+/// space.
+#[test]
+fn the_live_copy_is_dropped_against_the_concatenated_row_text() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "live",
+            "live": { "running": true, "text": "part onepart two" },
+        }),
+    });
+    assert_eq!(app.live_text(), "part onepart two");
+
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "row",
+            "seq": 5,
+            "row": multi_text_row("assistant_message", 5, "part one", "part two"),
+        }),
+    });
+
+    assert!(
+        app.live_text().is_empty(),
+        "the live copy is dropped: the server's text is the row's \\
+         parts concatenated"
+    );
+    assert_eq!(
+        app.messages().last().expect("a line").text,
+        "part one part two",
+        "the row's line joins the parts with a space"
+    );
 }
 
 #[test]
@@ -754,6 +835,160 @@ fn the_follow_baseline_records_the_resume_material() {
     assert_eq!(material.last_seq, 9);
     assert_eq!(material.pending, vec!["call-1".to_string()]);
     assert_eq!(material.request_snapshot_hash, "abc123");
+}
+
+/// The feedback target is the last assistant row's **ordinal** — the
+/// `seq` the log's writer stamped on it.
+///
+/// A count of the assistant lines would name nothing: the count is a
+/// fact about this view, not about the log, and two sessions both
+/// count "1". The server resolves the target against the log's rows,
+/// so the target has to be the row's identity there.
+#[test]
+fn the_feedback_target_is_the_last_assistant_rows_ordinal() {
+    let mut app = App::new();
+    app.apply(follow(vec![
+        text_row("user_message", 4, "hello"),
+        text_row("assistant_message", 5, "first answer"),
+        text_row("assistant_message", 9, "second answer"),
+    ]));
+
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(
+        material.last_message_id.as_deref(),
+        Some("9"),
+        "the target is the last assistant row's ordinal, not a count \
+         of the assistant lines"
+    );
+}
+
+/// A turn whose only assistant row carries reasoning — the model hit
+/// its token cap mid-thinking — renders no transcript line, so the
+/// turn has no answer to rate. The earlier turn's answer belongs to
+/// a different turn: the target must not reach back into it. The
+/// web's projection names no row in the same case.
+#[test]
+fn a_turn_with_only_a_reasoning_row_offers_no_target() {
+    let mut app = App::new();
+    app.apply(follow(vec![
+        text_row("user_message", 4, "hello"),
+        text_row("assistant_message", 5, "the answer"),
+        text_row("user_message", 6, "again"),
+        reasoning_row(9, "thinking about it"),
+    ]));
+
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(
+        material.last_message_id, None,
+        "the current turn wrote no answer, so it names no row to rate"
+    );
+}
+
+/// A reasoning-only row in the turn that already answered keeps that
+/// turn's answer as the target: the row renders no line of its own,
+/// and the turn still has an answer. The web's projection names the
+/// same row.
+#[test]
+fn a_reasoning_only_row_in_the_same_turn_keeps_the_answers_ordinal() {
+    let mut app = App::new();
+    app.apply(follow(vec![
+        text_row("user_message", 4, "hello"),
+        text_row("assistant_message", 5, "the answer"),
+        reasoning_row(9, "thinking about it"),
+    ]));
+
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(
+        material.last_message_id.as_deref(),
+        Some("5"),
+        "a reasoning-only row renders no line, so the answer before \
+         it stays the target"
+    );
+}
+
+/// The target is the **current turn's** answer: an earlier turn's
+/// answer is a different turn's row, so it is never named once the
+/// operator has asked again.
+#[test]
+fn the_feedback_target_is_the_current_turns_answer() {
+    let mut app = App::new();
+    app.apply(follow(vec![
+        text_row("user_message", 4, "hello"),
+        text_row("assistant_message", 5, "the first answer"),
+        text_row("user_message", 6, "again"),
+        text_row("assistant_message", 9, "the second answer"),
+    ]));
+
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(
+        material.last_message_id.as_deref(),
+        Some("9"),
+        "the current turn's answer is the target, not the earlier \
+         turn's"
+    );
+}
+
+/// An old log's rows carry no ordinal, so the transcript's last
+/// assistant line has none to offer — and a rating needs a row to
+/// name.
+#[test]
+fn a_line_without_an_ordinal_offers_no_feedback_target() {
+    let mut app = App::new();
+    let mut row = text_row("assistant_message", 5, "the answer");
+    row.as_object_mut().expect("a row object").remove("seq");
+    app.apply(follow(vec![row]));
+
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(
+        material.last_message_id, None,
+        "a row with no ordinal names nothing to rate"
+    );
+}
+
+/// The tool call and the feedback target must both survive a turn
+/// that called a tool.
+///
+/// The tool call renders as its own `Role::Assistant` line, so it is
+/// the transcript's *last* assistant line — the one a rating names.
+/// If that line carried no ordinal, the turn's tool call would
+/// silently cost the reader their rating target.
+#[test]
+fn a_tool_calling_turn_still_offers_its_ordinal() {
+    let mut app = App::new();
+    app.apply(follow(vec![
+        text_row("user_message", 4, "hello"),
+        json!({
+            "type": "assistant_message",
+            "seq": 5,
+            "data": {
+                "role": "assistant",
+                "content": { "Multi": [
+                    { "type": "text", "text": "let me look" },
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "shell",
+                        "input": { "command": "ls" },
+                    },
+                ]},
+            },
+        }),
+    ]));
+
+    let lines = app.messages();
+    let call = lines
+        .iter()
+        .find(|line| line.text == "tool call: shell {\"command\":\"ls\"}")
+        .expect("the tool call line");
+    assert_eq!(call.role, Role::Assistant);
+
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(
+        material.last_message_id.as_deref(),
+        Some("5"),
+        "the tool call line is the last assistant line, so it must \
+         carry the row's ordinal"
+    );
 }
 
 #[test]

@@ -2,7 +2,7 @@
 #
 # 触发: push 到 master (master 是 release 真源, gh-pages 从这里出).
 # 输出: 全 workspace 的 rustdoc, 部署到 gh-pages 分支的 `doc/<crate>/...`
-# 子路径, 这样多个 crate 不会互相覆盖 (本仓有 25 个 crate).
+# 子路径, 这样多个 crate 不会互相覆盖 (本仓有 31 个 crate).
 #
 # 重要约束:
 #   - `make doc-check` 已经在 rust-quality.yml 的 `gates` job 跑过;

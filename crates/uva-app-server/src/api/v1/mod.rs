@@ -21,10 +21,17 @@
 //! - [`validation`]: request-parameter validation helpers —
 //!   resource-name regex, sort whitelist enforcement, and API
 //!   key masking.
+//! - [`profile`]: [`profile::ProfileRow`] and
+//!   [`profile::ProfileChange`] — the profile seam's wire shapes,
+//!   with the catalog of the methods that answer with them.
+//! - [`session_view`]: the durable-row and legacy-attachment views
+//!   the three untyped `Vec<Value>` response fields carry.
 
 pub mod cursor;
 pub mod list;
 pub mod page_query;
+pub mod profile;
+pub mod session_view;
 pub mod validation;
 
 pub use cursor::{
@@ -36,4 +43,10 @@ pub use cursor::{
 };
 pub use list::List;
 pub use page_query::{DEFAULT_LIMIT, MAX_LIMIT, PageQuery, SessionPageQuery};
+pub use profile::{
+    ProfileChange,
+    ProfileChangeState,
+    ProfileRow,
+    ProfileSegment,
+};
 pub use validation::{api_key_mask, validate_resource_name, validate_sort};

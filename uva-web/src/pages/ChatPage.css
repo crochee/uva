@@ -1050,7 +1050,7 @@
 
 /* --- Usage chip (header) ---
  *
- * Cumulative token counters, polled from `/api/v1/chat/usage`.
+ * Cumulative token counters, polled from `sessions/usage`.
  * Compact so it can sit in the page chrome without competing
  * for attention with the transcript.
  */
@@ -1809,6 +1809,46 @@
   font-size: var(--fs-xs);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Durable warning row in the timeline (a `warning` session event):
+ * one muted line, warning accent — a fact, not a chat bubble. */
+.nt-chat__warning {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+  margin: var(--spacing-sm) 0;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-left: 2px solid var(--accent-yellow);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+}
+
+.nt-chat__warning-glyph {
+  color: var(--accent-yellow);
+}
+
+.nt-chat__warning-text {
+  overflow-wrap: anywhere;
+}
+
+/* A policy block: the same one-line family as the warning notice,
+ * but its own accent — a blocked call is not a lifecycle warning. */
+.nt-chat__hook-block {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+  margin: var(--spacing-sm) 0;
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-left: 2px solid var(--accent-red);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+}
+
+.nt-chat__hook-block-text {
+  overflow-wrap: anywhere;
 }
 
 /* Footer meter: session-scoped context + tokens, and the manual

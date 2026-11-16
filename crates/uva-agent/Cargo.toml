@@ -1,0 +1,38 @@
+[package]
+name = "uva-agent"
+description = "Agent vocabulary for uva runs: the Agent contract, AgentInput, the steer inboxes, the peer registry and the prompt manifest"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+# The `Agent` contract returns a `Stream` and the steer inbox owns one
+# `futures` channel. No executor: the crate is runtime-free.
+futures.workspace = true
+parking_lot.workspace = true
+# `PromptContext::assemble` traces the assembled prompt at debug level.
+tracing.workspace = true
+# The vocabulary names `RegistryItem` / `AgentDescriptor` / `CancelToken`
+# (`uva-core`), the content parts and messages (`uva-provider`), the
+# session log a child writer returns (`uva-session`), the resume token a
+# run input carries (`uva-approval`) and the events an agent streams
+# (`uva-events`). `uva-harness` depends on this crate and re-exports
+# every name, so consumer import paths do not change.
+uva-core.workspace = true
+uva-provider.workspace = true
+uva-session.workspace = true
+uva-approval.workspace = true
+uva-events.workspace = true
+
+[dev-dependencies]
+# The registry CRUD tests are async (`Registry::put/get/delete`), so they
+# run on a tokio current-thread executor. Test-only, like `uva-harness`.
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -8,7 +8,7 @@
  * informational, so no switch is invented for it.
  */
 import { useEffect, useState } from 'react';
-import { listModels, type ModelsResponse } from '../../api/chat-stream';
+import { catalogApi, type ModelsResponse } from '../../api/catalog';
 import type { ProfileRow } from '../../api/settings-profile';
 import { ProfileToggle } from '../ProfileToggle';
 import { EnableToggle } from '../EnableToggle';
@@ -30,7 +30,8 @@ export function ModelsSection({ reloadToken }: SettingsSectionProps) {
 
   useEffect(() => {
     const controller = new AbortController();
-    listModels(controller.signal)
+    catalogApi
+      .models(controller.signal)
       .then((response) => {
         setCatalogue(response);
         setError(null);

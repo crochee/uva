@@ -32,6 +32,7 @@ fn ev(tag: &str, seq: u64, data: Value, op: Option<SurfaceOp>) -> SessionEvent {
             data,
             source: None,
             surface_op: op,
+            attachments: Vec::new(),
         },
         "assistant_message" => SessionEvent::AssistantMessage {
             seq,
@@ -44,6 +45,7 @@ fn ev(tag: &str, seq: u64, data: Value, op: Option<SurfaceOp>) -> SessionEvent {
             ts: "2026-09-10T00:00:00Z".into(),
             data,
             is_error: false,
+            tool_call_id: None,
             surface_op: op,
         },
         "compaction" => SessionEvent::Compaction {
@@ -99,6 +101,8 @@ fn log_only_events_are_skipped() {
             seq: 2,
             ts: "2026-09-10T00:00:00Z".into(),
             data: json!({"name": "read"}),
+            call_id: None,
+            name: Some("read".to_string()),
         },
         ev(
             "assistant_message",
@@ -255,7 +259,8 @@ fn replace_at_tail_with_zero_length_is_valid_insert() {
             Some(SurfaceOp::append()),
         ),
         // Insert at end (start == end == len): zero-length
-        // replacement, equivalent to append.
+        // replacement, equivalent to append. The span covers no
+        // row, so it cites none.
         ev(
             "tool_result",
             2,
@@ -263,7 +268,7 @@ fn replace_at_tail_with_zero_length_is_valid_insert() {
             Some(SurfaceOp::Replace {
                 start: 1,
                 end: 1,
-                source_event_seqs: vec![1],
+                source_event_seqs: vec![],
             }),
         ),
     ];
@@ -286,6 +291,8 @@ fn log_only_only_produces_empty_surface() {
         seq: 1,
         ts: "2026-09-10T00:00:00Z".into(),
         data: json!({"name": "read"}),
+        call_id: None,
+        name: Some("read".to_string()),
     }];
     let s = fold_surface(&events).expect("fold");
     assert!(s.is_empty());

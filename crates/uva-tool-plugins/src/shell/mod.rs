@@ -51,23 +51,16 @@
 // the windows-gnu build warning-clean.
 #[cfg(unix)]
 use std::process::Stdio;
-// `Mutex` is only used by `spawn_reader` (POSIX-only pipe drain);
-// `Arc` is shared with the unix / non-unix `execute` stubs so it
-// stays unconditional.
-#[cfg(unix)]
-use std::sync::Mutex;
-use std::{sync::Arc, time::Duration};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+#[cfg(unix)]
+use exec::{finish_reader, spawn_reader};
 use schemars_derive::JsonSchema;
 use serde::Deserialize;
-#[cfg(unix)]
-use tokio::io::AsyncReadExt;
 // `process::Command` is the unix-only handle we wrap with
 // `process_group(0)` / `kill_on_drop(true)`. Non-unix builds get
-// the typed-refusal `execute` stub above. `AsyncReadExt` rides
-// along with `spawn_reader` / `finish_reader`, both also
-// unix-only.
+// the typed-refusal `execute` stub below.
 #[cfg(unix)]
 use tokio::process::Command;
 // POSIX-only: `signal_of` reads `ExitStatus::signal()`, which
@@ -81,6 +74,7 @@ use uva_tool::{
     ExecutionMode,
     RenderKind,
     Risk,
+    StreamOutput,
     Tool,
     ToolAnnotations,
     ToolOutput,
@@ -93,7 +87,14 @@ pub mod sandbox;
 /// the `shell` tool brick.
 pub mod plugin;
 
+/// The pipe readers: concurrent draining plus the optional progress
+/// stream. POSIX-only, like the execution path that uses it.
+#[cfg(unix)]
+mod exec;
 mod risk;
+/// The `stream` half of the `Tool` impl: `Progress` per pipe chunk,
+/// one terminal `Result`.
+mod stream;
 pub use plugin::{
     KEY_SANDBOX,
     SandboxBackendKind,
@@ -702,6 +703,15 @@ fn classify_git_risk(args: &[&str]) -> Risk {
     }
 }
 
+/// Where one reader task announces the chunk it just read.
+///
+/// [`ShellTool::stream`] installs one; [`Tool::call`] passes none.
+/// The send is never awaited: a reader that blocked on a slow
+/// consumer would stop draining its pipe, and a full pipe deadlocks
+/// the child. A dropped receiver is legal too — the stream ended and
+/// nobody is listening any more.
+type ProgressSink = futures::channel::mpsc::UnboundedSender<ToolOutput>;
+
 /// A completed shell run: collected streams plus the cause-of-death
 /// classification. `timed_out` and `signal` are mutually exclusive
 /// with a plain exit code (first-cause wins, dsh parity).
@@ -772,51 +782,6 @@ fn signal_group(pgid: i32, sig: i32) {
         // Group already reaped: best-effort direct signal.
         let _ = unsafe { libc::kill(pgid, sig) };
     }
-}
-
-/// Spawn a background task draining one pipe into a shared
-/// buffer. Concurrent draining is mandatory: a full pipe buffer
-/// would otherwise deadlock the child. POSIX-only — only the
-/// unix `execute` path uses this (it `tokio::process::Command`'s
-/// piped stdout/stderr); non-unix builds serve the typed-refusal
-/// stub from `execute` instead.
-#[cfg(unix)]
-fn spawn_reader<R: tokio::io::AsyncRead + Unpin + Send + 'static>(
-    mut pipe: R,
-) -> (Arc<Mutex<Vec<u8>>>, tokio::task::JoinHandle<()>) {
-    let buffer = Arc::new(Mutex::new(Vec::new()));
-    let sink = Arc::clone(&buffer);
-    let handle = tokio::spawn(async move {
-        let mut chunk = [0u8; 8192];
-        loop {
-            match pipe.read(&mut chunk).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if let Ok(mut buf) = sink.lock() {
-                        buf.extend_from_slice(&chunk[..n]);
-                    }
-                }
-            }
-        }
-    });
-    (buffer, handle)
-}
-
-/// Bounded wait for the reader tasks so a surviving grandchild
-/// holding the pipe cannot stall the tool result. POSIX-only —
-/// only `spawn_reader` (unix) consumes this.
-#[cfg(unix)]
-async fn finish_reader(
-    buffer: &Arc<Mutex<Vec<u8>>>,
-    handle: tokio::task::JoinHandle<()>,
-) -> String {
-    let _ =
-        tokio::time::timeout(Duration::from_secs(KILL_GRACE_SECS + 1), handle)
-            .await;
-    buffer
-        .lock()
-        .map(|buf| String::from_utf8_lossy(&buf).into_owned())
-        .unwrap_or_default()
 }
 
 #[async_trait]
@@ -891,6 +856,32 @@ impl Tool for ShellTool {
         input: serde_json::Value,
         context: &Context,
     ) -> ToolOutput {
+        self.run(input, context, None).await
+    }
+
+    /// Stream one command: each pipe chunk is a `Progress` item, the
+    /// rendered run is the single `Result`.
+    ///
+    /// The state machine lives in the private `stream` module; `call`
+    /// runs the same command without a progress sink.
+    fn stream<'a>(
+        &'a self,
+        input: serde_json::Value,
+        context: &'a Context,
+    ) -> Pin<Box<dyn futures::Stream<Item = StreamOutput> + Send + 'a>> {
+        stream::run(self, input, context)
+    }
+}
+
+impl ShellTool {
+    /// Execute one call, announcing pipe chunks to `progress` when it
+    /// is installed.
+    async fn run(
+        &self,
+        input: serde_json::Value,
+        context: &Context,
+        progress: Option<ProgressSink>,
+    ) -> ToolOutput {
         let args: ShellArgs = match serde_json::from_value(input) {
             Ok(a) => a,
             Err(e) => {
@@ -928,6 +919,7 @@ impl Tool for ShellTool {
             context,
             Duration::from_secs(timeout_secs),
             &confined,
+            progress,
         )
         .await;
 
@@ -969,6 +961,7 @@ async fn execute(
     context: &Context,
     timeout: Duration,
     confined: &ConfinedCommand,
+    progress: Option<ProgressSink>,
 ) -> Result<ShellRun, String> {
     let argv = confined.argv_for(command);
     let mut cmd = Command::new(&argv[0]);
@@ -997,10 +990,12 @@ async fn execute(
         .map_err(|e| format!("Failed to spawn shell: {e}"))?;
     let pgid = child.id().unwrap_or(0) as i32;
 
-    let (stdout_buf, stdout_task) =
-        spawn_reader(child.stdout.take().expect("piped stdout"));
+    let (stdout_buf, stdout_task) = spawn_reader(
+        child.stdout.take().expect("piped stdout"),
+        progress.clone(),
+    );
     let (stderr_buf, stderr_task) =
-        spawn_reader(child.stderr.take().expect("piped stderr"));
+        spawn_reader(child.stderr.take().expect("piped stderr"), progress);
 
     // First cause wins: natural exit vs. deadline.
     let timed_out;
@@ -1064,6 +1059,7 @@ async fn execute(
     _context: &Context,
     _timeout: Duration,
     _confined: &ConfinedCommand,
+    _progress: Option<ProgressSink>,
 ) -> Result<ShellRun, String> {
     Err(
         "shell tool is not implemented on non-unix targets in this build \

@@ -9,7 +9,7 @@
  * UI).
  */
 import { useEffect, useState } from 'react';
-import { listModels, type ModelsResponse } from '../../api/chat-stream';
+import { catalogApi, type ModelsResponse } from '../../api/catalog';
 import type { SettingsSectionProps } from '../sections';
 import { SettingsCard } from '../SettingsCard';
 import { RowCard } from '../RowCard';
@@ -20,7 +20,8 @@ export function AccountSection({ reloadToken }: SettingsSectionProps) {
 
   useEffect(() => {
     const controller = new AbortController();
-    listModels(controller.signal)
+    catalogApi
+      .models(controller.signal)
       .then((response) => {
         setModels(response);
         setError(null);

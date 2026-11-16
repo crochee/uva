@@ -394,7 +394,7 @@ impl AppState {
         .with_clock(self.clock.clone())
         // The mounted `agentLoop` factory: the run's deployment
         // knobs (strategy, restriction, context manager, compactor,
-        // spawner, delegators) resolve through it, so a remounted
+        // spawner) resolve through it, so a remounted
         // factory reaches sessions created after the remount.
         .with_agent_loop(Some(agent_loop))
         .with_agent_registry(
@@ -409,18 +409,18 @@ impl AppState {
         // one: child sessions land in the same registry the sessions
         // API lists.
         .with_usage_metrics(Arc::clone(&self.usage_metrics))
-        .with_subagent_router(Some(Arc::clone(&self.subagent_router)))
         .with_cluster(Arc::clone(&self.cluster))
         // The one place multimodal payload bytes live: a parked
         // prompt stores them here and its row carries the hash.
         .with_attachment_store(Arc::clone(&self.attachment_store));
 
         // Owner path: spawn the controller with the lease it holds.
+        // The writer is the one handle: the sink it owns is this
+        // session's own, so a mismatched pairing cannot be expressed.
         let restore_sink = Arc::clone(&session_sink);
         let controller = SessionController::spawn_with_lease(
             user_id,
             session_id,
-            session_sink,
             writer,
             deps,
             crate::session::controller::DEFAULT_IDLE_TIMEOUT,
@@ -493,8 +493,9 @@ impl AppState {
         // park can sit behind a long run — 200 rows is ~40 iterations of
         // a busy session. So widen until the window either reaches the
         // log's start or holds the consumption frontier (the newest
-        // `UserInput` row): everything after that row is the queue, and
-        // nothing before it can still be waiting.
+        // `park_consumed` row, or a legacy `UserInput` one): everything
+        // after that row is the queue, and nothing before it can still
+        // be waiting.
         let mut window = PARKED_PROMPT_WINDOW;
         let rows = loop {
             let rows = match sink.read_tail(window).await {
@@ -809,8 +810,9 @@ fn is_consumption_marker(row: &serde_json::Value) -> bool {
         row.get("type").and_then(serde_json::Value::as_str),
         // The link this build writes …
         Some("park_consumed")
-            // … and the one a log written before it relied on (see
-            // `repair::parked_prompts`).
+            // … and the run's own prompt row, which is the only
+            // consumption record a log written before `park_consumed`
+            // existed carries.
             | Some("UserInput")
     )
 }

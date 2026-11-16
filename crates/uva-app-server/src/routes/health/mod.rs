@@ -13,6 +13,7 @@
 /// probes.
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::state::AppState;
@@ -109,7 +110,7 @@ pub fn readyz(state: Arc<AppState>) -> ProbeResponse {
     }
 }
 /// Bare models-listing response.
-#[derive(Clone, Serialize)]
+#[derive(Clone, JsonSchema, Serialize)]
 pub struct ModelsResponse {
     /// One entry per configured provider.
     pub models: Vec<ModelEntry>,
@@ -119,7 +120,7 @@ pub struct ModelsResponse {
     pub default_model: String,
 }
 /// One provider's advertised model.
-#[derive(Clone, Serialize)]
+#[derive(Clone, JsonSchema, Serialize)]
 pub struct ModelEntry {
     /// The provider's `[providers.<name>]` entry name.
     pub provider: String,

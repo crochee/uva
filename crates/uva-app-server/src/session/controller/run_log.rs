@@ -1,88 +1,12 @@
-//! One run's handle on the session's writer, plus the helpers
-//! that shape prompt text for persistence.
-
-use std::sync::Arc;
+//! The helpers that shape a run's prompt rows, and the semantics a
+//! rerun's prompt row carries.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use serde_json::Value;
 use uva::{
     attachment::AttachmentStore,
     provider::{ContentPart, Role},
-    session::{AttachmentRefRow, LogWriter, SessionError},
+    session::AttachmentRefRow,
 };
-
-/// One run's handle on the session's one writer.
-///
-/// Every row the run persists goes through here — the writer is
-/// the session's, so the run's rows, the op loop's out-of-band
-/// rows and a checkpoint's own rows all draw from one ordinal
-/// sequence and every row is stamped with the ordinal it will be
-/// read back under. The append methods only enqueue: the flush
-/// cadence is the caller's — the harness flushes at the step
-/// boundary before each provider call and once more after a tool
-/// result's row (before that result's event goes out), and the run
-/// task flushes before it resolves the checkpoint and again before
-/// it ends.
-pub(crate) struct RunLog {
-    writer: Arc<LogWriter>,
-}
-
-impl RunLog {
-    /// Wrap the session's writer.
-    pub(crate) fn new(writer: Arc<LogWriter>) -> Self {
-        Self { writer }
-    }
-
-    /// Reserve an ordinal for one row, stamp it, and enqueue it.
-    ///
-    /// The row is on disk only after a [`Self::flush`]; the
-    /// ordinal it was given is the one the reader will reproduce
-    /// from its `seq` field, and the ledger the writer feeds
-    /// records it under the same number — the source of truth a
-    /// durable compaction checkpoint resolves its provenance
-    /// against. The row is taken by value: the writer stamps it
-    /// in place, so a caller that still needs it clones it
-    /// itself.
-    pub(crate) async fn append(
-        &mut self,
-        value: Value,
-    ) -> Result<u64, SessionError> {
-        self.writer.append(value).await
-    }
-
-    /// Reserve an ordinal for one typed row, stamp it, and
-    /// enqueue it.
-    ///
-    /// The writer replaces the row's `seq` and `ts`: the ordinal
-    /// is the writer's to hand out, and a typed event's builder
-    /// leaves `seq: 0` behind. The stamp is what a typed reader
-    /// reproduces — the row's own `seq` field is the ordinal the
-    /// log holds it under, which is also how the fold numbers a
-    /// fully stamped log.
-    pub(crate) async fn append_typed(
-        &mut self,
-        value: Value,
-    ) -> Result<(), SessionError> {
-        self.writer.append(value).await.map(|_| ())
-    }
-
-    /// Serialise one typed event and append it as a row.
-    ///
-    /// For the variants that hold their payload in fields rather than
-    /// an opaque `data` `Value` (`park_consumed` is one): they have no
-    /// builder, and the controller should not hand-roll their wire
-    /// shape at the call site. `seq: 0` / `ts: ""` in, the writer's
-    /// stamp out — same as [`Self::append_typed`].
-    pub(crate) async fn append_event(
-        &mut self,
-        event: &uva::session::SessionEvent,
-    ) -> Result<(), SessionError> {
-        let row = serde_json::to_value(event).map_err(|e| {
-            SessionError::AppendFailed(format!("serialise the row: {e}"))
-        })?;
-        self.append_typed(row).await
-    }
-}
 
 /// Concatenate the textual component of a multimodal prompt.
 ///
@@ -224,6 +148,12 @@ fn inline_bytes(data: &str) -> Result<Vec<u8>, &'static str> {
 /// and the `SurfaceLedger` splices the same span so a later
 /// compaction still resolves.
 ///
+/// The fold is in the model-visible order, so the "last user-role
+/// message" is the last one the *model* saw: on a steered log the
+/// steer waits for the tool result that answers the open call, and
+/// it is the steer the rerun shadows — the tool call and its result
+/// stay together, which is what a provider accepts.
+///
 /// `None` (plain append) when the fold holds no user message —
 /// the regenerate route refuses that case up front, so this is a
 /// defensive fallback, not a second contract.
@@ -278,6 +208,72 @@ mod tests {
             text: body.to_string(),
             cache_control: None,
         })
+    }
+
+    /// A rerun on a steered log must not shadow a tool call without
+    /// the result that answers it.
+    ///
+    /// The fold is in the model-visible order: the steer waits for
+    /// the result that answers the open call, so the steer is the
+    /// last user-role row and the rerun's span covers it alone. The
+    /// tool call and its result survive together — a transcript that
+    /// keeps the call but drops its result is one every provider
+    /// rejects.
+    #[test]
+    fn a_rerun_on_a_steered_log_keeps_the_tool_pair_together() {
+        let events = vec![
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 1,
+                "data": uva::provider::Message::user("start"),
+            }),
+            serde_json::json!({
+                "type": "assistant_message",
+                "seq": 2,
+                "data": uva::provider::Message::new(
+                    uva::provider::Role::Assistant,
+                    uva::provider::Content::parts(vec![
+                        uva::provider::ContentPart::ToolUse(
+                            uva::provider::ToolUse {
+                                id: "call-1".into(),
+                                name: "read".into(),
+                                input: serde_json::json!({"path": "a.rs"}),
+                            },
+                        ),
+                    ]),
+                ),
+            }),
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 3,
+                "data": uva::provider::Message::user("steer"),
+            }),
+            serde_json::json!({
+                "type": "tool_result",
+                "seq": 4,
+                "data": uva::provider::Message::tool(
+                    uva::provider::Content::text("ok"),
+                    "call-1",
+                ),
+            }),
+        ];
+
+        let op = rerun_replace_op(&events).expect("the log holds a user turn");
+        let uva::session::SurfaceOp::Replace {
+            start,
+            end,
+            source_event_seqs,
+        } = op
+        else {
+            panic!("a rerun replaces the turn it re-queues");
+        };
+        assert_eq!(start, 3, "the steer is the last user row the model saw");
+        assert_eq!(end, 4);
+        assert_eq!(
+            source_event_seqs,
+            vec![3],
+            "the rerun shadows the steer alone"
+        );
     }
 
     /// A text part is the prompt itself, so it produces no chip; every

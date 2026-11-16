@@ -14,6 +14,7 @@
  * reload.
  */
 import { useEffect } from 'react';
+import { sessionsApi } from '../api/sessions';
 import { useCursorList } from './useCursorList';
 import type { SessionSummary } from '../api/types';
 
@@ -26,10 +27,18 @@ export interface WorkspaceTree {
 }
 
 export function useWorkspaceTree(): WorkspaceTree {
-  const list = useCursorList<SessionSummary>('/api/v1/sessions', {
-    limit: 50,
-    sort: '-created_at',
-  });
+  const list = useCursorList<SessionSummary>(
+    (cursor, signal) =>
+      sessionsApi.list(
+        {
+          ...(cursor ? { cursor } : {}),
+          limit: 50,
+          sort: '-created_at',
+        },
+        signal,
+      ),
+    'workspace:sessions',
+  );
   const { refresh } = list;
 
   useEffect(() => {

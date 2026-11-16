@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **不写任何前端自动化测试**（AGENTS.md §4.2）：不新增 `*.test.ts`、不建 `uva-web/tests/`、不建 `playwright*.config.ts`、不装 playwright 依赖。验证 = `make check-web` + `cd uva-web && npm run build` + Playwright MCP 驱动真实页面（Task 8 给出逐条 URL / 点击 / DOM 断言）。
+- **不写前端 e2e 测试**（AGENTS.md §4.2：不保留 e2e 套件；纯函数单元测试用 vitest，随 `make check-web` 跑——本计划成文时 §4.2 还禁止一切前端测试，后由 ADR 0001 收窄到只禁 e2e）：不建 `playwright*.config.ts`、不装 playwright 依赖；纯函数改动在 `uva-web/tests/*.test.ts` 补 vitest 用例。验证 = `make check-web` + `cd uva-web && npm run build` + Playwright MCP 驱动真实页面（Task 8 给出逐条 URL / 点击 / DOM 断言）。
 - **前端没有 Node 类型**（C4）：`src/` 下不得出现 `import 'node:*'`、`process.*`（`vite.config.ts` 是仓库既有例外）。
 - **WS 传输不动**（C3）：`src/api/rpc.ts` 一行不改。新数据调用一律在 `src/api/client.ts` 的 `ROUTES` 映射表加行（REST 形状 → RPC 方法名），或者像 `pluginsApi` 一样包在 `src/api/` 下的模块里。
 - **无新依赖、无新 icon 库**：图形符号沿用仓库现状（emoji 字形 + 文本，见 `Sidebar.tsx:10-13` 的既有注释立场）。

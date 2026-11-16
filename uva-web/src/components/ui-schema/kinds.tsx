@@ -7,10 +7,24 @@
  * raw props rather than dropping the panel.
  */
 
-import type { UiComponent } from '../../api/ui-schema';
+import type { UiComponent } from '../../api/catalog';
 
 export interface KindProps {
   component: UiComponent;
+}
+
+/**
+ * The component's props as a record.
+ *
+ * The generated type comes from the Rust `serde_json::Value`, which the
+ * contract maps to `unknown` on purpose (it may be any JSON), so each
+ * renderer narrows once here instead of at every key access.
+ */
+function propsOf(component: UiComponent): Record<string, unknown> {
+  const { props } = component;
+  return props !== null && typeof props === 'object' && !Array.isArray(props)
+    ? (props as Record<string, unknown>)
+    : {};
 }
 
 /** Read an optional string prop (three kinds share this shape). */
@@ -21,9 +35,10 @@ function text(props: Record<string, unknown>, key: string): string | null {
 
 /** A titled prose panel. */
 export function PanelKind({ component }: KindProps) {
-  const title = text(component.props, 'title');
-  const body = text(component.props, 'body');
-  const raw = component.props.items;
+  const props = propsOf(component);
+  const title = text(props, 'title');
+  const body = text(props, 'body');
+  const raw = props.items;
   const lines = Array.isArray(raw)
     ? raw.filter((item): item is string => typeof item === 'string')
     : [];
@@ -45,8 +60,9 @@ export function PanelKind({ component }: KindProps) {
 
 /** A title plus an item list. */
 export function ListKind({ component }: KindProps) {
-  const title = text(component.props, 'title');
-  const raw = component.props.items;
+  const props = propsOf(component);
+  const title = text(props, 'title');
+  const raw = props.items;
   const lines = Array.isArray(raw)
     ? raw.filter((item): item is string => typeof item === 'string')
     : [];
@@ -69,8 +85,9 @@ export function ListKind({ component }: KindProps) {
 
 /** A title plus a label/value table. */
 export function KeyValueKind({ component }: KindProps) {
-  const title = text(component.props, 'title');
-  const raw = component.props.entries;
+  const props = propsOf(component);
+  const title = text(props, 'title');
+  const raw = props.entries;
   const entries =
     raw !== null && typeof raw === 'object' && !Array.isArray(raw)
       ? Object.entries(raw as Record<string, unknown>)

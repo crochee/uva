@@ -189,9 +189,11 @@
 //! | `tool-shell` | [`tool_shell`] | `uva-tool-plugins` | yes |
 //! | `tool-todo` | [`tool_todo`] | `uva-tool-plugins` | yes |
 //! | `tool-web` | [`tool_web`] | `uva-tool-plugins` | yes |
-//! | `tool-task` | [`tool_task`] | `uva-tool-plugins` | yes |
+//! | `tool-task` | [`tool_task`] | `uva-tool-task` | yes |
 //! | `session` | [`session`] | `uva-session` | yes |
 //! | `steering` | [`steering`] | `uva-steering` | yes |
+//! | `approval` | [`approval`] | `uva-approval` | yes |
+//! | `agent` | [`agent`] | `uva-agent` | yes |
 //! | `harness` | [`harness`] | `uva-harness` | yes |
 //! | `harness-tokio` | `uva::harness_tokio` | `uva-core-tokio` | no |
 //! | `agents` | `uva::agents` | `uva-core` (the `agent_def` module) | no |
@@ -209,7 +211,9 @@
 //! | `tool-memo` | [`tool_memo`] | `uva-tool-plugins` | no |
 //! | `resilience` | [`resilience`] | `uva-policy-plugins` | no |
 //! | `strategy-plan-execute` | [`strategy_plan_execute`] | `uva-policy-plugins` | no |
-//! | `reflection` | [`reflection`] | `uva-policy-plugins` | no |
+//! | `reflection` | `uva::reflection` | `uva-hook-plugins` | no |
+//! | `redact` | `uva::redact` | `uva-hook-plugins` | no |
+//! | `traffic-light` | `uva::traffic_light` | `uva-hook-plugins` | no |
 //! | `budget` | `uva::budget` | `uva-policy-plugins` | no |
 //! | `hpc-pool` | `uva::hpc_pool` | `uva-provider/hpc-pool` | no |
 //! | `hpc-simd` | `uva::hpc_simd` | `uva-search/simd` | no |
@@ -406,7 +410,7 @@ use uva::tool_todo::TodoWriteTool;
     doc = r#"```compile_fail
 // The `tool-task` feature is off: the `task` tool plugin must
 // not exist.
-use uva::tool_task::TaskDelegator;
+use uva::tool_task::TaskTool;
 ```"#
 )]
 #![cfg_attr(
@@ -481,8 +485,12 @@ pub use serde_json;
 #[doc = include_str!("../../../MINIMAL.md")]
 pub struct MinimalGuide;
 
+#[cfg(feature = "agent")]
+pub mod agent;
 #[cfg(feature = "agents")]
 pub mod agents;
+#[cfg(feature = "approval")]
+pub mod approval;
 #[cfg(feature = "attachment")]
 pub mod attachment;
 #[cfg(feature = "budget")]
@@ -493,12 +501,16 @@ pub mod context;
 pub mod core;
 #[cfg(feature = "eval")]
 pub mod eval;
+#[cfg(feature = "events")]
+pub mod events;
 #[cfg(feature = "harness")]
 pub mod harness;
 #[cfg(feature = "harness-tokio")]
 pub mod harness_tokio;
 #[cfg(feature = "hnsw")]
 pub mod hnsw;
+#[cfg(feature = "hook")]
+pub mod hook;
 #[cfg(feature = "hpc-pool")]
 pub mod hpc_pool;
 #[cfg(feature = "hpc-simd")]
@@ -510,6 +522,8 @@ pub mod mcp;
 pub mod prelude;
 #[cfg(feature = "provider")]
 pub mod provider;
+#[cfg(feature = "redact")]
+pub mod redact;
 #[cfg(feature = "reflection")]
 pub mod reflection;
 #[cfg(feature = "resilience")]
@@ -558,3 +572,5 @@ pub mod tool_todo;
 pub mod tool_web;
 #[cfg(feature = "tool-write")]
 pub mod tool_write;
+#[cfg(feature = "traffic-light")]
+pub mod traffic_light;

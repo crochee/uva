@@ -13,6 +13,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uva_core::{CancelToken, Error, SystemClock};
+use uva_events::{AgentEvent, SessionEndReason, SystemEvent, WarningKind};
 use uva_provider::{
     CompletionRequest,
     CompletionResponse,
@@ -41,7 +42,6 @@ use uva_tool::ToolRegistry;
 use super::support::*;
 use crate::{
     agent::{Agent, re_act::ReActAgent},
-    events::{AgentEvent, SessionEndReason, SystemEvent, WarningKind},
     input::AgentInput,
 };
 
@@ -174,7 +174,7 @@ async fn run(
     let dyn_provider: Arc<dyn ModelProvider> = provider.clone();
     let mut agent =
         ReActAgent::new(dyn_provider, Arc::new(ToolRegistry::new()))
-            .with_log_writer(Arc::clone(&writer));
+            .with_log_writer(writer.clone());
     if let Some(compactor) = compactor {
         agent = agent.with_compactor(compactor);
     }
@@ -194,8 +194,8 @@ async fn run_scripted(
     provider: Arc<CapturingProvider>,
     registry: Arc<ToolRegistry>,
 ) -> Vec<AgentEvent> {
-    let mut agent = ReActAgent::new(provider, registry)
-        .with_log_writer(Arc::clone(&writer));
+    let mut agent =
+        ReActAgent::new(provider, registry).with_log_writer(writer.clone());
     if let Some(compactor) = compactor {
         agent = agent.with_compactor(compactor);
     }

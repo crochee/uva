@@ -227,7 +227,6 @@ mod tests {
             AgentEvent::System(_)
                 | AgentEvent::Model(_)
                 | AgentEvent::ModelDone(_)
-                | AgentEvent::Agent(..)
         ));
     }
 

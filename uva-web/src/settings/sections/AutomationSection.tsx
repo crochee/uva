@@ -13,7 +13,7 @@
  */
 import { useEffect, useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../api/client';
+import { agentsApi } from '../../api/agents';
 import { evalsApi } from '../../api/evals';
 import { schedulesApi } from '../../api/schedules';
 import { tasksApi } from '../../api/tasks';
@@ -66,7 +66,10 @@ const EMPTY_FORM: CreateForm = {
 
 function toJobKind(form: CreateForm): JobKind {
   if (form.kind === 'interval') {
-    return { kind: 'interval', interval_secs: Math.max(1, Number(form.intervalSecs) || 1) };
+    return {
+      kind: 'interval',
+      interval: { secs: Math.max(1, Number(form.intervalSecs) || 1), nanos: 0 },
+    };
   }
   if (form.kind === 'cron') return { kind: 'cron', expr: form.cronExpr.trim() };
   return { kind: 'once' };
@@ -93,7 +96,7 @@ export function AutomationSection({ reloadToken }: SettingsSectionProps) {
       schedulesApi.list(controller.signal),
       tasksApi.list({ limit: 50 }, controller.signal),
       evalsApi.list(controller.signal),
-      api.get<{ name: string; source: string }>('/api/v1/agents/default', controller.signal),
+      agentsApi.defaultAgent(controller.signal),
     ]);
     void settle.then(([scheduleResult, taskResult, evalResult, agentResult]) => {
       const problems: string[] = [];

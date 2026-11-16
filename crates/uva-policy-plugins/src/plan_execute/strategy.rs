@@ -305,10 +305,7 @@ impl ReasoningStrategy for PlanExecuteStrategy {
         // The plan is the model's first turn of the run: one
         // `assistant_message` row through the session's writer, so a
         // resumed session sees what the model planned.
-        sink.write_assistant_turn(&[ContentPart::Text(TextContent {
-            text: plan_text(&plan),
-            cache_control: None,
-        })]);
+        sink.write_assistant_turn(&Message::assistant(plan_text(&plan)));
 
         let mut outcomes: Vec<StepOutcome> = Vec::new();
         for (idx, step) in plan.steps.iter().enumerate() {

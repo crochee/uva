@@ -28,7 +28,6 @@ fn no_surface_no_restriction_projects_every_tool() {
         &registry.descriptors_cached(),
         None,
         None,
-        &[],
         &empty_called(),
     );
     assert_eq!(defs.len(), 5);
@@ -42,7 +41,6 @@ fn surface_policy_branch_receives_a_visible_set() {
         &registry.descriptors_cached(),
         None,
         None,
-        &[],
         &empty_called(),
     );
     // `None` policy keeps the projection flat: every tool's
@@ -60,7 +58,6 @@ fn allow_restriction_yields_only_allowed_tools() {
         &registry.descriptors_cached(),
         None,
         Some(&restriction),
-        &[],
         &empty_called(),
     );
     let names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
@@ -76,7 +73,6 @@ fn deny_restriction_yields_every_tool_not_in_the_set() {
         &registry.descriptors_cached(),
         None,
         Some(&restriction),
-        &[],
         &empty_called(),
     );
     let names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
@@ -85,14 +81,13 @@ fn deny_restriction_yields_every_tool_not_in_the_set() {
 }
 
 #[test]
-fn empty_delegator_list_returns_registry_only_definitions() {
+fn the_registry_definitions_are_the_only_ones_offered() {
     let registry = build_registry(3);
     let defs: Vec<ToolDefinition> =
         crate::agent::re_act::projection::compose_tool_definitions(
             &registry.descriptors_cached(),
             None,
             None,
-            &[],
             &empty_called(),
         );
     assert_eq!(defs.len(), 3);
@@ -105,7 +100,6 @@ fn empty_registry_returns_empty_definitions() {
         &registry.descriptors_cached(),
         None,
         None,
-        &[],
         &empty_called(),
     );
     assert!(defs.is_empty());

@@ -33,6 +33,7 @@ Two things are worth knowing before reading the code:
 | `external-consumer` | `docs/examples/` | A **standalone crate** (not a workspace member) depending on uva by relative path — the real "use it as a library" test | `CONSUMER-PROOF: OK` |
 | `minimal-consumer` | `docs/examples/` | The **smallest** complete agent: one dependency (`uva`, `default-features = false`) and the seven-feature MVP subset from [`MINIMAL.md`](../../MINIMAL.md) — a scripted provider that asks for a tool, one hand-written `Tool`, and assertions that it really ran. Its tree carries no HTTP client at all | `MVP-OK`, and `make check-mvp-deps` for the dependency promise |
 | `harness-only-consumer` | `docs/examples/` | A **standalone crate** whose `cargo tree` contains **zero** `tokio`: one turn on `futures::executor::block_on` with a `std::thread` spawner, so the harness closure is runtime-*free* rather than merely runtime-tolerant | `HARNESS-ONLY: OK`, and the `tokio in tree: 0` line `make examples` asserts before running it |
+| `hook-only-consumer` | `docs/examples/` | A **standalone hook plugin** whose only normal dependency is `uva-hook` (the harness is a dev-dependency): it registers a `Gate` on `tool/pre-execute`, reads the tool name / call id / arguments, blocks a call, and withdraws by dropping the handle. `make check-hook-external` asserts its normal tree carries no `uva-harness` and runs its dev tests | the gate's `OK` line, and the fixture's three passing tests |
 | `assemble_from_zero` | `uva` (facade) | The same assembly through **one dependency**: `use uva::prelude::*` and nothing else | how few names a consumer actually needs; the crate docs are the longer version |
 
 ## 2. Tools and the wire
@@ -53,8 +54,8 @@ Two things are worth knowing before reading the code:
 
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
-| `delegation_gate` | `uva-tool-plugins` (`task`) | `gate`: a verification command that must pass for a delegated child's work to count | the pass path, then `failed gate …` with the command's output |
-| `worktree_isolation` | `uva-tool-plugins` (`task`) | `worktree`: a temp git worktree on a reserved `uva/agent-<ulid>` branch, kept when the child left changes | the branch and base SHA reported back |
+| `delegation_gate` | `uva-tool-task` (`task`) | `gate`: a verification command that must pass for a delegated child's work to count | the pass path, then `failed gate …` with the command's output |
+| `worktree_isolation` | `uva-tool-task` (`task`) | `worktree`: a temp git worktree on a reserved `uva/agent-<ulid>` branch, kept when the child left changes | the branch and base SHA reported back |
 
 ## 4. Interactivity and prompt hygiene
 

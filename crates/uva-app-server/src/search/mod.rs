@@ -41,9 +41,9 @@ use adapters::{MemoryEngine, SessionEngine};
 use catalog::CatalogEngine;
 use doc::SearchDoc;
 use uva::{
+    agent::AgentRegistry,
     context::Memory,
     core::Clock,
-    harness::AgentRegistry,
     search::{Hit, QueryContext, Registry},
     session::SharedSessionSearch,
     tool::{ToolExposure, ToolRegistry},

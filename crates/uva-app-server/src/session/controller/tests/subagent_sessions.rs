@@ -2,9 +2,9 @@
 //!
 //! The child's model facts — one `assistant_message` row per turn,
 //! one `tool_result` row per result — are written by the child's
-//! harness through the child session's writer (resolved from the
-//! registry the run hands the `task` delegator), not copied from
-//! the parent's event stream. The router contributes only the
+//! harness through the child session's writer (the `SubagentWriters`
+//! source the boot hands the `task` tool), not copied from the
+//! parent's event stream. The router contributes only the
 //! `subagent_enter` / dispatch-prompt / `subagent_exit` frame.
 
 use std::sync::Arc;
@@ -60,8 +60,8 @@ fn task_call(id: &str, agent: &str, prompt: &str) -> Vec<StreamChunk> {
 /// the child's own session: header, dispatch prompt, the child's
 /// assistant row(s) written by the child's harness, footer. The
 /// events alone persist nothing — without the writer handed down
-/// by the delegator the child's reply would exist only on the
-/// parent's live stream.
+/// by the `task` tool the child's reply would survive only as the
+/// parent's `tool_result` text, not as a resumable transcript.
 #[tokio::test]
 async fn a_delegated_child_writes_its_own_session_transcript() {
     let parent = Arc::new(ScriptedStreamProvider::new(vec![
@@ -95,17 +95,27 @@ async fn a_delegated_child_writes_its_own_session_transcript() {
         .unwrap();
     let mut deps = super::support::test_deps();
     deps.provider = parent;
-    deps.agent_registry = Some(peers);
-    deps.subagent_router = Some(Arc::new(
-        crate::session::subagent_router::SubagentRouter::new(
+    deps.agent_registry = Some(Arc::clone(&peers));
+    let router =
+        Arc::new(crate::session::subagent_router::SubagentRouter::new(
             Arc::clone(&manager),
-            Arc::new(crate::state::ActiveSessions::new()),
-        ),
-    ));
+        ));
+    // Delegation is a registry tool now: the fixture files the same
+    // `task` tool the boot's `tool-task` row files, over the test's
+    // router-backed writer source.
+    deps.tool_registry
+        .register_entry(uva::tool::ToolEntry::new(Arc::new(
+            uva::tool_task::TaskTool::new(Arc::clone(&peers))
+                .with_writers(Arc::new(
+                crate::session::subagent_router::SessionSubagentWriters::new(
+                    router,
+                    Arc::clone(&manager),
+                ),
+            )),
+        )));
     let controller = SessionController::spawn(
         "alice",
         "s1",
-        manager.sink("alice", "s1"),
         manager.writer("alice", "s1"),
         deps,
         std::time::Duration::from_secs(60),
@@ -126,7 +136,17 @@ async fn a_delegated_child_writes_its_own_session_transcript() {
     })
     .await
     .expect("run should finish");
-    wait_for_log_row(&manager, "subagent_exit").await;
+    // The tool closes the child session (footer + flush) before it
+    // returns, so the parent's ordinary `tool_result` row proves the
+    // child log is complete. The parent's own log carries no subagent
+    // markers at all: the child session is the one record.
+    let parent_rows = wait_for_log_row(&manager, "tool_result").await;
+    assert!(
+        !parent_rows.iter().any(|row| row["type"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("subagent_"))),
+        "the parent log holds no subagent markers: {parent_rows:?}"
+    );
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while controller.state() != SessionState::Idle {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -181,7 +201,7 @@ async fn a_delegated_child_writes_its_own_session_transcript() {
         types,
         vec![
             "subagent_enter",
-            "UserInput",
+            "user_message",
             // The child's own run follows, exactly like a
             // top-level session's: the turn boundary that lets a crash
             // be repaired, the request envelope snapshot it is checked

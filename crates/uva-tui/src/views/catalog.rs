@@ -65,8 +65,12 @@ pub struct ResumeMaterial {
     pub pending: Vec<String>,
     /// The fingerprint of the log's newest request envelope.
     pub request_snapshot_hash: String,
-    /// The transcript's newest assistant label (`msg-<n>`), the
-    /// `chat/feedback` target.
+    /// The transcript's newest assistant row's **ordinal** — its
+    /// `seq`, in decimal — the `chat/feedback` target.
+    ///
+    /// `None` when the newest assistant row carried no ordinal (an
+    /// old log's rows do not) or when there is no assistant row at
+    /// all: a rating needs a row to name.
     pub last_message_id: Option<String>,
 }
 

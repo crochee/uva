@@ -7,6 +7,7 @@
 //! client unchanged so its registry can show the fallback placeholder
 //! instead of dropping the whole segment.
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
 };
 
 /// `ui/schema` response body.
-#[derive(Debug, Serialize)]
+#[derive(Debug, JsonSchema, Serialize)]
 pub struct UiSchemaResponse {
     /// The slots this deployment's `[ui]` rows declare, in declaration
     /// order.
@@ -39,18 +40,15 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
-    use uva::kernel::RuntimeKind;
 
     use super::list_ui_schemas;
-    use crate::{profile::Entry, state::AppState, ui::tree::load_ui_tree};
+    use crate::{profile::Manifest, state::AppState, ui::tree::load_ui_tree};
 
-    fn entry(id: &str, config: serde_json::Value) -> Entry {
-        Entry {
-            id: id.to_owned(),
-            runtime: RuntimeKind::UiBundle,
+    fn entry(id: &str, config: serde_json::Value) -> Manifest {
+        Manifest {
+            name: id.to_owned(),
             config,
-            capabilities: Vec::new(),
-            enabled: crate::profile::Enabled::On,
+            ..Manifest::plain(id, id)
         }
     }
 
@@ -79,18 +77,20 @@ mod tests {
     #[tokio::test]
     async fn the_resolved_schemas_are_projected_in_order() {
         let (state, _dir) = state().await;
-        *state.ui_tree.write() = load_ui_tree(&[entry(
-            "ui.slot.chat.sidebar",
-            json!({
-                "slots": [{ "id": "chat.sidebar" }],
-                "components": [{
-                    "slot": "chat.sidebar",
-                    "kind": "panel",
-                    "props": { "title": "Notes" },
-                }],
-            }),
-        )])
-        .expect("the tree activates");
+        state.assembly.set_ui_tree(
+            load_ui_tree(&[entry(
+                "ui.slot.chat.sidebar",
+                json!({
+                    "slots": [{ "id": "chat.sidebar" }],
+                    "components": [{
+                        "slot": "chat.sidebar",
+                        "kind": "panel",
+                        "props": { "title": "Notes" },
+                    }],
+                }),
+            )])
+            .expect("the tree activates"),
+        );
 
         let body = list_ui_schemas(&state);
         assert_eq!(
@@ -116,24 +116,26 @@ mod tests {
     #[tokio::test]
     async fn the_response_carries_the_declared_slots() {
         let (state, _dir) = state().await;
-        *state.ui_tree.write() = load_ui_tree(&[
-            entry(
-                "ui.shell",
-                json!({ "slots": [
+        state.assembly.set_ui_tree(
+            load_ui_tree(&[
+                entry(
+                    "ui.shell",
+                    json!({ "slots": [
                     { "id": "chat.sidebar", "cardinality": "many" },
                     { "id": "session.detail.extensions", "cardinality": "one" },
                 ] }),
-            ),
-            entry(
-                "ui.slot.notes",
-                json!({ "components": [{
+                ),
+                entry(
+                    "ui.slot.notes",
+                    json!({ "components": [{
                     "slot": "chat.sidebar",
                     "kind": "panel",
                     "props": { "title": "Notes" },
                 }] }),
-            ),
-        ])
-        .expect("the tree activates");
+                ),
+            ])
+            .expect("the tree activates"),
+        );
 
         let body =
             serde_json::to_value(list_ui_schemas(&state)).expect("serializes");
@@ -158,11 +160,13 @@ mod tests {
     #[tokio::test]
     async fn the_method_is_served_under_its_wire_name() {
         let (state, _dir) = state().await;
-        *state.ui_tree.write() = load_ui_tree(&[entry(
-            "ui.slot.versioned",
-            json!({ "version": 3 }),
-        )])
-        .expect("the tree activates");
+        state.assembly.set_ui_tree(
+            load_ui_tree(&[entry(
+                "ui.slot.versioned",
+                json!({ "version": 3 }),
+            )])
+            .expect("the tree activates"),
+        );
         let state = Arc::new(state);
 
         let mut router = crate::rpc::RpcRouter::new();

@@ -130,12 +130,11 @@ pub(super) async fn tool_definitions_project_exposure_and_promote_after_a_call()
     cache.seed(&[]);
     let descriptors = registry.descriptors_cached();
     let baseline =
-        compose_tool_definitions(&descriptors, None, None, &[], &cache.called);
+        compose_tool_definitions(&descriptors, None, None, &cache.called);
     let noop_policy = compose_tool_definitions(
         &descriptors,
         Some(&ToolSurfacePolicy::default()),
         None,
-        &[],
         &cache.called,
     );
     assert_eq!(

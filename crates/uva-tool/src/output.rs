@@ -40,7 +40,7 @@ use crate::{ToolOutput, types::Context};
 
 /// Stable per-tool rendering contract. Cheap to clone; embed in
 /// any catalog or snapshot.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars_derive::JsonSchema)]
 pub struct ToolOutputDefinition {
     /// Tool name (matches `Tool::name()`).
     pub name: String,
@@ -187,7 +187,16 @@ impl ToolOutputDefinition {
 /// `snake_case` (matching the rest of the API surface:
 /// `ContentPart`, `OperationState`), so `"shell"` / `"web_fetch"`
 /// / `"todo"` ride the wire.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    schemars_derive::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RenderKind {

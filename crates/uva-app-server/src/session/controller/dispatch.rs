@@ -67,7 +67,7 @@ pub(super) async fn run_controller_loop(
     let mut last_activity = tokio::time::Instant::now();
     let mut run_handle: Option<tokio::task::JoinHandle<()>> = None;
     // R29-Phase-I: the reason recorded on the terminal
-    // `LifecycleShutdown` event. Each exit path overrides it;
+    // `SessionShutdown` event. Each exit path overrides it;
     // the default (Completed) covers the channel-closed path.
     let mut exit_reason = uva::session::SessionEndReason::Completed;
     // Cluster ownership keepalive: renew at a third of the TTL so a
@@ -519,26 +519,10 @@ async fn park_durably(
         model: Some(model),
         rerun,
     };
-    let row = match serde_json::to_value(&event) {
-        Ok(row) => row,
-        Err(e) => {
-            tracing::warn!(
-                target: "uva.session",
-                session_id = %inner.session_id,
-                error = %e,
-                "Failed to serialise the parked_prompt row"
-            );
-            return (
-                park_id,
-                Some(format!(
-                    "the parked_prompt row could not be serialised: {e}"
-                )),
-            );
-        }
-    };
     // The flush lands the row before the op returns: the park is the
     // promise, and a queued-but-unflushed row does not survive a crash.
-    if let Err(e) = inner.append_durable_row(row).await {
+    // The variant owns the row's shape; the writer stamps its ordinal.
+    if let Err(e) = inner.append_durable_event(&event).await {
         tracing::warn!(
             target: "uva.session",
             session_id = %inner.session_id,
@@ -589,11 +573,16 @@ async fn handle_rerun_op(
     failure
 }
 
-/// `Feedback`: log, then append the feedback row as a JSONL
-/// event so a future analytics endpoint can aggregate.
+/// `Feedback`: log, then append the feedback row as a typed
+/// log-only event so a future analytics endpoint can aggregate.
 /// Failures are logged but do not abort the controller —
 /// feedback is observational and never critical to the next
 /// run.
+///
+/// The rating's target is the rated row's **ordinal** (its `seq`, in
+/// decimal) — the row's identity in the session log. The route
+/// resolves it against the log before the op is submitted, so the row
+/// this op writes always names a row that exists.
 async fn handle_feedback_op(
     inner: &ControllerInner,
     message_id: String,
@@ -607,17 +596,19 @@ async fn handle_feedback_op(
         thumbs_up,
         "op_rx: received Feedback; persisting to sink"
     );
-    // The writer stamps the row's `seq` and `ts`.
-    let payload = serde_json::json!({
-        "kind": "feedback",
-        "message_id": message_id,
-        "thumbs_up": thumbs_up,
-    });
+    // The writer stamps the row's `seq` and `ts`; the variant owns
+    // the row's shape, so the call site names no wire keys.
+    let event = uva::session::SessionEvent::Feedback {
+        seq: 0,
+        ts: String::new(),
+        message_id,
+        thumbs_up,
+    };
     // The feedback row goes through the session's one writer, so
     // it carries the writer's ordinal — and the flush lands it
     // before the op returns: feedback has no broadcast of its own
     // to lean on for the flush.
-    if let Err(e) = inner.append_durable_row(payload).await {
+    if let Err(e) = inner.append_durable_event(&event).await {
         tracing::warn!(
             target: "uva.session",
             session_id = %inner.session_id,
@@ -701,22 +692,7 @@ async fn spend_parked_turns(
             ts: String::new(),
             park_id: parked.park_id,
         };
-        let row = match serde_json::to_value(&event) {
-            Ok(row) => row,
-            Err(e) => {
-                tracing::warn!(
-                    target: "uva.session",
-                    session_id = %inner.session_id,
-                    error = %e,
-                    "Failed to serialise the park_consumed row"
-                );
-                failure.get_or_insert_with(|| {
-                    format!("a park_consumed row could not be serialised: {e}")
-                });
-                continue;
-            }
-        };
-        if let Err(e) = inner.append_durable_row(row).await {
+        if let Err(e) = inner.append_durable_event(&event).await {
             tracing::warn!(
                 target: "uva.session",
                 session_id = %inner.session_id,

@@ -10,6 +10,7 @@ use std::sync::{
 use futures::StreamExt;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+use uva_approval::{ApprovalRequest, ResumeToken, Suspension};
 use uva_core::SystemClock;
 use uva_provider::ToolUse;
 use uva_session::{LogWriter, in_memory::InMemorySessionSink};
@@ -23,10 +24,7 @@ use uva_tool::{
 };
 
 use super::super::{support::*, *};
-use crate::{
-    ReActAgent,
-    agent::approval::{ApprovalRequest, ResumeToken, Suspension},
-};
+use crate::ReActAgent;
 
 // A tool whose annotations declare its risk; every execution bumps
 // the counter, so "did the held call run?" is observable.

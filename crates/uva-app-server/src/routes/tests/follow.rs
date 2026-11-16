@@ -888,7 +888,6 @@ async fn running_controller(
     let controller = crate::session::controller::SessionController::spawn(
         fixture.user.clone(),
         SESSION,
-        fixture.state.session_manager.sink(&fixture.user, SESSION),
         fixture.state.session_manager.writer(&fixture.user, SESSION),
         deps,
         Duration::from_secs(300),
@@ -1726,7 +1725,6 @@ async fn compact_is_rejected_while_running() {
     let controller = crate::session::controller::SessionController::spawn(
         user.clone(),
         SESSION,
-        state.session_manager.sink(&user, SESSION),
         state.session_manager.writer(&user, SESSION),
         deps,
         Duration::from_secs(300),
@@ -1803,7 +1801,7 @@ async fn a_run_cannot_start_while_the_compaction_gate_is_held() {
 }
 
 #[tokio::test]
-async fn a_settled_tool_call_advances_the_live_projection() {
+async fn a_progress_chunk_extends_the_live_projection_without_settling_it() {
     use uva::tool::ToolOutput;
     let fixture = fixture().await;
     let controller = fixture
@@ -1830,16 +1828,19 @@ async fn a_settled_tool_call_advances_the_live_projection() {
             output: ToolOutput::text("file body"),
         },
     ));
-    let settled = controller.live_snapshot();
+    let streamed = controller.live_snapshot();
     assert!(
-        settled.live_seq > proposed.live_seq,
-        "settling a call must advance the frame counter"
+        streamed.live_seq > proposed.live_seq,
+        "a chunk must advance the frame counter"
     );
-    assert_eq!(settled.tool_calls[0].status, "completed");
     assert_eq!(
-        settled.tool_calls[0].output.as_deref(),
+        streamed.tool_calls[0].status, "running",
+        "a chunk is not a result: the call is still running"
+    );
+    assert_eq!(
+        streamed.tool_calls[0].output.as_deref(),
         Some("file body"),
-        "the settled output reaches the client"
+        "the streamed chunk reaches the client"
     );
 }
 
@@ -2548,6 +2549,66 @@ fn the_window_folds_the_harnesss_suspended_segment() {
     assert!(
         crate::routes::follow::open_requests_in_window(clipped).is_none(),
         "the window refuses to guess from a clipped turn"
+    );
+}
+
+/// A `step` or `iteration` boundary is **not** a turn boundary.
+///
+/// The loop writes one step pair per iteration, and the window's two
+/// geometric predicates only mean something for turn rows: without the
+/// turn-only guard, a window that clipped the turn's own `turn_start`
+/// still saw a "start" (the `step_start`) and counted two "ends" (one
+/// turn end plus one step end) — so a clipped window priced a partial
+/// surface and folded answers from a turn it could not prove it held.
+#[test]
+fn a_step_boundary_is_not_a_turn_boundary() {
+    fn row(event: &SessionEvent) -> Value {
+        serde_json::to_value(event).expect("the row serialises")
+    }
+    assert_eq!(
+        crate::routes::follow::turn_boundary(&row(&uva::session::turn_start(
+            0
+        ))),
+        Some(true)
+    );
+    assert_eq!(
+        crate::routes::follow::turn_boundary(&row(&uva::session::turn_end(
+            0, "complete"
+        ))),
+        Some(false)
+    );
+    for step in [
+        uva::session::step_start(0, 0),
+        uva::session::step_end(0, 0, "tool_call"),
+        uva::session::iteration_start(0),
+        uva::session::iteration_end(0, "completed"),
+    ] {
+        assert_eq!(
+            crate::routes::follow::turn_boundary(&row(&step)),
+            None,
+            "a step/iteration row is not a turn boundary: {step:?}"
+        );
+    }
+
+    // This window is anchored (header + usage) and would have looked
+    // whole under the widened guard: its `step_start` is the only
+    // "start" in it, while the turn's own `turn_start` sits before the
+    // window. With the turn-only guard the head is provably clipped.
+    let clipped = vec![
+        row(&uva::session::step_start(0, 0)),
+        row(&uva::session::request_header(
+            "fake",
+            "fake-model",
+            "sha256:tools",
+            "start",
+        )),
+        row(&uva::session::usage(400, 100, 500, None, None, None)),
+        row(&uva::session::step_end(0, 0, "tool_call")),
+        row(&uva::session::turn_end(0, "complete")),
+    ];
+    assert!(
+        !crate::routes::follow::window_holds_last_turn(&clipped),
+        "a step start must not stand in for the turn's own start"
     );
 }
 

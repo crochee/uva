@@ -28,6 +28,7 @@ fn extra_fields(tag: &str) -> Value {
             "call_id": "c1", "tool": "shell",
             "arguments_hash": "sha256:x",
         }),
+        "tool_output" => json!({"call_id": "c1", "tool": "shell"}),
         "tool_result_transformed" => json!({
             "transformers": ["eraser"], "tool_name": "read",
             "call_id": "c1", "before": "sha256:a",
@@ -37,6 +38,7 @@ fn extra_fields(tag: &str) -> Value {
             "park_id": "park-1", "text": "queued",
         }),
         "park_consumed" => json!({"park_id": "park-1"}),
+        "feedback" => json!({"message_id": "m1", "thumbs_up": true}),
         "plugin" => json!({
             "kind": "acme.span", "payload": {"span": "s1"},
         }),
@@ -75,6 +77,55 @@ fn parses_user_message_with_surface_op() {
     assert_eq!(ev.seq(), 0);
     assert!(ev.surface_op().unwrap().is_append());
     assert_eq!(ev.type_tag(), "user_message");
+}
+
+/// A `user_message` row written before the attachments field
+/// existed still parses, with no refs: the field is additive on
+/// the wire, and a text-only turn must not be made to carry one.
+#[test]
+fn user_message_without_attachments_parses_with_no_refs() {
+    let v = json!({
+        "seq": 3,
+        "ts": "2026-11-14T00:00:00Z",
+        "type": "user_message",
+        "data": {"role": "user", "content": {"text": "hi"}},
+    });
+    let ev = SessionEvent::from_value(&v).expect("parses");
+    let SessionEvent::UserMessage { attachments, .. } = &ev else {
+        panic!("a user message, got {ev:?}");
+    };
+    assert!(attachments.is_empty(), "an old row carries no refs");
+}
+
+/// A turn's attachment refs ride its `user_message` row as typed
+/// fields beside the message payload, so a reloaded transcript can
+/// resolve them without decoding the payload.
+#[test]
+fn user_message_carries_attachment_refs() {
+    let row = json!({
+        "seq": 4,
+        "ts": "2026-11-14T00:00:00Z",
+        "type": "user_message",
+        "data": {"role": "user", "content": {"text": "look"}},
+        "attachments": [{
+            "kind": "image",
+            "hash": "abc123",
+            "mime_type": "image/png",
+            "byte_len": 12,
+        }],
+    });
+    let ev = SessionEvent::from_value(&row).expect("parses");
+    let SessionEvent::UserMessage { attachments, .. } = &ev else {
+        panic!("a user message, got {ev:?}");
+    };
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(
+        attachments[0].hash.as_deref(),
+        Some("abc123"),
+        "the ref is re-readable"
+    );
+    let back = serde_json::to_value(&ev).expect("serialises");
+    assert_eq!(back, row, "the row round-trips byte for byte");
 }
 
 #[test]
@@ -119,36 +170,19 @@ fn parses_compaction_with_surface_op() {
 
 #[test]
 fn log_only_events_carry_no_surface_op() {
-    let log_only = [
-        "assistant_chunk",
-        "compaction_start",
-        "compaction_summary",
-        "compaction_end",
-        "tool_call",
-        "step",
-        "turn",
-        "iteration",
-        "warning",
-        "steering_guard",
-        "steering_hint",
-        "hook_block",
-        "subagent_enter",
-        "subagent_exit",
-        "request_header",
-        "approval_asked",
-        "approval_decided",
-        "approval_granted",
-        "tool_dispatch",
-        "request_snapshot",
-        "usage",
-        "sandbox_mode",
-        "session_shutdown",
-        "tool_result_transformed",
-        "parked_prompt",
-        "park_consumed",
-        "plugin",
-    ];
-    for tag in log_only {
+    // The list is derived, not hand-written: every tag whose
+    // declared role is log-only, read off the enum through the
+    // const (which the cross-check in `log_surface`'s tests holds
+    // to the enum as a set). A hand-written list of the log-only
+    // tags shrank silently when a variant joined the enum, and a
+    // row that quietly stopped being asserted here is a row nobody
+    // re-checked.
+    for tag in KNOWN_SESSION_EVENT_TYPES {
+        let skeleton = empty_event_of(tag)
+            .unwrap_or_else(|| panic!("{tag} has no skeleton"));
+        if skeleton.surface_role() != SurfaceRole::LogOnly {
+            continue;
+        }
         let v = event_json(tag, 99, false);
         let ev = SessionEvent::from_value(&v)
             .unwrap_or_else(|| panic!("{tag} should parse"));
@@ -279,6 +313,60 @@ fn bounding_a_row_twice_is_a_no_op() {
 }
 
 #[test]
+fn a_tool_output_row_keeps_its_tail_and_is_idempotent() {
+    let huge = "0123456789".repeat(MAX_TOOL_OUTPUT_BYTES);
+    let row = serde_json::to_value(crate::tool_output("c1", "shell", &huge))
+        .expect("the row serialises");
+
+    let bounded = bound_tool_output_row(row);
+    let text = bounded["data"]["output"]
+        .as_str()
+        .expect("the chunk is text");
+    let stored = serde_json::to_string(text).expect("serialises");
+    assert!(
+        stored.len() <= MAX_TOOL_OUTPUT_BYTES,
+        "the row carries at most the cap: {}",
+        stored.len()
+    );
+    assert!(
+        text.ends_with(&huge[huge.len() - 64..]),
+        "the tail window keeps the newest output"
+    );
+    assert_eq!(
+        bounded["data"]["original_bytes"].as_u64(),
+        Some(huge.len() as u64),
+        "the cap records how much it summarized"
+    );
+
+    let twice = bound_tool_output_row(bounded.clone());
+    assert_eq!(twice, bounded, "a bounded row is bounded once");
+}
+
+#[test]
+fn merging_tool_output_chunks_keeps_one_tail_window() {
+    let chunk = "abcdef".repeat(10_000);
+    let mut row =
+        serde_json::to_value(crate::tool_output("c1", "shell", &chunk))
+            .expect("the row serialises");
+    let next = serde_json::to_value(crate::tool_output("c1", "shell", &chunk))
+        .expect("the row serialises");
+
+    merge_tool_output_row(&mut row, &next);
+    let text = row["data"]["output"].as_str().expect("text");
+    let stored = serde_json::to_string(text).expect("serialises");
+    assert!(stored.len() <= MAX_TOOL_OUTPUT_BYTES, "{}", stored.len());
+    assert!(
+        text.ends_with(&chunk[chunk.len() - 32..]),
+        "the merged row keeps the newest chunk's tail"
+    );
+    assert_eq!(
+        row["data"]["original_bytes"].as_u64(),
+        Some((chunk.len() * 2) as u64),
+        "the merged row says how much output it stands for"
+    );
+}
+
+#[test]
 fn rejects_unknown_legacy_shape() {
     let legacy = json!({"role": "user", "text": "hi"});
     assert!(SessionEvent::from_value(&legacy).is_none());
@@ -386,6 +474,7 @@ fn a_user_row_carries_its_source_only_when_it_has_one() {
         data: json!({"role": "user", "content": "focus on the tests"}),
         source: Some("steer".to_string()),
         surface_op: None,
+        attachments: Vec::new(),
     };
     let written = serde_json::to_value(&steer).expect("serialises");
     assert_eq!(written["source"], json!("steer"));
@@ -396,6 +485,7 @@ fn a_user_row_carries_its_source_only_when_it_has_one() {
         data: json!({"role": "user", "content": "hi"}),
         source: None,
         surface_op: None,
+        attachments: Vec::new(),
     };
     let written = serde_json::to_value(&ordinary).expect("serialises");
     assert!(
@@ -470,11 +560,14 @@ fn empty_event_of_returns_none_for_unknown_tag() {
 }
 
 #[test]
-fn known_session_event_types_has_one_entry_per_variant() {
-    // The const is the public contract; every variant of
-    // `SessionEvent` must appear exactly once. This catches
-    // the case where a new variant is added but the const
-    // is forgotten.
+fn known_session_event_types_lists_no_tag_twice() {
+    // The const is the public contract, so no tag may appear
+    // twice. The per-variant half — that the const names every
+    // variant's wire tag, and only those — is held by the
+    // cross-check in `log_surface`'s tests, which compares the
+    // const with the enum's tags as sets. A count cannot hold it:
+    // the number does not move when the enum grows, so a variant
+    // forgotten in the const kept the count green.
     let mut seen = std::collections::HashSet::new();
     for tag in KNOWN_SESSION_EVENT_TYPES {
         assert!(
@@ -482,11 +575,54 @@ fn known_session_event_types_has_one_entry_per_variant() {
             "duplicate tag in KNOWN_SESSION_EVENT_TYPES: {tag}"
         );
     }
-    assert_eq!(
-        seen.len(),
-        31,
-        "expected 31 typed event variants; add the new one to KNOWN_SESSION_EVENT_TYPES"
+}
+
+/// The feedback row is a typed log-only audit row: it parses back
+/// with its own tag, carries its payload in typed fields rather
+/// than a `data` envelope, and never enters the model surface.
+#[test]
+fn feedback_row_round_trips_as_a_log_only_event() {
+    let row = json!({
+        "type": "feedback",
+        "seq": 11,
+        "ts": "2026-11-14T00:00:00Z",
+        "message_id": "msg-7",
+        "thumbs_up": true,
+    });
+    let event = SessionEvent::from_value(&row).expect("the typed row parses");
+    assert_eq!(event.type_tag(), "feedback");
+    assert_eq!(event.seq(), 11);
+    assert!(!event.is_surface_eligible());
+    assert!(event.surface_op().is_none());
+    let back = serde_json::to_value(&event).expect("serialises");
+    assert_eq!(back, row, "the row round-trips byte for byte");
+}
+
+/// A `tool_output` row is the durable half of one streamed progress
+/// chunk: it names the call it belongs to, carries the chunk in
+/// `data.output`, and says nothing to the model — the settled
+/// `tool_result` row is the model's copy. Without it a reload of a
+/// running turn loses everything the tool printed so far.
+#[test]
+fn tool_output_row_round_trips_as_a_log_only_partial() {
+    let row = json!({
+        "type": "tool_output",
+        "seq": 12,
+        "ts": "2026-11-15T00:00:00Z",
+        "call_id": "c1",
+        "tool": "shell",
+        "data": {"output": "first half"},
+    });
+    let event = SessionEvent::from_value(&row).expect("the partial row parses");
+    assert_eq!(event.type_tag(), "tool_output");
+    assert_eq!(event.seq(), 12);
+    assert!(
+        !event.is_surface_eligible(),
+        "the settled `tool_result` row is the model's copy of the output"
     );
+    assert!(event.surface_op().is_none());
+    let back = serde_json::to_value(&event).expect("serialises");
+    assert_eq!(back, row, "the row round-trips byte for byte");
 }
 
 #[test]
@@ -710,6 +846,7 @@ fn usage_row_without_a_decodable_report_has_none_provider_usage() {
             data: json!({}),
             source: None,
             surface_op: None,
+            attachments: Vec::new(),
         }
         .provider_usage()
         .is_none()
@@ -779,4 +916,191 @@ fn a_transformed_result_row_names_its_plugin_and_its_two_versions() {
         round_trip_value(&event).type_tag(),
         "tool_result_transformed"
     );
+}
+
+/// A row written before the typed fields existed carries its values
+/// in `data` only. The parser joins the two views, so a typed reader
+/// sees the same value either way.
+#[test]
+fn an_old_row_gets_its_typed_fields_from_the_payload() {
+    let row = json!({
+        "type": "turn",
+        "seq": 7,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {"kind": "start", "turn": 3},
+    });
+    let event = SessionEvent::from_value(&row).expect("a typed row");
+    let SessionEvent::Turn { kind, turn, .. } = event else {
+        panic!("the row is a turn: {event:?}");
+    };
+    assert_eq!(kind.as_deref(), Some("start"));
+    assert_eq!(turn, Some(3));
+}
+
+/// The builders write both views, so a row's typed fields and its
+/// payload never disagree.
+#[test]
+fn a_built_row_agrees_with_its_payload() {
+    let row = crate::typed_event_builders::turn_start(2);
+    let value = serde_json::to_value(&row).expect("the row serializes");
+    let SessionEvent::Turn {
+        kind, turn, data, ..
+    } = row
+    else {
+        panic!("the row is a turn");
+    };
+    assert_eq!(kind.as_deref(), Some("start"));
+    assert_eq!(turn, Some(2));
+    assert_eq!(data.get("kind").and_then(Value::as_str), Some("start"));
+    assert_eq!(
+        data.get("turn").and_then(Value::as_u64),
+        Some(2),
+        "the payload and the typed field must agree"
+    );
+    // The raw-row readers still find the key where they always did.
+    assert_eq!(
+        value
+            .get("data")
+            .and_then(|d| d.get("kind"))
+            .and_then(Value::as_str),
+        Some("start")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Pre-typed rows: every key lives in `data`
+//
+// The repair closers and every log written before the typed fields
+// existed put their values in `data` only (and spell the tool-call id
+// `call_id`, not `tool_call_id`). `normalize` is the one place the two
+// views meet; these tests pin each fallback a reader depends on.
+// ---------------------------------------------------------------------------
+
+/// The synthetic closers and old logs spell the call id `call_id`.
+/// Dropping this fallback would make every old answered call a dangling
+/// call: both the repair report and the resume pairing read it through
+/// `tool_call_id()`.
+#[test]
+fn an_old_tool_result_answers_the_call_it_names_in_data() {
+    let row = json!({
+        "type": "tool_result",
+        "seq": 4,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {"role": "tool", "call_id": "c1", "content": "ok"},
+    });
+    let event = SessionEvent::from_value(&row).expect("the row parses");
+    assert_eq!(
+        event.tool_call_id(),
+        Some("c1"),
+        "the `call_id` spelling fills the typed field: {event:?}"
+    );
+}
+
+/// A suspension wrote `phase` where the loop writes `kind`; both mark
+/// the boundary.
+#[test]
+fn an_old_turn_spelling_phase_still_marks_its_boundary() {
+    let row = json!({
+        "type": "turn",
+        "seq": 5,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {"phase": "end", "reason": "suspended"},
+    });
+    let event = SessionEvent::from_value(&row).expect("the row parses");
+    assert_eq!(event.boundary_kind(), Some("end"), "{event:?}");
+}
+
+/// A hand-built `turn`/`step` event (never through `from_value`) that
+/// carries its kind in `data` must still answer `boundary_kind` — the
+/// interrupted-turn closers silently lose their boundary otherwise.
+#[test]
+fn a_hand_built_boundary_falls_back_to_its_payload() {
+    let turn = SessionEvent::Turn {
+        seq: 1,
+        ts: String::new(),
+        data: json!({"kind": "end", "turn": 2}),
+        kind: None,
+        turn: Some(2),
+    };
+    assert_eq!(turn.boundary_kind(), Some("end"), "{turn:?}");
+
+    let step = SessionEvent::Step {
+        seq: 2,
+        ts: String::new(),
+        data: json!({"phase": "start", "turn": 1, "step": 3}),
+        kind: None,
+        turn: Some(1),
+        step: Some(3),
+    };
+    assert_eq!(step.boundary_kind(), Some("start"), "{step:?}");
+}
+
+/// A `step` row from before the typed fields still exposes its kind and
+/// ordinals.
+#[test]
+fn an_old_step_row_keeps_its_kind_and_ordinals() {
+    let row = json!({
+        "type": "step",
+        "seq": 6,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {"kind": "end", "turn": 1, "step": 2},
+    });
+    let event = SessionEvent::from_value(&row).expect("the row parses");
+    assert_eq!(event.boundary_kind(), Some("end"), "{event:?}");
+    assert_eq!(event.boundary_turn(), Some(1));
+    assert_eq!(event.boundary_step(), Some(2));
+}
+
+/// A `subagent_exit` row from before the typed fields still names the
+/// child it closes.
+#[test]
+fn an_old_subagent_exit_row_names_its_child() {
+    let row = json!({
+        "type": "subagent_exit",
+        "seq": 7,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {
+            "child_session_id": "child-1",
+            "depth": 1,
+            "status": "completed",
+        },
+    });
+    let event = SessionEvent::from_value(&row).expect("the row parses");
+    assert_eq!(event.delegation_child(), Some("child-1"), "{event:?}");
+    assert_eq!(event.delegation_depth(), Some(1));
+    assert_eq!(event.delegation_status(), Some("completed"));
+}
+
+/// A `request_header` row from before the typed fields still names the
+/// envelope its facts were produced under.
+#[test]
+fn an_old_request_header_row_names_its_envelope() {
+    let row = json!({
+        "type": "request_header",
+        "seq": 8,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {
+            "provider": "anthropic",
+            "model": "claude-test",
+            "reason": "start",
+        },
+    });
+    let event = SessionEvent::from_value(&row).expect("the row parses");
+    assert_eq!(event.request_provider(), Some("anthropic"), "{event:?}");
+    assert_eq!(event.request_model(), Some("claude-test"));
+}
+
+/// A `tool_call` row from before the typed fields still pairs with its
+/// result.
+#[test]
+fn an_old_tool_call_row_names_the_call_it_opens() {
+    let row = json!({
+        "type": "tool_call",
+        "seq": 9,
+        "ts": "2026-11-13T00:00:00Z",
+        "data": {"call_id": "c1", "name": "read", "input": {"path": "a"}},
+    });
+    let event = SessionEvent::from_value(&row).expect("the row parses");
+    assert_eq!(event.tool_call_id(), Some("c1"), "{event:?}");
+    assert_eq!(event.tool_call_name(), Some("read"));
 }

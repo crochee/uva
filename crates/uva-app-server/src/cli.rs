@@ -65,9 +65,10 @@ pub struct Args {
     ///
     /// The profile owns plugin assembly; deployment basics (bind
     /// address, workspace root, logging) stay in `config.yaml`. When
-    /// omitted, `<directory>/profile.toml` is used if it exists, and
-    /// config.yaml's plugin sections are not consulted at all (the
-    /// compatibility layer.
+    /// omitted, `<directory>/.agents/profile.toml` is used if it
+    /// exists — the project's configuration layer, next to the
+    /// provider fallback `<directory>/.agents/config.toml`. The
+    /// settings surface writes the document back to the same path.
     #[arg(long, value_name = "PATH", global = true)]
     pub profile: Option<PathBuf>,
     /// Path to a bundle patch TOML (the lowest layer).

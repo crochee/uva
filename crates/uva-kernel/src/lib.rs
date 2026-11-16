@@ -31,6 +31,7 @@ pub mod effect;
 pub mod error;
 pub mod manifest;
 pub mod mount;
+pub mod mount_ctx;
 pub mod plugin;
 pub mod scope;
 pub mod waterfall;
@@ -45,7 +46,14 @@ pub use manifest::{
     RuntimeKind,
     ServiceKey,
 };
-pub use mount::{MountHandle, PluginState, mount_all};
+pub use mount::{
+    MountHandle,
+    PluginState,
+    mount_all,
+    mount_all_with,
+    parent_service_available,
+};
+pub use mount_ctx::{IsolateSpec, MountRow, Realms};
 pub use plugin::Plugin;
 pub use scope::{Namespace, ServiceHandle, UI_PREFIX, namespace_allows};
 pub use waterfall::{

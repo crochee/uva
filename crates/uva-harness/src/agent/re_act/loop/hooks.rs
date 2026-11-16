@@ -6,19 +6,24 @@
 //! cancellation reporting shared by the boundaries.
 
 use uva_context::AgentState;
+use uva_events::SystemEvent;
 
 use super::ReActLoop;
-use crate::{agent::host::HookContext, events::SystemEvent};
+use crate::agent::host::HookContext;
 
 impl ReActLoop {
     /// The context a registration sees at this boundary.
+    ///
+    /// The context carries run state and the cancellation token only
+    /// (ADR 0004): the sink is deliberately not part of it, so the
+    /// loop passes `self.sink` explicitly where a dispatch writes a
+    /// durable `hook_block` row.
     pub(super) fn hook_context<'a>(
         &'a self,
         state: &'a AgentState,
     ) -> HookContext<'a> {
         HookContext {
             state,
-            events: &self.sink,
             cancel: &self.run.cancel,
         }
     }

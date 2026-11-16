@@ -97,6 +97,13 @@ is still open. Keep concrete identifiers. Reply with the summary only.";
 
 /// What a request may spend: the model's window and the reserve the
 /// reply needs.
+/// The ordinal a message carries when it has no log row of its own.
+///
+/// A live run's inbox turn was written by the host, so the loop does
+/// not know its ordinal. Such a row cannot be cited as compaction
+/// provenance, so a plan may not shadow it.
+const UNCITABLE_SEQ: u64 = 0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TokenBudget {
     pub window: usize,
@@ -126,6 +133,11 @@ impl TokenBudget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactionPlan {
     /// Surface range `[start, end)` the summary replaces.
+    ///
+    /// The range is a position in the **model-visible** surface: the
+    /// fold's order, in which a steer that landed between a
+    /// `tool_use` and its `tool_result` waits for the result. The
+    /// durable fold reads the range in the same coordinates.
     pub range: Range<usize>,
     /// Seqs of the shadowed surface rows.
     ///
@@ -570,11 +582,18 @@ pub enum PlannedCompaction {
 /// Asks `compactor` whether to compact and binds the plan's range and
 /// provenance to `history`: the range is clamped to the span both
 /// lists cover, the leading system message is never shadowed, the cut
-/// moves back to the nearest balanced tool-pair boundary, and
+/// moves back to the nearest balanced tool-pair boundary, the cut
+/// stops before the first row the caller cannot cite, and
 /// `shadowed_seqs` comes from `surface_seqs` (never from the
 /// compactor). A plan the binding clamps to nothing is
 /// [`PlannedCompaction::EmptySpan`], not an error — nothing is broken,
 /// there is just nothing to shadow.
+///
+/// The rows are the **model-visible** surface: the fold's order, in
+/// which a steer that landed between a `tool_use` and its
+/// `tool_result` waits for the result. `surface_seqs` names the rows
+/// in that order, so the range is a position in the surface the
+/// durable fold reproduces.
 ///
 /// The loop calls this with the transcript it already holds, so a
 /// plan costs no log read. A host that has only the log calls
@@ -638,6 +657,11 @@ pub fn plan_compaction_from_rows(
 // anything is snapshotted: a summary that cut between an assistant's
 // `tool_use` and its `tool_result` would leave the kept tail invalid,
 // and a custom compactor must not be able to produce that shape.
+//
+// The cut also stops before the first row the caller cannot cite: a
+// message with no ordinal of its own — an inbox turn the host wrote
+// while the run was in flight — has no log row to shadow, and the
+// durable fold refuses a replace that cites it.
 fn bind_plan(
     mut plan: CompactionPlan,
     history: &[Message],
@@ -648,7 +672,16 @@ fn bind_plan(
     }
     let floor = usize::from(history[0].role == Role::System);
     let start = plan.range.start.max(floor);
-    let end = plan.range.end.min(history.len()).min(surface_seqs.len());
+    let citable_end = surface_seqs
+        .iter()
+        .position(|seq| *seq == UNCITABLE_SEQ)
+        .unwrap_or(surface_seqs.len());
+    let end = plan
+        .range
+        .end
+        .min(history.len())
+        .min(surface_seqs.len())
+        .min(citable_end);
     let end = balanced_cut_at_or_before(history, end);
     if start >= end {
         return None;

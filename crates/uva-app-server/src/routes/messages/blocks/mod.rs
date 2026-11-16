@@ -322,7 +322,7 @@ impl Turn {
             // Progress / warnings / steering notices are diagnostics,
             // and an `Agent(..)` event is a *subagent's* trace: neither
             // is part of this message.
-            AgentEvent::System(_) | AgentEvent::Agent(..) => Vec::new(),
+            AgentEvent::System(_) => Vec::new(),
         }
     }
 

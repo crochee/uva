@@ -51,19 +51,17 @@ use uva_kernel::{
     PluginManifest,
 };
 use uva_provider::ModelProvider;
-use uva_session::{Compactor, LogWriter};
+use uva_session::{Compactor, SessionLog};
 use uva_tool::{ToolRegistry, ToolRestriction, ToolSurfacePolicy};
 
 use crate::{
     agent::{
         Agent,
         AgentDescriptor,
-        DelegatingTool,
         ReActAgent,
         ReasoningStrategy,
         host::{Diagnostic, Host},
     },
-    input::SubagentWriters,
     prompt::PromptContext,
 };
 
@@ -106,9 +104,6 @@ pub struct RunConfig {
     pub prompt_context: Arc<PromptContext>,
     /// The iteration cap.
     pub max_iterations: usize,
-    /// Delegating tools (the `task` delegator); installed in order, and
-    /// a name clash with an earlier delegator is a programming error.
-    pub delegators: Vec<Arc<dyn DelegatingTool>>,
     /// The deployment's tool-surface policy.
     pub tool_surface: Option<ToolSurfacePolicy>,
     /// The deployment's reasoning loop; `None` keeps
@@ -117,10 +112,7 @@ pub struct RunConfig {
     /// The deployment's allow/deny list.
     pub tool_restriction: Option<Arc<ToolRestriction>>,
     /// The session's one writer.
-    pub log_writer: Option<Arc<LogWriter>>,
-    /// Writer source resolving the sessions this run's delegated
-    /// children run in.
-    pub subagent_writers: Option<Arc<dyn SubagentWriters>>,
+    pub log_writer: Option<Arc<dyn SessionLog>>,
     /// The caller-composed context manager.
     pub context_manager: Option<Arc<dyn ContextManager>>,
     /// The deployment's compaction engine, when one is configured.
@@ -138,16 +130,15 @@ impl RunConfig {
     /// Build the run's [`ReActAgent`].
     ///
     /// Mirrors the server's assembly: default the policy host, bind it
-    /// to the registry (reporting each refusal), install the delegators,
-    /// then apply every optional knob. Setter order is irrelevant —
-    /// each setter rewrites one capability field.
+    /// to the registry (reporting each refusal), then apply every
+    /// optional knob. Setter order is irrelevant — each setter rewrites
+    /// one capability field.
     ///
     /// # Panics
     ///
-    /// Panics when a delegator's name is already taken (a programming
-    /// error in the assembly) or when the final host bind is refused.
-    /// Both are impossible after the bind above claims the registry, and
-    /// both are exactly what the server's assembly asserts.
+    /// Panics when the final host bind is refused. It is impossible
+    /// after the bind above claims the registry, and it is exactly what
+    /// the server's assembly asserts.
     pub fn build(self) -> ReActAgent {
         let RunConfig {
             provider,
@@ -156,12 +147,10 @@ impl RunConfig {
             descriptor,
             prompt_context,
             max_iterations,
-            delegators,
             tool_surface,
             strategy,
             tool_restriction,
             log_writer,
-            subagent_writers,
             context_manager,
             compactor,
             host,
@@ -179,12 +168,10 @@ impl RunConfig {
             descriptor,
             prompt_context,
         );
-        let agent = install_delegators(agent, delegators);
         let agent = with_surface(agent, tool_surface);
         let agent = with_strategy(agent, strategy);
         let agent = with_restriction(agent, tool_restriction);
         let agent = with_writer(agent, log_writer);
-        let agent = with_subagent_writers(agent, subagent_writers);
         let agent = with_context_manager(agent, context_manager);
         let agent = with_compactor(agent, compactor);
         let agent = with_spawner(agent, spawner);
@@ -250,18 +237,6 @@ fn report_refusals(refused: Vec<Diagnostic>) {
     }
 }
 
-fn install_delegators(
-    mut agent: ReActAgent,
-    delegators: Vec<Arc<dyn DelegatingTool>>,
-) -> ReActAgent {
-    for tool in delegators {
-        agent = agent
-            .with_delegator(tool)
-            .expect("delegator install must succeed");
-    }
-    agent
-}
-
 fn with_surface(
     agent: ReActAgent,
     policy: Option<ToolSurfacePolicy>,
@@ -296,20 +271,10 @@ fn with_restriction(
 
 fn with_writer(
     agent: ReActAgent,
-    writer: Option<Arc<LogWriter>>,
+    writer: Option<Arc<dyn SessionLog>>,
 ) -> ReActAgent {
     match writer {
         Some(writer) => agent.with_log_writer(writer),
-        None => agent,
-    }
-}
-
-fn with_subagent_writers(
-    agent: ReActAgent,
-    writers: Option<Arc<dyn SubagentWriters>>,
-) -> ReActAgent {
-    match writers {
-        Some(writers) => agent.with_subagent_writers(writers),
         None => agent,
     }
 }

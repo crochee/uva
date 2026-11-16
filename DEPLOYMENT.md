@@ -69,25 +69,29 @@ make dev-web      # frontend only
 make ci            # fmt --check, clippy -D warnings, dependency invariants
 make test-crates   # every crate's suite, one at a time (never --workspace)
 make test-sqlite   # the optional SQLite memory tier
-make examples      # every example + both standalone consumer crates
+make examples      # every example + the standalone consumer binaries
 make check-web     # frontend types + lint + formatting (no browser)
 ```
 
 `.github/workflows/rust-quality.yml` runs exactly those targets on every
-push and pull request — three jobs (`gates`, `tests`, `examples`), no
-API keys required.
+push and pull request — five jobs (`gates`, `tests`, `examples`, `web`,
+`bench`), no API keys required.
 
 ### Frontend verification
 
-The frontend has **no automated test suite** by design (R72). The
-former Playwright e2e tree took 13 minutes per run and needed
-`cargo build` + Vite + Chromium, while its mocks rotted unnoticed. It is
-gone, along with `playwright.config.ts`, `.github/workflows/e2e.yml`,
-and an ad-hoc browser-script harness under `uva-web/scripts/e2e/`.
+The frontend keeps **no e2e suite** by design (R72; see
+`docs/adr/0001-frontend-test-policy.md`). The former Playwright e2e
+tree took 13 minutes per run and needed `cargo build` + Vite +
+Chromium, while its mocks rotted unnoticed. It is gone, along with
+`playwright.config.ts`, `.github/workflows/e2e.yml`, and an ad-hoc
+browser-script harness under `uva-web/scripts/e2e/`.
 
-What runs in CI is `make check-web` — `tsc --noEmit`, `eslint`, and
-`prettier --check`. Behaviour is verified by driving the running app
-with Playwright MCP (`AGENTS.md` §4.2):
+Pure-function unit tests run with vitest (`uva-web/tests/*.test.ts`,
+node environment). What runs in CI is `make check-web` —
+`tsc --noEmit`, `eslint`, `prettier --check`, and `vitest run`.
+Everything the unit tests do not cover (DOM, network, React, real
+rendering) is verified by driving the running app with Playwright MCP
+(`AGENTS.md` §4.2):
 
 ```bash
 make dev            # backend :8080 + Vite :5173

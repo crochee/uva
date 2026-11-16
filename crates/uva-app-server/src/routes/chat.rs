@@ -55,9 +55,14 @@
 //!   Body: `{ "thumbs_up": boolean, "session_id": string }`
 //!   Response: `204 No Content`.
 //!   - Persists a feedback record into the *named session's* log so
-//!     future analytics endpoints can aggregate it. `session_id` is
-//!     required: the message id is a client-side label and cannot
-//!     identify a session on its own.
+//!     future analytics endpoints can aggregate it. `message_id` is
+//!     the **ordinal** of the rated row (its `seq`, in decimal) — a
+//!     row's identity in the session log — so the server resolves the
+//!     rating to the assistant message it is about. A target that
+//!     names no row, or names a row that is not an assistant message,
+//!     is refused with `feedback_target_unknown`. `session_id` is
+//!     required: an ordinal only means something inside one
+//!     session's log and cannot identify a session on its own.
 //!
 //! - `GET /api/v1/chat/usage`
 //!   Response: `200 { "tokens_in": ..., "tokens_out": ..., ... }`.
@@ -74,6 +79,7 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -118,7 +124,15 @@ pub struct CreateSessionResponse {
 /// the session log — and reports `queue` back when no run was live
 /// to receive it.
 #[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize,
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Deserialize,
+    Serialize,
+    JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
 pub enum Delivery {
@@ -180,7 +194,7 @@ pub struct WireAttachment {
     pub attachment_hash: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SendMessageResponse {
     pub message_id: String,
     /// `true` when the turn waits for the session's next run.
@@ -199,13 +213,14 @@ pub struct SendMessageResponse {
 #[derive(Debug, Deserialize, Default, validator::Validate)]
 pub struct FeedbackRequest {
     pub thumbs_up: bool,
-    /// The session the rated message belongs to.
+    /// The session the rated row belongs to.
     ///
-    /// `message_id` alone cannot resolve it — the id the chat UI
-    /// sends is a client-side label, and the sink has no
-    /// message-id index. Without this the handler resolved a
-    /// hardcoded `"default"` session, so every 👍/👎 landed in the
-    /// wrong log (and created that session on first click).
+    /// The target is the rated row's **ordinal**, and an ordinal only
+    /// means something inside one session's log — the same number
+    /// names a different row in every other session. Without this the
+    /// handler resolved a hardcoded `"default"` session, so every
+    /// 👍/👎 landed in the wrong log (and created that session on
+    /// first click).
     #[serde(default)]
     #[validate(length(min = 1, message = "must not be empty"))]
     pub session_id: String,
@@ -554,13 +569,34 @@ pub async fn feedback(
     message_id: String,
     req: FeedbackRequest,
 ) -> Result<(), RpcError> {
-    validate_resource_name(&message_id)?;
     // The session arrives in the body, so it is caller-supplied and
     // reaches the sink's filesystem path — validate it exactly like a
     // path parameter.
     validate_resource_name(&req.session_id)?;
     let session_id = req.session_id;
     let user_id = resolve_user_id(&state);
+    // The target is resolved against the session's OWN log, and the
+    // resolution happens BEFORE the controller is opened: a rating
+    // that names no assistant row is the caller's mistake, and it
+    // must not create the session on the way to being refused.
+    let rows = match state
+        .session_manager
+        .sink(&user_id, &session_id)
+        .read()
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            // A log that cannot be read is a server fault, not a
+            // miss: the rating must not land in a log nobody could
+            // check it against.
+            return Err(
+                Error::internal(format!("read session log: {error}")).into()
+            );
+        }
+    };
+    let ordinal =
+        feedback_target(&rows, &message_id).map_err(feedback_target_unknown)?;
     let controller = state
         .get_or_create_session_controller(&user_id, &session_id)
         .await?;
@@ -568,12 +604,71 @@ pub async fn feedback(
     // before the answer goes out.
     controller
         .submit_durable(SessionOp::Feedback {
-            message_id,
+            // The canonical decimal spelling of the ordinal the
+            // target resolved to: the row on disk names the row the
+            // rating is about, in one spelling.
+            message_id: ordinal.to_string(),
             thumbs_up: req.thumbs_up,
         })
         .await
         .map_err(|e| Error::internal(format!("{e}")))?;
     Ok(())
+}
+
+/// The machine code a refused rating answers with.
+///
+/// One code for every refusal — a target that is not an ordinal, one
+/// that names no row, one that names a row that is not an answer:
+/// they are the same failure seen from three sides ("this rating
+/// names nothing"), and a client that has to tell them apart would
+/// learn nothing it can act on. The name says what the server could
+/// not do — resolve the target — not what the caller did wrong.
+fn feedback_target_unknown(message: String) -> RpcError {
+    RpcError::from(Error::validation(message.clone()))
+        .with_code("feedback_target_unknown")
+        .with_message(message)
+}
+
+/// Resolve a rating's target against the session's rows.
+///
+/// The target is the rated row's **ordinal** — the `seq` the
+/// session's writer stamped on it — in decimal. The ordinal is the
+/// row's identity in the log: the log has no second id, and a client
+/// that cannot name the ordinal has nothing to rate.
+///
+/// The row must be an **assistant message**: a rating is about an
+/// answer, and the log's other rows — a user turn, a tool result, a
+/// warning — are not answers. A target that names no row, or names a
+/// row that is not an answer, is refused: a rating that names nothing
+/// is noise in an append-only audit log.
+///
+/// Returns the ordinal the target resolved to.
+fn feedback_target(rows: &[Value], target: &str) -> Result<u64, String> {
+    let Ok(ordinal) = target.parse::<u64>() else {
+        return Err(
+            "the feedback target must be the ordinal of a row in this \
+             session (a decimal number)"
+                .to_string(),
+        );
+    };
+    let Some(row) = rows
+        .iter()
+        .find(|row| row.get("seq").and_then(Value::as_u64) == Some(ordinal))
+    else {
+        return Err(format!(
+            "no row with ordinal {ordinal} in this session's log"
+        ));
+    };
+    // The row is decoded through the session crate's own decoder, so
+    // the answer follows the vocabulary instead of a copy of it.
+    let is_assistant = matches!(
+        uva::session::SessionEvent::from_value(row),
+        Some(uva::session::SessionEvent::AssistantMessage { .. })
+    );
+    if !is_assistant {
+        return Err(format!("row {ordinal} is not an assistant message"));
+    }
+    Ok(ordinal)
 }
 
 // ---------------------------------------------------------------------------

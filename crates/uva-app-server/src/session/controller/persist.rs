@@ -7,29 +7,14 @@ use std::sync::atomic::Ordering;
 use anyhow::{Context as _, Result};
 use uva::harness::{AgentEvent, SystemEvent};
 
-use super::{inner::ControllerInner, run_log::RunLog};
+use super::inner::ControllerInner;
 use crate::state::UsageMetrics;
 
 impl ControllerInner {
     pub(super) async fn persist_and_broadcast(
         &self,
         event: &AgentEvent,
-        log: &mut RunLog,
     ) -> Result<()> {
-        // A wrapped event is a delegated sub-agent's trace. It never
-        // joins the parent's durable log or SSE: the router gives
-        // the child its own session (its own log, its own live
-        // stream), and the parent keeps only the lightweight
-        // enter/exit markers the router writes through `log`.
-        if let AgentEvent::Agent(meta, inner) = event {
-            Self::record_usage_tree(&self.usage, inner);
-            if let Some(router) = self.subagent_router.as_ref() {
-                router
-                    .route(&self.user_id, &self.session_id, meta, inner, log)
-                    .await;
-            }
-            return Ok(());
-        }
         let outer_kind = event.kind();
         let system_kind = Self::classify_system_kind(event);
         let event_value = Self::encode_event(event)?;
@@ -115,17 +100,6 @@ impl ControllerInner {
                 error = %e,
                 "cluster: session frame publish failed"
             );
-        }
-    }
-
-    /// [`Self::record_usage`] over a whole sub-agent trace: the
-    /// child's usage and turn totals are real consumption of the
-    /// deployment's tokens, so they belong in `/api/v1/chat/usage`
-    /// even though the child's events now land in their own session.
-    fn record_usage_tree(usage: &UsageMetrics, event: &AgentEvent) {
-        Self::record_usage(usage, event);
-        if let AgentEvent::Agent(_, inner) = event {
-            Self::record_usage_tree(usage, inner);
         }
     }
 

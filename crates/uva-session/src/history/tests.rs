@@ -1,7 +1,12 @@
 use serde_json::{Value, json};
 use uva_provider::{Content, ContentPart, Message, Role, TextContent, ToolUse};
 
-use super::{HistoryError, derive_history, surface_message};
+use super::{
+    HistoryError,
+    ProvenancedHistory,
+    derive_history,
+    surface_message,
+};
 use crate::{
     events::{SessionEvent, SurfaceOp},
     surface::FoldError,
@@ -22,6 +27,7 @@ fn user_row(seq: u64, text: &str) -> Value {
         data: message_json(&Message::user(text)),
         source: None,
         surface_op: None,
+        attachments: Vec::new(),
     })
 }
 
@@ -40,6 +46,7 @@ fn tool_row(seq: u64, call_id: &str, output: &str) -> Value {
         ts: "2026-10-25T00:00:02Z".into(),
         data: message_json(&Message::tool(output, call_id)),
         is_error: false,
+        tool_call_id: Some(call_id.to_string()),
         surface_op: None,
     })
 }
@@ -197,6 +204,111 @@ fn a_user_message_that_lands_mid_tool_call_follows_the_result() {
         text(&history[3]).as_deref(),
         Some("steer: focus on the tests")
     );
+}
+
+#[test]
+fn a_steer_between_a_tool_call_and_its_result_keeps_its_own_ordinal() {
+    // Log order: prompt(1), tool_use(2), steer(3), result(4). The
+    // projection releases the steer after the result — the model must
+    // not see a user turn between a `tool_use` and its answer — but
+    // the ordinal travels with the message, so the surface and its
+    // provenance stay paired: the tool result cites row 4, the steer
+    // cites row 3.
+    let rows = vec![
+        user_row(1, "start"),
+        assistant_tool_row(2, "call-1"),
+        user_row(3, "steer: focus on the tests"),
+        tool_row(4, "call-1", "ok"),
+    ];
+    let history = ProvenancedHistory::from_log(&rows).unwrap();
+    assert_eq!(
+        history.ordinals(),
+        &[1, 2, 4, 3],
+        "each ordinal is the row its message was written to"
+    );
+    let messages = history.messages();
+    assert_eq!(messages.len(), 4, "got {messages:?}");
+    assert_eq!(
+        text(&messages[2]).as_deref(),
+        Some("ok"),
+        "the result keeps its row even though the steer follows it"
+    );
+    assert_eq!(messages[2].tool_call_id.as_deref(), Some("call-1"));
+    assert_eq!(
+        text(&messages[3]).as_deref(),
+        Some("steer: focus on the tests")
+    );
+    assert!(
+        history.is_one_message_per_row(),
+        "the reordering moves rows; it does not merge them"
+    );
+}
+
+#[test]
+fn a_tail_that_still_holds_a_deferred_user_turn_is_one_message_per_row() {
+    // A user turn that arrives while a tool call is pending waits for
+    // the result. When the log ends before the result (the run was
+    // suspended), `into_parts` releases the turn at the tail — so every
+    // message is still exactly one folded row. The old length
+    // comparison ran before the release, saw two messages for three
+    // rows, and answered `false`, which is the legacy *merge* answer.
+    let rows = vec![
+        user_row(1, "start"),
+        assistant_tool_row(2, "call-1"),
+        user_row(3, "steer: focus on the tests"),
+    ];
+    let history = ProvenancedHistory::from_log(&rows).unwrap();
+    assert_eq!(history.messages().len(), 3, "{:?}", history.messages());
+    assert_eq!(
+        text(&history.messages()[2]).as_deref(),
+        Some("steer: focus on the tests"),
+        "the deferred tail is released, not dropped"
+    );
+    assert!(
+        history.is_one_message_per_row(),
+        "a deferral moves a message; it does not merge rows"
+    );
+}
+
+#[test]
+fn derive_history_is_the_same_projection_without_the_ordinals() {
+    let rows = vec![user_row(1, "hello"), assistant_row(2, "hi")];
+    let history = ProvenancedHistory::from_log(&rows).unwrap();
+    assert_eq!(history.ordinals(), &[1, 2]);
+    assert!(history.is_one_message_per_row());
+    assert_eq!(derive_history(&rows).unwrap(), history.into_messages());
+}
+
+#[test]
+fn a_merged_legacy_turn_keeps_the_ordinal_that_opened_it() {
+    // The legacy one-part-per-row dialect writes one assistant turn as
+    // two rows. The projection merges them into the one message the
+    // provider needs, and the message carries the ordinal of the row
+    // that opened the turn; the surface now has more rows than
+    // messages, so a position in it is not the position of a row.
+    let rows = vec![
+        json!({"type": "UserInput", "data": {"text": "run both"}}),
+        json!({"type": "Model", "data": {
+            "type": "tool_use", "id": "call_a", "name": "shell",
+            "input": {"command": "echo ONE"},
+        }}),
+        json!({"type": "Model", "data": {
+            "type": "tool_use", "id": "call_b", "name": "shell",
+            "input": {"command": "echo TWO"},
+        }}),
+    ];
+    let history = ProvenancedHistory::from_log(&rows).unwrap();
+    assert_eq!(
+        history.ordinals(),
+        &[1, 2],
+        "the merged turn cites the row that opened it"
+    );
+    assert_eq!(history.messages().len(), 2);
+    assert!(
+        !history.is_one_message_per_row(),
+        "three rows folded into two messages"
+    );
+    assert_eq!(derive_history(&rows).unwrap(), history.into_messages());
 }
 
 #[test]

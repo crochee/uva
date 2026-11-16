@@ -5,6 +5,7 @@ mod approval;
 mod approval_dispatch;
 mod approval_resume;
 mod cancellation;
+mod flush_cadence;
 mod log_writer;
 mod max_iterations;
 mod one_row_per_turn;
@@ -30,7 +31,6 @@ async fn table_driven_runs_every_fixture() {
     run!(approval::read_only_tools_are_never_asked_about);
     run!(approval::a_high_risk_call_suspends_before_it_runs);
     run!(approval::a_writerless_ask_is_refused_not_suspended);
-    run!(approval_dispatch::a_high_risk_delegated_call_is_blocked);
     run!(approval_dispatch::dispatch_is_recorded_for_high_and_unknown_calls);
     run!(approval_dispatch::a_failing_dispatch_flush_prevents_execution);
     run!(approval_resume::resume_dispatches_the_approved_call_and_continues);
@@ -58,7 +58,6 @@ async fn table_driven_runs_every_fixture() {
     run!(cancellation::a_token_cancelled_mid_run_reports_the_interruption);
     run!(cancellation::a_completed_run_ends_with_one_completed_terminal);
     run!(cancellation::panicking_tool_still_reports_session_end);
-    run!(cancellation::panicking_delegator_still_reports_session_end);
     run!(cancellation::panicking_strategy_still_reports_session_end);
     run!(cancellation::panicking_provider_still_reports_session_end);
     run!(step_pairing::every_step_start_has_a_matching_end);
@@ -75,6 +74,8 @@ async fn table_driven_runs_every_fixture() {
     run!(writer_history::a_host_history_that_prefixes_the_log_is_accepted);
     run!(writer_history::a_writer_backed_run_sends_attachments_once_and_warns);
     run!(writer_history::a_writer_backed_prune_warns_once_per_run);
+    run!(writer_history::streamed_chunks_land_as_tool_output_rows);
+    run!(flush_cadence::a_long_stream_is_durable_before_the_tool_finishes);
     run!(one_row_per_turn::a_streamed_reply_is_one_row_and_one_message_after_resume);
     run!(one_row_per_turn::a_reply_with_a_tool_call_keeps_text_and_tool_use_in_one_row);
     run!(one_row_per_turn::a_failed_tool_leaves_its_failure_on_the_row);
@@ -92,6 +93,7 @@ async fn table_driven_runs_every_fixture() {
     run!(
         tool_execution::cancelled_mid_sequential_batch_tags_undispatched_calls
     );
+    run!(tool_execution::dispatched_tools_observe_the_runs_cancel_token);
     run!(tool_projection::tool_definitions_project_exposure_and_promote_after_a_call);
     run!(tool_projection::tool_surface_policy_narrows_advertisement_but_not_dispatch);
     run!(tool_projection::run_emits_tool_progress_for_streaming_tool);

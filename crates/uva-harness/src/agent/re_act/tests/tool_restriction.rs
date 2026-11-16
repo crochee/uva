@@ -1,6 +1,6 @@
-//! Per-agent tool restriction: `denied_tools`, `allow_list`,
-//! and the delegation seam. Drives one loop per scenario and
-//! asserts the advertised tool list + the post-call result.
+//! Per-agent tool restriction: `denied_tools` and `allow_list`.
+//! Drives one loop per scenario and asserts the advertised tool list +
+//! the post-call result.
 
 use std::sync::Arc;
 
@@ -151,9 +151,7 @@ async fn allow_list_narrows_the_advertised_set() {
 }
 
 #[tokio::test]
-async fn restriction_without_the_delegator_hides_it() {
-    use crate::agent::re_act::delegation::tests::EchoInterceptor;
-
+async fn a_tool_outside_the_allow_list_is_not_advertised() {
     let provider = Arc::new(CapturingProvider::new(vec![empty_response()]));
     let registry = Arc::new(ToolRegistry::new());
     registry.register_entry(uva_tool::ToolEntry::dynamic(
@@ -161,10 +159,12 @@ async fn restriction_without_the_delegator_hides_it() {
         "read a file".to_string(),
         json!({"type": "object"}),
     ));
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(FakeTool::new(
+        "hidden_tool",
+        "never advertised",
+    ))));
 
     let agent = ReActAgent::new(provider.clone(), registry)
-        .with_delegator(Arc::new(EchoInterceptor::new("intercepted_tool")))
-        .expect("first install must succeed")
         .with_tool_restriction(uva_tool::ToolRestriction::allow(["read"]));
     let mut stream = agent
         .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
@@ -175,8 +175,8 @@ async fn restriction_without_the_delegator_hides_it() {
     let names: Vec<&str> =
         captured[0].iter().map(|d| d.name.as_str()).collect();
     assert!(
-        !names.contains(&"intercepted_tool"),
-        "the delegator is not in the allow-list, so its tool must not be \
+        !names.contains(&"hidden_tool"),
+        "the tool is not in the allow-list, so it must not be \
          advertised: {names:?}"
     );
     assert!(
@@ -186,16 +186,14 @@ async fn restriction_without_the_delegator_hides_it() {
 }
 
 #[tokio::test]
-async fn delegator_definition_advertised_and_call_routed() {
-    use crate::agent::re_act::delegation::tests::EchoInterceptor;
-
+async fn a_registry_tool_is_advertised_and_its_call_routed() {
     let provider = Arc::new(CapturingProvider::new(vec![
         vec![StreamChunk::IsDone {
             result: Box::new(SamplingResult {
                 text: String::new(),
                 tool_calls: vec![ToolUse {
                     id: "c_ix".into(),
-                    name: "intercepted_tool".into(),
+                    name: "echo".into(),
                     input: json!({"n": 1}),
                 }],
                 reasoning: String::new(),
@@ -215,11 +213,9 @@ async fn delegator_definition_advertised_and_call_routed() {
             }),
         }],
     ]));
-    let registry = echo_registry().0;
+    let (registry, executions) = echo_registry();
 
-    let agent = ReActAgent::new(provider.clone(), registry)
-        .with_delegator(Arc::new(EchoInterceptor::new("intercepted_tool")))
-        .expect("first install must succeed");
+    let agent = ReActAgent::new(provider.clone(), registry);
     let mut events = Vec::new();
     let mut stream = agent
         .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
@@ -233,43 +229,24 @@ async fn delegator_definition_advertised_and_call_routed() {
     let names: Vec<&str> =
         captured[0].iter().map(|d| d.name.as_str()).collect();
     assert!(
-        names.contains(&"intercepted_tool"),
-        "delegator definition rides the tool list: {names:?}"
+        names.contains(&"echo"),
+        "the registry tool's definition rides the tool list: {names:?}"
     );
     drop(captured);
 
-    let intercepted_result = events.iter().any(|e| {
+    assert_eq!(
+        *executions.lock(),
+        1,
+        "the advertised call reaches the registry tool exactly once"
+    );
+    let answered = events.iter().any(|e| {
         matches!(e, AgentEvent::Model(ContentPart::ToolResult(tr))
-        if tr.tool_name.as_deref() == Some("intercepted_tool")
-            && tr.content.iter().any(|p| {
-                matches!(p, ContentPart::Text(t)
-                    if t.text.contains("intercepted:intercepted_tool"))
-            }))
+        if tr.tool_name.as_deref() == Some("echo"))
     });
     assert!(
-        intercepted_result,
-        "the advertised call must be answered by the delegator: {events:?}"
+        answered,
+        "the advertised call must commit its result: {events:?}"
     );
-}
-
-#[test]
-fn with_delegator_rejects_duplicate_name() {
-    use crate::agent::re_act::delegation::tests::EchoInterceptor;
-
-    let agent = ReActAgent::new(
-        Arc::new(CapturingProvider::new(vec![])),
-        echo_registry().0,
-    )
-    .with_delegator(Arc::new(EchoInterceptor::new("shared_tool")))
-    .expect("first install must succeed");
-
-    let result =
-        agent.with_delegator(Arc::new(EchoInterceptor::new("shared_tool")));
-    let err = match result {
-        Ok(_) => panic!("duplicate delegator name must surface as Err"),
-        Err(name) => name,
-    };
-    assert_eq!(err, "shared_tool");
 }
 
 #[tokio::test]

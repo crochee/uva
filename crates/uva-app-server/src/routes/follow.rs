@@ -50,6 +50,7 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -65,7 +66,7 @@ use uva::{
 };
 
 use crate::{
-    api::validate_resource_name,
+    api::{v1::session_view::SessionTurn, validate_resource_name},
     routes::{chat::resolve_user_id, sessions::SESSION_LIST_TAIL_WINDOW},
     rpc::RpcError,
     session::controller::{
@@ -105,7 +106,7 @@ const FOLLOW_POLL_MAX: Duration = Duration::from_millis(500);
 pub(crate) const COMPACTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The session-level facts a client needs before its first row.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SessionHeader {
     /// The session id.
     pub session_id: String,
@@ -126,7 +127,7 @@ pub struct SessionHeader {
 }
 
 /// How much of the model's window the next request would occupy.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ContextMeter {
     /// Tokens the next request is projected to carry.
     pub used: u64,
@@ -136,11 +137,12 @@ pub struct ContextMeter {
 }
 
 /// The complete first frame of a `follow` stream.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FollowSnapshot {
     /// Session-level facts.
     pub header: SessionHeader,
     /// The last [`FOLLOW_WINDOW`] durable rows.
+    #[schemars(with = "Vec<SessionTurn>")]
     pub rows: Vec<Value>,
     /// The ordinal of the last durable row (`0` for an empty log).
     pub cursor: u64,
@@ -454,7 +456,7 @@ pub(crate) async fn build_baseline(
 ///    one session, two numbers. The newest `request_header` resets the
 ///    anchor, so the test is the meter's own end state: fold the window
 ///    and ask whether the newest anchor is a usage report.
-fn window_holds_last_turn(rows: &[Value]) -> bool {
+pub(crate) fn window_holds_last_turn(rows: &[Value]) -> bool {
     let mut starts = 0;
     let mut ends = 0;
     for row in rows {
@@ -568,12 +570,20 @@ async fn open_interrupts_widened(
 
 /// `Some(true)` for a turn start, `Some(false)` for a turn end, `None`
 /// when the row is not a turn boundary.
-fn turn_boundary(row: &Value) -> Option<bool> {
-    let SessionEvent::Turn { data, .. } = SessionEvent::from_value(row)? else {
+///
+/// Turn-only on purpose, even though the same accessor also answers for
+/// `step` and `iteration` rows. The loop writes one step pair per
+/// iteration, so counting those as turn boundaries would let a window
+/// that clipped the turn's own head look whole — a `step_start` would
+/// satisfy [`window_holds_last_turn`]'s "a start exists" clause, and one
+/// turn end plus one step end would satisfy
+/// [`open_requests_in_window`]'s "two ends" clause.
+pub(crate) fn turn_boundary(row: &Value) -> Option<bool> {
+    let event = SessionEvent::from_value(row)?;
+    let SessionEvent::Turn { .. } = event else {
         return None;
     };
-    let kind = data.get("kind").or_else(|| data.get("phase"))?.as_str()?;
-    match kind {
+    match event.boundary_kind()? {
         "start" => Some(true),
         "end" => Some(false),
         _ => None,
@@ -604,13 +614,11 @@ fn state_label(state: SessionState) -> &'static str {
 
 fn agent_attribution(head: Option<&Value>) -> Option<String> {
     let first = head?;
-    if first.get("type").and_then(Value::as_str) != Some("subagent_enter") {
+    let event = SessionEvent::from_value(first)?;
+    if !matches!(event, SessionEvent::SubagentEnter { .. }) {
         return None;
     }
-    first
-        .pointer("/data/agent_name")
-        .and_then(Value::as_str)
-        .map(str::to_string)
+    event.delegation_agent().map(str::to_string)
 }
 
 fn row_ts(row: &Value) -> Option<String> {
@@ -636,13 +644,12 @@ pub(crate) fn context_provider(
     rows: &[Value],
 ) -> Arc<dyn ModelProvider> {
     let header = rows.iter().rev().find_map(|row| {
-        let SessionEvent::RequestHeader { data, .. } =
-            SessionEvent::from_value(row)?
-        else {
+        let event = SessionEvent::from_value(row)?;
+        if !matches!(event, SessionEvent::RequestHeader { .. }) {
             return None;
-        };
-        let provider = data.get("provider")?.as_str()?;
-        let model = data.get("model")?.as_str()?;
+        }
+        let provider = event.request_provider()?;
+        let model = event.request_model()?;
         Some(format!("{provider}/{model}"))
     });
     match header {
@@ -949,12 +956,13 @@ fn carries_live_content(row: &Value) -> bool {
 }
 
 fn is_turn_start(row: &Value) -> bool {
-    let Some(SessionEvent::Turn { data, .. }) = SessionEvent::from_value(row)
-    else {
+    let Some(event) = SessionEvent::from_value(row) else {
         return false;
     };
-    data.get("kind").and_then(Value::as_str) == Some("start")
-        || data.get("phase").and_then(Value::as_str) == Some("start")
+    if !matches!(event, SessionEvent::Turn { .. }) {
+        return false;
+    }
+    event.boundary_kind() == Some("start")
 }
 
 /// `true` when a row can move the open-interrupt set.
@@ -962,9 +970,8 @@ fn changes_approvals(row: &Value) -> bool {
     match SessionEvent::from_value(row) {
         Some(SessionEvent::ApprovalAsked { .. })
         | Some(SessionEvent::ApprovalDecided { .. }) => true,
-        Some(SessionEvent::Turn { data, .. }) => {
-            data.get("kind").and_then(Value::as_str) == Some("end")
-                || data.get("phase").and_then(Value::as_str) == Some("end")
+        Some(event @ SessionEvent::Turn { .. }) => {
+            event.boundary_kind() == Some("end")
         }
         _ => false,
     }
@@ -1212,7 +1219,7 @@ pub(crate) async fn open_interrupts_with_token(
 // ---------------------------------------------------------------------------
 
 /// What a manual compaction pass did.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct CompactResponse {
     /// `true` when a summary replaced its span.
     pub committed: bool,
@@ -1497,7 +1504,7 @@ async fn run_manual_compaction_pass(
 /// Session-scoped token usage. Deliberately **not** the process-wide
 /// counters at `/api/v1/chat/usage`: a client showing one conversation
 /// must not be billed for every other session this process ran.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SessionUsageResponse {
     /// The session the numbers belong to.
     pub session_id: String,
@@ -1536,9 +1543,8 @@ pub async fn usage(
     let turns = events
         .iter()
         .filter(|event| match event {
-            SessionEvent::Turn { data, .. } => {
-                data.get("kind").and_then(Value::as_str) == Some("end")
-                    || data.get("phase").and_then(Value::as_str) == Some("end")
+            event @ SessionEvent::Turn { .. } => {
+                event.boundary_kind() == Some("end")
             }
             _ => false,
         })

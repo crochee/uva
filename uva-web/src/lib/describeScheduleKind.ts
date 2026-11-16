@@ -12,7 +12,7 @@ import type { JobKind } from '../api/types';
 export function describeScheduleKind(schedule: { kind: JobKind }): string {
   switch (schedule.kind.kind) {
     case 'interval':
-      return `interval · ${schedule.kind.interval_secs}s`;
+      return `interval · ${schedule.kind.interval.secs}s`;
     case 'cron':
       return `cron · ${schedule.kind.expr}`;
     case 'once':

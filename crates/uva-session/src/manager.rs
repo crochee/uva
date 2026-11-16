@@ -221,6 +221,20 @@ impl SessionRegistry {
         self.sessions.read().get(id).cloned()
     }
 
+    /// The user that owns `session_id`, if the registry knows it.
+    ///
+    /// The synchronous sibling of [`Self::get`] for a caller that only
+    /// needs the owning user and cannot await: the sub-agent writer
+    /// source resolves a delegated child's `(user, session)` pair from
+    /// the *parent* session id the tool stamped on the child's metadata.
+    #[must_use]
+    pub fn user_of(&self, session_id: &str) -> Option<String> {
+        self.sessions
+            .read()
+            .get(session_id)
+            .map(|session| session.user_id.clone())
+    }
+
     /// Drop a session from the in-memory index.
     ///
     /// Returns the session that was registered, if any, and removes

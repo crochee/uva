@@ -23,6 +23,7 @@ use std::{
 };
 
 use parking_lot::RwLock;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uva::core::Error;
 
@@ -43,7 +44,7 @@ use crate::{
 /// Sortable fields for the skills list endpoint.
 const SKILL_SORT_WHITELIST: &[&str] = &["name", "created_at"];
 
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -55,7 +56,7 @@ pub struct SkillInfo {
 /// detail payload exposes the raw frontmatter map and the markdown
 /// body so the UI can render the SKILL.md as structured metadata
 /// plus rendered markdown — no second round-trip needed.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct SkillDetail {
     pub name: String,
     pub description: String,
@@ -328,7 +329,7 @@ pub struct CreateSkillRequest {
 }
 
 /// Response from `POST /api/v1/skills`.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct CreateSkillResponse {
     pub name: String,
     pub path: String,
@@ -494,7 +495,7 @@ pub async fn delete_skill(
 }
 
 /// Response from `POST /api/v1/skills/reload`.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 pub struct ReloadSkillsResponse {
     /// Number of skills found in the workspace after reload.
     pub count: usize,

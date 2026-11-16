@@ -1,5 +1,7 @@
 //! Process-wide usage counters for `/api/v1/chat/usage`.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 
 /// Process-wide usage counters. Cheap to read (lock-free
@@ -46,4 +48,68 @@ pub struct UsageSnapshot {
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub turns: u64,
+}
+
+/// The deployment's account of what its **delegated** children consumed.
+///
+/// A child round runs on its own harness, so its `Usage` events and its
+/// terminal event never reach a [`SessionController`](crate::session)
+/// — the parent's stream never sees them. Without this seam every
+/// delegated token and turn would vanish from `/api/v1/chat/usage`;
+/// the `task` tool reports each round here while it drains the child.
+///
+/// The counters are the same atomics the controllers write: one
+/// process-wide total, whoever produced the tokens.
+pub struct DelegatedUsage {
+    metrics: Arc<UsageMetrics>,
+}
+
+impl DelegatedUsage {
+    /// Report delegated rounds into `metrics`.
+    #[must_use]
+    pub fn new(metrics: Arc<UsageMetrics>) -> Self {
+        Self { metrics }
+    }
+}
+
+impl uva::agent::SubagentUsage for DelegatedUsage {
+    fn tokens(&self, _child_session_id: &str, input: usize, output: usize) {
+        self.metrics
+            .tokens_in
+            .fetch_add(input as u64, std::sync::atomic::Ordering::Relaxed);
+        self.metrics
+            .tokens_out
+            .fetch_add(output as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn round_ended(&self, _child_session_id: &str) {
+        self.metrics
+            .turns
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uva::agent::SubagentUsage as _;
+
+    use super::*;
+
+    /// A delegated round lands in the same counters the controllers
+    /// write: `/api/v1/chat/usage` is the deployment's total, and a
+    /// child's work is part of it.
+    #[test]
+    fn delegated_rounds_land_in_the_deployment_counters() {
+        let metrics = Arc::new(UsageMetrics::default());
+        let sink = DelegatedUsage::new(Arc::clone(&metrics));
+
+        sink.tokens("child-a", 11, 5);
+        sink.tokens("child-a", 2, 3);
+        sink.round_ended("child-a");
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.tokens_in, 13);
+        assert_eq!(snapshot.tokens_out, 8);
+        assert_eq!(snapshot.turns, 1);
+    }
 }

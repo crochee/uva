@@ -37,7 +37,11 @@ struct OperationParams {
     #[serde(flatten)]
     request: OperationRequest,
 }
-/// `chat/feedback` — the message id beside the feedback.
+/// `chat/feedback` — the rated row's ordinal beside the feedback.
+///
+/// `message_id` is the ordinal of the row the rating is about (its
+/// `seq`, in decimal): the row's identity in the session log, and
+/// the only thing the server can resolve a rating against.
 #[derive(Deserialize, validator::Validate)]
 struct FeedbackParams {
     message_id: String,
