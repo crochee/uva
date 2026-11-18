@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use uva::harness::{ResumeDecision, ResumeStatus, ResumeToken};
 
 use super::{
-    super::{SessionOp, SessionState},
+    super::SessionOp,
     support::{
         BlockingFactory,
         CancelObservingFactory,
@@ -25,6 +25,7 @@ use super::{
         wait_for_runs,
     },
 };
+use crate::session::status::SessionState;
 
 #[tokio::test]
 async fn test_two_concurrent_prompts_spawn_one_run() {
@@ -248,11 +249,13 @@ fn subscribe_snapshots_latest_is_initially_none() {
 
 /// R11: the controller publishes `OperationSnapshot`s on the
 /// shared bus at run-state transitions. A subscriber must
-/// observe `Running` when a run starts and `Completing` when
-/// the factory stream ends — without touching the run task
-/// internals.
+/// observe `Running` when a run starts, then `Completing` (the
+/// run's outcome) and `Idle` (the session's now) when it ends —
+/// without touching the run task internals. `latest` reports
+/// the present, which is what `delete_session`'s busy check
+/// reads.
 #[tokio::test]
-async fn snapshot_bus_publishes_running_then_completing() {
+async fn snapshot_bus_publishes_running_completing_then_idle() {
     let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory = Arc::new(VecFactory::new(
         vec![super::super::AgentEvent::text_delta("done")],
@@ -261,7 +264,7 @@ async fn snapshot_bus_publishes_running_then_completing() {
     let (controller, _manager, _temp) =
         make_manager_and_controller(Duration::from_secs(300), factory).await;
 
-    // Subscribe BEFORE the run so we observe both transitions.
+    // Subscribe BEFORE the run so we observe every transition.
     let (mut rx, latest) = controller.subscribe_snapshots();
     assert!(latest.is_none(), "fresh bus has no snapshot yet");
 
@@ -286,7 +289,7 @@ async fn snapshot_bus_publishes_running_then_completing() {
     .await
     .expect("snapshot bus never received the Running publish");
 
-    // Drain the receiver: Running first, then Completing.
+    // Drain the receiver: Running, then Completing, then Idle.
     let first = rx.next().await.expect("Running snapshot");
     assert_eq!(
         first.state,
@@ -294,8 +297,17 @@ async fn snapshot_bus_publishes_running_then_completing() {
     );
     let second = rx.next().await.expect("Completing snapshot");
     assert_eq!(second.state, uva::session::OperationState::Completing);
+    let third = rx.next().await.expect("Idle snapshot");
+    assert_eq!(third.state, uva::session::OperationState::Idle);
     assert_eq!(first.session_id, "s1");
     assert_eq!(second.session_id, "s1");
+    assert_eq!(third.session_id, "s1");
+    // `latest` reports the present — not the last run's residue.
+    let (_, latest) = controller.subscribe_snapshots();
+    assert_eq!(
+        latest.expect("a settled bus holds a frame").state,
+        uva::session::OperationState::Idle
+    );
 }
 
 /// A resume resubmitted after the log applied it is a no-op.

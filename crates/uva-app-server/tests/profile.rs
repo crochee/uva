@@ -14,12 +14,18 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use uva::kernel::{Context, MountError, PLUGIN_PROTOCOL_VERSION, mount_all};
+use uva::kernel::{
+    Context,
+    MountError,
+    PLUGIN_PROTOCOL_VERSION,
+    PluginState,
+    Realms,
+    mount_all_with,
+};
 use uva_app_server::profile::{
     BootContext,
     Capability,
-    Enabled,
-    Entry,
+    Manifest,
     Patch,
     Plugin,
     PluginError,
@@ -150,22 +156,24 @@ fn boot() -> BootContext {
     BootContext::new("/tmp/uva-profile-test")
 }
 
-fn entry(id: &str, config: Value) -> Entry {
-    Entry {
-        id: id.to_owned(),
-        runtime: RuntimeKind::Native,
+fn entry(id: &str, config: Value) -> Manifest {
+    Manifest {
         config,
-        capabilities: Vec::new(),
-        enabled: Enabled::On,
+        ..Manifest::plain(id, id)
     }
 }
 
-fn profile(hmr: bool, entries: Vec<Entry>) -> Profile {
+fn profile(hmr: bool, entries: Vec<Manifest>) -> Profile {
     Profile {
         core: entries,
         ui: Vec::new(),
         hmr,
     }
+}
+
+/// The isolation-scope registry the assembly mounts against.
+fn realms() -> Arc<Realms> {
+    Arc::new(Realms::default())
 }
 
 fn profile_error<T>(
@@ -185,7 +193,7 @@ fn mount_error<T>(result: Result<T, MountError>, context: &str) -> MountError {
     }
 }
 
-fn find<'a>(profile: &'a Profile, id: &str) -> &'a Entry {
+fn find<'a>(profile: &'a Profile, id: &str) -> &'a Manifest {
     profile
         .core
         .iter()
@@ -203,8 +211,8 @@ fn later_layer_replaces_whole_config() {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "a", temperature = 0.2 } },
-          { id = "tools", runtime = "native" },
+          { id = "llm", name = "llm", config = { model = "a", temperature = 0.2 } },
+          { id = "tools", name = "tools" },
         ]
         "#,
     )
@@ -214,7 +222,7 @@ fn later_layer_replaces_whole_config() {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "b" } },
+          { id = "llm", name = "llm", config = { model = "b" } },
         ]
         "#,
     )
@@ -266,8 +274,8 @@ fn bundle_again() -> Profile {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "a" } },
-          { id = "tools", runtime = "native" },
+          { id = "llm", name = "llm", config = { model = "a" } },
+          { id = "tools", name = "tools" },
         ]
         "#,
     )
@@ -279,7 +287,7 @@ fn profile_layer_again() -> Profile {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "b" } },
+          { id = "llm", name = "llm", config = { model = "b" } },
         ]
         "#,
     )
@@ -291,7 +299,7 @@ fn patch_layers_apply_in_order() {
     let base = Profile::from_toml_str(
         r#"
         [core]
-        entries = [{ id = "llm", runtime = "native", config = { model = "a" } }]
+        entries = [{ id = "llm", name = "llm", config = { model = "a" } }]
         "#,
     )
     .expect("profile parses");
@@ -318,8 +326,8 @@ fn disabled_prevents_mount() {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "a" } },
-          { id = "tools", runtime = "native" },
+          { id = "llm", name = "llm", config = { model = "a" } },
+          { id = "tools", name = "tools" },
         ]
         "#,
     )
@@ -334,10 +342,10 @@ fn disabled_prevents_mount() {
 
     let factories =
         factories(vec![FakeFactory::new("llm"), FakeFactory::new("tools")]);
-    let built = build_plugins(&resolved, &factories, &boot())
+    let built = build_plugins(&resolved, &factories, &boot(), &realms())
         .expect("the remaining entry builds");
     assert_eq!(built.len(), 1);
-    assert_eq!(built[0].manifest().id, "tools");
+    assert_eq!(built[0].plugin.manifest().id, "tools");
 }
 
 #[test]
@@ -345,7 +353,7 @@ fn insert_appends_entry() {
     let base = Profile::from_toml_str(
         r#"
         [core]
-        entries = [{ id = "llm", runtime = "native" }]
+        entries = [{ id = "llm", name = "llm" }]
         "#,
     )
     .expect("profile parses");
@@ -353,7 +361,7 @@ fn insert_appends_entry() {
         r#"
         [[insert]]
         id = "extra"
-        runtime = "native"
+        name = "extra"
         config = { n = 1 }
         "#,
     )
@@ -373,7 +381,7 @@ fn insert_appends_entry() {
 
     let factories =
         factories(vec![FakeFactory::new("llm"), FakeFactory::new("extra")]);
-    let built = build_plugins(&resolved, &factories, &boot())
+    let built = build_plugins(&resolved, &factories, &boot(), &realms())
         .expect("inserted entry builds");
     assert_eq!(built.len(), 2);
 }
@@ -383,7 +391,7 @@ fn unknown_patch_id_fails() {
     let base = Profile::from_toml_str(
         r#"
         [core]
-        entries = [{ id = "llm", runtime = "native" }]
+        entries = [{ id = "llm", name = "llm" }]
         "#,
     )
     .expect("profile parses");
@@ -410,8 +418,8 @@ fn duplicate_id_in_one_layer_fails() {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native" },
-          { id = "llm", runtime = "native" },
+          { id = "llm", name = "llm" },
+          { id = "llm", name = "llm" },
         ]
         "#,
     )
@@ -423,28 +431,6 @@ fn duplicate_id_in_one_layer_fails() {
 }
 
 #[test]
-fn unknown_runtime_fails_and_lists_choices() {
-    let error = Profile::from_toml_str(
-        r#"
-        [core]
-        entries = [{ id = "llm", runtime = "python" }]
-        "#,
-    )
-    .expect_err("an unknown runtime is an error");
-    assert!(
-        matches!(&error, ProfileError::UnknownRuntime { value } if value == "python"),
-        "unexpected error: {error}"
-    );
-    let message = error.to_string();
-    for accepted in ["native", "ui-bundle"] {
-        assert!(
-            message.contains(accepted),
-            "the error names every accepted runtime: {message}"
-        );
-    }
-}
-
-#[test]
 fn core_loader_rejects_ui_key() {
     // The other half of the namespace boundary: a core plugin may not
     // claim a `ui.` service, just as the UI loader refuses a core key.
@@ -453,7 +439,7 @@ fn core_loader_rejects_ui_key() {
     let profile = profile(false, vec![entry("theme", json!({}))]);
 
     let error = profile_error(
-        build_plugins(&profile, &factories, &boot()),
+        build_plugins(&profile, &factories, &boot(), &realms()),
         "a core manifest declaring `ui.theme` is rejected",
     );
     assert!(
@@ -473,8 +459,8 @@ fn dump_is_deterministic() {
     let source = r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "b", temperature = 0.2 } },
-          { id = "tools", runtime = "native" },
+          { id = "llm", name = "llm", config = { model = "b", temperature = 0.2 } },
+          { id = "tools", name = "tools" },
         ]
         "#;
     let first = resolve(
@@ -504,30 +490,26 @@ fn dump_with_the_boot_factories_prints_manifest_services() {
         r#"
         [core]
         entries = [
-          { id = "tool-registry", runtime = "native" },
-          { id = "skills", runtime = "native" },
-          { id = "unregistered", runtime = "native" },
+          { id = "tool-registry", name = "tool-registry" },
+          { id = "skills", name = "skills" },
+          { id = "unregistered", name = "unregistered" },
         ]
 
         [ui]
         entries = [
-          { id = "ui.slot.chat.sidebar", runtime = "ui-bundle", config = {} },
+          { id = "ui.slot.chat.sidebar", name = "ui.slot.chat.sidebar", config = {} },
         ]
         "#,
     )
     .expect("profile parses");
 
-    let dumped = uva_app_server::boot::dump_profile(&profile)
-        .expect("the factory directory answers every manifest");
+    let dumped = uva_app_server::boot::dump_profile(&profile);
     let parsed: Value =
         serde_json::from_str(&dumped).expect("the dump is valid JSON");
 
     assert_eq!(parsed["core"][0]["provides"], json!(["tools"]));
     assert_eq!(parsed["core"][0]["inject"], json!([]));
-    assert_eq!(
-        parsed["core"][1]["provides"],
-        json!(["skills", "skill-checks"])
-    );
+    assert_eq!(parsed["core"][1]["provides"], json!(["skills"]));
     assert_eq!(parsed["core"][1]["inject"], json!(["tools"]));
     // A row with no registered factory is explicit, not omitted.
     assert_eq!(parsed["core"][2]["provides"], json!([]));
@@ -540,17 +522,17 @@ fn dump_with_the_boot_factories_prints_manifest_services() {
 // -- hot reload ------------------------------------------------------
 
 #[test]
-fn a_ui_bundle_row_never_reaches_the_core_loader() {
-    // `segment_of` routes every `ui-bundle` row into `Segment::Ui`, so
-    // a UI row cannot reach `build_plugins` (and the core loader's
-    // `ui.` namespace check) by riding the core list.
+fn a_ui_row_never_reaches_the_core_loader() {
+    // A row's segment is its position in the document: a `[ui]` row
+    // belongs to the frontend loader, so it never rides the core list
+    // and never reaches the core loader's `ui.` namespace check.
     let profile = Profile::from_toml_str(
         r#"
         [core]
-        entries = [{ id = "tools", runtime = "native" }]
+        entries = [{ id = "tools", name = "tools" }]
 
         [ui]
-        entries = [{ id = "ui.shell", runtime = "ui-bundle", config = {} }]
+        entries = [{ id = "ui.shell", name = "ui.shell", config = {} }]
         "#,
     )
     .expect("profile parses");
@@ -560,14 +542,15 @@ fn a_ui_bundle_row_never_reaches_the_core_loader() {
     assert_eq!(resolved.ui.len(), 1);
     assert_eq!(resolved.ui[0].id, "ui.shell");
     assert_eq!(resolved.core.len(), 1);
-    assert!(
-        resolved
-            .core
-            .iter()
-            .all(|entry| entry.runtime != RuntimeKind::UiBundle),
-        "no `ui-bundle` row rides the core list: {:?}",
-        resolved.core
-    );
+    assert_eq!(resolved.core[0].id, "tools");
+
+    // The core loader builds the core rows only: the ui row is not
+    // built, so it needs no factory.
+    let factories = factories(vec![FakeFactory::new("tools")]);
+    let built = build_plugins(&resolved, &factories, &boot(), &realms())
+        .expect("the core row builds");
+    assert_eq!(built.len(), 1);
+    assert_eq!(built[0].plugin.manifest().id, "tools");
 }
 
 #[test]
@@ -769,7 +752,7 @@ fn watcher_polls_mtime_without_a_live_process() {
 fn build_plugins_unknown_id_fails() {
     let profile = profile(false, vec![entry("missing", json!({}))]);
     let error = profile_error(
-        build_plugins(&profile, &PluginFactories::new(), &boot()),
+        build_plugins(&profile, &PluginFactories::new(), &boot(), &realms()),
         "an unregistered id is an error",
     );
     assert!(
@@ -792,14 +775,14 @@ fn build_plugins_validates_config_against_the_manifest_schema() {
     let factories = factories(vec![FakeFactory::new("llm").schema(schema)]);
 
     let valid = profile(false, vec![entry("llm", json!({ "model": "gpt" }))]);
-    assert!(build_plugins(&valid, &factories, &boot()).is_ok());
+    assert!(build_plugins(&valid, &factories, &boot(), &realms()).is_ok());
 
     let wrong_type = profile(
         false,
         vec![entry("llm", json!({ "model": "a", "temperature": "hot" }))],
     );
     let error = profile_error(
-        build_plugins(&wrong_type, &factories, &boot()),
+        build_plugins(&wrong_type, &factories, &boot(), &realms()),
         "a wrong value type is rejected",
     );
     assert!(
@@ -810,7 +793,7 @@ fn build_plugins_validates_config_against_the_manifest_schema() {
 
     let missing = profile(false, vec![entry("llm", json!({}))]);
     let error = profile_error(
-        build_plugins(&missing, &factories, &boot()),
+        build_plugins(&missing, &factories, &boot(), &realms()),
         "a missing required field is rejected",
     );
     assert!(
@@ -824,7 +807,7 @@ fn build_plugins_validates_config_against_the_manifest_schema() {
         vec![entry("llm", json!({ "model": "a", "prototype": true }))],
     );
     let error = profile_error(
-        build_plugins(&extra, &factories, &boot()),
+        build_plugins(&extra, &factories, &boot(), &realms()),
         "an additional property is rejected",
     );
     assert!(
@@ -842,26 +825,37 @@ fn mount_all_surfaces_cycle_and_missing_dependency() {
         FakeFactory::new("a").provides(&["a"]).inject(&["b"]),
         FakeFactory::new("b").provides(&["b"]).inject(&["a"]),
     ]);
-    let plugins = build_plugins(&cycle, &cycle_factories, &boot())
+    let scope = realms();
+    let plugins = build_plugins(&cycle, &cycle_factories, &boot(), &scope)
         .expect("plugins build");
+    let rows: Vec<_> = plugins
+        .into_iter()
+        .map(|mounted| (mounted.plugin, mounted.row))
+        .collect();
     let error = mount_error(
-        mount_all(&Context::new(), &plugins),
+        mount_all_with(&Context::new(), &scope, &rows),
         "a dependency cycle fails the mount",
     );
     assert!(matches!(error, MountError::Cycle { .. }), "got {error}");
 
+    // A missing dependency parks the row instead of failing the mount:
+    // the fiber waits for its provider (dsh's PENDING semantics).
     let missing = profile(false, vec![entry("a", json!({}))]);
     let missing_factories =
         factories(vec![FakeFactory::new("a").inject(&["absent"])]);
-    let plugins = build_plugins(&missing, &missing_factories, &boot())
+    let scope = realms();
+    let plugins = build_plugins(&missing, &missing_factories, &boot(), &scope)
         .expect("plugins build");
-    let error = mount_error(
-        mount_all(&Context::new(), &plugins),
-        "a missing dependency fails the mount",
-    );
-    assert!(
-        matches!(error, MountError::MissingDependency { .. }),
-        "got {error}"
+    let rows: Vec<_> = plugins
+        .into_iter()
+        .map(|mounted| (mounted.plugin, mounted.row))
+        .collect();
+    let handle = mount_all_with(&Context::new(), &scope, &rows)
+        .expect("a parked row is not a failed mount");
+    assert_eq!(
+        handle.plugin_state("a"),
+        Some(PluginState::Pending),
+        "the row waits for its missing dependency"
     );
 }
 
@@ -870,7 +864,7 @@ fn capabilities_are_parsed_and_rendered() {
     let profile = Profile::from_toml_str(
         r#"
         [core]
-        entries = [{ id = "web-tool", runtime = "native", capabilities = ["net:http", "log"], config = {} }]
+        entries = [{ id = "web-tool", name = "web-tool", capabilities = ["net:http", "log"], config = {} }]
         "#,
     )
     .expect("profile with capabilities parses");
@@ -905,8 +899,7 @@ fn dump_with_manifests_includes_provides_and_inject() {
         ],
     );
 
-    let dumped =
-        dump_with_manifests(&profile, &factories).expect("manifests render");
+    let dumped = dump_with_manifests(&profile, &factories);
     let parsed: Value =
         serde_json::from_str(&dumped).expect("the dump is valid JSON");
     assert_eq!(parsed["core"][0]["config"]["model"], json!("a"));
@@ -939,12 +932,12 @@ fn bundle_profile_home_and_overlay_apply_in_order() {
         r#"
         [[insert]]
         id = "llm"
-        runtime = "native"
+        name = "llm"
         config = { model = "bundle", temperature = 0.2 }
 
         [[insert]]
         id = "tools"
-        runtime = "native"
+        name = "tools"
         "#,
     )
     .expect("bundle");
@@ -953,7 +946,7 @@ fn bundle_profile_home_and_overlay_apply_in_order() {
         r#"
         [core]
         entries = [
-          { id = "llm", runtime = "native", config = { model = "profile" } },
+          { id = "llm", name = "llm", config = { model = "profile" } },
         ]
         "#,
     )

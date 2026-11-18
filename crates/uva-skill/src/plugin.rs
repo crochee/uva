@@ -47,8 +47,6 @@
 
 use std::{path::PathBuf, sync::Arc};
 
-use serde_json::Value;
-use uva_core::enable::EnableChecks;
 use uva_kernel::{
     Context,
     EffectHandle,
@@ -71,14 +69,6 @@ use crate::{
 /// the key a consumer passes to `Context::require` and the key the
 /// kernel validates are one constant.
 pub const KEY_SKILLS: &str = "skills";
-
-/// The service key the skill enablement judge is registered under.
-///
-/// A profile row may write
-/// `enabled = { service = "skill-checks", check = "is_enabled", arg = "<skill>" }`
-/// and the host asks this judge whether the skill's
-/// `metadata.enabled` frontmatter field is on.
-pub const KEY_SKILL_CHECKS: &str = "skill-checks";
 
 /// The plugin id the `skills` manifest declares.
 const SKILLS_ID: &str = "skills";
@@ -129,7 +119,6 @@ impl SkillPlugin {
             PluginManifest::new(SKILLS_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.provides.push(KEY_SKILLS.to_string());
-        manifest.provides.push(KEY_SKILL_CHECKS.to_string());
         manifest.inject.push(KEY_TOOLS.to_string());
         Self { manifest, config }
     }
@@ -145,9 +134,6 @@ impl KernelPlugin for SkillPlugin {
             self.config.workspace_root.as_path(),
         ));
         let service = ctx.provide_arc(KEY_SKILLS, registry)?;
-        let judge: Arc<dyn EnableChecks> =
-            Arc::new(SkillChecks::discover(&self.config.workspace_root));
-        let checks = ctx.provide(KEY_SKILL_CHECKS, judge)?;
         let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
         let entry = ToolEntry::new(Arc::new(SkillTool::new()));
         let Some(token) = tools.register_entry_with_token(entry) else {
@@ -172,110 +158,6 @@ impl KernelPlugin for SkillPlugin {
                 return Err(error);
             }
         };
-        Ok(vec![service, checks, effect])
-    }
-}
-
-/// Answers `is_enabled` from a skill's `metadata.enabled` frontmatter.
-///
-/// Unknown subjects and unreadable frontmatter answer `None`, which the
-/// host reads as fail-closed: a delegated enablement decision the judge
-/// cannot make leaves the row out.
-struct SkillChecks {
-    skills: Vec<crate::skill::Skill>,
-}
-
-impl SkillChecks {
-    fn discover(workspace_root: &std::path::Path) -> Self {
-        Self {
-            skills: crate::discovery::discover_skills(workspace_root),
-        }
-    }
-}
-
-impl EnableChecks for SkillChecks {
-    fn check(&self, method: &str, arg: &Value) -> Option<bool> {
-        if method != "is_enabled" {
-            return None;
-        }
-        let name = arg.as_str()?;
-        let skill = self.skills.iter().find(|skill| skill.name == name)?;
-        let metadata =
-            crate::loader::SkillLoader::parse_frontmatter(&skill.location)
-                .ok()?;
-        match metadata.metadata.get("enabled") {
-            Some(value) => value.as_bool(),
-            None => Some(true),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use serde_json::json;
-    use uva_core::enable::EnableChecks;
-    use uva_kernel::{Context, mount_all};
-    use uva_tool::{ToolRegistry, ToolRegistryPlugin};
-
-    use super::*;
-
-    fn write_skill(root: &std::path::Path, name: &str, enabled: Option<bool>) {
-        let dir = root.join(".agents").join("skills").join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let metadata = match enabled {
-            Some(value) => format!("metadata:\n  enabled: {value}\n"),
-            None => String::new(),
-        };
-        std::fs::write(
-            dir.join("SKILL.md"),
-            format!(
-                "---\nname: {name}\ndescription: probe\n{metadata}---\n\nbody\n"
-            ),
-        )
-        .unwrap();
-    }
-
-    /// The judge answers the three states the host distinguishes:
-    /// enabled, disabled, and unknown (which the host reads as
-    /// fail-closed).
-    #[test]
-    fn the_skill_judge_reads_frontmatter_metadata() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        write_skill(root, "probe-on", None);
-        write_skill(root, "probe-off", Some(false));
-        write_skill(root, "probe-also-on", Some(true));
-
-        let ctx = Context::new();
-        let plugins: Vec<Arc<dyn KernelPlugin>> = vec![
-            Arc::new(ToolRegistryPlugin::new(Arc::new(ToolRegistry::new()))),
-            Arc::new(SkillPlugin::new(SkillPluginConfig {
-                workspace_root: root.to_path_buf(),
-            })),
-        ];
-        let _mounted = mount_all(&ctx, &plugins).expect("mount");
-        let judge = ctx
-            .get::<Arc<dyn EnableChecks>>(KEY_SKILL_CHECKS)
-            .expect("lookup")
-            .expect("the skills row publishes the judge");
-
-        assert_eq!(
-            judge.check("is_enabled", &json!("probe-on")),
-            Some(true),
-            "absent metadata.enabled means enabled"
-        );
-        assert_eq!(judge.check("is_enabled", &json!("probe-off")), Some(false));
-        assert_eq!(
-            judge.check("is_enabled", &json!("probe-also-on")),
-            Some(true)
-        );
-        assert_eq!(
-            judge.check("is_enabled", &json!("no-such-skill")),
-            None,
-            "an unknown subject is unanswered, never enabled"
-        );
-        assert_eq!(judge.check("other", &json!("probe-on")), None);
+        Ok(vec![service, effect])
     }
 }

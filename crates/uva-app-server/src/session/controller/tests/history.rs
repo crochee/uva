@@ -12,13 +12,14 @@ use parking_lot::Mutex;
 use uva::provider::{Content, ContentPart, Role, TextContent};
 
 use super::{
-    super::{AgentEvent, AgentInput, SessionOp, SessionState},
+    super::{AgentEvent, AgentInput, SessionOp},
     support::{
         RecordingFactory,
         make_manager_and_controller,
         wait_for_log_row,
     },
 };
+use crate::session::status::SessionState;
 
 /// Regression: the second prompt submitted to the same session
 /// must seed `AgentInput::history` with the assistant turns the

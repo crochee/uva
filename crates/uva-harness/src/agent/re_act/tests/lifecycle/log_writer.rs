@@ -143,7 +143,7 @@ pub(super) async fn a_crashed_tool_call_repairs_to_a_balanced_tail() {
         uva_session::tool_dispatch("c1", "echo", "hash"),
     ] {
         writer
-            .append(serde_json::to_value(&event).expect("event serializes"))
+            .append_event(&event)
             .await
             .expect("append the crashed tail");
     }
@@ -228,13 +228,15 @@ pub(super) async fn a_cancelled_run_closes_its_turn_with_the_cancel_reason() {
 pub(super) async fn a_run_that_fails_setup_closes_its_turn_as_error() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let seed = uva_session::user_message(
+        serde_json::to_value(Message::user("from-log"))
+            .expect("a user message serialises"),
+        None,
+    );
     writer
-        .append(serde_json::json!({
-            "type": "UserInput",
-            "data": { "text": "from-log" },
-        }))
+        .append_event(&seed)
         .await
-        .expect("seed the host's user row");
+        .expect("seed the user turn");
     writer.flush().await.expect("flush the seeded row");
 
     let provider =
@@ -290,7 +292,7 @@ pub(super) async fn a_crash_in_the_resume_window_repairs_the_reopened_turn() {
         uva_session::tool_dispatch("c1", "echo", "hash"),
     ] {
         writer
-            .append(serde_json::to_value(&event).expect("event serializes"))
+            .append_event(&event)
             .await
             .expect("append the resume tail");
     }

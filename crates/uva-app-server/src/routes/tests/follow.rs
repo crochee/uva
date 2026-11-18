@@ -14,7 +14,7 @@ use uva::{
 use crate::{
     routes::follow::{FollowQuery, FollowSnapshot, follow},
     rpc::RpcError,
-    session::controller::SessionState,
+    session::status::{SessionState, SessionStatus},
     state::AppState,
 };
 
@@ -208,7 +208,7 @@ async fn follow_first_frame_is_a_complete_baseline() {
     .expect("the baseline serializes");
 
     assert_eq!(baseline["header"]["session_id"], SESSION);
-    assert_eq!(baseline["header"]["state"], "idle");
+    assert_eq!(baseline["header"]["state"], "completed");
     assert_eq!(
         baseline["cursor"], 3,
         "the cursor is the last durable ordinal"
@@ -234,6 +234,55 @@ async fn follow_first_frame_is_a_complete_baseline() {
         baseline["request_snapshot_hash"], "",
         "a log with no snapshot has no fingerprint"
     );
+}
+
+/// The baseline publishes its rows in the current vocabulary, but
+/// the cursor answers the raw log: a row with no current
+/// counterpart (an `Agent` delegation) advances the ordinal even
+/// though it never reaches the wire.
+#[tokio::test]
+async fn the_baseline_publishes_rows_but_tracks_the_raw_log_cursor() {
+    let fixture = fixture().await;
+    let writer = fixture.state.session_manager.writer(&fixture.user, SESSION);
+    writer
+        .append_copied(vec![
+            json!({
+                "seq": 1,
+                "type": "UserInput",
+                "ts": "2026-09-19T08:00:00+00:00",
+                "data": {"text": "hello"},
+            }),
+            json!({
+                "seq": 2,
+                "type": "Agent",
+                "ts": "2026-09-19T08:00:01+00:00",
+                "data": {},
+            }),
+            json!({
+                "seq": 3,
+                "type": "Model",
+                "ts": "2026-09-19T08:00:05+00:00",
+                "data": {"type": "text", "text": "hi"},
+            }),
+        ])
+        .await
+        .expect("seed the dialect rows");
+
+    let baseline = serde_json::to_value(
+        fixture.open(None).await.expect("a baseline frame"),
+    )
+    .expect("the baseline serializes");
+
+    assert_eq!(
+        baseline["cursor"], 3,
+        "the cursor is the last raw ordinal, published or not"
+    );
+    let rows = baseline["rows"].as_array().expect("rows is an array");
+    assert_eq!(rows.len(), 2, "the unpublished Agent row stays behind");
+    assert_eq!(rows[0]["type"], "user_message");
+    assert_eq!(seq_of(&rows[0]), 1);
+    assert_eq!(rows[1]["type"], "assistant_message");
+    assert_eq!(seq_of(&rows[1]), 3);
 }
 
 #[tokio::test]
@@ -440,7 +489,7 @@ async fn the_paused_state_is_derived_from_the_log() {
     let baseline =
         serde_json::to_value(fixture.open(None).await.expect("a baseline"))
             .expect("the baseline serializes");
-    assert_eq!(baseline["header"]["state"], "awaiting_approval");
+    assert_eq!(baseline["header"]["state"], "input_required");
     let pending = baseline["pending_interrupts"]
         .as_array()
         .expect("pending_interrupts");
@@ -1007,7 +1056,7 @@ async fn suspended_one_call(fixture: &Fixture) {
         let settled = rows
             .iter()
             .filter(|row| row["type"] == "turn")
-            .any(|row| row["data"]["phase"] == "end");
+            .any(|row| row["data"]["kind"] == "end");
         stamped && settled
     })
     .await;
@@ -1587,8 +1636,14 @@ async fn live_reasoning_is_not_duplicated() {
     assert_eq!(controller.live_snapshot().text, "hello");
 }
 
+/// The projection's identity is the log position its step began at.
+///
+/// A client retires the projection by comparing ordinals, so the
+/// position has to be the log's own: the step's rows are flushed
+/// before its events are emitted, so the position the controller
+/// stamps is where the step's content starts.
 #[tokio::test]
-async fn a_durable_row_names_the_turn_it_supersedes() {
+async fn the_projection_carries_the_position_its_step_began_at() {
     let fixture = fixture().await;
     let controller = fixture
         .state
@@ -1596,13 +1651,9 @@ async fn a_durable_row_names_the_turn_it_supersedes() {
         .await
         .expect("a controller");
     controller.reset_live_for_test();
-    let turn_id = controller.live_snapshot().turn_id;
-    assert!(!turn_id.is_empty(), "a run gets a turn id");
-
     let baseline =
         serde_json::to_value(fixture.open(None).await.expect("a baseline"))
             .expect("the baseline serializes");
-    assert_eq!(baseline["live"]["turn_id"], turn_id);
     let mut frames = fixture.events();
 
     controller.tap_live_for_test(&AgentEvent::Model(ContentPart::Text(
@@ -1613,48 +1664,70 @@ async fn a_durable_row_names_the_turn_it_supersedes() {
     )));
     let (name, live) = frames.next().await.expect("a live frame");
     assert_eq!(name, "live");
-    assert_eq!(live["live"]["turn_id"], turn_id);
     assert_eq!(live["live"]["text"], "streaming");
+    let writer = fixture.state.session_manager.writer(&fixture.user, SESSION);
+    assert_eq!(
+        live["live"]["start_seq"].as_u64(),
+        Some(writer.last_seq()),
+        "the projection carries the log's durable position at the step's start"
+    );
+    assert_eq!(
+        baseline["live"]["start_seq"].as_u64(),
+        Some(writer.last_seq()),
+        "the baseline carries the same position"
+    );
 
-    // The prompt and the step boundary are part of the running turn but
-    // are NOT content the projection renders: labelling them with the
-    // turn id retired the projection on the first poll, blanking the
-    // streaming answer until the next live frame.
+    // The row frames carry no label: the client's rule is an ordinal
+    // comparison, not an id match.
     fixture.append(&user_row("a durable row")).await;
     let user_frame = next_row_of_type(&mut frames, "user_message").await;
-    assert_eq!(
-        user_frame["turn_id"],
-        Value::Null,
-        "a prompt row does not supersede the projection"
+    assert!(
+        user_frame.get("turn_id").is_none(),
+        "a row frame carries no turn label: {user_frame:?}"
     );
+}
 
-    fixture.append(&uva::session::step_start(0, 0)).await;
-    let step_frame = next_row_of_type(&mut frames, "step").await;
-    assert_eq!(
-        step_frame["turn_id"],
-        Value::Null,
-        "a step boundary does not supersede the projection"
-    );
-
-    // The assistant row is what the projection was rendering, so it is
-    // labelled with the turn it supersedes.
-    let writer = fixture.state.session_manager.writer(&fixture.user, SESSION);
-    writer
-        .append(json!({
-            "type": "assistant_message",
-            "data": {
-                "role": "assistant",
-                "content": {"Multi": [{"type": "text", "text": "done"}]},
-            },
-        }))
+/// The next step is a new projection.
+///
+/// The projection is scoped to one model call: the next response
+/// opens the next step, whose content is its own.
+#[tokio::test]
+async fn the_next_step_is_a_new_projection() {
+    let fixture = fixture().await;
+    let controller = fixture
+        .state
+        .get_or_create_session_controller(&fixture.user, SESSION)
         .await
-        .expect("append the assistant row");
-    writer.flush().await.expect("flush the assistant row");
-    let assistant_frame =
-        next_row_of_type(&mut frames, "assistant_message").await;
+        .expect("a controller");
+    controller.reset_live_for_test();
+    fixture.open(None).await.expect("a baseline");
+    let mut frames = fixture.events();
+
+    controller.tap_live_for_test(&AgentEvent::Model(ContentPart::Text(
+        uva::provider::TextContent {
+            text: "first".to_string(),
+            cache_control: None,
+        },
+    )));
+    let (_, live) = frames.next().await.expect("a live frame");
+    assert_eq!(live["live"]["text"], "first");
+
+    controller.tap_live_for_test(&AgentEvent::ModelDone(
+        uva::provider::SamplingResult {
+            text: "first".to_string(),
+            ..uva::provider::SamplingResult::default()
+        },
+    ));
+    controller.tap_live_for_test(&AgentEvent::Model(ContentPart::Text(
+        uva::provider::TextContent {
+            text: "second".to_string(),
+            cache_control: None,
+        },
+    )));
+    let (_, live) = frames.next().await.expect("a live frame");
     assert_eq!(
-        assistant_frame["turn_id"], turn_id,
-        "the assistant row names the turn whose projection it supersedes"
+        live["live"]["text"], "second",
+        "the previous step's text is not this projection's"
     );
 }
 
@@ -1678,7 +1751,7 @@ async fn the_status_surface_reports_a_paused_session() {
     )
     .await
     .expect("detail");
-    assert_eq!(detail.status, "input_required");
+    assert_eq!(detail.status, SessionStatus::InputRequired);
 }
 
 /// A run that never produces an event until its token fires — the
@@ -1764,28 +1837,28 @@ async fn a_run_cannot_start_while_the_compaction_gate_is_held() {
         .get_or_create_session_controller(&fixture.user, SESSION)
         .await
         .expect("a controller");
-    let gate = controller
-        .compaction_gate()
-        .await
-        .expect("the owner has a gate");
-    controller
-        .submit(crate::session::controller::SessionOp::Prompt {
-            content: "start me".to_string(),
-            priority: 1,
-        })
-        .await
-        .expect("queued");
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
     let writer = fixture.state.session_manager.writer(&fixture.user, SESSION);
-    let rows = writer.read().await.expect("rows");
-    assert!(
-        !rows.iter().any(|row| row["type"] == "request_header"),
-        "a run started while a compaction held the gate"
-    );
-    assert_eq!(controller.state(), SessionState::Idle);
+    controller
+        .with_compaction_gate(async {
+            controller
+                .submit(crate::session::controller::SessionOp::Prompt {
+                    content: "start me".to_string(),
+                    priority: 1,
+                })
+                .await
+                .expect("queued");
+            tokio::time::sleep(Duration::from_millis(200)).await;
 
-    drop(gate);
+            let rows = writer.read().await.expect("rows");
+            assert!(
+                !rows.iter().any(|row| row["type"] == "request_header"),
+                "a run started while a compaction held the gate"
+            );
+            assert_eq!(controller.state(), SessionState::Idle);
+        })
+        .await;
+
+    // The gate is released with the work it was given.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
         let rows = writer.read().await.expect("rows");
@@ -1882,7 +1955,8 @@ async fn a_restarted_session_reports_the_pause_in_the_list_and_detail() {
     .await
     .expect("detail");
     assert_eq!(
-        detail.status, "input_required",
+        detail.status,
+        SessionStatus::InputRequired,
         "the disk-only detail derives the pause from the transcript"
     );
 
@@ -1898,7 +1972,8 @@ async fn a_restarted_session_reports_the_pause_in_the_list_and_detail() {
         .find(|summary| summary.id == SESSION)
         .expect("the disk-only session is listed");
     assert_eq!(
-        row.status, "input_required",
+        row.status,
+        SessionStatus::InputRequired,
         "the disk-only list derives the pause from the transcript"
     );
 }
@@ -1954,7 +2029,6 @@ async fn the_last_live_frame_reports_the_turn_settled() {
         .await
         .expect("a controller");
     controller.reset_live_for_test();
-    let turn_id = controller.live_snapshot().turn_id;
     fixture.open(None).await.expect("a baseline");
     let mut frames = fixture.events();
 
@@ -1979,77 +2053,9 @@ async fn the_last_live_frame_reports_the_turn_settled() {
         settled["live"]["running"], false,
         "the settling run reaches the client as a live frame"
     );
-    assert_eq!(settled["live"]["turn_id"], turn_id);
-}
-
-#[tokio::test]
-async fn a_batch_straddling_two_runs_labels_only_the_current_turn() {
-    let fixture = fixture().await;
-    let controller = fixture
-        .state
-        .get_or_create_session_controller(&fixture.user, SESSION)
-        .await
-        .expect("a controller");
-    controller.reset_live_for_test();
-    let current = controller.live_snapshot().turn_id;
-    let previous = json!({"type": "user_message", "seq": 1,
-        "data": {"role": "user"}});
-    let start =
-        serde_json::to_value(uva::session::turn_start(1)).expect("a turn row");
-    let fresh =
-        json!({"type": "user_message", "seq": 3, "data": {"role": "user"}});
-
-    let labels = crate::routes::follow::turn_labels(
-        &[previous, start.clone(), fresh],
-        &current,
-        true,
-    );
-    assert_eq!(
-        labels,
-        vec![None, None, None],
-        "neither the previous run's tail nor the new prompt is labelled"
-    );
-
-    let mid_turn = [json!({"type": "assistant_message", "seq": 4})];
-    assert_eq!(
-        crate::routes::follow::turn_labels(&mid_turn, &current, true),
-        vec![Some(current.as_str())],
-        "a mid-turn batch belongs to the running turn"
-    );
-    assert_eq!(
-        crate::routes::follow::turn_labels(&mid_turn, &current, false),
-        vec![None],
-        "a settled turn has no projection left to supersede"
-    );
-}
-
-/// Only the rows the live projection renders carry the live turn id.
-///
-/// A user prompt, a `step` boundary or a `turn` boundary must not
-/// supersede the projection: those rows land within the first poll of a
-/// run, and retiring the projection there blanked the streaming answer
-/// until the next live frame (the client had nothing else rendering it).
-#[tokio::test]
-async fn only_assistant_and_tool_result_rows_supersede_the_live_projection() {
-    let current = "turn-live";
-    let start =
-        serde_json::to_value(uva::session::turn_start(1)).expect("a turn row");
-    let step = serde_json::to_value(uva::session::step_start(1, 0))
-        .expect("a step row");
-    let rows = vec![
-        start,
-        json!({"type": "user_message", "seq": 2, "data": {"role": "user"}}),
-        step,
-        json!({"type": "assistant_message", "seq": 4}),
-        json!({"type": "tool_result", "seq": 5}),
-        json!({"type": "usage", "seq": 6}),
-        json!({"type": "turn", "seq": 7, "data": {"phase": "end"}}),
-    ];
-    let labels = crate::routes::follow::turn_labels(&rows, current, true);
-    assert_eq!(
-        labels,
-        vec![None, None, None, Some(current), Some(current), None, None],
-        "only content rows supersede the projection"
+    assert!(
+        settled["live"]["start_seq"].as_u64().is_some(),
+        "the settled projection still says where its step began"
     );
 }
 
@@ -2318,7 +2324,7 @@ async fn baseline_over_spy(
         .read_tail(crate::routes::follow::FOLLOW_WINDOW)
         .await
         .expect("the tail");
-    let head = sink.read_head().await.expect("the head");
+    let head = sink.read_head_rows(4).await.expect("the head");
     let spy = ReadSpy::new(Arc::clone(&sink));
     let snapshot = crate::routes::follow::build_baseline(
         &fixture.state,
@@ -2764,7 +2770,7 @@ async fn a_follow_connection_reads_only_the_rows_that_arrived() {
         .read_tail(crate::routes::follow::FOLLOW_WINDOW)
         .await
         .expect("the tail");
-    let head = sink.read_head().await.expect("the head");
+    let head = sink.read_head_rows(4).await.expect("the head");
     let baseline = crate::routes::follow::build_baseline(
         &fixture.state,
         &controller,

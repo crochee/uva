@@ -33,7 +33,7 @@
 //! unioned with the row's, the row winning on a shared key — wraps
 //! group rows in the runtime group plugin, and returns mountable
 //! plugins with their per-row context derivations (isolation labels,
-//! intercept configs) for [`mount_all_with`](uva::kernel::mount_all_with).
+//! intercept configs) for [`uva::kernel::mount_all_with`].
 //! [`diff_profiles`] compares two resolutions so only affected fibers
 //! are remounted.
 //!
@@ -46,17 +46,19 @@
 //! [`BootContext`], so it can be tested without naming a concrete
 //! plugin.
 
-use serde_json::Value;
 use std::{
     any::Any,
     fmt::{self, Formatter},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
-use uva::core::SharedClock;
-use uva::kernel::{Context, EffectHandle};
-use uva::kernel::{IsolateSpec, MountRow, mount_all_with};
+
+use serde_json::Value;
 pub use uva::kernel::Realms;
+use uva::{
+    core::SharedClock,
+    kernel::{Context, EffectHandle, IsolateSpec, MountRow, mount_all_with},
+};
 
 mod merge;
 mod model;
@@ -317,7 +319,7 @@ pub struct Mounted {
 /// as the runtime group plugin with its recursively built children.
 ///
 /// The returned vector is ready for
-/// [`mount_all_with`](uva::kernel::mount_all_with); dependency
+/// [`uva::kernel::mount_all_with`]; dependency
 /// ordering, cycle detection, and rollback stay the kernel's job.
 ///
 /// # Errors
@@ -786,7 +788,12 @@ fn dump_entries(
             out.push_str("\"inject\": ");
             write_json(
                 out,
-                &Value::Array(inject.iter().map(|key| Value::String(key.clone())).collect()),
+                &Value::Array(
+                    inject
+                        .iter()
+                        .map(|key| Value::String(key.clone()))
+                        .collect(),
+                ),
                 indent + 4,
             );
         }

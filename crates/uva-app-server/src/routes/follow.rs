@@ -10,10 +10,10 @@
 //!         pending_interrupts, request_snapshot_hash }
 //!
 //! event: row
-//! data: { seq: <u64>, turn_id: <string>, row: <durable row> }
+//! data: { seq: <u64>, row: <durable row> }
 //!
 //! event: live
-//! data: { turn_id, live_seq, running, text, reasoning, tool_calls }
+//! data: { start_seq, live_seq, running, text, reasoning, tool_calls }
 //!
 //! event: interrupts
 //! data: { pending_interrupts: [ApprovalRequest, ...] }
@@ -38,11 +38,13 @@
 //! session another node owns answers `409 remote_session`.
 //!
 //! Later frames are either durable (`row`, carrying `seq`) or
-//! transient (`live`, carrying `live_seq`). A `row`'s `turn_id` names
-//! the turn whose projection it supersedes — the client drops a live
-//! projection when a row for the same `turn_id` arrives. A `live`
-//! frame whose `live_seq` is not greater than the baseline's is
-//! discarded (it predates the window the client just accepted).
+//! transient (`live`, carrying `live_seq`). A `live` frame's
+//! `start_seq` is the log position where its projection's step began,
+//! so a durable content row whose own ordinal is greater than that
+//! position supersedes the projection — the client compares ordinals
+//! and needs no label on the row. A `live` frame whose `live_seq` is
+//! not greater than the baseline's is discarded (it predates the
+//! window the client just accepted).
 //!
 //! A crash mid-turn loses `live` and leaves no half-written assistant
 //! row — the durable log simply never got one. That is the "one row
@@ -62,18 +64,24 @@ use uva::{
         suspended_segment,
     },
     provider::traits::ModelProvider,
-    session::{SessionEvent, TokenMeter},
+    session::{
+        RowTag,
+        SessionEvent,
+        TokenMeter,
+        publish_row,
+        publish_rows,
+        restore_row,
+    },
+    tool_task::{HEAD_ROWS, RecordSource, head_records},
 };
 
 use crate::{
     api::{v1::session_view::SessionTurn, validate_resource_name},
     routes::{chat::resolve_user_id, sessions::SESSION_LIST_TAIL_WINDOW},
     rpc::RpcError,
-    session::controller::{
-        LiveTurn,
-        SessionController,
-        SessionOp,
-        SessionState,
+    session::{
+        controller::{LiveTurn, SessionController, SessionOp},
+        status::{self, SessionState, SessionStatus, StatusFacts},
     },
     state::AppState,
 };
@@ -116,8 +124,13 @@ pub struct SessionHeader {
     /// peer that ran them).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
-    /// `idle`, `running`, `awaiting_approval` or `cancelled`.
-    pub state: &'static str,
+    /// The session status — the same closed set the session listing
+    /// and the session detail carry. The `follow` header used to
+    /// speak its own four-label vocabulary (`idle` / `running` /
+    /// `awaiting_approval` / `cancelled`); retiring it means a client
+    /// asking "what state is this session in" gets one answer, not
+    /// two.
+    pub state: SessionStatus,
     /// First durable row's timestamp.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
@@ -173,8 +186,6 @@ pub enum FollowEvent {
     Row {
         /// The row's ordinal in the log.
         seq: u64,
-        /// The turn the row belongs to.
-        turn_id: Option<String>,
         /// The durable row itself.
         row: Value,
         /// The fingerprint of the log's newest request envelope.
@@ -202,14 +213,12 @@ impl FollowEvent {
         match self {
             Self::Row {
                 seq,
-                turn_id,
                 row,
                 request_snapshot_hash,
             } => serde_json::json!({
                 "kind": "row",
                 "seq": seq,
                 "row": row,
-                "turn_id": turn_id,
                 "request_snapshot_hash": request_snapshot_hash,
             }),
             Self::Live { live } => {
@@ -258,7 +267,7 @@ pub async fn follow(
     // the request keeps `created_at` a whole-log fact. Substituting the
     // window's first timestamp would put a plausible, wrong value on
     // the wire instead.
-    let head = sink.read_head().await.map_err(|error| {
+    let head = sink.read_head_rows(HEAD_ROWS).await.map_err(|error| {
         RpcError::from(uva::core::Error::session(format!(
             "read session log head: {error}"
         )))
@@ -365,7 +374,7 @@ pub(crate) async fn build_baseline(
     session_id: &str,
     sink: &dyn uva::session::SessionSink,
     rows: Vec<Value>,
-    head: Option<Value>,
+    head: Vec<Value>,
 ) -> FollowSnapshot {
     let cursor = cursor_of(&rows);
     // The three whole-log folds — the context meter, the model window
@@ -413,21 +422,31 @@ pub(crate) async fn build_baseline(
     let request_snapshot_hash =
         latest_request_snapshot_hash(facts).unwrap_or_default();
     let context = context_meter(state, facts);
-    let head = head.as_ref().or_else(|| rows.first());
+    let head_window: &[Value] = if head.is_empty() {
+        rows.first().map(std::slice::from_ref).unwrap_or(&[])
+    } else {
+        head.as_slice()
+    };
     let header = SessionHeader {
         session_id: session_id.to_string(),
         user_id: user_id.to_string(),
-        agent_name: agent_attribution(head),
-        state: state_label(reported_state(
-            controller.state(),
-            &pending_interrupts,
-        )),
-        created_at: head.and_then(row_ts),
+        agent_name: agent_attribution(head_window, session_id),
+        state: status::session_status(
+            StatusFacts {
+                controller: Some(controller.state()),
+                awaiting: !pending_interrupts.is_empty(),
+            },
+            !rows.is_empty(),
+        ),
+        created_at: head.first().and_then(row_ts),
         updated_at: last_ts(&rows),
     };
+    // Publishing is the last step: the cursor, the header timestamps
+    // and every fold above answered from the raw log rows, so a row
+    // the vocabulary cannot publish still advanced them.
     FollowSnapshot {
         header,
-        rows,
+        rows: publish_rows(rows),
         cursor,
         live: controller.live_snapshot(),
         context,
@@ -477,38 +496,15 @@ pub(crate) fn window_holds_last_turn(rows: &[Value]) -> bool {
 /// the meter asks itself when it projects pressure — asked of the window
 /// instead of the whole log.
 fn window_holds_usage_anchor(rows: &[Value]) -> bool {
-    let events: Vec<SessionEvent> =
-        rows.iter().filter_map(SessionEvent::from_value).collect();
+    let events: Vec<SessionEvent> = rows
+        .iter()
+        .filter_map(|row| restore_row(row).event())
+        .collect();
     let mut meter = TokenMeter::new();
     if meter.observe(&events).is_err() {
         return false;
     }
     meter.context_pressure(None).is_some()
-}
-
-/// The state the wire reports, derived the way the controller derives
-/// it — but from the window where the window can answer.
-///
-/// A live run wins outright. Otherwise the log decides: an open
-/// interrupt means `AwaitingApproval`, and a cached `AwaitingApproval`
-/// with no open interrupt means the asks were answered, so the flag is
-/// stale. This is the controller's own rule
-/// (`SessionController::session_state`), with the approval set the
-/// baseline already folded instead of a second read of the log.
-fn reported_state(
-    in_memory: SessionState,
-    pending_interrupts: &[ApprovalRequest],
-) -> SessionState {
-    if in_memory == SessionState::Running {
-        return SessionState::Running;
-    }
-    if !pending_interrupts.is_empty() {
-        return SessionState::AwaitingApproval;
-    }
-    if in_memory == SessionState::AwaitingApproval {
-        return SessionState::Idle;
-    }
-    in_memory
 }
 
 /// Open interrupts folded from a tail window, or `None` when the
@@ -579,7 +575,7 @@ async fn open_interrupts_widened(
 /// turn end plus one step end would satisfy
 /// [`open_requests_in_window`]'s "two ends" clause.
 pub(crate) fn turn_boundary(row: &Value) -> Option<bool> {
-    let event = SessionEvent::from_value(row)?;
+    let event = restore_row(row).event()?;
     let SessionEvent::Turn { .. } = event else {
         return None;
     };
@@ -603,22 +599,11 @@ fn cursor_of(rows: &[Value]) -> u64 {
     }
 }
 
-fn state_label(state: SessionState) -> &'static str {
-    match state {
-        SessionState::Idle => "idle",
-        SessionState::Running => "running",
-        SessionState::AwaitingApproval => "awaiting_approval",
-        SessionState::Cancelled => "cancelled",
-    }
-}
-
-fn agent_attribution(head: Option<&Value>) -> Option<String> {
-    let first = head?;
-    let event = SessionEvent::from_value(first)?;
-    if !matches!(event, SessionEvent::SubagentEnter { .. }) {
-        return None;
-    }
-    event.delegation_agent().map(str::to_string)
+fn agent_attribution(head: &[Value], session_id: &str) -> Option<String> {
+    head_records(head, session_id)
+        .into_iter()
+        .find(|record| record.source == RecordSource::OwnLog)
+        .map(|record| record.agent_name)
 }
 
 fn row_ts(row: &Value) -> Option<String> {
@@ -644,7 +629,7 @@ pub(crate) fn context_provider(
     rows: &[Value],
 ) -> Arc<dyn ModelProvider> {
     let header = rows.iter().rev().find_map(|row| {
-        let event = SessionEvent::from_value(row)?;
+        let event = restore_row(row).event()?;
         if !matches!(event, SessionEvent::RequestHeader { .. }) {
             return None;
         }
@@ -679,8 +664,10 @@ pub(crate) fn context_provider(
 /// way the number reacts to a compaction, which reports no usage of
 /// its own.
 pub(crate) fn context_meter(state: &AppState, rows: &[Value]) -> ContextMeter {
-    let events: Vec<SessionEvent> =
-        rows.iter().filter_map(SessionEvent::from_value).collect();
+    let events: Vec<SessionEvent> = rows
+        .iter()
+        .filter_map(|row| restore_row(row).event())
+        .collect();
     let mut meter = TokenMeter::new();
     let _ = meter.observe(&events);
     let window =
@@ -788,6 +775,11 @@ pub(crate) async fn follow_stream(
                         let live = if controller.projects_live_locally() {
                             controller.live_snapshot()
                         } else {
+                            // The owner's log position is not this
+                            // node's to know: the remote projection
+                            // carries no position, so a client's
+                            // ordinal comparison falls back to "any
+                            // content row supersedes it".
                             remote_live.apply(&event);
                             remote_live.clone()
                         };
@@ -846,12 +838,6 @@ pub(crate) async fn follow_stream(
                     // Rows arrived: the fast rate again.
                     poll_delay = FOLLOW_POLL;
                     poll_deadline = tokio::time::Instant::now() + poll_delay;
-                    let live = controller.live_snapshot();
-                    let labels = turn_labels(
-                        &new_rows,
-                        &live.turn_id,
-                        live.running,
-                    );
                     let mut approvals_changed = false;
                     // The envelope a resume must reproduce changes
                     // with every request snapshot, and the client
@@ -867,18 +853,23 @@ pub(crate) async fn follow_stream(
                             .unwrap_or(cursor + 1 + offset as u64);
                         cursor = cursor.max(seq);
                         approvals_changed |= changes_approvals(row);
-                        if row.get("type").and_then(Value::as_str)
-                            == Some("request_snapshot")
+                        if restore_row(row)
+                            .restores_to(RowTag::RequestSnapshot)
                         {
                             envelope_hash =
                                 latest_request_snapshot_hash(&new_rows);
                         }
-                        emit(FollowEvent::Row {
-                            seq,
-                            turn_id: labels[offset].map(str::to_string),
-                            row: row.clone(),
-                            request_snapshot_hash: envelope_hash.clone(),
-                        });
+                        // Publish before emitting: a row with no current
+                        // shape sends no frame, but the cursor above has
+                        // already advanced, so iterate the raw rows and
+                        // publish each one.
+                        if let Some(published) = publish_row(row.clone()) {
+                            emit(FollowEvent::Row {
+                                seq,
+                                row: published,
+                                request_snapshot_hash: envelope_hash.clone(),
+                            });
+                        }
                     }
                     if approvals_changed {
                         let Some(open) =
@@ -901,73 +892,9 @@ pub(crate) async fn follow_stream(
     }
 }
 
-/// The turn each content row in a poll batch supersedes, for the
-/// client's "a durable row supersedes that turn's projection" rule.
-///
-/// Only rows the projection actually renders are labelled
-/// ([`carries_live_content`]): an assistant message or a tool result.
-/// Labelling every row of the running turn (the user prompt, `step` /
-/// `turn` boundaries) retired the projection on the first poll and
-/// blanked the streaming answer.
-///
-/// A batch can straddle two runs: the tail of the previous one (written
-/// before the new run started) plus the new run's rows. The last
-/// `turn/start` in the batch is the boundary — content before it belongs
-/// to a projection the client no longer holds (`None`), content from it
-/// onward belongs to the current turn. A batch with no start is part of
-/// the running turn when the projection is live; once the run has
-/// settled there is no projection left to supersede, so the labels are
-/// `None` rather than a stale id.
-pub(crate) fn turn_labels<'a>(
-    rows: &[Value],
-    current: &'a str,
-    running: bool,
-) -> Vec<Option<&'a str>> {
-    let last_start = rows.iter().rposition(is_turn_start);
-    (0..rows.len())
-        .map(|index| {
-            let belongs = match last_start {
-                Some(start) => index >= start,
-                None => running && !current.is_empty(),
-            };
-            if belongs && carries_live_content(&rows[index]) {
-                Some(current)
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Rows whose content the live projection already represents, and which
-/// therefore supersede it when they land.
-///
-/// Everything else in a running turn — the user prompt, `turn` / `step`
-/// boundaries, usage, approvals — is either not part of the projection
-/// or must not retire it. Labelling those with the live turn id made a
-/// client drop the in-flight text on the first poll of a run (the user
-/// row is the first durable row), blanking the answer until the next
-/// event: the projection is the only thing rendering it at that point.
-fn carries_live_content(row: &Value) -> bool {
-    matches!(
-        row.get("type").and_then(Value::as_str),
-        Some("assistant_message" | "tool_result")
-    )
-}
-
-fn is_turn_start(row: &Value) -> bool {
-    let Some(event) = SessionEvent::from_value(row) else {
-        return false;
-    };
-    if !matches!(event, SessionEvent::Turn { .. }) {
-        return false;
-    }
-    event.boundary_kind() == Some("start")
-}
-
 /// `true` when a row can move the open-interrupt set.
 fn changes_approvals(row: &Value) -> bool {
-    match SessionEvent::from_value(row) {
+    match restore_row(row).event() {
         Some(SessionEvent::ApprovalAsked { .. })
         | Some(SessionEvent::ApprovalDecided { .. }) => true,
         Some(event @ SessionEvent::Turn { .. }) => {
@@ -1295,43 +1222,48 @@ pub async fn compact(
     }
     // The pass holds the gate a run start needs, so the state read
     // below cannot be invalidated by a run beginning mid-pass.
-    let _compaction_gate = controller.compaction_gate().await;
-    match controller.session_state().await {
-        SessionState::Running => {
-            return Err(conflict(
-                "session_busy",
-                format!(
-                    "session '{session_id}' is running; a compaction rewrites \
-                     the surface a live request is built from"
-                ),
-            ));
-        }
-        SessionState::AwaitingApproval => {
-            return Err(conflict(
-                "session_suspended",
-                format!(
-                    "session '{session_id}' is awaiting approval; resolve the \
-                     interrupts before compacting"
-                ),
-            ));
-        }
-        SessionState::Idle | SessionState::Cancelled => {}
-    }
-    let Some(settings) = state.default_compaction else {
-        return Err(compact_not_configured(&session_id));
-    };
-    if !settings.enabled {
-        return Err(compact_not_configured(&session_id));
-    }
-    if let Err(error) = settings.validate() {
-        return Err(conflict(
-            "invalid_compaction_policy",
-            format!("the configured compaction policy is invalid: {error}"),
-        ));
-    }
-    let writer = state.session_manager.writer(&user_id, &session_id);
-    let report = run_manual_compaction(&state, &writer, settings).await?;
-    Ok(report)
+    controller
+        .with_compaction_gate(async {
+            match controller.session_state().await {
+                SessionState::Running => {
+                    return Err(conflict(
+                        "session_busy",
+                        format!(
+                            "session '{session_id}' is running; a compaction \
+                             rewrites the surface a live request is built \
+                             from"
+                        ),
+                    ));
+                }
+                SessionState::AwaitingApproval => {
+                    return Err(conflict(
+                        "session_suspended",
+                        format!(
+                            "session '{session_id}' is awaiting approval; \
+                             resolve the interrupts before compacting"
+                        ),
+                    ));
+                }
+                SessionState::Idle | SessionState::Cancelled => {}
+            }
+            let Some(settings) = state.default_compaction else {
+                return Err(compact_not_configured(&session_id));
+            };
+            if !settings.enabled {
+                return Err(compact_not_configured(&session_id));
+            }
+            if let Err(error) = settings.validate() {
+                return Err(conflict(
+                    "invalid_compaction_policy",
+                    format!(
+                        "the configured compaction policy is invalid: {error}"
+                    ),
+                ));
+            }
+            let writer = state.session_manager.writer(&user_id, &session_id);
+            run_manual_compaction(&state, &writer, settings).await
+        })
+        .await
 }
 
 fn compact_not_configured(session_id: &str) -> RpcError {
@@ -1535,8 +1467,10 @@ pub async fn usage(
     validate_resource_name(&session_id)?;
     let user_id = resolve_user_id(&state);
     let rows = session_rows(&state, &user_id, &session_id).await?;
-    let events: Vec<SessionEvent> =
-        rows.iter().filter_map(SessionEvent::from_value).collect();
+    let events: Vec<SessionEvent> = rows
+        .iter()
+        .filter_map(|row| restore_row(row).event())
+        .collect();
     let mut meter = TokenMeter::new();
     let _ = meter.observe(&events);
     let totals = meter.usage_totals();
@@ -1615,7 +1549,7 @@ fn resume_replay(
     for row in rows {
         // The tag is read off the row itself: parsing a row clones it,
         // and only the decision rows are worth that.
-        if row.get("type").and_then(Value::as_str) != Some("approval_decided") {
+        if !restore_row(row).restores_to(RowTag::ApprovalDecided) {
             continue;
         }
         let Some(SessionEvent::ApprovalDecided {
@@ -1623,7 +1557,7 @@ fn resume_replay(
             call_id,
             status,
             ..
-        }) = SessionEvent::from_value(row)
+        }) = restore_row(row).event()
         else {
             continue;
         };

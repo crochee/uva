@@ -81,10 +81,9 @@ impl ProfileRow {
                 .map(|capability| capability.to_string())
                 .collect(),
             inject,
-            intercept: row
-                .intercept
-                .as_ref()
-                .map(|intercept| serde_json::to_value(intercept).unwrap_or(Value::Null)),
+            intercept: row.intercept.as_ref().map(|intercept| {
+                serde_json::to_value(intercept).unwrap_or(Value::Null)
+            }),
             isolate: row.isolate.as_ref().map(|isolate| {
                 let wire: serde_json::Map<String, Value> = isolate
                     .iter()

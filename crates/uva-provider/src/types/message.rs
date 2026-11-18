@@ -11,11 +11,12 @@
 //! original bytes for replay / recovery (P8: transform, never lose).
 
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::{content::Content, message_kind::MessageKind, role::Role};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct Message {
     pub role: Role,
     pub content: Content,

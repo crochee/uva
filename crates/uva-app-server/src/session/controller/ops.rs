@@ -96,16 +96,3 @@ pub enum SteerDelivery {
     /// and carries no pre-appended row of its own.
     Queue,
 }
-
-/// Lifecycle state of a session controller.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionState {
-    Idle,
-    Running,
-    /// A suspended turn is waiting for approval decisions. Derived
-    /// from the log (open `approval_asked` rows in the last suspended
-    /// segment), never from a memory flag: a process that restarts
-    /// reports the same state as the one that suspended.
-    AwaitingApproval,
-    Cancelled,
-}

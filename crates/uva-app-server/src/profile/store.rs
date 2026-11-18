@@ -280,8 +280,8 @@ impl ProfileStore {
     /// Returns a message when the row does not exist.
     pub fn apply_edit(doc: &mut Profile, edit: &RowEdit) -> Result<(), String> {
         let id = edit.id();
-        let target = row_mut(&mut doc.core, id)
-            .or_else(|| row_mut(&mut doc.ui, id));
+        let target =
+            row_mut(&mut doc.core, id).or_else(|| row_mut(&mut doc.ui, id));
         let Some(target) = target else {
             return Err(format!("the profile has no row `{id}`"));
         };
@@ -375,10 +375,7 @@ fn section(rows: &[Manifest]) -> Result<toml::value::Table, String> {
 }
 
 /// Find a row by id at this level or in any group below.
-fn row_mut<'a>(
-    rows: &'a mut [Manifest],
-    id: &str,
-) -> Option<&'a mut Manifest> {
+fn row_mut<'a>(rows: &'a mut [Manifest], id: &str) -> Option<&'a mut Manifest> {
     for row in rows.iter_mut() {
         if row.id == id {
             return Some(row);
@@ -402,15 +399,9 @@ fn row_to_toml(entry: &Manifest) -> Result<toml::Value, String> {
     if entry.group {
         row.insert("group".to_string(), toml::Value::Boolean(true));
     } else {
-        row.insert(
-            "name".to_string(),
-            toml::Value::String(entry.name.clone()),
-        );
+        row.insert("name".to_string(), toml::Value::String(entry.name.clone()));
     }
-    row.insert(
-        "disabled".to_string(),
-        toml::Value::Boolean(entry.disabled),
-    );
+    row.insert("disabled".to_string(), toml::Value::Boolean(entry.disabled));
     if entry.group {
         let children = entry
             .children

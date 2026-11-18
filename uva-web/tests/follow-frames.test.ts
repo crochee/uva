@@ -21,7 +21,13 @@ const ROW = {
   type: 'assistant_message',
   ts: '2026-11-14T00:00:00Z',
   seq: 12,
-  data: { role: 'assistant', content: 'done' },
+  data: {
+    role: 'assistant',
+    content: { Single: { type: 'text', text: 'done' } },
+    tool_call_id: null,
+    name: null,
+    tool_result_cleared_at: null,
+  },
 };
 
 /** One call a suspended run is waiting on. */
@@ -39,7 +45,7 @@ const HEADER = { session_id: 's-1', user_id: 'u-1', state: 'running' };
 
 /** The transient projection of the turn that is live right now. */
 const LIVE = {
-  turn_id: 'turn-7',
+  start_seq: 12,
   live_seq: 3,
   running: true,
   text: 'working',
@@ -55,29 +61,19 @@ describe('readRowFrame', () => {
     expect(
       readRowFrame({
         seq: 12,
-        turn_id: 'turn-7',
         row: ROW,
         request_snapshot_hash: 'hash-1',
       }),
     ).toStrictEqual({
       type: 'row',
       seq: 12,
-      turnId: 'turn-7',
       row: ROW,
       hash: 'hash-1',
     });
   });
 
-  it('leaves out the optional turn id and hash the frame does not carry', () => {
+  it('leaves out the optional hash the frame does not carry', () => {
     expect(readRowFrame({ seq: 12, row: ROW })).toStrictEqual({
-      type: 'row',
-      seq: 12,
-      row: ROW,
-    });
-  });
-
-  it('leaves out a turn id that is empty', () => {
-    expect(readRowFrame({ seq: 12, turn_id: '', row: ROW })).toStrictEqual({
       type: 'row',
       seq: 12,
       row: ROW,
@@ -93,7 +89,7 @@ describe('readRowFrame', () => {
   });
 
   it('drops a frame that has no row', () => {
-    expect(readRowFrame({ seq: 12, turn_id: 'turn-7' })).toBeNull();
+    expect(readRowFrame({ seq: 12 })).toBeNull();
   });
 
   it('drops a frame whose seq is not a number', () => {
@@ -227,7 +223,7 @@ describe('readLiveTurn', () => {
   it('keeps the text and the calls of the live turn', () => {
     expect(
       readLiveTurn({
-        turn_id: 'turn-7',
+        start_seq: 12,
         live_seq: 3,
         running: true,
         text: 'working',
@@ -237,7 +233,7 @@ describe('readLiveTurn', () => {
         ],
       }),
     ).toStrictEqual({
-      turn_id: 'turn-7',
+      start_seq: 12,
       live_seq: 3,
       running: true,
       text: 'working',
@@ -249,8 +245,8 @@ describe('readLiveTurn', () => {
   });
 
   it('fills in the empty text of a turn that has none', () => {
-    expect(readLiveTurn({ turn_id: 'turn-7', live_seq: 3 })).toStrictEqual({
-      turn_id: 'turn-7',
+    expect(readLiveTurn({ start_seq: 12, live_seq: 3 })).toStrictEqual({
+      start_seq: 12,
       live_seq: 3,
       running: false,
       text: '',
@@ -259,21 +255,21 @@ describe('readLiveTurn', () => {
     });
   });
 
-  it('drops a live frame that has no turn id', () => {
+  it('drops a live frame that has no start position', () => {
     expect(readLiveTurn({ live_seq: 3 })).toBeNull();
   });
 
-  it('drops a live frame whose turn id is not a string', () => {
-    expect(readLiveTurn({ turn_id: 7, live_seq: 3 })).toBeNull();
+  it('drops a live frame whose start position is not a number', () => {
+    expect(readLiveTurn({ start_seq: '12', live_seq: 3 })).toBeNull();
   });
 
   it('drops a live frame whose live seq is not a number', () => {
-    expect(readLiveTurn({ turn_id: 'turn-7', live_seq: '3' })).toBeNull();
+    expect(readLiveTurn({ start_seq: 12, live_seq: '3' })).toBeNull();
   });
 
   it('drops the tool call whose status is not one the client knows', () => {
     const frame = readLiveTurn({
-      turn_id: 'turn-7',
+      start_seq: 12,
       live_seq: 3,
       tool_calls: [{ call_id: 'call-1', name: 'shell', status: 'paused' }],
     });
@@ -282,7 +278,7 @@ describe('readLiveTurn', () => {
 
   it('drops the tool call that has no name', () => {
     const frame = readLiveTurn({
-      turn_id: 'turn-7',
+      start_seq: 12,
       live_seq: 3,
       tool_calls: [{ call_id: 'call-1', status: 'running' }],
     });
@@ -290,18 +286,18 @@ describe('readLiveTurn', () => {
   });
 
   it('keeps no tool calls when the frame carries no list', () => {
-    const frame = readLiveTurn({ turn_id: 'turn-7', live_seq: 3, tool_calls: 'none' });
+    const frame = readLiveTurn({ start_seq: 12, live_seq: 3, tool_calls: 'none' });
     expect(frame?.tool_calls).toStrictEqual([]);
   });
 
   it('keeps no tool calls when the frame carries a bare value', () => {
-    const frame = readLiveTurn({ turn_id: 'turn-7', live_seq: 3, tool_calls: 7 });
+    const frame = readLiveTurn({ start_seq: 12, live_seq: 3, tool_calls: 7 });
     expect(frame?.tool_calls).toStrictEqual([]);
   });
 
   it('drops a tool call that is not an object', () => {
     const frame = readLiveTurn({
-      turn_id: 'turn-7',
+      start_seq: 12,
       live_seq: 3,
       tool_calls: [null, { call_id: 'call-1', name: 'shell', status: 'running' }],
     });

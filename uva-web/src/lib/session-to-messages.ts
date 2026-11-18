@@ -12,9 +12,10 @@
  * (role=user), agent text deltas, and tool_call / tool_result
  * events with `Part::data` payloads shaped like the provider's
  * `ToolUse` / `ToolResult` structs (`{id, name, input}` /
- * `{tool_use_id, content, is_error}`). The wire carries no
- * synthetic `kind` discriminator — we detect the segment kind
- * from the keys present in each `Part::data` payload.
+ * `{tool_use_id, content, is_error}`). The contract types a message
+ * row's payload as that provider `Message`, so the segment kind is read
+ * from each part's own `type` discriminator — not probed from the keys
+ * a payload happens to carry.
  *
  * The durable log also carries the newer typed rows, and this
  * projection reads them too: an `assistant_message` row holds one
@@ -44,7 +45,16 @@
 import { contentText, extractImages, filesFromPersistedAttachments } from '../api/chat-message';
 import { stripAttachmentSegments } from './strip-attachment-segments';
 import type { ChatFile, ChatImage, CompactionInfo } from '../api/chat-message';
-import type { SessionArtifact, SessionDetail, SessionEventType, SessionTurn } from '../api/types';
+import type {
+  ContentPart,
+  Message,
+  SessionArtifact,
+  SessionDetail,
+  SessionEventType,
+  SessionTurn,
+  ToolResult,
+  ToolUse,
+} from '../api/types';
 
 export interface ChatMessageLike {
   id: string;
@@ -100,7 +110,7 @@ interface ChatSegmentLike {
   /** Attachments the user's turn carried, ready to render as
    *  chips. The live path fills this from the composer's pending
    *  attachments; the rebuild fills it from the references the
-   *  persisted `UserInput` row carries (see
+   *  persisted `user_message` row carries at its top level (see
    *  `filesFromPersistedAttachments`), so a file-only turn shows
    *  a labelled chip instead of an empty bubble. */
   files?: ChatFile[];
@@ -117,39 +127,8 @@ interface ChatSegmentLike {
   toolUseId?: string;
 }
 
-/** Event type discriminators carried on each durable `SessionTurn`
- *  envelope. The typed vocabulary now arrives as the generated
- *  `SessionEventType` union (see `SessionTurn` in `src/api/types.ts`)
- *  and is accounted for in `TYPED_ROW_TREATMENT`; what stays here is
- *  the legacy envelope dialect, which predates that union and is
- *  read through `legacyRowType`. */
-const EVENT_USER_INPUT = 'UserInput';
-/** The typed turn record this build writes: `data` is the provider
- *  message the model saw, and the turn's attachment refs ride the
- *  row's own `attachments` field. */
-const EVENT_USER_MESSAGE = 'user_message';
-const EVENT_MODEL = 'Model';
-/** The legacy recursive sub-agent trace envelope: `data` is
- *  `[child metadata, inner event]`. Durable inner content is
- *  persisted verbatim, so history replay reconstructs
- *  delegated turns the same way the live stream shows them.
- *  No build writes this envelope any more — a delegated child
- *  lives in its own session — but logs written before the
- *  delegation channel's retirement still carry it, so the fold
- *  keeps reading them. */
-const EVENT_AGENT = 'Agent';
-
-/** The `type` value of a durable row, widened past the typed
- *  vocabulary. Rows written before the typed writer carry the legacy
- *  envelope dialect (`UserInput` / `Model` / `Agent`) — strings
- *  outside `SessionEventType` — so a reader that still serves those
- *  logs compares through this widening instead of the closed union. */
-export function legacyRowType(row: SessionTurn): string | null | undefined {
-  return row.type;
-}
-
 /** Discriminators on the inner `ContentPart` carried by
- *  `Model` events. */
+ *  assistant/tool message parts. */
 const PART_TEXT = 'text';
 /** Model reasoning. Durable rows carry it, so a rebuilt transcript can
  *  show the same scratchpad the live projection streamed. */
@@ -441,13 +420,12 @@ function appendAgentSegment(
  */
 function appendToolCall(
   messages: ChatMessageLike[],
-  payload: Record<string, unknown>,
+  part: ToolUse,
   sessionId: string,
   target?: ChatMessageLike,
   ordinal?: number,
 ): void {
-  const toolName = typeof payload.name === 'string' ? payload.name : undefined;
-  const input = payload.input;
+  const input = part.input;
   const callBody =
     input !== undefined
       ? (() => {
@@ -458,15 +436,14 @@ function appendToolCall(
           }
         })()
       : '';
-  const toolUseId = typeof payload.id === 'string' ? payload.id : undefined;
   const segment: ChatSegmentLike = {
     id: crypto.randomUUID(),
     type: 'tool_block',
     content: '',
-    toolName,
+    toolName: part.name,
     callContent: callBody,
     toolPending: true,
-    toolUseId,
+    toolUseId: part.id,
   };
   const owner = mutableAssistantTarget(messages, target);
   if (owner) {
@@ -508,19 +485,19 @@ function appendToolCall(
  */
 function appendToolResult(
   messages: ChatMessageLike[],
-  payload: Record<string, unknown>,
+  result: ToolResult,
   sessionId: string,
   target?: ChatMessageLike,
 ): void {
-  const content = contentText(payload.content);
+  const content = contentText(result.content);
   // Normalise to `undefined` when there are none: the three push
   // sites below must produce one shape, otherwise a rebuilt segment
   // differs from a freshly-created one purely by an empty array.
-  const found = extractImages(payload.content);
+  const found = extractImages(result.content);
   const images = found.length > 0 ? found : undefined;
-  const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined;
-  const isError = payload.is_error === true;
-  const toolUseId = typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined;
+  const toolName = result.tool_name ?? undefined;
+  const isError = result.is_error === true;
+  const toolUseId = result.tool_use_id;
 
   const owner = mutableAssistantTarget(messages, target);
   if (owner) {
@@ -530,14 +507,13 @@ function appendToolResult(
     for (let i = 0; i < segments.length; i++) {
       const seg = segments[i];
       if (seg.type !== 'tool_block' || seg.toolPending !== true) continue;
-      if (toolUseId !== undefined && seg.toolUseId === toolUseId) {
+      if (seg.toolUseId === toolUseId) {
         matchIdx = i;
         break;
       }
-      // Last-resort fallback: the trailing still-pending
-      // block. Only used when no exact id match exists —
-      // keeps the legacy behaviour for transcripts that
-      // don't carry `tool_use_id` (older wire versions).
+      // Last-resort fallback: the trailing still-pending block. Only
+      // used when no exact id match exists — keeps the pairing
+      // behaviour for a result whose block carried no id.
       fallback = i;
     }
     if (matchIdx === -1) matchIdx = fallback;
@@ -583,78 +559,90 @@ function appendToolResult(
 }
 
 /**
- * The `content` parts of a provider `Message` payload.
+ * The content parts of a provider `Message`.
  *
- * The wire form is the serde shape of `uva_provider::Content`:
- * an externally tagged enum, so one part arrives as
- * `{"Single": <part>}` and several as `{"Multi": [<part>, …]}`.
- * The loose spelling — `{"role": …, "content": [<part>, …]}` — is
- * read too, so a row written by hand and a row written by the
- * backend project the same way. Those are the two shapes the
- * server's own fold accepts, so this reader and that fold agree on
- * what a valid row is.
+ * The contract publishes the provider's own `Content` enum: one part
+ * arrives as `{ Single: <part> }`, several as `{ Multi: [<part>, …] }`.
+ * Reading the generated union is the whole job — there is no bare-array
+ * spelling to accommodate, because the server folds a legacy log into
+ * these provider shapes before it publishes a row.
  *
- * Exported so the session detail page counts the parts of a row
- * with the same reader this projection uses.
+ * Exported so the page reads a row's parts with the same reader this
+ * projection uses.
  */
-export function messageParts(payload: unknown): Record<string, unknown>[] {
-  const message = toRecord(payload);
-  if (!message) return [];
+export function messageParts(message: Message): ContentPart[] {
   const content = message.content;
-  if (Array.isArray(content)) {
-    return content.map(toRecord).filter((part): part is Record<string, unknown> => part !== null);
-  }
-  const obj = toRecord(content);
-  if (!obj) return [];
-  if (Array.isArray(obj.Multi)) {
-    return obj.Multi.map(toRecord).filter((part): part is Record<string, unknown> => part !== null);
-  }
-  const single = toRecord(obj.Single);
-  return single ? [single] : [];
+  if ('Multi' in content) return content.Multi;
+  return [content.Single];
 }
 
 /**
- * Dispatch one `Model`-envelope payload (`data` = a single
- * `ContentPart`) onto the message list. When `target` is
- * provided the segment lands in that message (used for
- * sub-agent bubbles); otherwise the trailing assistant turn
- * absorbs it, matching the live-stream reducer.
+ * The joined text of a message's `text` parts.
+ *
+ * Exported because the prompt row's text is a reconciliation key on the
+ * page (its own steer and outbox matching) as well as the bubble body
+ * this fold builds.
+ */
+export function messageText(message: Message): string {
+  const texts: string[] = [];
+  for (const part of messageParts(message)) {
+    if (part.type === PART_TEXT) texts.push(part.text);
+  }
+  return texts.join('');
+}
+
+/**
+ * Dispatch one content part (`data` = a single `ContentPart`)
+ * onto the message list. When `target` is provided the segment
+ * lands in that message (reserved for sub-agent bubbles);
+ * otherwise the trailing assistant turn absorbs it, matching
+ * the live-stream reducer. No caller passes a `target` today;
+ * it is kept for the recipe below.
  *
  * `ordinal` is the ordinal of the assistant row the part came from;
  * it is stamped on the message the part lands in.
+ *
+ * Recipe — reviving embedded sub-agent rendering: the parent
+ * transcript does not render subagent content (the `task` tool's
+ * SubagentSummary link card is the user's only entry point to the
+ * child from this transcript; the child's full trace lives at
+ * `/chat/<childId>`). To restore the embedded rendering in the
+ * future, re-introduce `ensureSubagentTarget` and dispatch
+ * `applyContentPart(part, sessionId, out, target)` again — it is
+ * not a one-line revert because the target plumbing runs through
+ * `appendAgentSegment` / `appendToolCall` / `appendToolResult`.
  */
 function applyContentPart(
-  data: Record<string, unknown>,
+  part: ContentPart,
   sessionId: string,
   out: ChatMessageLike[],
   target?: ChatMessageLike,
   ordinal?: number,
 ): void {
-  const kind = typeof data.type === 'string' ? data.type : '';
-  if (kind === PART_TOOL_USE) {
-    appendToolCall(out, data, sessionId, target, ordinal);
-    return;
-  }
-  if (kind === PART_TOOL_RESULT) {
-    appendToolResult(out, data, sessionId, target);
-    return;
-  }
-  if (kind === PART_TEXT) {
-    const text = typeof data.text === 'string' ? data.text : '';
-    if (!text) return;
-    // Skip the LLM's text echo of a tool event. The real
-    // event is already on the wire as a typed `ContentPart`
-    // and will be rendered as a tool block; the text echo
-    // would otherwise append the same data to the
-    // assistant's text segment, creating the appearance
-    // of a duplicate tool turn.
-    if (isToolEchoText(text)) return;
-    appendAgentSegment(out, text, 'text', sessionId, target, ordinal);
-    return;
-  }
-  if (kind === PART_REASONING) {
-    const text = typeof data.text === 'string' ? data.text : '';
-    appendAgentSegment(out, text, 'thinking', sessionId, target, ordinal);
+  switch (part.type) {
+    case PART_TOOL_USE:
+      appendToolCall(out, part, sessionId, target, ordinal);
+      return;
+    case PART_TOOL_RESULT:
+      appendToolResult(out, part, sessionId, target);
+      return;
+    case PART_TEXT:
+      // Skip the LLM's text echo of a tool event. The real event is
+      // already on the wire as a typed `ContentPart` and will be
+      // rendered as a tool block; the text echo would otherwise append
+      // the same data to the assistant's text segment, creating the
+      // appearance of a duplicate tool turn.
+      if (!part.text || isToolEchoText(part.text)) return;
+      appendAgentSegment(out, part.text, 'text', sessionId, target, ordinal);
+      return;
+    case PART_REASONING:
+      appendAgentSegment(out, part.text, 'thinking', sessionId, target, ordinal);
+      return;
+    default:
+      // An `image`, `audio` or `resource` part has no chat segment of
+      // its own: the bubble text already names what the model saw, and
+      // the file chips / image blocks render the attachment itself.
+      return;
   }
 }
 
@@ -681,45 +669,96 @@ function applyToolResultMessage(
   sessionId: string,
   out: ChatMessageLike[],
 ): void {
-  const data = toRecord(entry.data);
-  if (!data) return;
-  const parts = messageParts(data);
-  const resultPart = parts.find((part) => part.type === PART_TOOL_RESULT);
+  const data = entry.data;
+  if (data === null || data === undefined || typeof data !== 'object') return;
+  // The `tool_result` tag owns two payloads, which is why the contract
+  // types its `data` as `unknown`: the run's own row is the provider
+  // `Message` the loop committed, and the crash-repair closer is a
+  // marker bag for a call that never finished. This is where the two
+  // shapes are told apart — and the one cast in this fold: a payload
+  // carrying `role` is the message; the marker bag never has one.
+  if ('role' in data) {
+    applyRunToolResult(entry, data as Message, sessionId, out);
+    return;
+  }
+  const marker = toRecord(data);
+  if (marker) applyRepairCloserResult(entry, marker, sessionId, out);
+}
+
+/** The run's own `tool_result` row: the provider `Message` with
+ *  `role: "tool"`, the tool's output as its `content`, and the id of
+ *  the call it answers in `tool_call_id`. A row whose content carries a
+ *  `tool_result` part already has the whole payload (the body, the
+ *  error flag); an otherwise plain row is rebuilt from the message. */
+function applyRunToolResult(
+  entry: SessionTurn,
+  message: Message,
+  sessionId: string,
+  out: ChatMessageLike[],
+): void {
+  const parts = messageParts(message);
+  const resultPart = parts.find(
+    (part): part is Extract<ContentPart, { type: typeof PART_TOOL_RESULT }> =>
+      part.type === PART_TOOL_RESULT,
+  );
   if (resultPart) {
     // The part carries its own failure flag; the row's flag says the
     // same thing from the row's side, so either may set it.
-    const payload = entry.is_error === true ? { ...resultPart, is_error: true } : resultPart;
+    const payload: ToolResult =
+      entry.is_error === true ? { ...resultPart, is_error: true } : resultPart;
     appendToolResult(out, payload, sessionId);
     return;
   }
-  const toolUseId =
-    typeof data.tool_call_id === 'string'
-      ? data.tool_call_id
-      : typeof data.call_id === 'string'
-        ? data.call_id
-        : '';
+  // No `tool_result` part: the message itself is the outcome. Its parts
+  // are the output, `tool_call_id` names the call it answers, and
+  // `name` names the tool.
+  const toolUseId = message.tool_call_id;
   if (!toolUseId) return;
-  // A failed tool says so three ways: the row's own flag (the run's
-  // row), the repair closer's error code, and the closer's
-  // `interrupted` marker. A call that never finished must not read
-  // as one that returned.
-  const errorCode = typeof data.error === 'string' ? data.error : '';
-  const isError = entry.is_error === true || errorCode !== '' || data.interrupted === true;
-  const toolName =
-    typeof data.tool_name === 'string'
-      ? data.tool_name
-      : typeof data.name === 'string'
-        ? data.name
-        : undefined;
   appendToolResult(
     out,
     {
-      type: PART_TOOL_RESULT,
       tool_use_id: toolUseId,
-      // The repair closer carries no output — its error code is the
-      // only thing it knows about the call — so the code is what
-      // the block shows.
-      content: parts.length > 0 ? parts : errorCode ? [{ type: PART_TEXT, text: errorCode }] : [],
+      content: parts,
+      structured_content: null,
+      tool_name: message.name,
+      is_error: entry.is_error === true,
+    },
+    sessionId,
+  );
+}
+
+/** The crash-repair closer: a marker bag, not a provider message. It
+ *  names the call and the reason it never returned, so the block shows
+ *  the error code as its output. The payload stays a loose read because
+ *  this bag is the writer's own shape for the row, not a provider
+ *  shape. */
+function applyRepairCloserResult(
+  entry: SessionTurn,
+  marker: Record<string, unknown>,
+  sessionId: string,
+  out: ChatMessageLike[],
+): void {
+  const toolUseId = typeof marker.call_id === 'string' ? marker.call_id : '';
+  if (!toolUseId) return;
+  // A failed tool says so three ways: the row's own flag, the closer's
+  // error code, and its `interrupted` marker. A call that never
+  // finished must not read as one that returned.
+  const errorCode = typeof marker.error === 'string' ? marker.error : '';
+  const isError = entry.is_error === true || errorCode !== '' || marker.interrupted === true;
+  const toolName =
+    typeof marker.tool_name === 'string'
+      ? marker.tool_name
+      : typeof marker.name === 'string'
+        ? marker.name
+        : null;
+  appendToolResult(
+    out,
+    {
+      tool_use_id: toolUseId,
+      // The closer carries no output — its error code is the only thing
+      // it knows about the call — so the code is what the block shows.
+      content: errorCode ? [{ type: PART_TEXT, text: errorCode }] : [],
+      structured_content: null,
       tool_name: toolName,
       is_error: isError,
     },
@@ -774,146 +813,45 @@ function applyToolOutputRow(entry: SessionTurn, out: ChatMessageLike[]): void {
 /**
  * How the projection folds one durable row.
  *
- * Two dialects reach this fold:
+ * `SessionTurn.type` is the published `SessionEventType` union —
+ * the server publishes only current-shape rows, dialect rows
+ * arrive as their current counterparts, and rows with no current
+ * form are not published at all. The single
+ * {@link TYPED_ROW_TREATMENT} table is a `Record` over that
+ * union, so the compiler fails when a tag is added to the
+ * contract and no table answers for it — silence is never a
+ * default, and the browser recognizes exactly the row set the
+ * server publishes.
  *
- * - the **legacy envelope dialect** (`UserInput` / `Model` /
- *   `Agent` on `type`) predates the typed vocabulary; those rows
- *   are compared through [`legacyRowType`], because their strings
- *   are outside `SessionEventType`.
- * - the **typed vocabulary** — every tag the server can write — is
- *   accounted for in [`TYPED_ROW_TREATMENT`]: each tag either
- *   renders (a handler) or is ignored-by-design (`null`). The
- *   table is a `Record` over the generated `SessionEventType`
- *   union, so a tag added to the vocabulary fails `tsc` until the
- *   table says what to do with the row. Silence is never the
- *   default.
+ * Published row shapes:
+ * - `user_message` — `data` is the provider message for the turn
+ *   (text in its content parts); attachment references ride the
+ *   row's top-level `attachments` field.
+ * - `assistant_message` — `data` is a provider message carrying
+ *   one part (text, `tool_use`, or reasoning); text appends to
+ *   the trailing assistant turn (coalesced), `tool_use` drives
+ *   the tool-block pairing logic.
+ * - `tool_result` — `data` is either the run's own tool message
+ *   (`{role:'tool', content, tool_call_id}`) or the crash-repair
+ *   closer's marker bag; either way the outcome lands on the paired
+ *   tool block. The contract keeps this tag's `data` `unknown` because
+ *   it owns two payloads, so the fold tells them apart by shape.
  *
- * A `UserInput` envelope produces one user message — its text plus
- * one chip per attachment reference the row carries; `Model`
- * envelopes dispatch on the inner `ContentPart.type` — text
- * appends to the trailing assistant turn (coalesced), `tool_use` /
- * `tool_result` drive the tool-block pairing logic above.
- *
- * Each `Model` envelope carries exactly one `ContentPart` on the
- * wire (the controller writes one event per agent frame), so a
- * single dispatch is enough — no inner part loop is needed.
- *
- * The typed rows carry whole messages instead: an
- * `assistant_message` envelope is one assistant turn (its text and
- * its tool calls together), and a `tool_result` envelope is one
- * tool's outcome. Both land on the same segments the `Model`
- * envelopes produced.
- *
- * The legacy `Agent` envelope (`data` = `[child metadata, inner
- * event]`) reconstructs the delegated child's durable content
- * into its own `role: 'subagent'` bubble, mirroring the live
- * stream's sub-agent rendering. Inner `System` / `ModelDone`
- * frames are lifecycle noise and were never persisted as durable
- * content, so only nested `Model` parts are dispatched.
+ * Reconstructed rows (history replay) travel the same paths: the
+ * server folds whatever a legacy log held into these current
+ * shapes before publishing, so the browser needs one table.
  */
-
-/** Fold one legacy `UserInput` row (`data` = `{"text": …}`). */
-function applyLegacyUserInputRow(entry: SessionTurn, out: ChatMessageLike[]): void {
-  const obj = toRecord(entry.data);
-  // A `UserInput` row is the controller's prompt record
-  // (`{"text": …}`). The session controller deliberately does
-  // NOT persist user image/audio/document BYTES — a
-  // multi-megabyte `data:` URI per turn would bloat the JSONL
-  // log — so a turn that carried attachments writes
-  // `data.attachments` beside the text: one reference per
-  // attachment (`{kind, name, mime_type, byte_len}`), which is
-  // everything a chip needs and nothing more. Absent for a
-  // text-only turn, and absent entirely in logs written before
-  // the references landed.
-  const text = obj && typeof obj.text === 'string' ? obj.text : '';
-  const files = obj ? filesFromPersistedAttachments(obj.attachments) : [];
-  // A file-only send writes a row with no text; it must still
-  // produce the bubble, otherwise the turn reads as if the user
-  // sent nothing at all.
-  if (!text && files.length === 0) return;
-  out.push({
-    id: crypto.randomUUID(),
-    role: 'user',
-    segments: [
-      {
-        id: crypto.randomUUID(),
-        type: 'text',
-        content: text,
-        files: files.length > 0 ? files : undefined,
-      },
-    ],
-  });
-}
-
-/** Fold one legacy `Model` row (`data` = one `ContentPart`). */
-function applyLegacyModelRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
-  const obj = toRecord(entry.data);
-  if (!obj) return;
-  applyContentPart(obj, sessionId, out);
-}
-
-/** Fold one legacy `Agent` row (`data` = `[child metadata, event]`). */
-function applyLegacyAgentRow(entry: SessionTurn): void {
-  // `data` = `[child metadata, inner event]`; nested `Agent`
-  // payloads (a sub-agent that itself delegated) are unwrapped
-  // to the innermost non-Agent event so the deepest durable
-  // content lands on the innermost child's bubble.
-  const data = entry.data;
-  if (!Array.isArray(data) || data.length < 2) return;
-  let meta = data[0] as Record<string, unknown> | undefined;
-  let inner: unknown = data[1];
-  while (
-    inner &&
-    typeof inner === 'object' &&
-    !Array.isArray(inner) &&
-    (inner as Record<string, unknown>).type === EVENT_AGENT
-  ) {
-    const nested = (inner as Record<string, unknown>).data;
-    if (!Array.isArray(nested) || nested.length < 2) {
-      inner = undefined;
-      break;
-    }
-    meta = nested[0] as Record<string, unknown>;
-    inner = nested[1];
-  }
-  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return;
-  const innerRecord = inner as Record<string, unknown>;
-  if (innerRecord.type !== EVENT_MODEL) return;
-  const part = toRecord(innerRecord.data);
-  if (!part) return;
-  const metaRecord = meta ?? {};
-  const childId =
-    typeof metaRecord.child_session_id === 'string' && metaRecord.child_session_id.length > 0
-      ? metaRecord.child_session_id
-      : undefined;
-  const depth = typeof metaRecord.parent_depth === 'number' ? metaRecord.parent_depth : 1;
-  const childKey = childId ?? `subagent:d${depth}`;
-  // Silent skip: the parent transcript does not render subagent
-  // content. The `task` tool's SubagentSummary (link card
-  // mounted on the tool_block) is the user's only entry point
-  // to the child from this transcript; the child's full trace
-  // lives at `/chat/<childId>`, where the unwrapped log
-  // goes through `EVENT_MODEL` and is rendered in full.
-  //
-  // The underlying event rows are still in the session log (not
-  // deleted). To restore the embedded rendering in the future,
-  // re-introduce `ensureSubagentTarget` and dispatch
-  // `applyContentPart(part, sessionId, out, target)` again — it
-  // is not a one-line revert because the target plumbing runs
-  // through `appendAgentSegment` / `appendToolCall` /
-  // `appendToolResult`.
-  void childKey;
-}
 
 /** Fold one `user_message` row: `data` is the provider message the
  *  controller wrote for the turn — its text in the content parts —
  *  and the attachment references ride the row's own `attachments`
  *  field rather than inside the payload. */
 function applyUserMessageRow(entry: SessionTurn, out: ChatMessageLike[]): void {
-  const text = messageParts(entry.data)
-    .filter((part) => part.type === PART_TEXT && typeof part.text === 'string')
-    .map((part) => (typeof part.text === 'string' ? part.text : ''))
-    .join('');
+  // The table routes only `user_message` rows here; the guard narrows
+  // the union so `data` reads as the provider `Message` the contract
+  // types for this tag.
+  if (entry.type !== 'user_message') return;
+  const text = entry.data ? messageText(entry.data) : '';
   const files = filesFromPersistedAttachments(entry.attachments);
   // A file-only turn writes a row with no text; it must still
   // produce the bubble, otherwise the turn reads as if the user
@@ -935,10 +873,10 @@ function applyUserMessageRow(entry: SessionTurn, out: ChatMessageLike[]): void {
 
 /** Fold one `assistant_message` row: `data` is the whole provider
  *  `Message`, so its parts expand into the turn's segments — text
- *  into the text segment, `tool_use` into a tool block. The parts
- *  go through the same dispatch the legacy `Model` rows use, so
- *  the tool pairing rules live in one place and the turn renders
- *  the way the live stream rendered it.
+ *  into the text segment, `tool_use` into a tool block. All part
+ *  dispatch goes through `applyContentPart`, so the tool pairing
+ *  rules live in one place and the turn renders the way the live
+ *  stream rendered it.
  *
  *  The row's ordinal rides along: it is the answer's identity in the
  *  session log, and the only thing a rating of that answer can
@@ -948,6 +886,8 @@ function applyAssistantMessageRow(
   sessionId: string,
   out: ChatMessageLike[],
 ): void {
+  if (entry.type !== 'assistant_message') return;
+  if (!entry.data) return;
   const ordinal = typeof entry.seq === 'number' ? entry.seq : undefined;
   for (const part of messageParts(entry.data)) {
     applyContentPart(part, sessionId, out, undefined, ordinal);
@@ -1209,33 +1149,15 @@ const TYPED_ROW_TREATMENT: Record<SessionEventType, TypedRowHandler | null> = {
 };
 
 function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
-  // The legacy envelope dialect first: those rows pre-date the
-  // typed vocabulary, so their `type` strings are read through the
-  // widening, not the closed union.
-  const envelope = legacyRowType(entry);
-  if (envelope === EVENT_USER_INPUT) {
-    applyLegacyUserInputRow(entry, out);
-    return;
-  }
-  if (envelope === EVENT_AGENT) {
-    applyLegacyAgentRow(entry);
-    return;
-  }
-  if (envelope === EVENT_MODEL) {
-    applyLegacyModelRow(entry, sessionId, out);
-    return;
-  }
   const tag = entry.type;
   if (tag === null || tag === undefined) return;
-  // The `?.` is version-skew armour only: the table is total over
-  // the union the contract generated, so within one build every
-  // tag resolves.
+  // The `?.` covers the table's deliberate `null` entries (rows
+  // ignored by design), not version skew: the table is total over
+  // the union the contract generated.
   TYPED_ROW_TREATMENT[tag]?.(entry, sessionId, out);
 }
 
-/** Narrow the union `data` shape to a JSON object, or `null`. */
-/**
- * The replace range a `surface_op` carries, or null when the op is the
+/** The replace range a `surface_op` carries, or null when the op is the
  * append form (`"append"` on the wire).
  */
 function replaceOp(
@@ -1244,10 +1166,30 @@ function replaceOp(
   return op !== null && op !== undefined && typeof op === 'object' ? op : null;
 }
 
+/** Narrow the union `data` shape to a JSON object, or `null`. */
 function toRecord(data: unknown): Record<string, unknown> | null {
   return data !== null && typeof data === 'object' && !Array.isArray(data)
     ? (data as Record<string, unknown>)
     : null;
+}
+
+/**
+ * The boundary discriminator a `turn` or `step` row's payload carries.
+ *
+ * Today's writer stamps `kind`; `phase` is the older spelling, still
+ * tolerated so a log written before the rename reads the same. The rule
+ * lives here once — the page's turn-open, turn-close and step-start
+ * readers call it instead of repeating the fallback.
+ *
+ * Returns `''` when the payload is not a keyed object or names no
+ * discriminator — neither a turn open nor a turn close.
+ */
+export function boundaryKind(data: Record<string, unknown> | null): string {
+  if (!data) return '';
+  const kind = data.kind;
+  if (typeof kind === 'string') return kind;
+  const phase = data.phase;
+  return typeof phase === 'string' ? phase : '';
 }
 
 /**
@@ -1279,7 +1221,7 @@ export function newRowProjection(sessionId: string): RowProjection {
  * from `newRowProjection(sessionId)` and passes the whole baseline.
  *
  * The output preserves the on-wire ordering of events, with one
- * exception: a `UserInput` or `user_message` row carrying a
+ * exception: a `user_message` row carrying a
  * `surface_op` replace (the row a regenerate persists) first drops the
  * messages its cited seqs shadow, so a rerun shows the replacement
  * story — one prompt bubble, the new answer. The `"append"` string form
@@ -1290,7 +1232,7 @@ export function projectRows(state: RowProjection, rows: ReadonlyArray<SessionTur
   const messages = state.messages.slice();
   const sources = state.sources.slice();
   for (const entry of rows) {
-    if (legacyRowType(entry) === EVENT_USER_INPUT || entry.type === EVENT_USER_MESSAGE) {
+    if (entry.type === 'user_message') {
       dropReplacedTurn(entry, messages, sources);
     }
     const before = messages.length;

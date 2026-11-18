@@ -40,7 +40,7 @@ export function HooksSection({ reloadToken }: SettingsSectionProps) {
                 key={row.id}
                 icon="🪝"
                 label={row.id}
-                description={`${row.runtime} · ${row.status}`}
+                description={`${row.name} · ${row.status}`}
                 actions={
                   <ProfileToggle
                     surface={surface}

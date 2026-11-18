@@ -9,10 +9,28 @@ use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use uva_core::SystemClock;
 use uva_provider::{Content, ContentPart, ImageContent, Role};
-use uva_session::{LogWriter, in_memory::InMemorySessionSink};
+use uva_session::{
+    LogWriter,
+    assistant_message,
+    in_memory::InMemorySessionSink,
+    user_message,
+};
 use uva_tool::{Context, StreamOutput, Tool, ToolOutput, ToolRegistry};
 
 use super::super::{support::*, *};
+
+// Seed the user turn the host persisted before the run.
+//
+// The row goes through the typed constructor: an outside caller names
+// the event, and the crate owns the row's shape.
+async fn seed_user_turn(writer: &LogWriter, text: &str) {
+    let row = user_message(
+        serde_json::to_value(Message::user(text))
+            .expect("a user message serialises"),
+        None,
+    );
+    writer.append_event(&row).await.expect("seed the user turn");
+}
 
 // A recording provider that answers once, plus a writer whose log
 // already holds the user turn the host persisted before the run — the
@@ -20,13 +38,7 @@ use super::super::{support::*, *};
 async fn logged_turn(text: &str) -> (Arc<CapturingProvider>, Arc<LogWriter>) {
     let sink = Arc::new(InMemorySessionSink::new("log"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
-    writer
-        .append(serde_json::json!({
-            "type": "UserInput",
-            "data": { "text": text },
-        }))
-        .await
-        .expect("seed the host's user row");
+    seed_user_turn(&writer, text).await;
     writer.flush().await.expect("flush the seeded row");
     (
         Arc::new(CapturingProvider::new(vec![done_chunk("ok")])),
@@ -166,10 +178,7 @@ pub(super) async fn a_writer_backed_run_reads_its_turns_back_from_the_log() {
     ]));
     let sink = Arc::new(InMemorySessionSink::new("log"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
-    writer
-        .append(json!({"type": "UserInput", "data": { "text": "go" }}))
-        .await
-        .expect("seed the host's user row");
+    seed_user_turn(&writer, "go").await;
     writer.flush().await.expect("flush the seeded row");
 
     let (registry, _calls) = echo_registry();
@@ -231,10 +240,7 @@ pub(super) async fn a_host_history_that_prefixes_the_log_is_accepted() {
         done_chunk("first answer"),
         done_chunk("second answer"),
     ]));
-    writer
-        .append(serde_json::json!({"type": "UserInput", "data": { "text": "first" }}))
-        .await
-        .expect("seed the first turn");
+    seed_user_turn(&writer, "first").await;
     writer.flush().await.expect("flush the seeded row");
 
     // First run: completes the first turn and writes its answer.
@@ -260,10 +266,7 @@ pub(super) async fn a_host_history_that_prefixes_the_log_is_accepted() {
     let prior =
         uva_session::derive_history(&writer.read().await.expect("read"))
             .expect("derive");
-    writer
-        .append(serde_json::json!({"type": "UserInput", "data": { "text": "second" }}))
-        .await
-        .expect("log the second turn");
+    seed_user_turn(&writer, "second").await;
     writer.flush().await.expect("flush the second row");
     let events = run_with_writer(
         Arc::clone(&provider),
@@ -356,22 +359,26 @@ pub(super) async fn a_writer_backed_prune_warns_once_per_run() {
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
     for i in 0..6 {
         for row in [
-            json!({
-                "type": "user_message",
-                "data": Message::user(format!("{}{i}", "q".repeat(399))),
-            }),
-            json!({
-                "type": "assistant_message",
-                "data": Message::assistant(format!("{}{i}", "a".repeat(399))),
-            }),
+            user_message(
+                serde_json::to_value(Message::user(format!(
+                    "{}{i}",
+                    "q".repeat(399)
+                )))
+                .expect("a user message serialises"),
+                None,
+            ),
+            assistant_message(
+                serde_json::to_value(Message::assistant(format!(
+                    "{}{i}",
+                    "a".repeat(399)
+                )))
+                .expect("an assistant message serialises"),
+            ),
         ] {
-            writer.append(row).await.expect("seed the log");
+            writer.append_event(&row).await.expect("seed the log");
         }
     }
-    writer
-        .append(json!({"type": "UserInput", "data": { "text": "go" }}))
-        .await
-        .expect("seed the current turn");
+    seed_user_turn(&writer, "go").await;
     writer.flush().await.expect("flush the seeded rows");
 
     let provider = Arc::new(
@@ -491,10 +498,7 @@ pub(super) async fn streamed_chunks_land_as_tool_output_rows() {
 
     let sink = Arc::new(InMemorySessionSink::new("log"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
-    writer
-        .append(json!({"type": "UserInput", "data": { "text": "stream" }}))
-        .await
-        .expect("seed the host's user row");
+    seed_user_turn(&writer, "stream").await;
     writer.flush().await.expect("flush the seeded row");
 
     let provider = Arc::new(CapturingProvider::new(vec![

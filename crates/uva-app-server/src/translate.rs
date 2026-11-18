@@ -168,7 +168,7 @@ pub fn run(args: &TranslateArgs, directory: &std::path::Path) -> Result<()> {
     let workspace = bridge(source, &mut inline_keys)?;
 
     let config = ModelAdapterConfig {
-        workspace,
+        catalogue: workspace,
         cache: section::<CacheSection>(&document, "cache")?,
         resilience: section::<ResilienceSection>(&document, "resilience")?,
         budget: section::<BudgetSection>(&document, "budget")?,
@@ -347,7 +347,26 @@ fn profile_toml(
     if let Some(policy) = agent_loop {
         set_row_config(&mut profile, "agent-loop", policy.clone());
     }
+    declare_effective_edges(&mut profile);
     crate::profile::ProfileStore::to_toml(&profile).map_err(anyhow::Error::msg)
+}
+
+/// Write every row's effective dependency set into the document.
+///
+/// The document states the whole tree, so a row carries the edges the
+/// kernel will order it by: the plugin manifest's own `inject` (the
+/// row's own declaration would be unioned on top of it). A reader of
+/// the document therefore sees the same edges the kernel sees, without
+/// opening a plugin's manifest.
+fn declare_effective_edges(profile: &mut crate::profile::Profile) {
+    let factories = crate::composition::kernel::dump_factories();
+    for row in profile.core.iter_mut() {
+        let Some(factory) = factories.get(&row.name) else {
+            continue;
+        };
+        let manifest = factory.manifest();
+        row.inject = Some(manifest.inject);
+    }
 }
 
 /// Put a row's config on the profile, when the row is there.
@@ -416,8 +435,8 @@ fn report(
     );
     eprintln!(
         "  mapped: {MAPPED} ({} providers, default `{}`)",
-        config.workspace.providers.len(),
-        config.workspace.default_provider,
+        config.catalogue.providers.len(),
+        config.catalogue.default_provider,
     );
     eprintln!(
         "  assembly: the built-in plugin set is carried over — the \

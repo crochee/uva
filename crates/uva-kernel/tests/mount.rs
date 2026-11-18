@@ -312,7 +312,7 @@ fn rejects_cycle() {
 }
 
 #[test]
-fn rejects_missing_dependency() {
+fn parks_a_missing_dependency() {
     let ctx = Context::new();
     let applied = order();
     let cleaned = order();
@@ -327,15 +327,18 @@ fn rejects_missing_dependency() {
         &cleaned,
     );
 
-    let error = mount_all(&ctx, &[consumer]).expect_err("missing dependency");
-    match error {
-        MountError::MissingDependency { plugin_id, keys } => {
-            assert_eq!(plugin_id, "consumer");
-            assert_eq!(keys, vec!["missing".to_owned()]);
-        }
-        other => panic!("expected a missing-dependency error, got {other:?}"),
-    }
-    assert!(recorded(&applied).is_empty(), "nothing mounted");
+    // dsh's PENDING semantics: a row whose injected service is
+    // missing parks instead of failing the mount.
+    let handle = mount_all(&ctx, &[consumer]).expect("the mount succeeds");
+    assert_eq!(
+        handle.plugin_state("consumer"),
+        Some(PluginState::Pending),
+        "the row waits for its missing provider"
+    );
+    assert!(
+        recorded(&applied).is_empty(),
+        "a parked row never activates"
+    );
 }
 
 #[test]

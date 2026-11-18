@@ -22,7 +22,7 @@ use uva_core::CancelToken;
 use uva_kernel::{EventValue, WaterfallCtx};
 use uva_steering::HookEvent;
 
-use crate::context::HookContext;
+use crate::{arbitration::Fact, context::HookContext};
 
 /// Before a loop step samples the model.
 ///
@@ -89,6 +89,12 @@ pub struct HookPayload {
     // new payload, but the ask reasons a middleware recorded before
     // the rewrite must survive to the fold.
     asks: Arc<Mutex<Vec<String>>>,
+    // The same, for the facts a registration left behind: a gate that
+    // could not answer, a decision the point did not accept, a
+    // registration that panicked. The chain runs where the run's sink
+    // is not reachable, so the facts travel with the pass and the
+    // dispatch writes them where the sink lives.
+    facts: Arc<Mutex<Vec<Fact>>>,
 }
 
 impl HookPayload {
@@ -99,6 +105,7 @@ impl HookPayload {
             state: ctx.state.clone(),
             cancel: Arc::clone(ctx.cancel),
             asks: Arc::new(Mutex::new(Vec::new())),
+            facts: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -121,6 +128,11 @@ impl HookPayload {
     /// Record an ask reason; the pass continues.
     pub fn ask(&self, reason: impl Into<String>) {
         lock(&self.asks).push(reason.into());
+    }
+
+    /// Record a fact about a registration; the pass continues.
+    pub fn record_fact(&self, fact: Fact) {
+        lock(&self.facts).push(fact);
     }
 
     #[must_use]
@@ -147,6 +159,7 @@ impl HookPayload {
             state: pass.state.clone(),
             cancel: Arc::clone(&pass.cancel),
             asks: Arc::clone(&pass.asks),
+            facts: Arc::clone(&pass.facts),
         });
         Arc::new(WaterfallCtx::new(
             ctx.event().to_owned(),
@@ -158,6 +171,11 @@ impl HookPayload {
     /// Drain the ask reasons recorded on this pass.
     pub fn take_asks(&self) -> Vec<String> {
         std::mem::take(&mut *lock(&self.asks))
+    }
+
+    /// Drain the facts recorded on this pass.
+    pub fn take_facts(&self) -> Vec<Fact> {
+        std::mem::take(&mut *lock(&self.facts))
     }
 }
 

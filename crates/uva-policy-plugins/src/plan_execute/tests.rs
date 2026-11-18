@@ -193,7 +193,7 @@ async fn the_models_output_is_one_row_per_call() {
     let assistant: Vec<SessionEvent> = rows
         .iter()
         .filter_map(SessionEvent::from_value)
-        .filter(|event| event.type_tag() == "assistant_message")
+        .filter(|event| event.tag().as_wire() == "assistant_message")
         .collect();
     assert_eq!(
         assistant.len(),
@@ -205,7 +205,7 @@ async fn the_models_output_is_one_row_per_call() {
         .iter()
         .map(|event| match event {
             SessionEvent::AssistantMessage { data, .. } => data.to_string(),
-            other => other.type_tag().to_string(),
+            other => other.tag().as_wire().to_string(),
         })
         .collect();
     assert!(

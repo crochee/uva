@@ -68,6 +68,7 @@
 - **公开项有文档**：每个 `pub` 项写清语义；公开行为随实现演进会破坏调用方。
 - **库代码不 `unwrap` / `expect`**：返回 `Result`，或在文档化的不变量上 panic；测试代码除外。
 - **feature 只增不减**：开启一个 feature 不得移除功能、不得破坏 semver。
+- **破坏性变更是常态（未到 v1）**：本项目尚未发布 1.0，**接口与内部结构的破坏性变更一律允许，不承诺向后兼容**。遇到旧形状就换掉：不要加兼容层、别名、双写分支或“过渡期”标记。改动一次切干净，需要留痕的是**基线与文档同步**（见 §3.10），不是旧形状的存活。
 
 ## 3.2 代码质量与格式化
 
@@ -133,12 +134,14 @@
 | `check-clock` | 库代码不得直接调用 `chrono::Utc::now()` |
 | `check-stdout` / `check-cli-surface` | 无头核心的 stdout 只承载协议帧；命令行一律 clap |
 | `check-host-capabilities` | 能力矩阵只许变好 |
+| `check-profile-document` | 入库的 `.agents/profile.toml` 必须复述每个插件 manifest 的依赖边（有效边 ≠ 文档声明即红） |
 | `check-single-writer` | 会话行只能由该会话的 writer 写 |
+| `check-row-vocabulary` | Rust 生产代码不得自己拼会话行的 `type`（标签与方言一律取自行词汇），也不得在 `uva-session` 之外以字面量构造 `SessionEvent` 变体（写行一律走 `typed_event_builders`；读侧 pattern 不受限，裸 match 臂进审计表）；浏览器源码（`uva-web/src`，经 TS compiler API 扫描器）不得拼写方言；审计过的例外表在脚本里，只许变短 |
 | `check-claim-language` | 当前状态文档不出现与代码事实矛盾的绝对化措辞 |
 | `check-publishable` / `check-deny` | 每个 crate 可 `cargo package`；许可证 / 来源 / ban 审计通过 |
 | `check-web` / `check-web-contract` | 前端类型 / lint / 格式化 / 纯函数单测；`uva-web/src/api/types.ts` 必须逐字节等于服务端 wire types 的重新生成结果 |
 | `check-web-methods` | 前端域客户端的 `METHOD` 表里的每个方法名都必须是服务端真正提供的方法（路由注册表 + 通知常量）；服务端有而前端不调的不算错；**读不懂的表也红**（每个含 `const METHOD` 的文件必须至少产出一行；表里读不出的一行——计算值、带插值的模板、计算 key、取值不在 key 那一行——也算读不懂，门禁点名文件与 key；契约清单的每一行都必须是被抽取器读到的一行） |
-| `lint-sh` | 对 16 个 `scripts/*.sh` 门禁跑 shellcheck |
+| `lint-sh` | 对 18 个 `scripts/*.sh` 门禁跑 shellcheck |
 
 **新增 `scripts/*.sh` 门禁必须在同一变更里同步四处**：`Makefile` 的 `check-*` 目标与 `make ci` 的聚合清单、`Makefile` 的 `lint-sh` 清单、`.github/workflows/shellcheck.yml` 的清单、本节的 `lint-sh` 行——两份脚本清单必须一致。
 
@@ -185,6 +188,7 @@ CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)�
 - 新增依赖必须通过 `cargo deny check licenses bans sources`（`make check-deny`）与 `cargo audit`。
 - `Cargo.lock` 入库，release 产物从它复现。
 - 破坏性公开面变更必须同步 `docs/api-frozen.md` 与基线（`make check-frozen-api`）。
+- 冻结面是**基线，不是兼容承诺**：它记录当前公开面，让破坏性变更**可见可审**（§3.1 允许破坏性变更）；同步基线与 `docs/api-frozen.md` 即可，不需要为旧调用方保留形状。
 - 可发布的 crate 必须能被 `cargo package`（`make check-publishable`）——path 依赖缺版本号这类缺陷只有打包那一刻才暴露。
 
 ***

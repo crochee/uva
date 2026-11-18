@@ -10,7 +10,7 @@ use super::{
     try_fold_log_surface,
 };
 use crate::{
-    events::{KNOWN_SESSION_EVENT_TYPES, SessionEvent, SurfaceRole},
+    events::{RowTag, SessionEvent, SurfaceRole},
     jsonl::SessionMetadataHeader,
     surface::fold::{RowKind, row_view},
 };
@@ -278,21 +278,6 @@ fn log_tail_seq_numbers_rows_like_the_fold() {
     );
 }
 
-/// The source of the event vocabulary — the file the doc markers
-/// live in.
-const EVENTS_SOURCE: &str = include_str!("../events/mod.rs");
-
-/// The role each doc marker spells, in the words the markers use.
-///
-/// The markers are the human-readable half of the role; this table
-/// is the parser's half of the same vocabulary, and the test below
-/// is what holds the two together.
-const MARKERS: &[(&str, SurfaceRole)] = &[
-    ("surface message", SurfaceRole::Message),
-    ("surface op only", SurfaceRole::OpOnly),
-    ("log-only", SurfaceRole::LogOnly),
-];
-
 /// A provider message in its wire shape.
 fn message(message: uva_provider::Message) -> Value {
     serde_json::to_value(message).expect("a provider message serialises")
@@ -303,7 +288,7 @@ fn message(message: uva_provider::Message) -> Value {
 ///
 /// The row is the fixture three times over: it deserialises into the
 /// typed event (so the declared role can be read), it is the raw row
-/// [`classify_row`] reads, and it carries the wire tag the two must
+/// the restore reads, and it carries the wire tag the two must
 /// agree on. The expected kind is the fourth fact this table states:
 /// which kind of surface row the variant is — `None` for a log-only
 /// row, which reaches no surface and so has no kind.
@@ -585,90 +570,6 @@ fn variant_rows() -> Vec<(&'static str, Value, Option<RowKind>)> {
     ]
 }
 
-/// The lines of the `SessionEvent` enum body.
-fn enum_body(source: &str) -> Vec<&str> {
-    let lines: Vec<&str> = source.lines().collect();
-    let start = lines
-        .iter()
-        .position(|line| line.trim_start() == "pub enum SessionEvent {")
-        .expect("the event vocabulary declares its enum");
-    let rest = &lines[start + 1..];
-    let end = rest
-        .iter()
-        .position(|line| *line == "}")
-        .expect("the event vocabulary's enum closes");
-    rest[..end].to_vec()
-}
-
-/// The name of the variant a line declares, if it declares one.
-fn variant_name(line: &str) -> Option<&str> {
-    let rest = line.strip_prefix("    ")?;
-    let end = rest
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .unwrap_or(rest.len());
-    let name = &rest[..end];
-    if name.is_empty() || !rest[end..].starts_with(" {") {
-        return None;
-    }
-    Some(name)
-}
-
-/// The wire tag a variant's name derives.
-///
-/// The enum-level `rename_all = "snake_case"` is what turns a
-/// variant's name into the tag it writes on the wire — the tag
-/// [`SessionEvent::type_tag`] also states, and the tag every
-/// hand-written list of the vocabulary has to agree with. Every
-/// variant name in the enum is plain PascalCase (no digit or
-/// acronym runs), so the per-character rule below is exactly
-/// serde's.
-fn variant_wire_tag(variant: &str) -> String {
-    let mut tag = String::with_capacity(variant.len());
-    for (i, ch) in variant.chars().enumerate() {
-        if ch.is_ascii_uppercase() {
-            if i > 0 {
-                tag.push('_');
-            }
-            tag.push(ch.to_ascii_lowercase());
-        } else {
-            tag.push(ch);
-        }
-    }
-    tag
-}
-
-/// The doc block that precedes one variant, in source order.
-fn variant_doc<'a>(body: &'a [&'a str], variant: &str) -> Option<Vec<&'a str>> {
-    let index = body
-        .iter()
-        .position(|line| variant_name(line) == Some(variant))?;
-    let mut cursor = index;
-    // The attributes sit between the doc block and the declaration.
-    while cursor > 0 && body[cursor - 1].trim_start().starts_with("#[") {
-        cursor -= 1;
-    }
-    let mut doc = Vec::new();
-    while cursor > 0 && body[cursor - 1].trim_start().starts_with("///") {
-        cursor -= 1;
-        doc.push(body[cursor]);
-    }
-    doc.reverse();
-    Some(doc)
-}
-
-/// The role a variant's doc marker spells.
-fn doc_role(body: &[&str], variant: &str) -> Option<SurfaceRole> {
-    let doc = variant_doc(body, variant)?;
-    let summary = doc.first()?.trim_start();
-    let marker = summary
-        .rsplit_once("— ")
-        .map(|(_, tail)| tail.trim().trim_end_matches('.'))?;
-    MARKERS
-        .iter()
-        .find(|(text, _)| *text == marker)
-        .map(|(_, role)| *role)
-}
-
 /// The role the raw-log classifier gives a row of that kind.
 fn classified_role(row: &Value) -> SurfaceRole {
     match classify_row(row) {
@@ -683,15 +584,15 @@ fn classified_role(row: &Value) -> SurfaceRole {
 
 /// Every variant declares one surface role, and the places that
 /// state it agree: the declared role, the raw-log classifier's
-/// treatment of a row of that kind, the variant's doc marker, and
-/// the kind the fold gives the row.
+/// treatment of a row of that kind, and the kind the fold gives
+/// the row.
 ///
-/// Those are several hand-written statements of one fact, and a
-/// list that drifts is silent: a variant added to one of them and
-/// not the others either hides a row the model should see or shows
-/// it one it should not. The declared role is the one the compiler
+/// Those are several statements of one fact, and a list that
+/// drifts is silent: a variant added to one of them and not the
+/// others either hides a row the model should see or shows it one
+/// it should not. The declared role is the one the compiler
 /// enforces — a new variant does not compile until its role is
-/// declared — so this test is what holds the other three to it.
+/// declared — so this test is what holds the others to it.
 ///
 /// The kind is checked first, because it is the one that decides
 /// what the model sees: the fold skips a row it cannot place, so a
@@ -703,22 +604,30 @@ fn classified_role(row: &Value) -> SurfaceRole {
 /// decides.
 #[test]
 fn every_variant_declares_one_surface_role() {
-    let body = enum_body(EVENTS_SOURCE);
     let rows = variant_rows();
-    let declared: Vec<&str> =
-        body.iter().filter_map(|line| variant_name(line)).collect();
-    let covered: Vec<&str> = rows.iter().map(|(name, _, _)| *name).collect();
+    let mut covered: Vec<&str> = rows
+        .iter()
+        .map(|(_, row, _)| {
+            row.get("type")
+                .and_then(Value::as_str)
+                .expect("the fixture row names a type")
+        })
+        .collect();
+    let mut vocabulary: Vec<&str> =
+        RowTag::ALL.iter().map(|tag| tag.as_wire()).collect();
+    covered.sort_unstable();
+    vocabulary.sort_unstable();
     assert_eq!(
-        declared, covered,
-        "every variant needs a fixture row: a variant with no row is a \
-         variant nobody checked"
+        covered, vocabulary,
+        "every tag needs a fixture row: a tag with no row is a tag \
+         nobody checked"
     );
 
     for (name, row, expected_kind) in &rows {
         let event = SessionEvent::from_value(row)
             .expect("the fixture row deserialises into its variant");
         assert_eq!(
-            event.type_tag(),
+            event.tag().as_wire(),
             row.get("type")
                 .and_then(Value::as_str)
                 .expect("the fixture row names a type"),
@@ -770,73 +679,5 @@ fn every_variant_declares_one_surface_role() {
             classified_role(row),
             "{name}: the raw-log classifier and the declared role disagree"
         );
-        assert_eq!(
-            declared,
-            doc_role(&body, name).unwrap_or_else(|| {
-                panic!("{name}: the variant states no surface role")
-            }),
-            "{name}: the doc marker and the declared role disagree"
-        );
     }
-}
-
-/// The const names exactly the wire tags the enum's variants
-/// produce — as sets, both ways.
-///
-/// `KNOWN_SESSION_EVENT_TYPES` is the public vocabulary: the doc
-/// on it holds it out to the front-end codegen as the source of
-/// truth, and `empty_event_of` builds a skeleton from it. Unlike
-/// the other lists of the vocabulary, a variant added to the enum
-/// and forgotten in the const compiled and passed every test —
-/// the const's own test counted the entries, and a count does not
-/// move when the enum grows. So this test compares the two *sets*:
-/// the tags the variants' names derive under the enum's
-/// `rename_all = "snake_case"` rule (the tags the rows carry
-/// on the wire, and the tags
-/// [`SessionEvent::type_tag`] states, held together by the
-/// round-trip above) and the tags the const lists. A tag the const
-/// forgets and a tag it invents both fail, and the message names
-/// the tag — which is what makes the failure actionable rather
-/// than a red count.
-#[test]
-fn the_known_event_types_are_exactly_the_enum_s_wire_tags() {
-    let body = enum_body(EVENTS_SOURCE);
-    let mut declared: Vec<String> = Vec::new();
-    for line in &body {
-        let Some(variant) = variant_name(line) else {
-            continue;
-        };
-        let tag = variant_wire_tag(variant);
-        assert!(
-            !declared.contains(&tag),
-            "{variant}: two variants derive the wire tag {tag}, so the \
-             set below would collapse them"
-        );
-        declared.push(tag);
-    }
-
-    let known: Vec<&str> = KNOWN_SESSION_EVENT_TYPES.to_vec();
-    let missing: Vec<&str> = declared
-        .iter()
-        .filter(|tag| !known.contains(&tag.as_str()))
-        .map(String::as_str)
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "KNOWN_SESSION_EVENT_TYPES is missing the wire tag(s) {} — a \
-         tag the const does not name is a tag `empty_event_of` cannot \
-         build and no consumer of the const can discover",
-        missing.join(", ")
-    );
-    let extra: Vec<&str> = known
-        .iter()
-        .filter(|tag| !declared.iter().any(|d| *d == **tag))
-        .copied()
-        .collect();
-    assert!(
-        extra.is_empty(),
-        "KNOWN_SESSION_EVENT_TYPES names the wire tag(s) {} that no \
-         variant produces — a tag the enum cannot read back",
-        extra.join(", ")
-    );
 }

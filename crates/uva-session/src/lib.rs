@@ -60,13 +60,17 @@
 //! ([`fs::FsBackend`]) and a summary's deadline is armed by a
 //! [`Sleeper`](uva_core::sleeper::Sleeper). Both default to the
 //! runtime-free implementation, and a host on a real runtime swaps
-//! its own in (`with_blocking` / `with_sleeper`). Callers
-//! (specifically the agent loop) serialize their events to
-//! `serde_json::Value` before calling `append`.
+//! its own in (`with_blocking` / `with_sleeper`). A caller names the
+//! event it wants written; the writer's typed constructors
+//! (`append_event` / `append_event_nowait`) serialize it, so a row's
+//! shape is this crate's knowledge and never a caller's.
 
 pub mod compaction;
 /// The `compaction` kernel service: the compactor as a plugin.
 pub mod compaction_plugin;
+/// The provider's content blocks, read off a raw payload — one reader
+/// for the wire shape the surface fold and the tool pairing read.
+pub(crate) mod content_blocks;
 pub mod events;
 pub mod fs;
 pub mod history;
@@ -124,14 +128,22 @@ pub use compaction_plugin::{
 pub use events::{
     AttachmentRefRow,
     CompactionLifecycleOutcome,
-    KNOWN_SESSION_EVENT_TYPES,
+    CurrentRow,
     MAX_PLUGIN_KIND_BYTES,
     MAX_PLUGIN_PAYLOAD_BYTES,
     ReplaceRange,
+    RowDefect,
+    RowDialect,
+    RowTag,
+    Rows,
     SessionEvent,
     SurfaceOp,
+    SurfaceRole,
     SurfaceToken,
-    empty_event_of,
+    UnreadableLog,
+    publish_row,
+    publish_rows,
+    restore_row,
 };
 pub use history::{
     HistoryError,
@@ -213,11 +225,18 @@ pub use typed_event_builders::{
     approval_asked,
     approval_decided,
     approval_granted,
+    assistant_message,
+    feedback,
+    hook_block,
     iteration_end,
     iteration_start,
+    message_row,
+    park_consumed,
+    parked_prompt,
     request_header,
     request_snapshot,
     round_trip,
+    session_shutdown,
     step_end,
     step_end_suspended,
     step_start,
@@ -226,11 +245,15 @@ pub use typed_event_builders::{
     subagent_exit,
     tool_dispatch,
     tool_output,
+    tool_result,
+    tool_result_transformed,
     turn_end,
     turn_end_suspended,
+    turn_prompt_row,
     turn_start,
     turn_suspended,
     usage,
     user_message,
+    warning,
 };
 pub use writer::LogWriter;

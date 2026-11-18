@@ -140,10 +140,13 @@ impl PageQuery {
 /// filters.
 ///
 /// `status` is a free-form string at this layer — the
-/// `/api/v1/sessions` route validates it against the canonical
-/// session-state set (`working` / `completed` / `failed` /
-/// `canceled` / `input-required`) and returns HTTP 400
-/// `bad_request` for unknown values.
+/// `/api/v1/sessions` route validates it against the status
+/// module's **filter vocabulary** (nine labels: `unspecified` /
+/// `submitted` / `working` / `completed` / `failed` / `canceled` /
+/// `input_required` / `rejected` / `auth_required`) and returns HTTP
+/// 400 `bad_request` for unknown values. The filter vocabulary is
+/// wider than the set of statuses the listing produces — five —
+/// because it is a query vocabulary, not a status vocabulary.
 #[derive(
     Debug,
     Clone,

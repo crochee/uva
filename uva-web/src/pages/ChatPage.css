@@ -86,9 +86,12 @@
   color: var(--text-secondary);
 }
 
-.status-submitted,
-.status-working,
-.status-unspecified {
+/* The message status carries five values — `working`, `completed`,
+   `failed`, `canceled`, `input-required` — the ones the chat page
+   derives from a turn's end reason. The session status has its own
+   vocabulary (see `src/api/types.ts`), and the classes it would need
+   are not these. */
+.status-working {
   color: var(--accent-yellow);
 }
 
@@ -96,19 +99,13 @@
   color: var(--accent-green);
 }
 
-.status-failed,
-.status-rejected {
+.status-failed {
   color: var(--accent-red);
 }
 
 .status-canceled,
-.status-input-required,
-.status-auth-required {
+.status-input-required {
   color: var(--accent-purple);
-}
-
-.status-unknown {
-  color: var(--text-secondary);
 }
 
 .nt-chat__message-content {

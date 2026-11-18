@@ -18,6 +18,13 @@
 //! that does not record `source` omits it, and a non-object value is
 //! wrapped as `{data, seq, ts}` with no `type` at all.
 //!
+//! The row's `type` is not named here either: it is
+//! [`uva::session::RowTag`] — the vocabulary that owns the tag set.
+//! The server **publishes current rows** ([`uva::session::publish_row`]
+//! restores a dialect row at the wire boundary), so a legacy dialect
+//! spelling never reaches the wire and the browser's row accounting
+//! has one closed answer for every `type` it can hold.
+//!
 //! These types are **schema views**. They are not serialized or
 //! deserialized by this crate — the routes keep writing
 //! `serde_json::Value` — so the responses they describe are pinned by
@@ -26,7 +33,6 @@
 //! meet.
 //!
 //! `skip_serializing_if` on every member is what tells the schema
-//! emitter the member may be absent — the same annotation every other
 //! response type uses. These types never derive serde, so the attribute is
 //! inert at runtime; it is the presence annotation the schema needs.
 //!
@@ -36,103 +42,39 @@
 
 use schemars::JsonSchema;
 use serde_json::Value;
-use uva::session::SurfaceOp;
-
-/// The closed vocabulary of `type` tags a durable row can carry —
-/// `uva_session::KNOWN_SESSION_EVENT_TYPES` re-typed, so the schema
-/// emitter can close [`SessionTurn`]'s `type` field over it instead
-/// of an open string. The contract catalog exports it as the
-/// `SessionEventType` union, and `uva-web`'s row accounting is a
-/// `Record` over that generated union, so a tag added here fails the
-/// web typecheck until the renderer says what it does with the row.
-///
-/// A legacy row written before the typed vocabulary carries a
-/// pre-vocabulary envelope string (`UserInput`, `Model`, `Agent`) or
-/// no `type` at all — which is why the field it types stays optional.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionEventType {
-    /// One user turn: `data` is the provider message the run sent.
-    UserMessage,
-    /// One assistant turn: `data` is the whole provider message.
-    AssistantMessage,
-    /// A streamed delta of the running assistant turn.
-    AssistantChunk,
-    /// One tool outcome: `data` is the committed tool message.
-    ToolResult,
-    /// A committed compaction: `data.summary` replaces a span.
-    Compaction,
-    /// A compaction lifecycle began.
-    CompactionStart,
-    /// The summary a compaction produced.
-    CompactionSummary,
-    /// A compaction lifecycle ended (committed / failed / interrupted).
-    CompactionEnd,
-    /// One model tool call, separate from the turn's message.
-    ToolCall,
-    /// A partial-output chunk of a running tool call (`data.output`
-    /// is the text; `call_id` names the call). Log-only: the settled
-    /// `tool_result` row is the model's copy, and a reload replays
-    /// the progress from these rows.
-    ToolOutput,
-    /// One step boundary inside a turn.
-    Step,
-    /// One turn boundary of the run.
-    Turn,
-    /// One iteration boundary of the run.
-    Iteration,
-    /// A fact the runtime could not report any other way (`data.kind`
-    /// is a stable slug, `data.message` says what happened).
-    Warning,
-    /// A steering guard decision.
-    SteeringGuard,
-    /// A steering hint the run injected.
-    SteeringHint,
-    /// A hook blocked an action.
-    HookBlock,
-    /// The run entered a delegated child session.
-    SubagentEnter,
-    /// The delegated child session ended.
-    SubagentExit,
-    /// The provider envelope one request ran under.
-    RequestHeader,
-    /// A held call asked the host for approval.
-    ApprovalAsked,
-    /// The host answered a held call.
-    ApprovalDecided,
-    /// A held call was authorized.
-    ApprovalGranted,
-    /// One tool dispatch toward its executor.
-    ToolDispatch,
-    /// The request envelope fingerprint a resume compared against.
-    RequestSnapshot,
-    /// Token usage counters for a stretch of the run.
-    Usage,
-    /// The sandbox mode a run executed under.
-    SandboxMode,
-    /// The session's writer shut down.
-    SessionShutdown,
-    /// A tool result rewritten by a result-transform seam.
-    ToolResultTransformed,
-    /// A prompt parked while a turn was in flight.
-    ParkedPrompt,
-    /// A parked prompt was consumed into a new turn.
-    ParkConsumed,
-    /// User feedback on a completed turn (log-only).
-    Feedback,
-    /// One plugin event: `data.kind` names the plugin's event.
-    Plugin,
-}
+use uva::{
+    provider::Message,
+    session::{RowTag, SurfaceOp},
+};
 
 /// One durable row of a session log, as `sessions/get` returns it in
 /// `history` and `follow` returns it in `rows`.
+///
+/// The row's **payload is shaped by its tag**, so the schema says
+/// which shape: a message row's `data` is the provider `Message` —
+/// the same type the provider serializes — not an open bag. The rows
+/// whose payload is free-form (a warning's message, a hook block's
+/// policy, the crash-repair closer's recovery code) stay `unknown`:
+/// the vocabulary declares their *tags*, not their payloads' shapes.
+///
+/// The tag list comes from the vocabulary itself, so the union cannot
+/// drift from the tag set.
 #[derive(Debug, Clone, JsonSchema)]
-pub struct SessionTurn {
-    /// The event family the row belongs to — one of the closed
-    /// [`SessionEventType`] vocabulary. Absent on a legacy row that
-    /// was not written through the typed event vocabulary.
+#[schemars(schema_with = "session_turn_schema")]
+pub struct SessionTurn;
+
+/// The row envelope — the members every row carries, whatever its
+/// tag.
+///
+/// The published row is the union over the tags
+/// ([`SessionTurn`]); this is the shape each of its branches shares.
+#[derive(Debug, Clone, JsonSchema)]
+pub struct SessionTurnEnvelope {
+    /// The event family the row belongs to — a tag of the closed
+    /// [`RowTag`] vocabulary. Absent on a row that carries no `type`
+    /// at all.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<SessionEventType>,
+    pub r#type: Option<RowTag>,
     /// The row's payload — the event's own data, shaped by `type`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
@@ -237,4 +179,81 @@ pub struct SessionPart {
     #[schemars(rename = "mediaType")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_type: Option<String>,
+}
+
+/// Build the row's schema: a discriminated union over the row's tag.
+///
+/// Every branch is the row envelope ([`SessionTurnEnvelope`]) with
+/// two members narrowed: `type` names the tag that branch answers
+/// to, and `data` — for the rows that carry a message — is the
+/// provider `Message`. Every other row keeps the envelope's own
+/// "any value", because its payload is free-form: the vocabulary
+/// declares the tag, not what the tag's family carries.
+///
+/// The tag list is read from the vocabulary's own tag union, so a
+/// tag the vocabulary adds appears here without a second list to
+/// keep in step.
+fn session_turn_schema(
+    generator: &mut schemars::SchemaGenerator,
+) -> schemars::Schema {
+    use serde_json::{Value, json};
+
+    // The rows whose payload *is* the provider message — the two
+    // tags asked of the vocabulary, never spelled here. A
+    // `tool_result` row is not among them: the run's own row holds
+    // the tool message, but the crash-repair closer holds a marker
+    // of its own — one tag, two payloads, so the schema says
+    // neither.
+    let message_tags = [
+        RowTag::UserMessage.as_wire(),
+        RowTag::AssistantMessage.as_wire(),
+    ];
+
+    // Registering a type with the generator yields its reference;
+    // the definitions map holds the schema itself.
+    let message_ref = generator.subschema_for::<Message>();
+    // Registering the envelope with the generator registers the tags
+    // and ops it references, so the definitions map holds them all.
+    generator.subschema_for::<SessionTurnEnvelope>();
+    let definitions = generator.definitions().clone();
+
+    let envelope = definitions["SessionTurnEnvelope"].clone();
+    // The envelope is an implementation detail of the union: the
+    // branches inline its members, so the document carries no
+    // definition nothing points at.
+    generator.definitions_mut().remove("SessionTurnEnvelope");
+    let message: Value = serde_json::to_value(message_ref)
+        .expect("the message reference serialises");
+    let tags: Vec<String> = definitions["RowTag"]["oneOf"]
+        .as_array()
+        .map(|branches| {
+            branches
+                .iter()
+                .filter_map(|branch| branch["const"].as_str())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let branches: Vec<Value> = tags
+        .into_iter()
+        .map(|tag| {
+            let mut branch = envelope.clone();
+            let properties = &mut branch
+                .as_object_mut()
+                .expect("the envelope is an object")["properties"]
+                .as_object_mut()
+                .expect("the envelope has properties");
+            // This branch answers to one tag alone.
+            properties.insert("type".to_owned(), json!({ "const": tag }));
+            // A message row's payload is the provider's own message.
+            if message_tags.contains(&tag.as_str()) {
+                properties.insert("data".to_owned(), message.clone());
+            }
+            branch
+        })
+        .collect();
+
+    serde_json::from_value(json!({ "oneOf": branches }))
+        .expect("the union schema parses")
 }

@@ -303,7 +303,7 @@ fn the_winner_is_one_durable_row() {
         rows.iter().filter_map(SessionEvent::from_value).collect();
     let assistant: Vec<&SessionEvent> = events
         .iter()
-        .filter(|event| event.type_tag() == "assistant_message")
+        .filter(|event| event.tag().as_wire() == "assistant_message")
         .collect();
     assert_eq!(
         assistant.len(),

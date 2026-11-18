@@ -21,12 +21,14 @@
 //! The queue is bounded, and the pressure it applies is backpressure,
 //! not loss:
 //!
-//! - The asynchronous path ([`LogWriter::append`]) waits for the
-//!   flush that frees the queue — the flush is the only drainer, so a
-//!   send that waited for room nobody would make would wait forever.
-//! - The synchronous path ([`LogWriter::append_nowait`]) cannot wait:
-//!   the provider's chunk callback is synchronous. A row that does not
-//!   fit waits in the spill, and the next flush writes it.
+//! - The asynchronous path ([`LogWriter::append_event`]) waits for
+//!   the flush that frees the queue — the flush is the only drainer,
+//!   so a send that waited for room nobody would make would wait
+//!   forever.
+//! - The synchronous path ([`LogWriter::append_event_nowait`])
+//!   cannot wait: the provider's chunk callback is synchronous. A row
+//!   that does not fit waits in the spill, and the next flush writes
+//!   it.
 //!
 //! Either way the row keeps the ordinal it was given, and the writer
 //! never hands out an ordinal it does not write: the reservation and
@@ -79,7 +81,7 @@ use crate::{
     SessionEvent,
     SessionSink,
     SurfaceOp,
-    events::{bound_plugin_row, bound_tool_output_row, merge_tool_output_row},
+    events::{bounded_event, merge_tool_output_row, restore_row},
     jsonl::is_metadata_header_row,
     log::{RepairReport, SessionLog},
     log_surface::{SurfaceLedger, log_is_stamped, row_seq},
@@ -320,6 +322,13 @@ impl LogWriter {
 
     /// Reserve an ordinal, stamp the row with it, and queue it.
     ///
+    /// Crate-private: a row's shape is this crate's knowledge. An
+    /// outside caller names the event it wants written —
+    /// [`Self::append_event`] on the async path,
+    /// [`Self::append_event_nowait`] on the synchronous one — and
+    /// never assembles the JSON itself, so a tag or payload the
+    /// vocabulary renames cannot drift in a caller.
+    ///
     /// The row is never dropped: when the queue is full the row waits
     /// in the writer's spill and the flush that follows writes it
     /// with the rows the queue already holds. The call therefore
@@ -332,7 +341,10 @@ impl LogWriter {
     /// Returns the sink's error when the flush that made room for
     /// the row failed. The row stays owed to the log: it is in the
     /// spill, and the next flush writes it.
-    pub async fn append(&self, value: Value) -> Result<u64, SessionError> {
+    pub(crate) async fn append(
+        &self,
+        value: Value,
+    ) -> Result<u64, SessionError> {
         let (seq, queue_was_full) = {
             let tx = self.tx.lock().await;
             self.enqueue(tx, value)
@@ -360,25 +372,31 @@ impl LogWriter {
         &self,
         event: &SessionEvent,
     ) -> Result<u64, SessionError> {
+        let bounded = bounded_event(event);
+        let event = bounded.as_ref().unwrap_or(event);
         let value = serde_json::to_value(event).map_err(|error| {
             SessionError::AppendFailed(format!("serialize event: {error}"))
         })?;
+        // A streamed chunk never takes the queue: it merges into the
+        // call's pending row, so the memory bound is the tail window
+        // rather than the tool's output rate.
+        if let Some(call_id) = event.tool_output_call() {
+            return Ok(self.enqueue_tool_output(call_id, value));
+        }
         self.append(value).await
     }
 
     /// Reserve an ordinal, stamp the row with it, and queue it
     /// without waiting.
     ///
+    /// Crate-private for the same reason as [`Self::append`]: the
+    /// synchronous door an outside caller may use is
+    /// [`Self::append_event_nowait`], which takes the typed event.
+    ///
     /// A row that does not fit waits in the writer's spill instead of
     /// being dropped; the next flush writes it. Returns the ordinal
     /// the row was given.
-    pub fn append_nowait(&self, value: Value) -> u64 {
-        if let Some(call_id) = tool_output_call(&value) {
-            // A streamed chunk never takes the queue: it merges into
-            // the call's pending row, so the memory bound is the tail
-            // window rather than the tool's output rate.
-            return self.enqueue_tool_output(&call_id, value);
-        }
+    pub(crate) fn append_nowait(&self, value: Value) -> u64 {
         match self.tx.try_lock() {
             Some(tx) => self.enqueue(tx, value).0,
             None => {
@@ -395,10 +413,7 @@ impl LogWriter {
                 let seq = self.sink.alloc_seq();
                 let row = StampedRow {
                     seq,
-                    value: self.stamp(
-                        seq,
-                        bound_tool_output_row(bound_plugin_row(value)),
-                    ),
+                    value: self.stamp(seq, value),
                 };
                 spill.push(row);
                 seq
@@ -412,6 +427,8 @@ impl LogWriter {
     /// The synchronous path a compaction checkpoint's callbacks use.
     /// Returns the ordinal the row was given.
     pub fn append_event_nowait(&self, event: &SessionEvent) -> u64 {
+        let bounded = bounded_event(event);
+        let event = bounded.as_ref().unwrap_or(event);
         let value = match serde_json::to_value(event) {
             Ok(value) => value,
             Err(error) => {
@@ -424,6 +441,12 @@ impl LogWriter {
                 Value::Null
             }
         };
+        // A streamed chunk never takes the queue: it merges into the
+        // call's pending row, so the memory bound is the tail window
+        // rather than the tool's output rate.
+        if let Some(call_id) = event.tool_output_call() {
+            return self.enqueue_tool_output(call_id, value);
+        }
         self.append_nowait(value)
     }
 
@@ -565,14 +588,15 @@ impl LogWriter {
             .iter()
             .zip(&seqs)
             .filter_map(|(row, &seq)| {
-                row.get("seq").and_then(Value::as_u64).map(|old| (old, seq))
+                restore_row(row).seq().map(|old| (old, seq))
             })
             .collect();
+        // The rows come from this crate's own child log, bounded at
+        // their own write, so the copy does not bound again.
         let copied: Vec<StampedRow> = rows
             .into_iter()
             .zip(&seqs)
-            .map(|(row, &seq)| {
-                let mut row = bound_tool_output_row(bound_plugin_row(row));
+            .map(|(mut row, &seq)| {
                 remap_citations(&mut row, &remap);
                 StampedRow {
                     seq,
@@ -660,10 +684,20 @@ impl LogWriter {
     /// retry of a refused batch does not write the row twice.
     fn stamp(&self, seq: u64, mut value: Value) -> Value {
         let ts = self.clock.now().to_rfc3339();
+        // A row whose kind the vocabulary declares ignorable carries
+        // the marker that lets a build which does not know the kind
+        // skip it instead of refusing the whole log. The declaration
+        // lives on the tag, so the marker cannot be forgotten by the
+        // writer — it is the vocabulary's promise, stamped here.
+        let ignorable =
+            restore_row(&value).tag().is_some_and(|tag| tag.ignorable());
         match value.as_object_mut() {
             Some(object) => {
                 object.insert("seq".to_string(), Value::from(seq));
                 object.insert("ts".to_string(), Value::String(ts));
+                if ignorable {
+                    object.insert("ignorable".to_string(), Value::Bool(true));
+                }
                 value
             }
             None => {
@@ -693,14 +727,10 @@ impl LogWriter {
         mut tx: MutexGuard<'_, mpsc::Sender<StampedRow>>,
         value: Value,
     ) -> (u64, bool) {
-        if let Some(call_id) = tool_output_call(&value) {
-            return (self.enqueue_tool_output(&call_id, value), false);
-        }
         let seq = self.sink.alloc_seq();
         let row = StampedRow {
             seq,
-            value: self
-                .stamp(seq, bound_tool_output_row(bound_plugin_row(value))),
+            value: self.stamp(seq, value),
         };
         match tx.try_send(row) {
             Ok(()) => (seq, false),
@@ -721,7 +751,6 @@ impl LogWriter {
     /// the sink writes one row where the tool produced a burst.
     /// Returns the ordinal the row carries.
     fn enqueue_tool_output(&self, call_id: &str, value: Value) -> u64 {
-        let value = bound_tool_output_row(value);
         let mut pending = self.pending_tool_output.lock();
         if let Some(row) = pending.get_mut(call_id) {
             merge_tool_output_row(&mut row.value, &value);
@@ -783,23 +812,6 @@ fn stamp_copy(seq: u64, mut value: Value) -> Value {
             json!({"data": value, "seq": seq})
         }
     }
-}
-
-/// The tool call a row streams for, when the row is one streamed
-/// chunk.
-///
-/// The writer merges these rows into one pending row per call; every
-/// other row takes the queue. A `tool_output` row without a call id
-/// cannot be merged with anything, so it takes the queue too — and is
-/// bounded on that path like any other row.
-fn tool_output_call(value: &Value) -> Option<String> {
-    if value.get("type").and_then(Value::as_str) != Some("tool_output") {
-        return None;
-    }
-    value
-        .get("call_id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
 }
 
 /// Remap a copied row's `surface_op.source_event_seqs` through the
@@ -889,8 +901,17 @@ impl SessionLog for LogWriter {
         // them or it would close a turn that is about to be written.
         LogWriter::flush(self).await?;
         let rows = LogWriter::read(self).await?;
+        // The scan reads the log's rows, not a decode of the whole
+        // log: the vocabulary restores each row on demand, so a row
+        // of another kind costs no decode — and a row this build
+        // cannot read stops the scan instead of being dropped.
+        let log = crate::events::Rows::read(&rows).map_err(|error| {
+            SessionError::ReadFailed(format!(
+                "session log is unreadable: {error}"
+            ))
+        })?;
         let typed: Vec<SessionEvent> =
-            rows.iter().filter_map(SessionEvent::from_value).collect();
+            log.iter().filter_map(|row| row.event()).collect();
         let closers = crate::repair::interrupted_turn_closers(&typed);
         let count = closers.len();
         self.repair_with(closers).await?;

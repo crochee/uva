@@ -75,19 +75,18 @@ fn translate_writes_a_profile_with_the_model_adapter_row() {
         .iter()
         .find(|entry| entry.id == "model-adapter")
         .expect("the model-adapter row is present");
-    assert_eq!(row.runtime, uva_app_server::profile::RuntimeKind::Native);
+    assert_eq!(row.name, "model-adapter");
 
-    // The row config is a ModelAdapterConfig: the workspace section
+    // The row config is a ModelAdapterConfig: the provider catalogue
     // carries the providers and the default, the cache section the
     // yaml's cache block.
-    let workspace = &row.config["workspace"];
-    assert_eq!(workspace["default_provider"], "demo-echo");
+    assert_eq!(row.config["default_provider"], "demo-echo");
     assert_eq!(
-        workspace["providers"]["demo-echo"]["default_model"],
+        row.config["providers"]["demo-echo"]["default_model"],
         "echo-model"
     );
     assert_eq!(
-        workspace["providers"]["openai"]["default_model"], "gpt-4o",
+        row.config["providers"]["openai"]["default_model"], "gpt-4o",
         "the legacy models[] shape is bridged"
     );
     assert_eq!(row.config["cache"]["enabled"], true);
@@ -105,7 +104,7 @@ fn translate_writes_a_profile_with_the_model_adapter_row() {
         parsed.resilience.is_none(),
         "an absent section stays absent"
     );
-    assert_eq!(parsed.workspace.default_provider, "demo-echo");
+    assert_eq!(parsed.catalogue.default_provider, "demo-echo");
 }
 
 /// The document layer is authoritative: a row the document does not

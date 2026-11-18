@@ -53,6 +53,15 @@ use uva_steering::{HookDecision, HookEvent};
 use uva_tool::ToolOutput;
 
 use crate::{
+    arbitration::{
+        Arbitration,
+        Fact,
+        PanicPolicy,
+        Refusal,
+        Ruling,
+        refusal,
+        rule,
+    },
     context::HookContext,
     seam::{
         LLM_REQUEST,
@@ -89,60 +98,14 @@ pub fn is_mount_point(key: &str) -> bool {
     MOUNT_POINTS.contains(&key)
 }
 
-/// What one dispatch pass decided at one mount point.
+/// The registry's panic policy: an external plugin that panics is
+/// skipped and **stays registered** — it may fail transiently, and
+/// nothing tells it that it was disabled.
 ///
-/// The `decision` is the one that won the pass: `Allow` when nothing
-/// objected, `Block` / `Terminate` when a registration ended the
-/// pass, `ReplaceParams` when a request was rewritten. The `asks` are
-/// the approval reasons the registrations collected on the way — they
-/// never end a pass.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Arbitration {
-    /// The decision that won the pass.
-    pub decision: HookDecision,
-    /// The reasons the registrations asked for an approval.
-    pub asks: Vec<String>,
-}
-
-impl Arbitration {
-    /// Fold one decision into the pass.
-    ///
-    /// The fold is deny-only and monotonic — the terminal rule from
-    /// dsh (`E004`, `E048`): an `Ask` joins the collected reasons, a
-    /// `ReplaceParams` schedules a rewrite while the pass is still
-    /// allowed, and a `Block` / `Terminate` is final. Once a denial is
-    /// recorded, no later decision can clear it: there is no allow
-    /// result to absorb, so registration order cannot turn a denial
-    /// back into permission.
-    pub fn absorb(&mut self, decision: HookDecision) {
-        match decision {
-            HookDecision::Allow => {}
-            HookDecision::Ask { reason } => self.asks.push(reason),
-            HookDecision::ReplaceParams(_) => {
-                if matches!(self.decision, HookDecision::Allow) {
-                    self.decision = decision;
-                }
-            }
-            HookDecision::Block { .. } | HookDecision::Terminate { .. } => {
-                if matches!(
-                    self.decision,
-                    HookDecision::Allow | HookDecision::ReplaceParams(_)
-                ) {
-                    self.decision = decision;
-                }
-            }
-        }
-    }
-
-    /// Whether a decision ended the pass: a block or a termination.
-    #[must_use]
-    pub fn decided(&self) -> bool {
-        matches!(
-            self.decision,
-            HookDecision::Block { .. } | HookDecision::Terminate { .. }
-        )
-    }
-}
+/// The harness's typed registrations use
+/// [`PanicPolicy::Withdraw`] instead: an in-process registration
+/// that panics is broken.
+const PANIC_POLICY: PanicPolicy = PanicPolicy::Keep;
 
 /// What went wrong with one registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,15 +147,14 @@ pub struct RegistryPass {
     /// The effective event the pass hands on — `None` when the pass
     /// was decided.
     pub event: Option<HookEvent>,
-    /// Gates that could not answer at a point that accepts no denial.
+    /// What the pass learned about the registrations that ran.
     ///
-    /// The four points that can refuse a pass get a synthesized
-    /// decision instead ([`HookDecision::Block`] before a tool call,
-    /// [`HookDecision::Terminate`] elsewhere). `llm/request` and
-    /// `llm/result` accept no denial at all, so a failing gate there
-    /// cannot fail closed; the failure is reported here — never folded
-    /// into `Allow` — and the harness turns it into a warning.
-    pub failures: Vec<String>,
+    /// A gate that could not answer at a point that accepts no denial
+    /// could not fail closed, so the failure is reported here — never
+    /// folded into `Allow`. A decision the point did not accept and a
+    /// registration that panicked are reported the same way: the pass
+    /// continued, and the operator should know why.
+    pub facts: Vec<Fact>,
 }
 
 /// The shared table of external registrations, keyed by mount point.
@@ -298,7 +260,7 @@ impl HookRegistry {
     /// (the model reads the refusal as the tool result),
     /// [`HookDecision::Terminate`] at the other points that can end a
     /// run. `llm/request` and `llm/result` accept no denial at all, so
-    /// a failure there is reported in [`RegistryPass::failures`]
+    /// a failure there is reported in [`RegistryPass::facts`]
     /// instead — the harness writes a `hook` warning — and is never
     /// folded into `Allow`.
     ///
@@ -391,7 +353,7 @@ impl HookRegistry {
         let mut effective = event.clone();
         let mut arbitration = Arbitration::default();
         let mut denied_by = None;
-        let mut failures = Vec::new();
+        let mut facts = Vec::new();
         for entry in self.entries_for(key) {
             if arbitration.decided() {
                 break;
@@ -406,21 +368,25 @@ impl HookRegistry {
                     let decision = match observed {
                         Ok(decision) => decision,
                         Err(_) => {
+                            // The registry's panic policy: an external
+                            // plugin may fail transiently, so it stays
+                            // registered.
                             tracing::warn!(
                                 hook = %entry.name,
                                 "hook registration panicked; skipped"
                             );
+                            facts.push(
+                                PANIC_POLICY
+                                    .fact(&entry.name, "the call panicked"),
+                            );
                             continue;
                         }
                     };
-                    if !effective.accepts(&decision) {
-                        tracing::debug!(
-                            hook = %entry.name,
-                            event = %uva_steering::event_name(&effective),
-                            "hook decision not accepted here; ignored"
-                        );
+                    let Some(decision) =
+                        ruled(&effective, decision, &entry.name, &mut facts)
+                    else {
                         continue;
-                    }
+                    };
                     apply_decision(
                         &mut arbitration,
                         &mut effective,
@@ -435,56 +401,55 @@ impl HookRegistry {
                     )
                     .catch_unwind()
                     .await;
-                    let (decision, failure) = match checked {
-                        Ok(Ok(decision)) => (decision, None),
-                        Ok(Err(reason)) => {
-                            let why = format!("the gate failed: {reason}");
-                            (gate_failure(&effective, why.clone()), Some(why))
-                        }
+                    let outcome = match checked {
+                        Ok(Ok(decision)) => GateOutcome::Decided(decision),
+                        Ok(Err(reason)) => GateOutcome::Failed(format!(
+                            "the gate failed: {reason}"
+                        )),
                         Err(_) => {
-                            let why = "the gate panicked".to_owned();
-                            (gate_failure(&effective, why.clone()), Some(why))
+                            GateOutcome::Failed("the gate panicked".to_owned())
                         }
                     };
-                    if let Some(why) = &failure {
-                        tracing::error!(
-                            gate = %entry.name,
-                            event = %uva_steering::event_name(&effective),
-                            %why,
-                            "gate could not answer"
-                        );
-                    }
-                    // An ordinary decision the point does not accept is
-                    // a no-op. A gate *failure* is not one: at the four
-                    // points that can refuse, `gate_failure` synthesized
-                    // the decision the point accepts, so it lands below;
-                    // at `llm/request` and `llm/result` no denial exists
-                    // to carry, so the failure is reported as a dispatch
-                    // failure — the same conclusion the host's typed path
-                    // reaches with `DiagnosticKind::GateFailed`.
-                    if !effective.accepts(&decision) {
-                        if let Some(why) = &failure {
-                            failures.push(format!(
-                                "gate `{}` could not answer at `{}`: {why}",
+                    match outcome {
+                        GateOutcome::Decided(decision) => {
+                            let Some(decision) = ruled(
+                                &effective,
+                                decision,
+                                &entry.name,
+                                &mut facts,
+                            ) else {
+                                continue;
+                            };
+                            apply_decision(
+                                &mut arbitration,
+                                &mut effective,
+                                &mut denied_by,
                                 entry.name,
-                                uva_steering::event_name(&effective)
-                            ));
-                            continue;
+                                decision,
+                            );
                         }
-                        tracing::debug!(
-                            gate = %entry.name,
-                            event = %uva_steering::event_name(&effective),
-                            "gate decision not accepted here; ignored"
-                        );
-                        continue;
+                        GateOutcome::Failed(why) => {
+                            tracing::error!(
+                                gate = %entry.name,
+                                event = %uva_steering::event_name(&effective),
+                                %why,
+                                "gate could not answer"
+                            );
+                            match refusal(&effective, &entry.name, &why) {
+                                Refusal::Decided(decision) => apply_decision(
+                                    &mut arbitration,
+                                    &mut effective,
+                                    &mut denied_by,
+                                    entry.name,
+                                    decision,
+                                ),
+                                Refusal::Reported(fact) => {
+                                    facts.push(fact);
+                                    continue;
+                                }
+                            }
+                        }
                     }
-                    apply_decision(
-                        &mut arbitration,
-                        &mut effective,
-                        &mut denied_by,
-                        entry.name,
-                        decision,
-                    );
                 }
                 Registered::Request(transformer) => {
                     let HookEvent::BeforeRequest { provider, params } =
@@ -524,14 +489,14 @@ impl HookRegistry {
                 arbitration,
                 denied_by,
                 event: None,
-                failures,
+                facts,
             }
         } else {
             RegistryPass {
                 arbitration,
                 denied_by: None,
                 event: Some(effective),
-                failures,
+                facts,
             }
         }
     }
@@ -645,6 +610,38 @@ impl HookRegistry {
 // `ReplaceParams` rewrites the effective event so later registrations
 // — and the harness's own typed registrations — see what the earlier
 // one left. A denial records its source for the `hook_block` row.
+/// What one registration did at one mount point.
+enum GateOutcome {
+    /// The gate answered.
+    Decided(HookDecision),
+    /// The gate could not answer: this is why.
+    Failed(String),
+}
+
+/// Rule one registration's decision at the point.
+///
+/// `None` when the point does not accept the decision: the fact is
+/// recorded and the pass continues — the decision does not apply.
+fn ruled(
+    event: &HookEvent,
+    decision: HookDecision,
+    name: &str,
+    facts: &mut Vec<Fact>,
+) -> Option<HookDecision> {
+    match rule(event, decision, name) {
+        Ruling::Stands(decision) => Some(decision),
+        Ruling::Unsupported { fact, .. } => {
+            tracing::debug!(
+                registration = %name,
+                event = %uva_steering::event_name(event),
+                "decision not accepted here; ignored"
+            );
+            facts.push(fact);
+            None
+        }
+    }
+}
+
 fn apply_decision(
     arbitration: &mut Arbitration,
     event: &mut HookEvent,
@@ -669,22 +666,6 @@ fn apply_decision(
         *denied_by = Some(name);
     }
     arbitration.absorb(decision);
-}
-
-// The decision a gate that could not answer synthesizes at `event`'s
-// mount point.
-//
-// A gate fails closed, but "closed" is the point's own word: only
-// `before_tool` turns a denial into a refused call the model can read
-// (`Block`), and only the points on `HookEvent::accepts`'s termination
-// list can end a run (`Terminate`). Synthesizing a blanket `Block` —
-// the old behaviour — made the failure a no-op everywhere but
-// `before_tool`, because the passes filter unaccepted decisions.
-fn gate_failure(event: &HookEvent, why: String) -> HookDecision {
-    match event {
-        HookEvent::BeforeTool { .. } => HookDecision::Block { reason: why },
-        _ => HookDecision::Terminate { reason: why },
-    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

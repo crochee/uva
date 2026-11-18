@@ -18,8 +18,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::effective_inject;
-use super::model::{Manifest, PluginFactories, Profile};
+use super::{
+    effective_inject,
+    model::{Manifest, PluginFactories, Profile},
+};
 
 /// One file's identity for polling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

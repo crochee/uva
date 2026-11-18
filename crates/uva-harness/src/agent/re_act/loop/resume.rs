@@ -52,17 +52,13 @@ pub(super) async fn resume_suspended(
     // later review of this session must see that the resume ran under a
     // different envelope.
     if let Some((logged, current)) = &validated.drift {
-        this.emit_typed(uva_session::SessionEvent::Warning {
-            seq: 0,
-            ts: String::new(),
-            data: serde_json::json!({
-                "kind": "config_drift",
-                "message": format!(
-                    "resume accepted a changed request envelope: log \
-                     {logged}, current {current}"
-                ),
-            }),
-        });
+        this.emit_typed(uva_session::warning(
+            "config_drift",
+            &format!(
+                "resume accepted a changed request envelope: log \
+                 {logged}, current {current}"
+            ),
+        ));
     }
     let requests = validated.requests;
     // Every interrupt needs its own answer: an empty or partial list is

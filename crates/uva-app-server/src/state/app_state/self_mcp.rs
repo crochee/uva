@@ -54,12 +54,7 @@ use uva::{
 };
 
 use crate::{
-    profile::{
-        CapabilityAction,
-        CapabilityDomain,
-        ProfileAction,
-        RowEdit,
-    },
+    profile::{CapabilityAction, CapabilityDomain, ProfileAction, RowEdit},
     state::AppState,
 };
 
@@ -707,8 +702,8 @@ fn tasks_tool(state: Arc<AppState>) -> ServerTool {
                 match action_of(&args).as_str() {
                     "list" => {
                         let user_id = state.default_user_id().to_string();
-                        let rows = crate::routes::tasks::scan_recent_sessions(
-                            &state, &user_id, 50,
+                        let rows = crate::routes::tasks::delegations_of_user(
+                            &state, &user_id,
                         )
                         .await;
                         Ok(pretty(&json!(rows)))
@@ -717,8 +712,8 @@ fn tasks_tool(state: Arc<AppState>) -> ServerTool {
                         let id = str_field(&args, "id")
                             .ok_or("get requires `id`")?;
                         let user_id = state.default_user_id().to_string();
-                        let rows = crate::routes::tasks::scan_recent_sessions(
-                            &state, &user_id, 50,
+                        let rows = crate::routes::tasks::delegations_of_user(
+                            &state, &user_id,
                         )
                         .await;
                         rows.iter()
@@ -869,9 +864,10 @@ fn profile_tool(state: Arc<AppState>) -> ServerTool {
         "profile",
         "Read and change this deployment's plugin profile: list every \
          row with its effective status, get one row, or set a row's \
-         enabled/config. Create/delete agent and skill definitions \
-         through the same transaction. Writes are approval-gated: the \
-         tool declares MCP's destructiveHint, so the call is Risk::High.",
+         disabled bit / config. Create/delete agent and skill \
+         definitions through the same transaction. Writes are \
+         approval-gated: the tool declares MCP's destructiveHint, so \
+         the call is Risk::High.",
         json!({
             "type": "object",
             "properties": {
@@ -881,8 +877,9 @@ fn profile_tool(state: Arc<AppState>) -> ServerTool {
                     "description": "Defaults to list."
                 },
                 "id": {"type": "string"},
-                "enabled": {
-                    "description": "true, false, or a check table."
+                "disabled": {
+                    "type": "boolean",
+                    "description": "Whether the row stays out of the assembly."
                 },
                 "config": {
                     "type": "object",
@@ -922,8 +919,8 @@ fn profile_tool(state: Arc<AppState>) -> ServerTool {
                             Some(value) => Some(
                                 serde_json::from_value::<bool>(value.clone())
                                     .map_err(|error| {
-                                        format!("disabled: {error}")
-                                    })?,
+                                    format!("disabled: {error}")
+                                })?,
                             ),
                         };
                         let config = args.get("config").cloned();

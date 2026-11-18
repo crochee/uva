@@ -160,17 +160,13 @@ pub(super) async fn execute_gated(
             // One row per rewritten result. The digests cover the whole
             // serialized output, and the host reports a change only when
             // the aggregate actually differs, so `before != after` here.
-            this.sink.emit_typed(
-                uva_session::SessionEvent::ToolResultTransformed {
-                    seq: 0,
-                    ts: String::new(),
-                    transformers,
-                    tool_name: tool_name.to_string(),
-                    call_id: call_id.to_string(),
-                    before,
-                    after: result_digest(&result),
-                },
-            );
+            this.sink.emit_typed(uva_session::tool_result_transformed(
+                transformers,
+                tool_name,
+                call_id,
+                before,
+                result_digest(&result),
+            ));
         }
     }
     // Steering seam 3—observation: tracker boundary and

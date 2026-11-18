@@ -14,6 +14,7 @@ use uva_kernel::{
     MountError,
     PLUGIN_PROTOCOL_VERSION,
     Plugin as KernelPlugin,
+    PluginState,
     RuntimeKind,
     mount_all,
 };
@@ -126,7 +127,7 @@ async fn schedule_tool_is_registered_and_unload_removes_only_its_entry() {
 }
 
 #[test]
-fn missing_scheduler_leaves_the_tool_unmounted() {
+fn missing_scheduler_parks_the_tool() {
     let ctx = Context::new();
     let tools = Arc::new(ToolRegistry::new());
     let tools_mount = mount_all(
@@ -136,25 +137,20 @@ fn missing_scheduler_leaves_the_tool_unmounted() {
     )
     .expect("mount `tools`");
 
-    let error = mount_all(
+    let mounted = mount_all(
         &ctx,
         &[Arc::new(ScheduleToolPlugin::new()) as Arc<dyn KernelPlugin>],
     )
-    .expect_err("the brick cannot activate without `scheduler`");
+    .expect("a missing dependency parks the brick, it does not fail the group");
 
-    match error {
-        MountError::MissingDependency { plugin_id, keys } => {
-            assert_eq!(plugin_id, "schedule-tool");
-            assert!(
-                keys.iter().any(|key| key == KEY_SCHEDULER),
-                "the refusal names `scheduler`: {keys:?}"
-            );
-        }
-        other => panic!("expected MissingDependency, got {other:?}"),
-    }
+    assert_eq!(
+        mounted.plugin_state("schedule-tool"),
+        Some(PluginState::Pending),
+        "the brick waits for `scheduler` (dsh PENDING)"
+    );
     assert!(
         !tools.contains(SCHEDULE_TOOL_NAME),
-        "an unmounted brick registers no tool"
+        "a parked brick registers no tool"
     );
     assert!(
         ctx.require::<ToolRegistry>(KEY_TOOLS).is_ok(),

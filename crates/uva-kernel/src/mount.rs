@@ -377,7 +377,6 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("panic with a non-string payload")
 }
 
-
 /// Dispose one fiber, logging rather than propagating a failure (this is
 /// called from rollback paths and destructors).
 fn dispose_fiber(fiber: Fiber) {

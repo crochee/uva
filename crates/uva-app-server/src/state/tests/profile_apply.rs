@@ -5,15 +5,8 @@ use std::{path::Path, sync::Arc};
 use serde_json::json;
 
 use crate::{
-    api::v1::profile::{ProfileEnabled, ProfileSegment},
-    profile::{
-        ChangeState,
-        EnableCheck,
-        Enabled,
-        ProfileAction,
-        ProfileStore,
-        RowEdit,
-    },
+    api::v1::profile::ProfileSegment,
+    profile::{ChangeState, ProfileAction, ProfileStore, RowEdit},
     rpc::RpcRuntime,
     state::AppState,
 };
@@ -52,10 +45,10 @@ async fn the_rows_are_typed_and_findable_by_id() {
     );
 }
 
-/// A row the assembly skipped says why, and a delegated enablement
-/// keeps the check the plugin answers.
+/// A row the assembly skipped says why, and the row keeps the
+/// `disabled` bit the settings page flips.
 #[tokio::test]
-async fn a_skipped_row_reports_its_reason_and_its_check() {
+async fn a_skipped_row_reports_its_reason() {
     let dir = tempfile::tempdir().unwrap();
     let state = state(dir.path()).await;
     {
@@ -65,21 +58,14 @@ async fn a_skipped_row_reports_its_reason_and_its_check() {
             .iter_mut()
             .find(|row| row.id == "skills")
             .expect("the skills row");
-        row.enabled = Enabled::Check(EnableCheck {
-            service: "skills".to_owned(),
-            check: "present".to_owned(),
-            arg: json!("writing"),
-        });
+        row.disabled = true;
     }
     let row = state.profile_row("skills").expect("the skills row");
     assert!(
         row.status.starts_with("off: "),
         "a skipped row says why: {row:?}"
     );
-    assert!(
-        matches!(row.enabled, ProfileEnabled::Check(_)),
-        "a delegated row keeps its check: {row:?}"
-    );
+    assert!(row.disabled, "the row keeps its switch: {row:?}");
 }
 
 #[tokio::test]
@@ -161,8 +147,8 @@ async fn failed_leaves_the_document_and_the_tree_unchanged() {
             "ui",
             ProfileAction::Edit(RowEdit::SetConfig {
                 id: "model-adapter".to_owned(),
-                // Missing `default_provider`: the factory refuses it.
-                config: json!({ "workspace": {} }),
+                // `providers` is not a map: the factory refuses it.
+                config: json!({ "providers": "not-an-object" }),
             }),
         )
         .await;

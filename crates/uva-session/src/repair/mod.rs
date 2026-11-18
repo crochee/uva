@@ -42,8 +42,15 @@
 //! can recognise them across the two runtimes.
 
 use serde_json::{Value, json};
+use uva_provider::ContentPart;
 
-use crate::events::{CompactionLifecycleOutcome, SessionEvent, SurfaceOp};
+use crate::events::{
+    CompactionLifecycleOutcome,
+    RowTag,
+    SessionEvent,
+    SurfaceOp,
+    restore_row,
+};
 
 /// Recovery code for an assistant tool request that never reached
 /// a recorded call start.
@@ -167,32 +174,22 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                     // a paired dispatch row still get a synthetic
                     // closer.
                     //
-                    // The row payload is the provider `Message`
-                    // (`{"role":"assistant","content":[{…}]}`),
-                    // so the calls live in the content parts; the
-                    // flat `tool_calls` array is the legacy shape
-                    // older logs carry.
+                    // The calls come from the row's **message**,
+                    // read the way the vocabulary reads it — the
+                    // provider's own encoding, not a hand-written
+                    // guess at the payload's shape. (The flat
+                    // `tool_calls` array is the legacy shape older
+                    // logs carry.)
                     if s.open_turn.is_some() {
-                        let mut calls: Vec<(&str, &str)> = Vec::new();
-                        if let Some(parts) =
-                            data.get("content").and_then(Value::as_array)
-                        {
-                            for part in parts {
-                                if part.get("type").and_then(Value::as_str)
-                                    != Some("tool_use")
-                                {
-                                    continue;
+                        let mut calls: Vec<(String, String)> = Vec::new();
+                        if let Some(message) = ev.message() {
+                            for part in message.content.iter() {
+                                if let ContentPart::ToolUse(call) = part {
+                                    calls.push((
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                    ));
                                 }
-                                let Some(id) =
-                                    part.get("id").and_then(Value::as_str)
-                                else {
-                                    continue;
-                                };
-                                let name = part
-                                    .get("name")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("");
-                                calls.push((id, name));
                             }
                         }
                         if let Some(arr) =
@@ -208,19 +205,19 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                                     .get("name")
                                     .and_then(Value::as_str)
                                     .unwrap_or("");
-                                calls.push((id, name));
+                                calls.push((id.to_string(), name.to_string()));
                             }
                         }
                         for (call_id, name) in calls {
                             if call_id.is_empty() {
                                 continue;
                             }
-                            s.pending_calls
-                                .entry(call_id.to_string())
-                                .or_insert(PendingCall {
+                            s.pending_calls.entry(call_id).or_insert(
+                                PendingCall {
                                     call_started: false,
-                                    name: name.to_string(),
-                                });
+                                    name,
+                                },
+                            );
                         }
                     }
                 }
@@ -476,8 +473,9 @@ pub fn parked_prompts(rows: &[Value]) -> Vec<ParkedPromptRecovery> {
     let mut consumed: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for row in rows {
-        match row.get("type").and_then(Value::as_str) {
-            Some("parked_prompt") => {
+        let current = restore_row(row);
+        match current.tag() {
+            Some(RowTag::ParkedPrompt) => {
                 let Some(SessionEvent::ParkedPrompt {
                     seq,
                     ts,
@@ -488,7 +486,7 @@ pub fn parked_prompts(rows: &[Value]) -> Vec<ParkedPromptRecovery> {
                     provider,
                     model,
                     rerun,
-                }) = SessionEvent::from_value(row)
+                }) = current.event()
                 else {
                     continue;
                 };
@@ -512,9 +510,9 @@ pub fn parked_prompts(rows: &[Value]) -> Vec<ParkedPromptRecovery> {
                     rerun,
                 });
             }
-            Some("park_consumed") => {
+            Some(RowTag::ParkConsumed) => {
                 if let Some(SessionEvent::ParkConsumed { park_id, .. }) =
-                    SessionEvent::from_value(row)
+                    current.event()
                 {
                     consumed.insert(park_id);
                 }

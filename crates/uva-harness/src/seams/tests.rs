@@ -544,3 +544,76 @@ async fn dropping_a_registration_withdraws_it_from_the_pass() {
         "the withdrawn registration does not run again"
     );
 }
+
+// A gate that cannot answer.
+//
+// The arbitration's rule is one rule for both surfaces: a gate that
+// cannot answer refuses the pass where the point can refuse —
+// `Terminate` at the points that end a run — and is reported where no
+// denial exists. Before the rule had one owner, the typed host
+// downgraded the failure to `Allow` at those points and the run
+// continued under a gate that had no answer.
+struct FailingGate;
+
+#[async_trait]
+impl uva_hook::Gate for FailingGate {
+    fn name(&self) -> &str {
+        "failing"
+    }
+
+    async fn check(
+        &self,
+        _event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> Result<HookDecision, String> {
+        Err("the policy store is down".to_owned())
+    }
+}
+
+#[tokio::test]
+async fn a_typed_gate_that_cannot_answer_ends_the_run_where_the_point_can_refuse()
+ {
+    let fixture = Fixture::new();
+    let ctx = fixture.ctx();
+    let mut host = Host::new();
+    let _registration = host.gate(Arc::new(FailingGate));
+
+    let seams = Seams::new(host);
+    let arbitration = seams.step_pre(&ctx, &fixture.sink, "default", 0).await;
+
+    // Fail closed: the step does not begin under a gate that has no
+    // answer.
+    match &arbitration.decision {
+        HookDecision::Terminate { reason } => {
+            assert!(reason.contains("failing"), "{reason}");
+        }
+        other => panic!("expected a termination, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn the_external_registry_and_the_typed_host_rule_one_failure_the_same_way()
+ {
+    let fixture = Fixture::new();
+    let ctx = fixture.ctx();
+
+    // The external registry's half.
+    let registry = uva_hook::HookRegistry::new();
+    let _registration = registry
+        .register_gate(STEP_PRE, Arc::new(FailingGate))
+        .expect("the external gate registers");
+    let external = Seams::new(Host::new())
+        .with_hook_registry(registry)
+        .step_pre(&ctx, &fixture.sink, "default", 0)
+        .await;
+
+    // The typed host's half.
+    let mut host = Host::new();
+    let _gate = host.gate(Arc::new(FailingGate));
+    let typed = Seams::new(host)
+        .step_pre(&ctx, &fixture.sink, "default", 0)
+        .await;
+
+    // One rule, two surfaces: the same failure, the same decision.
+    assert_eq!(external.decision, typed.decision);
+}

@@ -212,16 +212,7 @@ impl EventSink {
         tool: &str,
         call_id: &str,
     ) {
-        self.emit_typed(uva_session::SessionEvent::HookBlock {
-            seq: 0,
-            ts: String::new(),
-            data: serde_json::json!({
-                "hook": hook,
-                "reason": reason,
-                "tool": tool,
-                "call_id": call_id,
-            }),
-        });
+        self.emit_typed(uva_session::hook_block(hook, reason, tool, call_id));
     }
 
     /// Append one durable `tool_output` row: one streamed chunk of a
@@ -390,13 +381,10 @@ impl EventSink {
         if message.content.iter().next().is_none() {
             return 0;
         }
-        writer.append_event_nowait(&SessionEvent::AssistantMessage {
-            seq: 0,
-            ts: String::new(),
-            data: serde_json::to_value(message)
+        writer.append_event_nowait(
+            &uva_session::message_row(message)
                 .expect("assistant message serializes"),
-            surface_op: None,
-        })
+        )
     }
 
     /// Publish one `Warning` system event — the shared shape

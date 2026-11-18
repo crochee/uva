@@ -8,13 +8,14 @@ use base64::{
     Engine as _,
     engine::general_purpose::STANDARD as BASE64_STANDARD,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::content::{ContentPart, TextContent};
 use crate::cache_mark::CacheControlMark;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct ToolUse {
     pub id: String,
     pub name: String,
@@ -88,7 +89,7 @@ impl ToolUse {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct ToolResult {
     pub tool_use_id: String,
     /// Optional tool name. Carried on the wire so downstream
@@ -224,7 +225,7 @@ impl ToolDefinition {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceLink {
     pub uri: String,

@@ -1,9 +1,11 @@
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use serde_json::json;
+use uva_provider::Content;
 
 use super::*;
 use crate::{
     app::App,
+    tests::{FIXTURE_TS, message_data, message_role},
     transport::{RequestKind, TransportEvent},
 };
 
@@ -11,9 +13,8 @@ fn text_row(kind: &str, seq: u64, text: &str) -> serde_json::Value {
     json!({
         "type": kind,
         "seq": seq,
-        "data": {
-            "content": { "Single": { "type": "text", "text": text } },
-        },
+        "ts": FIXTURE_TS,
+        "data": message_data(message_role(kind), Content::text(text)),
     })
 }
 
@@ -34,7 +35,7 @@ fn followed(app: &mut App) {
             ],
             "cursor": 2,
             "live": {
-                "turn_id": "",
+                "start_seq": 0,
                 "live_seq": 0,
                 "running": false,
                 "text": "",
@@ -240,6 +241,7 @@ fn thinking_expands_while_streaming_and_collapses_when_done() {
             "row": {
                 "type": "turn",
                 "seq": 5,
+                "ts": FIXTURE_TS,
                 "data": { "kind": "end", "turn": 0, "reason": "completed" },
             },
         }),

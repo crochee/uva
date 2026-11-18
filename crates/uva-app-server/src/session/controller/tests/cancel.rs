@@ -10,7 +10,7 @@ use std::{
 use parking_lot::Mutex;
 
 use super::{
-    super::{RunStreamFactory, SessionOp, SessionState},
+    super::{RunStreamFactory, SessionOp},
     support::{
         BlockingFactory,
         RecordedCall,
@@ -19,6 +19,7 @@ use super::{
         wait_for_runs,
     },
 };
+use crate::session::status::SessionState;
 
 #[tokio::test]
 async fn test_cancel_terminates_run() {
@@ -147,17 +148,17 @@ async fn a_cancel_is_not_blocked_by_a_manual_compaction_pass() {
         make_manager_and_controller(Duration::from_secs(60), factory).await;
 
     // The gate a `/compact` request holds for its whole pass.
-    let _pass = controller
-        .compaction_gate()
-        .await
-        .expect("the owner has a gate");
-    controller.cancel().await.unwrap();
+    controller
+        .with_compaction_gate(async {
+            controller.cancel().await.unwrap();
 
-    tokio::time::timeout(Duration::from_millis(1_000), async {
-        while controller.state() != SessionState::Cancelled {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("the cancel flips while the pass holds its gate");
+            tokio::time::timeout(Duration::from_millis(1_000), async {
+                while controller.state() != SessionState::Cancelled {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the cancel flips while the pass holds its gate");
+        })
+        .await;
 }

@@ -16,7 +16,6 @@ use super::model::{
     children_from_config,
 };
 
-
 /// Resolve an ordered layer stack and an optional CLI overlay.
 ///
 /// The layers are applied in slice order (empty → bundle patch → profile
@@ -120,11 +119,7 @@ fn apply_replacement(
     profile: &mut Profile,
     replacement: &EntryPatch,
 ) -> Result<(), ProfileError> {
-    for row in profile
-        .core
-        .iter_mut()
-        .chain(profile.ui.iter_mut())
-    {
+    for row in profile.core.iter_mut().chain(profile.ui.iter_mut()) {
         if patch_row(row, replacement)? {
             return Ok(());
         }
@@ -209,7 +204,8 @@ fn remove_from_tree(rows: &mut Vec<Manifest>, id: &str) -> bool {
         rows.remove(index);
         return true;
     }
-    rows.iter_mut().any(|row| remove_from_tree(&mut row.children, id))
+    rows.iter_mut()
+        .any(|row| remove_from_tree(&mut row.children, id))
 }
 
 /// Resolve the CLI's file layers, in the spec order.

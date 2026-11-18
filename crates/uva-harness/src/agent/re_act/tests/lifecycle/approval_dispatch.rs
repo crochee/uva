@@ -125,10 +125,15 @@ pub(super) async fn a_failing_dispatch_flush_prevents_execution() {
         inner: InMemorySessionSink::new("approval"),
     });
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
+    let seed = uva_session::user_message(
+        serde_json::to_value(uva_provider::Message::user("go"))
+            .expect("a user message serialises"),
+        None,
+    );
     writer
-        .append(json!({"type": "UserInput", "data": {"text": "go"}}))
+        .append_event(&seed)
         .await
-        .expect("seed the host's user row");
+        .expect("seed the user turn");
     writer.flush().await.expect("flush the seeded row");
 
     let provider = scripted(vec![call("c1", "risky")]);

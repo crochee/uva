@@ -213,7 +213,16 @@ impl AgentsMessageTool {
                  cannot look up sub-agent `{child}`"
             ));
         };
-        let records = scan::discover(index.as_ref(), parent).await;
+        let records = scan::discover(
+            index.as_ref(),
+            scan::Scope::Parent(parent.to_string()),
+        )
+        .await
+        .into_iter()
+        // A mirror child has no readable log, so there is nothing to
+        // wake: the wake would only fail on the writer it cannot get.
+        .filter(|record| record.source == scan::RecordSource::OwnLog)
+        .collect::<Vec<_>>();
         let Some(record) = records.iter().find(|record| record.id == child)
         else {
             return ToolOutput::error(format!(

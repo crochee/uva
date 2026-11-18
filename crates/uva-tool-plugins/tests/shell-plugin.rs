@@ -20,6 +20,7 @@ use uva_kernel::{
     MountError,
     PLUGIN_PROTOCOL_VERSION,
     Plugin as KernelPlugin,
+    PluginState,
     RuntimeKind,
     mount_all,
 };
@@ -204,25 +205,20 @@ fn registers_the_tool_and_unload_removes_it() {
 }
 
 #[test]
-fn missing_tools_leaves_the_brick_unmounted() {
+fn missing_tools_parks_the_brick() {
     let ctx = Context::new();
 
-    let error = mount_all(
+    let mounted = mount_all(
         &ctx,
         &[Arc::new(ShellToolPlugin::new()) as Arc<dyn KernelPlugin>],
     )
-    .expect_err("the brick cannot activate without `tools`");
+    .expect("a missing dependency parks the brick, it does not fail the group");
 
-    match error {
-        MountError::MissingDependency { plugin_id, keys } => {
-            assert_eq!(plugin_id, "tool-shell");
-            assert!(
-                keys.iter().any(|key| key == KEY_TOOLS),
-                "the refusal names `tools`: {keys:?}"
-            );
-        }
-        other => panic!("expected MissingDependency, got {other:?}"),
-    }
+    assert_eq!(
+        mounted.plugin_state("tool-shell"),
+        Some(PluginState::Pending),
+        "the brick waits for `tools` (dsh PENDING)"
+    );
 }
 
 #[test]

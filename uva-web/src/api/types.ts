@@ -19,10 +19,56 @@
  * enum — decides what to do with it.
  */
 export type Risk = 'low' | 'high' | 'unknown';
+export type AudioFormat = 'wav' | 'mp3' | 'flac';
+/**
+ * Cache TTL class.
+ *
+ * `Ephemeral` is the default; providers may map this to short-lived cache
+ * hints. `Extended` and `Long` request longer TTLs and require explicit
+ * opt-in.
+ */
+export type CacheTtl = 'Ephemeral' | 'Extended' | 'Long';
+/**
+ * Namespace scope for a cache entry.
+ *
+ * The wrapped `String` is formatted as `u={user_id};s={session_id}` so that
+ * different users can never collide on a cache key.
+ */
+export type CacheScope = string;
 /**
  * How many components one slot accepts.
  */
 export type Cardinality = 'one' | 'many';
+export type Content =
+  | {
+      Single: ContentPart;
+    }
+  | {
+      Multi: ContentPart[];
+    };
+export type ContentPart =
+  | (TextContent & {
+      type: 'text';
+    })
+  | (ImageContent & {
+      type: 'image';
+    })
+  | (AudioContent & {
+      type: 'audio';
+    })
+  | (ToolUse & {
+      type: 'tool_use';
+    })
+  | (ToolResult & {
+      type: 'tool_result';
+    })
+  | (ReasoningContent & {
+      type: 'reasoning';
+    })
+  | (ResourceLink & {
+      type: 'resource';
+    });
+export type ImageDetail = 'low' | 'high' | 'auto';
 /**
  * One schedule expression. Adding a new variant is a
  * deliberate act — `Scheduler::tick` is the only place
@@ -48,52 +94,1157 @@ export type JobKind =
       kind: 'once';
     };
 /**
- * The closed vocabulary of `type` tags a durable row can carry —
- * `uva_session::KNOWN_SESSION_EVENT_TYPES` re-typed, so the schema
- * emitter can close [`SessionTurn`]'s `type` field over it instead
- * of an open string. The contract catalog exports it as the
- * `SessionEventType` union, and `uva-web`'s row accounting is a
- * `Record` over that generated union, so a tag added here fails the
- * web typecheck until the renderer says what it does with the row.
+ * The session status — what a session reports to the outside.
  *
- * A legacy row written before the typed vocabulary carries a
- * pre-vocabulary envelope string (`UserInput`, `Model`, `Agent`) or
- * no `type` at all — which is why the field it types stays optional.
+ * It is the controller state refined: a session with no log has
+ * never run, and one whose log holds rows has run at least once.
+ *
+ * The **variant name is the wire spelling**, the same rule the row
+ * vocabulary follows (ADR-0006): `rename_all = "snake_case"` derives
+ * it, so the name and the string cannot drift apart.
+ * [`SessionStatus::as_wire`] is the hand-written mirror of that
+ * derivation — the pattern the vocabulary uses for `RowTag::as_wire`
+ * — and a test pins the two together.
  */
-export type SessionEventType =
-  | 'user_message'
-  | 'assistant_message'
-  | 'assistant_chunk'
-  | 'tool_result'
-  | 'compaction'
-  | 'compaction_start'
-  | 'compaction_summary'
-  | 'compaction_end'
-  | 'tool_call'
-  | 'tool_output'
-  | 'step'
-  | 'turn'
-  | 'iteration'
-  | 'warning'
-  | 'steering_guard'
-  | 'steering_hint'
-  | 'hook_block'
-  | 'subagent_enter'
-  | 'subagent_exit'
-  | 'request_header'
-  | 'approval_asked'
-  | 'approval_decided'
-  | 'approval_granted'
-  | 'tool_dispatch'
-  | 'request_snapshot'
-  | 'usage'
-  | 'sandbox_mode'
-  | 'session_shutdown'
-  | 'tool_result_transformed'
-  | 'parked_prompt'
-  | 'park_consumed'
-  | 'feedback'
-  | 'plugin';
+export type SessionStatus = 'unspecified' | 'working' | 'input_required' | 'canceled' | 'completed';
+/**
+ * One durable row of a session log, as `sessions/get` returns it in
+ * `history` and `follow` returns it in `rows`.
+ *
+ * The row's **payload is shaped by its tag**, so the schema says
+ * which shape: a message row's `data` is the provider `Message` —
+ * the same type the provider serializes — not an open bag. The rows
+ * whose payload is free-form (a warning's message, a hook block's
+ * policy, the crash-repair closer's recovery code) stay `unknown`:
+ * the vocabulary declares their *tags*, not their payloads' shapes.
+ *
+ * The tag list comes from the vocabulary itself, so the union cannot
+ * drift from the tag set.
+ */
+export type SessionTurn =
+  | {
+      type?: 'user_message';
+      data?: Message;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'assistant_message';
+      data?: Message;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'assistant_chunk';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'tool_result';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'compaction';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'compaction_start';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'compaction_summary';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'compaction_end';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'tool_call';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'tool_output';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'step';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'turn';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'iteration';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'warning';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'steering_guard';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'steering_hint';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'hook_block';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'subagent_enter';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'subagent_exit';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'request_header';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'approval_asked';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'approval_decided';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'approval_granted';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'tool_dispatch';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'request_snapshot';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'usage';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'sandbox_mode';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'session_shutdown';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'tool_result_transformed';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'parked_prompt';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'park_consumed';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'feedback';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    }
+  | {
+      type?: 'plugin';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * Set on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * Set on a `tool_output` row: the provider call id the streamed
+       * chunk belongs to, so a client can attach the chunk to the tool
+       * block it is streaming into.
+       */
+      call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+    };
+export type Role = 'system' | 'user' | 'assistant' | 'tool';
 /**
  * How a [`SessionEvent`] enters the model-visible surface.
  *
@@ -146,11 +1297,6 @@ export type JobStatus = 'active' | 'paused' | 'completed';
  */
 export type ProfileChangeState = 'applied' | 'restart-required' | 'overridden' | 'failed';
 /**
- * A row's enablement: the row assembles, it stays out, or a plugin
- * answers.
- */
-export type ProfileEnabled = boolean | ProfileEnableCheck;
-/**
  * Which assembly segment a profile row sits in.
  */
 export type ProfileSegment = 'core' | 'ui';
@@ -180,6 +1326,55 @@ export type ResumeStatus = 'resolved' | 'cancelled' | 'rejected';
  * to receive it.
  */
 export type SteerDelivery = 'queue' | 'steer';
+/**
+ * The closed vocabulary of typed row tags — the `type` strings a
+ * durable session row written through the typed layer carries.
+ *
+ * The variant name *is* the wire tag: the enum derives its entire
+ * spelling from `rename_all = "snake_case"`, so the name and the
+ * wire string cannot drift apart. The enum also derives
+ * [`JsonSchema`], publishing the tags as a `oneOf` of consts — the
+ * union the wire contract (and the frontend types generated from
+ * it) derives from, replacing a hand-written mirror.
+ *
+ * The vocabulary only grows, and only here: a new tag makes every
+ * exhaustive match over this enum (this module's, and every
+ * consumer's) fail to compile until the new row says what it is.
+ */
+export type SessionEventType =
+  | 'user_message'
+  | 'assistant_message'
+  | 'assistant_chunk'
+  | 'tool_result'
+  | 'compaction'
+  | 'compaction_start'
+  | 'compaction_summary'
+  | 'compaction_end'
+  | 'tool_call'
+  | 'tool_output'
+  | 'step'
+  | 'turn'
+  | 'iteration'
+  | 'warning'
+  | 'steering_guard'
+  | 'steering_hint'
+  | 'hook_block'
+  | 'subagent_enter'
+  | 'subagent_exit'
+  | 'request_header'
+  | 'approval_asked'
+  | 'approval_decided'
+  | 'approval_granted'
+  | 'tool_dispatch'
+  | 'request_snapshot'
+  | 'usage'
+  | 'sandbox_mode'
+  | 'session_shutdown'
+  | 'tool_result_transformed'
+  | 'parked_prompt'
+  | 'park_consumed'
+  | 'feedback'
+  | 'plugin';
 
 export interface AgentDetail {
   name: string;
@@ -243,6 +1438,22 @@ export interface ApprovalRequest {
    */
   agent: string;
 }
+export interface AudioContent {
+  data: string;
+  mime_type: string;
+  format: AudioFormat | null;
+}
+/**
+ * Marks a prompt snapshot for cache control tracking.
+ *
+ * All fields participate in the mark's hash, so a change to any of
+ * them is distinguishable from a change to the system prompt content.
+ */
+export interface CacheControlMark {
+  ttl: CacheTtl;
+  scope: CacheScope;
+  pinned: boolean;
+}
 /**
  * What a manual compaction pass did.
  */
@@ -283,6 +1494,67 @@ export interface CompactResult {
    * Why nothing was committed (`under_budget`, `empty_span`).
    */
   reason?: string | null;
+}
+export interface TextContent {
+  text: string;
+  cache_control?: CacheControlMark | null;
+}
+export interface ImageContent {
+  data: string;
+  mime_type: string;
+  detail: ImageDetail | null;
+}
+export interface ToolUse {
+  id: string;
+  name: string;
+  input: unknown;
+}
+export interface ToolResult {
+  tool_use_id: string;
+  /**
+   * Optional tool name. Carried on the wire so downstream
+   * consumers (SSE mapping, frontend segment rendering) can
+   * label a `tool_result` even when no preceding `tool_call`
+   * segment exists in the same message (e.g. results flushed
+   * by an interceptor or replayed from session JSONL).
+   * `#[serde(default)]` keeps deserialization backward-compatible
+   * with payloads written before this field existed.
+   */
+  tool_name?: string | null;
+  content: ContentPart[];
+  structured_content: unknown;
+  is_error: boolean | null;
+  /**
+   * Structured metadata accompanying the tool result (counts,
+   * timing, truncation reason). Defaults to empty for
+   * backward compatibility with payloads written before this
+   * field existed.
+   *
+   * The field is forwarded from `uva_tool::ToolOutput`'s
+   * `metadata` so the LLM and the frontend
+   * can see tool-attached telemetry without parsing the
+   * content stream.
+   */
+  metadata?: {
+    [k: string]: unknown;
+  };
+  truncated_by?: unknown;
+}
+export interface ReasoningContent {
+  text: string;
+  /**
+   * Anthropic `signature_delta` value attached to the most recent
+   * reasoning block. Required to preserve cross-turn reasoning
+   * continuity when the upstream Provider is Anthropic.
+   */
+  signature?: string | null;
+}
+export interface ResourceLink {
+  uri: string;
+  name: string;
+  title: string | null;
+  description: string | null;
+  mimeType: string | null;
 }
 /**
  * `POST /api/v1/schedules` body. Mirrors `CreateScheduleRequest`
@@ -449,9 +1721,14 @@ export interface FollowHeader {
    */
   agent_name?: string | null;
   /**
-   * `idle`, `running`, `awaiting_approval` or `cancelled`.
+   * The session status — the same closed set the session listing
+   * and the session detail carry. The `follow` header used to
+   * speak its own four-label vocabulary (`idle` / `running` /
+   * `awaiting_approval` / `cancelled`); retiring it means a client
+   * asking "what state is this session in" gets one answer, not
+   * two.
    */
-  state: string;
+  state: SessionStatus;
   /**
    * First durable row's timestamp.
    */
@@ -495,60 +1772,28 @@ export interface FollowSnapshot {
    */
   request_snapshot_hash: string;
 }
-/**
- * One durable row of a session log, as `sessions/get` returns it in
- * `history` and `follow` returns it in `rows`.
- */
-export interface SessionTurn {
-  /**
-   * The event family the row belongs to — one of the closed
-   * [`SessionEventType`] vocabulary. Absent on a legacy row that
-   * was not written through the typed event vocabulary.
-   */
-  type?: SessionEventType | null;
-  data?: unknown;
-  /**
-   * RFC 3339 instant the writer stamped the row with.
-   */
-  ts?: string | null;
-  /**
-   * The writer's ordinal for the row. This is the client's only
-   * cursor, and what a resume token's `last_seq` points at.
-   */
-  seq?: number | null;
-  /**
-   * Provenance recorded beside the row, when it is not an ordinary
-   * turn boundary. Today only `"steer"`.
-   */
-  source?: string | null;
-  /**
-   * Set on a `tool_result` row whose tool failed.
-   */
-  is_error?: boolean | null;
-  /**
-   * Set on a `tool_output` row: the provider call id the streamed
-   * chunk belongs to, so a client can attach the chunk to the tool
-   * block it is streaming into.
-   */
-  call_id?: string | null;
-  attachments?: unknown;
-  /**
-   * The surface op the row applies instead of appending —
-   * `"append"` (a plain string) or a replace range.
-   */
-  surface_op?: SurfaceOp | null;
+export interface Message {
+  role: Role;
+  content: Content;
+  tool_call_id: string | null;
+  name: string | null;
+  tool_result_cleared_at: string | null;
 }
 /**
- * The transient projection of the turn that is running (or just
+ * The transient projection of the step that is running (or just
  * ended) in this process.
  */
 export interface LiveTurn {
   /**
-   * Identifies the turn the projection belongs to. A fresh run gets
-   * a fresh id, so a client can tell a superseded projection from
-   * the current one.
+   * The log position where this projection's step began.
+   *
+   * A durable content row whose ordinal is greater than this
+   * supersedes the projection: the row is that step's own answer.
+   * `0` means "no position" — a projection whose step began before
+   * this process knew the log's numbering (a remote owner's step,
+   * projected here).
    */
-  turn_id: string;
+  start_seq: number;
   /**
    * Monotone per-controller frame counter. A baseline carries the
    * current value; a client discards an increment whose `live_seq`
@@ -702,9 +1947,9 @@ export interface ProfileChange {
  * What changed between two resolved profiles, and therefore which
  * fibers a running process must remount.
  *
- * `added`, `removed`, and `remounted` name **core** ids only: a UI
- * bundle change is the frontend loader's concern and never remounts a
- * core fiber.
+ * `added`, `removed`, and `remounted` name **core** unit ids only: a
+ * UI bundle change is the frontend loader's concern and never remounts
+ * a core fiber.
  */
 export interface ProfileDiff {
   /**
@@ -716,7 +1961,7 @@ export interface ProfileDiff {
    */
   removed: string[];
   /**
-   * Ids whose non-volatile configuration or runtime changed.
+   * Ids whose declaration or non-volatile configuration changed.
    */
   remounted: string[];
   /**
@@ -760,26 +2005,13 @@ export interface ProfileChangedEvent {
   at: string | null;
 }
 /**
- * `enabled = { service = "…", check = "…", arg = "…" }` — a plugin
- * answers whether the row assembles.
- */
-export interface ProfileEnableCheck {
-  /**
-   * The kernel service key the judge answers under.
-   */
-  service: string;
-  /**
-   * The method the judge answers.
-   */
-  check: string;
-  arg?: unknown;
-}
-/**
  * One row of the resolved profile, as `profile/list` returns them and
  * `profile/get` returns one of.
  *
  * The row is the settings page's data source: the interface is the
- * resolved profile read backwards (D26).
+ * resolved profile read backwards (D26). `inject` is the row's
+ * **effective** dependency set — the plugin manifest's default unioned
+ * with the row's declaration.
  */
 export interface ProfileRow {
   /**
@@ -791,14 +2023,29 @@ export interface ProfileRow {
    */
   segment: ProfileSegment;
   /**
-   * The loader kind: `native` / `ui-bundle`.
+   * The plugin the row loads (empty for a group row).
    */
-  runtime: string;
+  name: string;
   /**
-   * Whether the row assembles, or the plugin check that decides.
+   * Whether the row is a nested group.
    */
-  enabled: ProfileEnabled;
+  group: boolean;
+  /**
+   * Whether the row (and its descendants, for a group) stays out of
+   * the assembly.
+   */
+  disabled: boolean;
   config: unknown;
+  /**
+   * Host capabilities the row grants.
+   */
+  capabilities: string[];
+  /**
+   * The effective dependency set.
+   */
+  inject: string[];
+  intercept?: unknown;
+  isolate?: unknown;
   /**
    * `mounted`, or `off: <reason>` when the assembly skipped it.
    */
@@ -1035,7 +2282,10 @@ export interface SessionArtifactMetadata {
  */
 export interface SessionDetail {
   id: string;
-  status: string;
+  /**
+   * The session status — the same closed set the summary carries.
+   */
+  status: SessionStatus;
   context_id: string;
   /**
    * When the session **started**: the log's first event's
@@ -1068,9 +2318,11 @@ export interface SessionDetail {
 export interface SessionSummary {
   id: string;
   /**
-   * Static string slice — the closed set of 9 status labels.
+   * The session status — one of the five the status module
+   * produces. The wire spells it `unspecified`, `working`,
+   * `input_required`, `canceled` or `completed`.
    */
-  status: string;
+  status: SessionStatus;
   context_id?: string | null;
   /**
    * When the session **started**: the log's first event's

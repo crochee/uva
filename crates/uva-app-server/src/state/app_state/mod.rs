@@ -421,7 +421,28 @@ impl AppState {
         // concurrent reconciles would unload and mount the same rows
         // twice (a double mount, and an unload in the wrong order).
         let _guard = self.assembly.writer().lock().await;
-        Ok(self.reconcile(resolved, false).await?.diff)
+        let reconciled = self.reconcile(resolved, false).await?;
+        // dsh's self-disable write-back: a row that lost its provider
+        // (the provider left the document) can no longer run, so the
+        // document records `disabled = true` for it.
+        let dep_lost = reconciled.dep_lost.clone();
+        if !dep_lost.is_empty()
+            && let Some(store) = self.assembly.profile_store().cloned()
+        {
+            for id in dep_lost {
+                let edit =
+                    crate::profile::RowEdit::SetDisabled { id, disabled: true };
+                let outcome = self.apply_row_edit(&store, edit).await;
+                if outcome.state != crate::profile::ChangeState::Applied {
+                    tracing::warn!(
+                        state = ?outcome.state,
+                        "the write-back of a row that lost its provider \
+                         did not apply"
+                    );
+                }
+            }
+        }
+        Ok(reconciled.diff)
     }
 
     /// Apply an explicit profile change: the same reconcile as
@@ -495,7 +516,6 @@ impl AppState {
     /// The process handles an assembly change borrows.
     fn assembly_context(&self) -> AssemblyContext<'_> {
         AssemblyContext {
-            workspace_root: &self.workspace_root,
             clock: &self.clock,
             mcp: &self.mcp,
         }

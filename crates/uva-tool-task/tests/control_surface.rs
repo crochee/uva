@@ -262,6 +262,10 @@ impl uva_tool_task::SessionIndex for TestIndex {
         Vec::new()
     }
 
+    async fn session_ids_of_user(&self, _user_id: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     async fn read_head(
         &self,
         _id: &str,

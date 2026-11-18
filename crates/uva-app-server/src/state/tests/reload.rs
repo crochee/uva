@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 use uva::{
     attachment::KEY_ATTACHMENTS,
     eval::{EvalRunner, KEY_EVAL},
-    kernel::RuntimeKind,
     session::manager::SessionRegistry,
 };
 
@@ -92,7 +91,7 @@ async fn a_second_write_does_not_remount_the_world() {
             "ui",
             crate::profile::ProfileAction::Edit(crate::profile::RowEdit::Set {
                 id: "eval".to_owned(),
-                enabled: Some(crate::profile::Enabled::Off),
+                disabled: Some(true),
                 config: None,
             }),
         )
@@ -108,7 +107,7 @@ async fn a_second_write_does_not_remount_the_world() {
             "ui",
             crate::profile::ProfileAction::Edit(crate::profile::RowEdit::Set {
                 id: "eval".to_owned(),
-                enabled: Some(crate::profile::Enabled::On),
+                disabled: Some(false),
                 config: None,
             }),
         )
@@ -117,6 +116,53 @@ async fn a_second_write_does_not_remount_the_world() {
         second.state,
         crate::profile::ChangeState::Applied,
         "{second:?}"
+    );
+}
+
+/// dsh's self-disable write-back: a row that loses its provider can no
+/// longer run, so the document records `disabled = true` for it — the
+/// document always reflects the real assembly.
+#[tokio::test]
+async fn a_row_that_loses_its_provider_is_written_back_as_disabled() {
+    let (mut state, dir) = state().await;
+    let doc = dir.path().join("profile.toml");
+    // Seed the document with the current assembly, so the write-back
+    // has a document to edit.
+    let text = crate::profile::ProfileStore::to_toml(&state.current_profile())
+        .expect("the profile serializes");
+    std::fs::write(&doc, text).expect("seed the document");
+    state.assembly.set_store(Some(crate::profile::ProfileStore {
+        bundle: None,
+        doc: doc.clone(),
+        home: None,
+        overlay: None,
+    }));
+
+    // Remove the provider row: `agent-loop` (it injects `llm.default`)
+    // loses its provider.
+    let mut next = state.current_profile();
+    next.hmr = true;
+    next.core.retain(|row| row.id != "model-adapter");
+    state
+        .reload_profile(next)
+        .await
+        .expect("the removal applies");
+
+    let document = crate::profile::Profile::from_path(&doc)
+        .expect("the written-back document parses");
+    let loop_row = document
+        .find("agent-loop")
+        .expect("the loop row stays in the document");
+    assert!(
+        loop_row.disabled,
+        "the row that lost its provider is written back disabled"
+    );
+    let untargeted = document
+        .find("tool-read")
+        .expect("an unrelated row stays in the document");
+    assert!(
+        !untargeted.disabled,
+        "a row that kept its provider is not written back"
     );
 }
 
@@ -187,16 +233,14 @@ async fn hmr_model_adapter_change_cascades_to_agent_loop() {
         .find(|entry| entry.id == "model-adapter")
         .expect("the native set has model-adapter");
     adapter.config = json!({
-        "workspace": {
-            "providers": {
-                "echo": {
-                    "type": "demo",
-                    "api_key_env": "NONE",
-                    "default_model": "echo-model"
-                }
-            },
-            "default_provider": "echo"
-        }
+        "providers": {
+            "echo": {
+                "type": "demo",
+                "api_key_env": "NONE",
+                "default_model": "echo-model"
+            }
+        },
+        "default_provider": "echo"
     });
 
     let diff = state
@@ -263,13 +307,8 @@ async fn hmr_removes_and_readds_a_row() {
 
     let mut next = state.current_profile();
     next.hmr = true;
-    next.core.push(crate::profile::Entry {
-        id: "eval".to_owned(),
-        runtime: RuntimeKind::Native,
-        config: serde_json::Value::Null,
-        capabilities: Vec::new(),
-        enabled: crate::profile::Enabled::On,
-    });
+    next.core
+        .push(crate::profile::Manifest::plain("eval", "eval"));
     let diff = state
         .reload_profile(next)
         .await
@@ -289,16 +328,14 @@ async fn hmr_provider_swap_reaches_new_runs_only() {
     let (state, _dir) = state().await;
     let adapter_config = |provider: &str| {
         json!({
-            "workspace": {
-                "providers": {
-                    provider: {
-                        "type": "demo",
-                        "api_key_env": "NONE",
-                        "default_model": format!("{provider}-model")
-                    }
-                },
-                "default_provider": provider
-            }
+            "providers": {
+                provider: {
+                    "type": "demo",
+                    "api_key_env": "NONE",
+                    "default_model": format!("{provider}-model")
+                }
+            },
+            "default_provider": provider
         })
     };
 
@@ -415,16 +452,14 @@ async fn disposing_model_adapter_parks_the_agent_loop() {
         .find(|entry| entry.id == "model-adapter")
         .expect("the native set has model-adapter");
     adapter.config = json!({
-        "workspace": {
-            "providers": {
-                "alpha": {
-                    "type": "demo",
-                    "api_key_env": "NONE",
-                    "default_model": "alpha-model"
-                }
-            },
-            "default_provider": "alpha"
-        }
+        "providers": {
+            "alpha": {
+                "type": "demo",
+                "api_key_env": "NONE",
+                "default_model": "alpha-model"
+            }
+        },
+        "default_provider": "alpha"
     });
     state
         .reload_profile(next)
@@ -501,23 +536,18 @@ async fn removing_the_provider_row_parks_the_loop_and_fails_loudly() {
     // Re-adding the row recovers the loop and the provider surface.
     let mut next = state.current_profile();
     next.hmr = true;
-    next.core.push(crate::profile::Entry {
-        id: "model-adapter".to_owned(),
-        runtime: RuntimeKind::Native,
+    next.core.push(crate::profile::Manifest {
         config: json!({
-            "workspace": {
-                "providers": {
-                    "demo": {
-                        "type": "demo",
-                        "api_key_env": "NONE",
-                        "default_model": "demo-model"
-                    }
-                },
-                "default_provider": "demo"
-            }
+            "providers": {
+                "demo": {
+                    "type": "demo",
+                    "api_key_env": "NONE",
+                    "default_model": "demo-model"
+                }
+            },
+            "default_provider": "demo"
         }),
-        capabilities: Vec::new(),
-        enabled: crate::profile::Enabled::On,
+        ..crate::profile::Manifest::plain("model-adapter", "model-adapter")
     });
     state
         .reload_profile(next)
@@ -600,12 +630,12 @@ async fn prompt_context_reads_the_live_skills_service() {
 
 // -- enablement: the effective row set drives the mount ---------------
 
-/// `enabled = false` filters the row out of the assembly at the
+/// `disabled = true` filters the row out of the assembly at the
 /// boundary: its fiber is unloaded and its service withdrawn, while the
 /// row stays in the raw profile so the settings page can show the
 /// switch.
 #[tokio::test]
-async fn enabled_false_unmounts_the_row_and_keeps_it_in_the_profile() {
+async fn a_disabled_row_unmounts_and_stays_in_the_profile() {
     let (state, _dir) = state().await;
     let mut next = state.current_profile();
     next.hmr = true;
@@ -614,7 +644,7 @@ async fn enabled_false_unmounts_the_row_and_keeps_it_in_the_profile() {
         .iter_mut()
         .find(|entry| entry.id == "skills")
         .expect("the native set has skills");
-    skills.enabled = crate::profile::Enabled::Off;
+    skills.disabled = true;
 
     let reconciled = state.apply_resolved(next).await.expect("apply");
     assert_eq!(reconciled.diff.removed, vec!["skills".to_owned()]);
@@ -638,123 +668,20 @@ async fn enabled_false_unmounts_the_row_and_keeps_it_in_the_profile() {
     );
 }
 
-/// A delegated check that flips reads as a presence change: the row
-/// leaves the assembly on `false` and rejoins it on `true`, with the
-/// existing `removed` / `added` diff vocabulary.
-#[tokio::test]
-async fn judge_flip_reads_as_a_presence_change() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use uva::{
-        core::enable::EnableChecks,
-        kernel::{
-            EffectHandle,
-            PLUGIN_PROTOCOL_VERSION,
-            Plugin as KernelPlugin,
-            PluginError,
-            PluginManifest,
-        },
-    };
-
-    struct FlippingJudge(Arc<AtomicBool>);
-
-    impl EnableChecks for FlippingJudge {
-        fn check(
-            &self,
-            method: &str,
-            _arg: &serde_json::Value,
-        ) -> Option<bool> {
-            (method == "is_enabled").then(|| self.0.load(Ordering::SeqCst))
-        }
-    }
-
-    struct JudgePlugin {
-        manifest: PluginManifest,
-        flag: Arc<AtomicBool>,
-    }
-
-    impl KernelPlugin for JudgePlugin {
-        fn manifest(&self) -> &PluginManifest {
-            &self.manifest
-        }
-
-        fn apply(
-            &self,
-            ctx: &uva::kernel::Context,
-        ) -> Result<Vec<EffectHandle>, PluginError> {
-            let judge: Arc<dyn EnableChecks> =
-                Arc::new(FlippingJudge(Arc::clone(&self.flag)));
-            Ok(vec![ctx.provide("test-judge", judge)?])
-        }
-    }
-
-    let (state, _dir) = state().await;
-    let flag = Arc::new(AtomicBool::new(false));
-    let mut manifest =
-        PluginManifest::new("test-judge", PLUGIN_PROTOCOL_VERSION);
-    manifest.provides.push("test-judge".to_owned());
-    let _judge_mount = state
-        .assembly
-        .mount_for_test(&[Arc::new(JudgePlugin {
-            manifest,
-            flag: Arc::clone(&flag),
-        }) as Arc<dyn KernelPlugin>])
-        .expect("the fixture mounts the judge");
-
-    let mut next = state.current_profile();
-    next.hmr = true;
-    let skills = next
-        .core
-        .iter_mut()
-        .find(|entry| entry.id == "skills")
-        .expect("the native set has skills");
-    skills.enabled =
-        crate::profile::Enabled::Check(crate::profile::EnableCheck {
-            service: "test-judge".into(),
-            check: "is_enabled".into(),
-            arg: serde_json::json!("x"),
-        });
-
-    let off = state.apply_resolved(next).await.expect("apply while off");
-    assert_eq!(
-        off.diff.removed,
-        vec!["skills".to_owned()],
-        "a judge answering false removes the row: {:?}",
-        off.diff
-    );
-    assert!(state.plugin_state("skills").is_none());
-
-    flag.store(true, Ordering::SeqCst);
-    let on = state
-        .apply_resolved(state.current_profile())
-        .await
-        .expect("apply while on");
-    assert_eq!(
-        on.diff.added,
-        vec!["skills".to_owned()],
-        "a judge answering true adds the row: {:?}",
-        on.diff
-    );
-    assert!(state.plugin_state("skills").is_some());
-}
-
 // -- the `[ui]` tree: HMR swaps the whole tree -----------------------
 
-fn ui_row(id: &str, config: serde_json::Value) -> crate::profile::Entry {
-    crate::profile::Entry {
-        id: id.to_owned(),
-        runtime: RuntimeKind::UiBundle,
+fn ui_row(id: &str, config: serde_json::Value) -> crate::profile::Manifest {
+    crate::profile::Manifest {
         config,
-        capabilities: Vec::new(),
-        enabled: crate::profile::Enabled::On,
+        ..crate::profile::Manifest::plain(id, id)
     }
 }
 
-fn shell_row() -> crate::profile::Entry {
+fn shell_row() -> crate::profile::Manifest {
     ui_row("ui.shell", json!({ "slots": [{ "id": "chat.sidebar" }] }))
 }
 
-fn notes_row(title: &str) -> crate::profile::Entry {
+fn notes_row(title: &str) -> crate::profile::Manifest {
     ui_row(
         "ui.slot.notes",
         json!({ "components": [{
@@ -864,4 +791,105 @@ async fn a_reload_waits_for_the_write_transaction() {
     assert!(diff.added.is_empty(), "nothing was added: {diff:?}");
     assert!(diff.removed.is_empty(), "nothing was removed: {diff:?}");
     assert!(diff.remounted.is_empty(), "nothing was remounted: {diff:?}");
+}
+
+/// A remount reuses the boot's build recipe. The fixture's session
+/// corpus lives outside `<workspace>/sessions`; the remounted `search`
+/// row must keep reading it — before the recipe was unified, the
+/// rebuild constructed its build context without the boot's extras and
+/// silently indexed the empty default directory.
+#[tokio::test]
+async fn a_remount_keeps_the_boots_session_corpus() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A corpus only the boot's `sessions_dir` names: the workspace's
+    // default `sessions/` stays empty, so a hit can only come from the
+    // right directory.
+    let corpus = dir.path().join("corpus");
+    let probe = corpus.join("alice").join("s_probe").join("events.jsonl");
+    std::fs::create_dir_all(probe.parent().expect("probe parent"))
+        .expect("corpus dirs");
+    let message = uva::provider::Message::user("the zephyr needle");
+    std::fs::write(
+        &probe,
+        serde_json::json!({
+            "type": "user_message",
+            "seq": 1,
+            "ts": "2026-11-18T00:00:00Z",
+            "data": message,
+        })
+        .to_string()
+            + "\n",
+    )
+    .expect("probe row");
+
+    let registry = SessionRegistry::new(corpus);
+    let state = AppState::for_test(registry, dir.path().to_path_buf()).await;
+
+    // Touch the `search` row's config so the diff names it.
+    let mut next = state.current_profile();
+    next.hmr = true;
+    let search = next
+        .core
+        .iter_mut()
+        .find(|entry| entry.id == "search")
+        .expect("the native set has search");
+    search.config = json!({ "marker": true });
+    let diff = state
+        .reload_profile(next)
+        .await
+        .expect("the reload applies");
+    assert!(
+        diff.remounted.iter().any(|id| id == "search"),
+        "the search row is remounted: {diff:?}"
+    );
+
+    let service = state.search().expect("search stays mounted");
+    let hits = service
+        .search(
+            "zephyr",
+            10,
+            Some(vec!["session".to_owned()]),
+            Some("alice"),
+        )
+        .await;
+    assert!(
+        !hits.is_empty(),
+        "the remounted row reads the boot's session corpus"
+    );
+}
+
+/// An edit that strands a required row fails the whole change: the
+/// mount stanza's audit sees `agent-loop` parked (its provider left
+/// the document in the same edit) and the previous rows come back
+/// through the best-effort rollback. Before the audit moved into the
+/// stanza this edit applied silently with a parked loop.
+#[tokio::test]
+async fn an_edit_that_strands_a_required_row_fails_and_rolls_back() {
+    let (state, _dir) = state().await;
+    let mut next = state.current_profile();
+    next.hmr = true;
+    next.core.retain(|entry| entry.id != "model-adapter");
+    let agent_loop = next
+        .core
+        .iter_mut()
+        .find(|entry| entry.id == "agent-loop")
+        .expect("the native set has agent-loop");
+    agent_loop.config = json!({ "marker": true });
+
+    let error = state
+        .reload_profile(next)
+        .await
+        .expect_err("the edit strands a required row");
+    assert!(
+        error.contains("agent-loop"),
+        "the failure names the stranded row: {error}"
+    );
+    assert!(
+        state.resolve_provider(None).is_ok(),
+        "the rollback restored the provider row"
+    );
+    assert!(
+        state.agent_loop().is_some(),
+        "the rollback restored the loop"
+    );
 }

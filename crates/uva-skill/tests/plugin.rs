@@ -25,7 +25,7 @@ use uva_skill::{
     SkillRegistry,
     SkillTool,
     builtin::skill_tool::{SKILL_TOOL_NAME, register_skill_tool},
-    plugin::{KEY_SKILL_CHECKS, KEY_SKILLS, SkillPlugin, SkillPluginConfig},
+    plugin::{KEY_SKILLS, SkillPlugin, SkillPluginConfig},
 };
 use uva_tool::{
     ToolEntry,
@@ -279,12 +279,8 @@ fn manifest_matches_provided_key_and_injects_tools() {
     assert_eq!(manifest.id, "skills");
     assert_eq!(manifest.version, PLUGIN_PROTOCOL_VERSION);
     assert_eq!(manifest.runtime, RuntimeKind::Native);
-    assert_eq!(
-        manifest.provides,
-        vec![KEY_SKILLS.to_string(), KEY_SKILL_CHECKS.to_string()]
-    );
+    assert_eq!(manifest.provides, vec![KEY_SKILLS.to_string()]);
     assert_eq!(KEY_SKILLS, "skills");
-    assert_eq!(KEY_SKILL_CHECKS, "skill-checks");
     assert_eq!(manifest.inject, vec![KEY_TOOLS.to_string()]);
     assert!(manifest.capabilities.is_empty());
     assert!(manifest.config_schema.is_none());

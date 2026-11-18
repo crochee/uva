@@ -389,14 +389,14 @@ fn the_models_answer_is_one_durable_row() {
 
     let assistant: Vec<&SessionEvent> = rows
         .iter()
-        .filter(|event| event.type_tag() == "assistant_message")
+        .filter(|event| event.tag().as_wire() == "assistant_message")
         .collect();
     assert_eq!(
         assistant.len(),
         1,
         "the run's answer is one row; got {:?}",
         rows.iter()
-            .map(|event| event.type_tag())
+            .map(|event| event.tag().as_wire())
             .collect::<Vec<_>>()
     );
     let SessionEvent::AssistantMessage { data, .. } = assistant[0] else {

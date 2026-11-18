@@ -17,17 +17,16 @@
 //! - `GET /api/v1/tasks`             — list delegations across recent sessions
 //! - `GET /api/v1/tasks/{id}`        — fetch one delegation by `parentId:childId`
 //!
-//! The child's own log is the **only** record of the delegation: the
+//! The child's own log is the **only** record this build writes: the
 //! parent's log keeps the ordinary `tool_call` / `tool_result` rows
-//! and no `subagent_enter` mirror. Finding a delegation therefore
-//! cannot work by scanning the parent's tail — it works by
-//! enumerating the user's sessions and reading each log's **head**,
-//! because the header is the child log's first event. The
-//! enumeration has to cover the sessions the manager's in-memory
-//! index does not hold: a child session is opened through its
-//! writer, and the registry's `writer()` does not register the
-//! session, so only the on-disk directory knows it exists (and the
-//! write of the header made that directory).
+//! and no `subagent_enter` mirror (a mirror is what a log from an
+//! older build opens with, and discovery reads that too). Finding a
+//! delegation therefore cannot work by scanning the parent's tail —
+//! it is the **discovery** module's job (`uva-tool-task`'s scan,
+//! over the `SessionIndex` seam): enumerate the user's newest
+//! sessions, read each head, answer which children exist. This route
+//! owns the description — what each discovered child's own log says
+//! on the wire: dispatch prompt, closing footer, status.
 //!
 //! The id names the delegation by the pair that defines it — the
 //! parent that delegated and the child that was delegated to — so it
@@ -36,18 +35,18 @@
 //! same delegation would answer to a different id on the next
 //! request, and a cursor naming it would no longer find it.
 
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uva::session::SessionEvent;
-
-use super::{
-    helpers::paginate,
-    sessions::{is_ephemeral_session, unregistered_session_ids},
+use uva::{
+    session::{RowTag, SessionEvent, restore_row},
+    tool_task::{ChildRecord, RecordSource, Scope, discover},
 };
+
+use super::helpers::paginate;
 use crate::{
     api::{
         List,
@@ -81,16 +80,6 @@ pub struct TaskDelegation {
     pub status: String,
 }
 
-/// Cap on the fan-out: how many recent sessions one scan reads. Keeps
-/// a workspace with thousands of sessions from exhausting the
-/// request budget from this page.
-///
-/// The window is **newest first** (see [`recent_session_ids`]): a
-/// cap is only safe when the rows it can drop are the ones nobody is
-/// looking for, and a delegation that just started is the row this
-/// page exists to show.
-const TASK_SCAN_LIMIT: usize = 50;
-
 /// `GET /api/v1/tasks` — server-side scan.
 ///
 /// The page is taken from what the scan found, so the cursor names
@@ -118,8 +107,7 @@ pub async fn list_tasks(
     )?;
     let resolved = resolve_page(&page)?;
     let user_id = state.default_user_id().to_string();
-    let mut delegations =
-        scan_recent_sessions(&state, &user_id, TASK_SCAN_LIMIT).await;
+    let mut delegations = delegations_of_user(&state, &user_id).await;
     sort_delegations(&mut delegations, &resolved);
     Ok(paginate(
         delegations,
@@ -162,150 +150,67 @@ pub async fn get_task(
     Ok(delegation)
 }
 
-/// Walk the most recent `limit` sessions and extract every
-/// delegation they record. Sessions that fail to load are silently
-/// skipped — a partial result is better than nothing on this
-/// read-only page.
+/// The user's delegations: discovery answers which children exist,
+/// and each child's own log describes it.
 ///
-/// A delegation's record is the **child's** log, and the child's log
-/// opens with the header — so discovery reads each candidate's head,
-/// not its tail. The candidates are the user's sessions from both
-/// sources: the manager's registry, and the sessions directory (a
-/// child session lives only on disk until some other surface opens
-/// it).
-pub(crate) async fn scan_recent_sessions(
+/// Discovery — the enumeration window, the header rule, the
+/// legacy-mirror dialect — lives in `uva-tool-task`'s scan module
+/// behind the `SessionIndex` seam; this route owns the wire shape. A
+/// delegation whose own log cannot be read is still listed — the
+/// record degrades, no prompt and no end — rather than silently
+/// dropped.
+pub(crate) async fn delegations_of_user(
     state: &AppState,
     user_id: &str,
-    limit: usize,
 ) -> Vec<TaskDelegation> {
-    // The delegation a header row describes, keyed by the child it
-    // names. One delegation is one log — the child's own — but a log
-    // written by an older build may still hold the parent's mirror,
-    // and the same child would then be discovered twice.
-    //
-    // The header row is kept alongside the child: it is the fallback
-    // record for a delegation whose own log cannot be read, so the
-    // delegation is still listed rather than silently dropped.
-    let mut candidates: Vec<(String, Value)> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for session_id in recent_session_ids(state, user_id, limit).await {
-        let sink = state.session_manager.sink(user_id, &session_id);
-        // Bounded head read: the delegation header is the child
-        // log's first event, so one head read answers the whole
-        // question. A tail window could not — the header is the log's
-        // first row, and a child log grows past any fixed window.
-        let Ok(Some(head)) = sink.read_head().await else {
-            continue;
-        };
-        let Some(child_id) = delegation_child(&head) else {
-            continue;
-        };
-        if seen.insert(child_id.clone()) {
-            candidates.push((child_id, head));
+    let index = crate::session::session_index::ServerSessionIndex::new(
+        Arc::clone(&state.session_manager),
+    );
+    let records = discover(&index, Scope::User(user_id.to_string())).await;
+    let mut out = Vec::new();
+    for record in &records {
+        if record.source == RecordSource::OwnLog {
+            // The child's own log is the complete record: the
+            // header, the dispatch prompt, the closing footer.
+            let sink = state.session_manager.sink(user_id, &record.id);
+            let raw = sink.read().await.unwrap_or_default();
+            if let Some(delegation) = delegation_of_child(&raw, &record.id) {
+                out.push(delegation);
+                continue;
+            }
         }
-    }
-    // Each delegation's own record lives in the child's log, which
-    // holds the header, the dispatch prompt, and the closing footer.
-    //
-    // The dedup happens on the record's own id rather than on the
-    // candidate: the child's log is what says who delegated, so two
-    // discoveries of one delegation — the parent's mirror and the
-    // child's own header — are one row only if the record agrees
-    // with itself, and the record is what the id is built from.
-    let mut out: Vec<TaskDelegation> = Vec::new();
-    let mut listed: HashSet<String> = HashSet::new();
-    for (child_id, marker) in candidates {
-        let sink = state.session_manager.sink(user_id, &child_id);
-        let raw = sink.read().await.unwrap_or_default();
-        let delegation =
-            delegation_of_child(&raw, &child_id).unwrap_or_else(|| {
-                // The child's own log is the complete record, but a
-                // delegation whose child log cannot be read is still
-                // a delegation: the parent's mirror says so. The
-                // record degrades — no prompt, no end — rather than
-                // the delegation vanishing from the list.
-                let parent_id = SessionEvent::from_value(&marker)
-                    .and_then(|event| {
-                        event.delegation_parent().map(str::to_string)
-                    })
-                    .unwrap_or_default();
-                to_delegation(&parent_id, &child_id, &marker, None, "")
-            });
-        if listed.insert(delegation.id.clone()) {
-            out.push(delegation);
-        }
+        out.push(degraded_delegation(record));
     }
     out
 }
 
-/// The child a session's **first** event names, when that first event
-/// is the delegation header.
-///
-/// The reader is deliberately narrow: the delegation header opens a
-/// child session, so a session whose first event is not one is not a
-/// delegation this route can describe — and reading any further
-/// would let an ordinary session's later row masquerade as one.
-fn delegation_child(head: &Value) -> Option<String> {
-    let event = SessionEvent::from_value(head)?;
-    if !matches!(event, SessionEvent::SubagentEnter { .. }) {
-        return None;
+/// The record a delegation falls back to when its own log cannot be
+/// read — a legacy parent's mirror, or a child whose full read
+/// failed: the header's facts only, no prompt and no end.
+fn degraded_delegation(record: &ChildRecord) -> TaskDelegation {
+    TaskDelegation {
+        id: delegation_id(&record.parent_session_id, &record.id),
+        parent_session_id: record.parent_session_id.clone(),
+        child_session_id: Some(record.id.clone()),
+        parent_depth: record.depth,
+        agent: record.agent_name.clone(),
+        prompt: String::new(),
+        started_at: record.started_at.clone(),
+        finished_at: None,
+        status: "running".to_string(),
     }
-    event.delegation_child().map(str::to_string)
 }
 
-/// The user's sessions, newest first, capped at `limit`.
+/// Whether a row is the delegation's dispatch prompt.
 ///
-/// Two sources, because either alone misses the sessions this page
-/// exists to find:
-///
-/// - the manager's in-memory index holds the sessions this process
-///   created (`create_with_user`);
-/// - the user's sessions directory holds every session the user has,
-///   including delegated children, which are opened through their
-///   writer and never registered.
-async fn recent_session_ids(
-    state: &AppState,
-    user_id: &str,
-    limit: usize,
-) -> Vec<String> {
-    let mut ids: Vec<String> = state
-        .session_manager
-        .list_all()
-        .await
-        .map(|sessions| {
-            sessions
-                .into_iter()
-                .filter(|session| {
-                    session.user_id == user_id
-                        && !is_ephemeral_session(&session.id)
-                })
-                .map(|session| session.id)
-                .collect()
-        })
-        .unwrap_or_default();
-    let registered: HashSet<String> = ids.iter().cloned().collect();
-    // The directory listing is blocking `std::fs`, so it rides the
-    // blocking pool like every other disk scan on the runtime.
-    let root = state.session_manager.sessions_root().to_path_buf();
-    let scan_user = user_id.to_string();
-    let on_disk = tokio::task::spawn_blocking(move || {
-        unregistered_session_ids(&root, &scan_user, &registered)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-    })
-    .await
-    .unwrap_or_default();
-    ids.extend(on_disk);
-    ids.sort();
-    ids.dedup();
-    // Session ids are ULIDs: their lexicographic order is their
-    // creation order. Reversing it makes the cap a **newest-first**
-    // window, so the delegation that just started is never the row
-    // the budget drops.
-    ids.reverse();
-    ids.truncate(limit);
-    ids
+/// The question is asked of the **restored** row, so the answer does
+/// not depend on how the row was written: a prompt is a
+/// [`RowTag::UserMessage`] row today and was a legacy envelope
+/// before, and the row vocabulary is what says which one this row
+/// is. A read site that spelled either tag would have to keep the
+/// two in step — and the pair it forgot would drop the prompt.
+fn is_user_prompt(row: &Value) -> bool {
+    restore_row(row).restores_to(RowTag::UserMessage)
 }
 
 /// One delegation, read from the child's own log.
@@ -325,7 +230,7 @@ fn delegation_of_child(
     child_id: &str,
 ) -> Option<TaskDelegation> {
     let (enter, marker) = rows.iter().find_map(|row| {
-        let event = SessionEvent::from_value(row)?;
+        let event = restore_row(row).event()?;
         if !matches!(event, SessionEvent::SubagentEnter { .. }) {
             return None;
         }
@@ -338,29 +243,17 @@ fn delegation_of_child(
     let exit = find_exit(rows, child_id);
     let prompt = rows
         .iter()
-        .find(|row| {
-            // The typed `user_message` this build writes, or the
-            // legacy `UserInput` envelope an older log holds — the
-            // same two-tag rule every prompt reader uses.
-            matches!(
-                row.get("type").and_then(Value::as_str),
-                Some("user_message" | "UserInput")
-            )
-        })
+        .find(|row| is_user_prompt(row))
         .and_then(|row| {
-            // The typed row carries a provider `Message` — decode it
-            // back and ask for its text. A log from before the typed
-            // writer kept `{"text": …}` in the payload instead.
-            row.get("data").and_then(|data| {
-                serde_json::from_value::<uva::provider::Message>(data.clone())
-                    .ok()
-                    .and_then(|message| message.content.extract_text())
-                    .or_else(|| {
-                        data.get("text")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-            })
+            // The restored row projects the model message it
+            // carries, and the prompt is that message's text. The
+            // projection covers both shapes a prompt row comes in:
+            // the provider `Message` this build writes, and the
+            // `{"text": …}` payload a log from before the typed
+            // writer kept.
+            restore_row(row)
+                .message()
+                .and_then(|message| message.content.extract_text())
         })
         .unwrap_or_default()
         .to_string();
@@ -426,7 +319,7 @@ fn started_at(delegation: &TaskDelegation) -> Option<DateTime<Utc>> {
 fn find_exit(rows: &[Value], child_id: &str) -> Option<Value> {
     rows.iter()
         .find(|row| {
-            SessionEvent::from_value(row).is_some_and(|event| {
+            restore_row(row).event().is_some_and(|event| {
                 matches!(event, SessionEvent::SubagentExit { .. })
                     && event.delegation_child() == Some(child_id)
             })
@@ -482,7 +375,7 @@ fn to_delegation(
     exit: Option<&Value>,
     prompt: &str,
 ) -> TaskDelegation {
-    let enter_event = SessionEvent::from_value(enter);
+    let enter_event = restore_row(enter).event();
     let agent = enter_event
         .as_ref()
         .and_then(|event| event.delegation_agent())
@@ -493,7 +386,8 @@ fn to_delegation(
         .and_then(|event| event.delegation_depth())
         .unwrap_or(0) as u32;
     let status = exit.and_then(|row| {
-        SessionEvent::from_value(row)
+        restore_row(row)
+            .event()
             .and_then(|event| event.delegation_status().map(str::to_string))
     });
     TaskDelegation {

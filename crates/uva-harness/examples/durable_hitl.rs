@@ -35,6 +35,7 @@ use uva_provider::{
     CompletionResponse,
     Content,
     ContentPart,
+    Message,
     ModelConfig,
     ProviderConfig,
     SamplingResult,
@@ -43,7 +44,7 @@ use uva_provider::{
     TokenUsage,
     traits::ModelProvider,
 };
-use uva_session::{LogWriter, in_memory::InMemorySessionSink};
+use uva_session::{LogWriter, in_memory::InMemorySessionSink, user_message};
 use uva_tool::{
     Context,
     Tool,
@@ -277,10 +278,12 @@ async fn main() {
     //    message; the run folds it back out of the log.
     let sink = Arc::new(InMemorySessionSink::new("durable-hitl"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
-    writer
-        .append(json!({"type": "UserInput", "data": {"text": "deploy"}}))
-        .await
-        .expect("seed the user row");
+    let seed = user_message(
+        serde_json::to_value(Message::user("deploy"))
+            .expect("a user message serialises"),
+        None,
+    );
+    writer.append_event(&seed).await.expect("seed the user row");
     writer.flush().await.expect("flush the seeded row");
 
     let runs = Arc::new(AtomicUsize::new(0));

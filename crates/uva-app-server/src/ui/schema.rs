@@ -56,17 +56,6 @@ pub enum UiError {
         /// The rejected id.
         id: String,
     },
-    /// The row names a runtime the UI loader does not read.
-    #[error(
-        "entry `{id}` selects runtime `{runtime}`, but the UI loader \
-         reads `ui-bundle` rows only"
-    )]
-    WrongRuntime {
-        /// The row's id.
-        id: String,
-        /// The row's runtime wire name.
-        runtime: &'static str,
-    },
     /// The row's config is not a renderable schema.
     #[error("entry `{id}` config is not a valid UI schema: {message}")]
     InvalidConfig {

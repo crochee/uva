@@ -1,38 +1,52 @@
 hmr = true
 
 [[core.entries]]
+disabled = false
 id = "tool-registry"
-runtime = "native"
+inject = []
+name = "tool-registry"
 
 [[core.entries]]
+disabled = false
 id = "tool-read"
-runtime = "native"
+inject = ["tools"]
+name = "tool-read"
 
 [[core.entries]]
+disabled = false
 id = "tool-write"
-runtime = "native"
+inject = ["tools"]
+name = "tool-write"
 
 [[core.entries]]
+disabled = false
 id = "tool-shell"
-runtime = "native"
+inject = ["tools"]
+name = "tool-shell"
 
 [[core.entries]]
+disabled = false
 id = "tool-todo"
-runtime = "native"
+inject = ["tools"]
+name = "tool-todo"
 
 [[core.entries]]
+disabled = false
 id = "tool-web"
-runtime = "native"
+inject = ["tools"]
+name = "tool-web"
 
 [[core.entries]]
+disabled = false
 id = "model-adapter"
-runtime = "native"
+inject = []
+name = "model-adapter"
 
-[core.entries.config.workspace]
+[core.entries.config]
 default_model = "MiniMax-M2.7"
 default_provider = "openai"
 
-[core.entries.config.workspace.providers.anthropic]
+[core.entries.config.providers.anthropic]
 api_key_env = "UVA_PROVIDER_API_KEY_ANTHROPIC"
 base_url = "https://api.deepseek.com/anthropic"
 context_window = 128000
@@ -43,7 +57,7 @@ supports_streaming = true
 supports_tools = true
 type = "anthropic"
 
-[core.entries.config.workspace.providers.openai]
+[core.entries.config.providers.openai]
 api_key_env = "UVA_PROVIDER_API_KEY_OPENAI"
 base_url = "https://api.minimaxi.com/v1"
 context_window = 128000
@@ -55,66 +69,107 @@ supports_tools = true
 type = "openai"
 
 [[core.entries]]
+disabled = false
 id = "memory"
-runtime = "native"
+inject = []
+name = "memory"
 
 [[core.entries]]
+disabled = false
 id = "search"
-runtime = "native"
+inject = [
+    "tools",
+    "memory",
+]
+name = "search"
 
 [[core.entries]]
+disabled = false
 id = "session-store"
-runtime = "native"
+inject = []
+name = "session-store"
 
 [[core.entries]]
+disabled = false
 id = "sandbox"
-runtime = "native"
+inject = []
+name = "sandbox"
 
 [[core.entries]]
+disabled = false
 id = "tool-task"
-runtime = "native"
+inject = ["tools"]
+name = "tool-task"
 
 [[core.entries]]
+disabled = false
 id = "context-compactor"
-runtime = "native"
+inject = ["llm.default"]
+name = "context-compactor"
 
 [[core.entries]]
+disabled = false
 id = "approval"
-runtime = "native"
+inject = []
+name = "approval"
 
 [[core.entries]]
+disabled = false
 id = "skills"
-runtime = "native"
+inject = ["tools"]
+name = "skills"
 
 [[core.entries]]
+disabled = false
 id = "hooks"
-runtime = "native"
+inject = []
+name = "hooks"
 
 [[core.entries]]
+disabled = false
 id = "agent-loop"
-runtime = "native"
+inject = [
+    "llm",
+    "llm.default",
+    "tools",
+    "sessions",
+]
+name = "agent-loop"
 
 [core.entries.config]
 
 [[core.entries]]
+disabled = false
 id = "mcp"
-runtime = "native"
+inject = []
+name = "mcp"
 
 [[core.entries]]
+disabled = false
 id = "eval"
-runtime = "native"
+inject = []
+name = "eval"
 
 [[core.entries]]
+disabled = false
 id = "scheduler"
-runtime = "native"
+inject = []
+name = "scheduler"
 
 [[core.entries]]
+disabled = false
 id = "schedule-tool"
-runtime = "native"
+inject = [
+    "scheduler",
+    "tools",
+]
+name = "schedule-tool"
 
 [[core.entries]]
+disabled = false
 id = "attachments"
-runtime = "native"
+inject = []
+name = "attachments"
 
 [ui]
 entries = []

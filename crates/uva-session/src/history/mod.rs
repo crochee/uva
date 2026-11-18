@@ -219,15 +219,13 @@ pub fn surface_message(payload: &Value) -> Option<Message> {
 ///
 /// Message rows carry a `Message`-shaped payload; a compaction row
 /// carries `{"summary": …}`, which the model saw as the assistant
-/// turn replacing the batch.
+/// turn replacing the batch. The vocabulary owns both shapes — it is
+/// where a payload's meaning lives — and this projection asks it.
+///
+/// The fold stays strict: a payload that is neither shape is an
+/// error here, never a guess.
 fn decode_message(payload: &Value) -> Result<Message, HistoryError> {
-    match serde_json::from_value::<Message>(payload.clone()) {
-        Ok(message) => Ok(message),
-        Err(error) => match payload.get("summary").and_then(Value::as_str) {
-            Some(summary) => Ok(Message::assistant(summary)),
-            None => Err(HistoryError::Decode(error)),
-        },
-    }
+    crate::events::decode_folded_payload(payload).map_err(HistoryError::Decode)
 }
 
 /// The shared projection of folded surface payloads into provider

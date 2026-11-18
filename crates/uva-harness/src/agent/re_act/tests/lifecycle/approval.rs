@@ -101,10 +101,15 @@ pub(super) fn build_registry(tools: Vec<Arc<dyn Tool>>) -> Arc<ToolRegistry> {
 pub(super) async fn logged_writer() -> Arc<LogWriter> {
     let sink = Arc::new(InMemorySessionSink::new("approval"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
+    let seed = uva_session::user_message(
+        serde_json::to_value(uva_provider::Message::user("go"))
+            .expect("a user message serialises"),
+        None,
+    );
     writer
-        .append(json!({"type": "UserInput", "data": {"text": "go"}}))
+        .append_event(&seed)
         .await
-        .expect("seed the host's user row");
+        .expect("seed the user turn");
     writer.flush().await.expect("flush the seeded row");
     writer
 }
@@ -217,18 +222,18 @@ pub(super) async fn a_high_risk_call_suspends_before_it_runs() {
 
     let turn_suspended = rows.iter().any(|row| {
         row["type"] == "turn"
-            && row["data"]["phase"] == "suspended"
+            && row["data"]["kind"] == "suspended"
             && row["data"]["status"] == "suspended"
             && row["data"]["pending"] == json!(["c1"])
     });
     let step_suspended = rows.iter().any(|row| {
         row["type"] == "step"
-            && row["data"]["phase"] == "end"
+            && row["data"]["kind"] == "end"
             && row["data"]["status"] == "suspended"
     });
     let turn_ended = rows.iter().any(|row| {
         row["type"] == "turn"
-            && row["data"]["phase"] == "end"
+            && row["data"]["kind"] == "end"
             && row["data"]["reason"] == "suspended"
     });
     assert!(turn_suspended, "the turn records the suspension");

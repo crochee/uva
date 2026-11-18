@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use uva::harness::{SessionEndReason, SystemEvent};
 
 use super::{
-    super::{AgentEvent, RunStreamFactory, SessionOp, SessionState},
+    super::{AgentEvent, RunStreamFactory, SessionOp},
     support::{
         BlockingFactory,
         RecordedCall,
@@ -25,7 +25,7 @@ use super::{
         wait_for_runs,
     },
 };
-use crate::state::UsageMetrics;
+use crate::{session::status::SessionState, state::UsageMetrics};
 
 /// A run that reports token usage and then ends must move both token
 /// buckets by the reported values and count exactly one turn. The two

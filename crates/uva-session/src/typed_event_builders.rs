@@ -22,9 +22,9 @@
 //!    touches every site. The builder is the single
 //!    canonicalisation point.
 //! 3. **Frontend codegen** — the app-server contract catalog turns
-//!    `KNOWN_SESSION_EVENT_TYPES` into the `SessionEventType` union
-//!    `uva-web` generates; these builders pin the *payload* shape
-//!    each tag carries on the wire.
+//!    the vocabulary's own tag type (`RowTag`) into the
+//!    `SessionEventType` union `uva-web` generates; these builders pin
+//!    the *payload* shape each tag carries on the wire.
 //! 4. **Replay-friendliness** — `fold_surface` /
 //!    `interrupted_turn_closers` already understand the
 //!    `data`-as-`Value` envelope; builders produce the exact
@@ -36,7 +36,11 @@
 
 use serde_json::{Value, json};
 
-use crate::{events::SessionEvent, token_meter::UsageBuckets};
+use crate::{
+    events::{AttachmentRefRow, SessionEvent, SurfaceOp},
+    sink::SessionEndReason,
+    token_meter::UsageBuckets,
+};
 
 /// Build a `Step { start }` event. `step_idx` is the 0-based
 /// step ordinal inside the current turn; `turn_idx` is the
@@ -235,7 +239,7 @@ pub fn turn_suspended(pending: Vec<String>) -> SessionEvent {
         seq: 0,
         ts: String::new(),
         data: json!({
-            "phase": "suspended",
+            "kind": "suspended",
             "status": "suspended",
             "pending": pending,
         }),
@@ -251,7 +255,7 @@ pub fn step_end_suspended() -> SessionEvent {
         seq: 0,
         ts: String::new(),
         data: json!({
-            "phase": "end",
+            "kind": "end",
             "status": "suspended",
         }),
         kind: Some("end".to_string()),
@@ -267,7 +271,7 @@ pub fn turn_end_suspended() -> SessionEvent {
         seq: 0,
         ts: String::new(),
         data: json!({
-            "phase": "end",
+            "kind": "end",
             "reason": "suspended",
         }),
         kind: Some("end".to_string()),
@@ -467,6 +471,207 @@ pub fn user_message(data: Value, source: Option<&str>) -> SessionEvent {
     }
 }
 
+#[must_use]
+/// Build an `AssistantMessage { data }` event.
+///
+/// `data` is a [`uva_provider::Message`] serialised with the
+/// crate's wire (`{"role": "assistant", "content": …}`) — the turn
+/// the model produced. The row carries no source: an assistant turn
+/// always comes from the run, never from a steering injection.
+///
+/// The seq is stamped `0` like every builder's — the writer
+/// re-stamps at append time.
+pub fn assistant_message(data: Value) -> SessionEvent {
+    SessionEvent::AssistantMessage {
+        seq: 0,
+        ts: String::new(),
+        data,
+        surface_op: None,
+    }
+}
+
+/// Build a `Warning` row — the shared shape every panic-isolated
+/// seam (hooks, guards, inbox, tracker, compaction) reports
+/// through: `data` is always `{"kind": .., "message": ..}`.
+#[must_use]
+pub fn warning(kind: &str, message: &str) -> SessionEvent {
+    SessionEvent::Warning {
+        seq: 0,
+        ts: String::new(),
+        data: json!({ "kind": kind, "message": message }),
+    }
+}
+
+/// Build a `ToolResult` row from the tool call's output envelope.
+///
+/// `data` is the [`uva_provider::Message`] payload (the tool's
+/// output, not the failure); `is_error` rides beside it so the row
+/// says what the live event says. `tool_call_id` is `None` only for
+/// a result that answers no call.
+#[must_use]
+pub fn tool_result(
+    data: Value,
+    tool_call_id: Option<String>,
+    is_error: bool,
+) -> SessionEvent {
+    SessionEvent::ToolResult {
+        seq: 0,
+        ts: String::new(),
+        data,
+        is_error,
+        tool_call_id,
+        surface_op: None,
+    }
+}
+
+/// Build the row a role-bearing provider message lands as — the
+/// seeding path's one entry for a client-supplied history.
+///
+/// `User` and `System` both land as `user_message` (that is the
+/// role the model and the fold see for an inline system prompt),
+/// `Assistant` as `assistant_message`, `Tool` as `tool_result` with
+/// the message's own call id and no error flag. Serialisation is
+/// the one fallible step, so the row comes back as `Result`.
+pub fn message_row(
+    message: &uva_provider::Message,
+) -> Result<SessionEvent, serde_json::Error> {
+    let data = serde_json::to_value(message)?;
+    Ok(match message.role {
+        uva_provider::Role::User | uva_provider::Role::System => {
+            user_message(data, None)
+        }
+        uva_provider::Role::Assistant => assistant_message(data),
+        uva_provider::Role::Tool => {
+            tool_result(data, message.tool_call_id.clone(), false)
+        }
+    })
+}
+
+/// Build the `UserMessage` row a turn's prompt lands as — with its
+/// re-readable attachment refs and the [`SurfaceOp`] the fold
+/// computed for it: `None` appends, a rerun's `Replace` shadows the
+/// turn it replaces.
+#[must_use]
+pub fn turn_prompt_row(
+    data: Value,
+    attachments: Vec<AttachmentRefRow>,
+    op: Option<SurfaceOp>,
+) -> SessionEvent {
+    SessionEvent::UserMessage {
+        seq: 0,
+        ts: String::new(),
+        data,
+        source: None,
+        surface_op: op,
+        attachments,
+    }
+}
+
+/// Build a `HookBlock` row — the veto's durable half: which hook,
+/// gate or guard refused the call, why, and the call it refused.
+#[must_use]
+pub fn hook_block(
+    hook: &str,
+    reason: &str,
+    tool: &str,
+    call_id: &str,
+) -> SessionEvent {
+    SessionEvent::HookBlock {
+        seq: 0,
+        ts: String::new(),
+        data: json!({
+            "hook": hook,
+            "reason": reason,
+            "tool": tool,
+            "call_id": call_id,
+        }),
+    }
+}
+
+/// Build a `ToolResultTransformed` row — one row per rewritten
+/// result, carrying the transformers that ran (in registration
+/// order) and the digests of the result before and after.
+#[must_use]
+pub fn tool_result_transformed(
+    transformers: Vec<String>,
+    tool_name: &str,
+    call_id: &str,
+    before: String,
+    after: String,
+) -> SessionEvent {
+    SessionEvent::ToolResultTransformed {
+        seq: 0,
+        ts: String::new(),
+        transformers,
+        tool_name: tool_name.to_string(),
+        call_id: call_id.to_string(),
+        before,
+        after,
+    }
+}
+
+/// Build a `ParkedPrompt` row — a steering prompt parked while a
+/// run held the session, with everything its recovered turn needs
+/// to run under the selection it was submitted under.
+#[must_use]
+pub fn parked_prompt(
+    park_id: String,
+    text: String,
+    attachments: Vec<AttachmentRefRow>,
+    agent_name: Option<String>,
+    provider: Option<String>,
+    model: Option<String>,
+    rerun: bool,
+) -> SessionEvent {
+    SessionEvent::ParkedPrompt {
+        seq: 0,
+        ts: String::new(),
+        park_id,
+        text,
+        attachments,
+        agent_name,
+        provider,
+        model,
+        rerun,
+    }
+}
+
+/// Build a `ParkConsumed` row — the durable half of the
+/// park/consumer link: the park named by `park_id` left the queue.
+#[must_use]
+pub fn park_consumed(park_id: String) -> SessionEvent {
+    SessionEvent::ParkConsumed {
+        seq: 0,
+        ts: String::new(),
+        park_id,
+    }
+}
+
+/// Build a `Feedback` row — a user's rating of one assistant
+/// message, naming it by the writer-stamped ordinal it carries in
+/// decimal.
+#[must_use]
+pub fn feedback(message_id: String, thumbs_up: bool) -> SessionEvent {
+    SessionEvent::Feedback {
+        seq: 0,
+        ts: String::new(),
+        message_id,
+        thumbs_up,
+    }
+}
+
+/// Build the session's `SessionShutdown` marker. The writer stamps
+/// `ts` at append time like every row — the caller does not read
+/// the clock for it.
+#[must_use]
+pub fn session_shutdown(reason: SessionEndReason) -> SessionEvent {
+    SessionEvent::SessionShutdown {
+        seq: 0,
+        ts: String::new(),
+        data: json!({ "reason": reason }),
+    }
+}
+
 /// Round-trip a typed event through `serde_json::Value` and
 /// back. Builders must produce JSON that survives
 /// `from_value` — that is the durability contract.
@@ -485,216 +690,4 @@ pub fn structural_kind(event: &SessionEvent) -> Option<&str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn step_start_carries_turn_and_step_ordinals() {
-        let event = step_start(2, 4);
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "step");
-        assert_eq!(value["data"]["kind"], "start");
-        assert_eq!(value["data"]["turn"], 2);
-        assert_eq!(value["data"]["step"], 4);
-        // seq is 0 — the controller stamps it.
-        assert_eq!(value["seq"], 0);
-        assert_eq!(value["ts"], "");
-    }
-
-    #[test]
-    fn step_end_carries_action() {
-        let event = step_end(0, 1, "tool_call");
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["data"]["kind"], "end");
-        assert_eq!(value["data"]["action"], "tool_call");
-    }
-
-    #[test]
-    fn turn_start_end_round_trip_via_known_event_types() {
-        let start = turn_start(0);
-        let end = turn_end(0, "max_iterations");
-        assert_eq!(start.type_tag(), "turn");
-        assert_eq!(end.type_tag(), "turn");
-        // Both round-trip through serde.
-        assert!(round_trip(&start).is_some());
-        assert!(round_trip(&end).is_some());
-    }
-    #[test]
-    fn iteration_start_end_paired() {
-        let start = iteration_start(7);
-        let end = iteration_end(7, "completed");
-        let value = serde_json::to_value(&end).unwrap();
-        assert_eq!(value["data"]["kind"], "end");
-        assert_eq!(value["data"]["iteration"], 7);
-        assert_eq!(value["data"]["action"], "completed");
-        // Pin `start` is constructed without warnings.
-        let _ = start.type_tag();
-    }
-
-    #[test]
-    fn subagent_enter_carries_parent_and_depth() {
-        let event = subagent_enter("child-1", "parent-1", 2, "researcher");
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "subagent_enter");
-        assert_eq!(value["data"]["child_session_id"], "child-1");
-        assert_eq!(value["data"]["parent_session_id"], "parent-1");
-        assert_eq!(value["data"]["depth"], 2);
-        assert_eq!(value["data"]["agent_name"], "researcher");
-    }
-
-    #[test]
-    fn subagent_exit_carries_status() {
-        let event = subagent_exit("child-1", 2, "completed");
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "subagent_exit");
-        assert_eq!(value["data"]["status"], "completed");
-    }
-
-    #[test]
-    fn request_header_round_trips_with_reason() {
-        let event = request_header(
-            "anthropic",
-            "claude-opus-4-7",
-            "deadbeef",
-            "initial",
-        );
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "request_header");
-        assert_eq!(value["data"]["provider"], "anthropic");
-        assert_eq!(value["data"]["model"], "claude-opus-4-7");
-        assert_eq!(value["data"]["tools_hash"], "deadbeef");
-        assert_eq!(value["data"]["reason"], "initial");
-        // Round-trip via from_value.
-        let restored = round_trip(&event).expect("parses");
-        assert_eq!(restored.type_tag(), "request_header");
-    }
-
-    #[test]
-    fn usage_omits_none_optionals_from_data() {
-        // The Usage event must not include `"reasoning_tokens":
-        // null` in the serialised form — providers that do not
-        // surface reasoning tokens must produce a clean
-        // envelope.
-        let event = usage(100, 50, 150, None, Some(80), Some(20));
-        let value = serde_json::to_value(&event).unwrap();
-        assert!(value["data"].get("prompt_tokens").is_some());
-        assert!(value["data"].get("completion_tokens").is_some());
-        assert!(value["data"].get("total_tokens").is_some());
-        assert!(value["data"].get("cache_read_tokens").is_some());
-        assert!(value["data"].get("cache_write_tokens").is_some());
-        // `reasoning_tokens` is None → not in the payload.
-        assert!(value["data"].get("reasoning_tokens").is_none());
-    }
-
-    #[test]
-    fn usage_includes_reasoning_when_provided() {
-        let event = usage(100, 50, 150, Some(7), None, None);
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["data"]["reasoning_tokens"], 7);
-        // Optionals not provided must not appear.
-        assert!(value["data"].get("cache_read_tokens").is_none());
-        assert!(value["data"].get("cache_write_tokens").is_none());
-    }
-
-    #[test]
-    fn usage_stamps_typed_buckets_matching_legacy_payload() {
-        let event = usage(100, 50, 150, Some(7), Some(80), Some(20));
-        let value = serde_json::to_value(&event).unwrap();
-        // The typed field is the current wire form.
-        assert_eq!(value["usage"]["input_tokens"], 100);
-        assert_eq!(value["usage"]["output_tokens"], 50);
-        assert_eq!(value["usage"]["cache_read_tokens"], 80);
-        assert_eq!(value["usage"]["cache_write_tokens"], 20);
-        // And it decodes back to the same disjoint report.
-        let buckets = event.provider_usage().expect("typed report");
-        assert_eq!(buckets.input_tokens, 100);
-        assert_eq!(buckets.output_tokens, 50);
-        assert_eq!(buckets.cache_read_tokens, Some(80));
-        assert_eq!(buckets.cache_write_tokens, Some(20));
-        assert_eq!(buckets.prompt_side_tokens(), 200);
-    }
-
-    #[test]
-    fn sandbox_mode_carries_the_policy_wire_name() {
-        let event = sandbox_mode("read-only");
-        let value = serde_json::to_value(&event).unwrap();
-        assert_eq!(value["type"], "sandbox_mode");
-        assert_eq!(value["mode"], "read-only");
-        assert_eq!(value["seq"], 0);
-        assert_eq!(value["ts"], "");
-        let restored = round_trip(&event).expect("round-trips");
-        assert_eq!(restored.sandbox_mode(), Some("read-only"));
-        // A mode this build does not know survives the log rather
-        // than failing it: the fold, not the wire, rejects it.
-        let unknown = round_trip(&sandbox_mode("future-mode"))
-            .expect("unknown mode parses");
-        assert_eq!(unknown.sandbox_mode(), Some("future-mode"));
-    }
-
-    #[test]
-    fn structural_kind_extracts_kind_tag() {
-        assert_eq!(structural_kind(&step_start(0, 0)), Some("start"));
-        assert_eq!(structural_kind(&step_end(0, 0, "x")), Some("end"));
-        assert_eq!(structural_kind(&turn_start(0)), Some("start"));
-        assert_eq!(structural_kind(&turn_end(0, "x")), Some("end"));
-        assert_eq!(structural_kind(&iteration_start(0)), Some("start"));
-        // Non-structural events return None.
-        let non_structural = usage(1, 1, 2, None, None, None);
-        assert_eq!(structural_kind(&non_structural), None);
-    }
-
-    #[test]
-    fn user_message_carries_its_source_only_when_it_has_one() {
-        let steer = user_message(
-            json!({"role": "user", "content": "focus"}),
-            Some("steer"),
-        );
-        let value = serde_json::to_value(&steer).unwrap();
-        assert_eq!(value["type"], "user_message");
-        assert_eq!(value["source"], "steer");
-        assert_eq!(value["seq"], 0, "the writer stamps the ordinal");
-        let restored = round_trip(&steer).expect("round-trips");
-        let source = match &restored {
-            SessionEvent::UserMessage { source, .. } => source.clone(),
-            other => panic!("expected a user_message row, got {other:?}"),
-        };
-        assert_eq!(
-            source.as_deref(),
-            Some("steer"),
-            "the source survives the log"
-        );
-
-        let ordinary =
-            user_message(json!({"role": "user", "content": "hi"}), None);
-        let value = serde_json::to_value(&ordinary).unwrap();
-        assert!(
-            value.get("source").is_none(),
-            "an ordinary turn keeps its shape: {value}"
-        );
-    }
-
-    #[test]
-    fn all_builders_round_trip_through_serde() {
-        // One test per builder — pins the durability contract
-        // for every event the loop might emit.
-        let cases: Vec<(&str, SessionEvent)> = vec![
-            ("step_start", step_start(0, 0)),
-            ("step_end", step_end(0, 0, "completed")),
-            ("turn_start", turn_start(0)),
-            ("turn_end", turn_end(0, "completed")),
-            ("iteration_start", iteration_start(0)),
-            ("iteration_end", iteration_end(0, "completed")),
-            ("subagent_enter", subagent_enter("c", "p", 1, "a")),
-            ("subagent_exit", subagent_exit("c", 1, "completed")),
-            ("request_header", request_header("p", "m", "h", "initial")),
-            ("usage", usage(1, 1, 2, None, None, None)),
-            ("sandbox_mode", sandbox_mode("workspace-write")),
-            ("tool_output", tool_output("c1", "shell", "half")),
-        ];
-        for (name, event) in cases {
-            let restored = round_trip(&event)
-                .unwrap_or_else(|| panic!("{name} must round-trip"));
-            assert_eq!(restored.type_tag(), event.type_tag(), "{name}");
-        }
-    }
-}
+mod tests;

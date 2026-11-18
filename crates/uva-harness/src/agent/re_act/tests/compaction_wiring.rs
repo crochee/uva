@@ -9,7 +9,6 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use uva_context::{AgentState, ContextManager};
 use uva_core::{Error, SystemClock};
@@ -157,16 +156,15 @@ async fn seeded_writer() -> Arc<LogWriter> {
     let sink = Arc::new(InMemorySessionSink::new("compaction-wiring"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
     for turn in 0..4 {
-        writer
-            .append(json!({
-                "type": "user_message",
-                "data": uva_provider::Message::user(format!(
-                    "turn {turn}: {}",
-                    "x".repeat(4_000)
-                )),
-            }))
-            .await
-            .expect("seed the turn");
+        let row = uva_session::user_message(
+            serde_json::to_value(uva_provider::Message::user(format!(
+                "turn {turn}: {}",
+                "x".repeat(4_000)
+            )))
+            .expect("a user message serialises"),
+            None,
+        );
+        writer.append_event(&row).await.expect("seed the turn");
     }
     writer.flush().await.expect("flush the seeded rows");
     writer

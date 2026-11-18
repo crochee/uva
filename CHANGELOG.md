@@ -12,6 +12,389 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Changed (拦截裁决归一个主人：一条规则，三个 adapter)
+
+- **fail-closed 在 host 路径成立（行为变更）**：「一个注册在挂载点上的决定意味着什么」
+  被写了三遍且互相矛盾——同一个答不上来的门，注册表路径终止运行、host 路径降级为
+  Allow 继续跑（host 自己的注释还写着 the pass fails closed）。现在 `uva-hook` 新增
+  `arbitration` 模块作为唯一 owner：合法性（点的表）、fail-closed 合成（能拒绝就拒绝：
+  Block 优先于 Terminate；`llm/*` 没有拒绝可用就报告）、折叠（`Arbitration::absorb`
+  从 registry.rs 搬来）、两条 panic 策略（外部插件保活、进程内注册撤除，host 内部
+  hint 的第三种收掉）。注册表与 host 的三条派发路径全部改问 owner；host 路径的门失败
+  从「什么都不落」变为 durable 的 hook warning 行（链上的事实随载荷走，seam 层落行）。
+- **不接受的裁决不再静默（行为变更）**：注册说出点不接受的话，以 `Fact`（一个形状、
+  两个面共用）落成 warning 行，运维看得见。
+- **hint 类注册 panic 后被撤除（行为变更）**：原先只跳过、每次都再试。
+- `RegistryPass.failures: Vec<String>` → `facts: Vec<Fact>`；`uva-harness` 删除
+  `Host::accept` 与 `DiagnosticKind::{UnsupportedDecision, GateFailed}`（裁决类诊断的
+  形状现在是 owner 的 `Fact`）。冻结基线按名字比较，没有名字移动。
+- 两条回归测试（改动前失败/后通过）钉住 fail-closed 与「注册表与 host 对同一失败给出
+  同一裁决」。决策记录见 docs/adr/0020-interception-arbitration-in-one-owner.md。
+
+### Changed (控制器的句柄不暴露锁：门是承诺，不是机制)
+
+- **压缩门变成"工作"形状**：`SessionController::compaction_gate()`（返回
+  `Option<tokio::sync::MutexGuard<'_, ()>>`，句柄上唯一在签名里点名锁的方法）换成
+  `with_compaction_gate(work)`——调用方把「这段工作期间不许开新 run」交给控制器，
+  guard 永不越出控制器模块；**"门覆盖整段工作"从约定变成结构保证**（生产调用点
+  `/compact` 原先靠 `let _compaction_gate = …` 的生命周期约定）。
+- **清空策略落进内层**：`ControllerInner::clear_cached_history()` 承接缓存的清空，
+  句柄只转发——句柄不再直接写 `*inner.cached_history.lock()`。
+- **远端句柄无门照跑**（行为不变，远端句柄 `inner` 为 `None`，没有可串行化的工作），
+  新测试 `session/controller/tests/compaction_gate.rs` 钉住这条语义。
+- **行为变更零**：门仍只挡 run start（不挡 steer、不挡 cancel），三条既有测试逐字保持。
+  `uva-app-server` 不在冻结面里，仓内无 crate 依赖它，无基线要更新。
+- 决策记录见 docs/adr/0019-controller-handle-offers-a-promise-not-a-lock.md。
+
+### Changed (折叠载荷的读法归一处：词汇是主人，消费者改问)
+
+- **折叠载荷只有一套解码**：载荷的读法按 ADR-0009 归行词汇管，但那条纪律只落实了
+  一半——词汇有宽松的 `decode_message`，history 后来又长了一套严格的，两套各认
+  不同的形状；压缩载荷的 `data.summary` 也两个读者。现在词汇新增
+  `decode_folded_payload`（provider 形状 → 压缩摘要 → 报错），history 改问它、自己
+  那套删掉，`data.summary` 只剩词汇内部一个读者（`compaction_summary_message`）。
+  **严格度不变**：历史投影对无法证明归属的载荷仍然报错（新增测试
+  `a_payload_that_is_neither_shape_fails_the_projection` 钉住）。
+- **provider 内容块形状一个读者**：读 `type: tool_use`/`id` 与
+  `type: tool_result`/`tool_use_id` 的两处（`surface/fold.rs`、`tool_pairing.rs`）
+  收进新增的 `uva-session/src/content_blocks.rs`，键名只写一遍；手读保持手读（旧
+  方言载荷解不成 provider 类型，折叠必须仍能在旧载荷里找到调用）。
+- **行为变更零、公开面零增长**（新增项都是 crate 内 `pub(crate)`）。决策记录见
+  docs/adr/0018-folded-payload-reads-live-in-one-place.md。
+
+### Changed (聊天窗口读模型归一个模块：界面只做胶水)
+
+- **窗口读模型有模块了**：前端两套读行词汇里，转录（`session-to-messages.ts`）是
+  纯模块且有 vitest 覆盖，而窗口那套（12 个 action 的 reducer、窗口/轮/steer 语义、
+  状态与 action 类型）是 `ChatPage.tsx` 的私有函数——vitest 进不去（ADR-0001 只测纯
+  函数），于是窗口 reducer 的每个分支只能人肉点页面验证。现在整块搬进
+  `lib/chat-window.ts`（reducer + `emptyWindow` + 页面真用到的三个符号），模块接口
+  是窄的，其余封在模块里；`ChatPage.tsx` 2001 → ~1430 行，只剩 React 渲染与
+  effects。
+- **行为变更零**：逐行未改（仅 `turnEndReason` 的 doc 从错放的 `rowData` 头上归位）。
+  测试面从零到 13 条：新 `tests/chat-window.test.ts` 对 12 个 action 每个至少一条
+  用例，外加 baseline 重建、live 帧守卫（退役后不得复活 / 序号单调）、steer 生命周期
+  与轮边界分支。决策记录见
+  docs/adr/0017-chat-window-read-model-in-one-module.md。
+
+### Changed (退役规则归一个模块：每个客户端各答一次)
+
+- **取代判据只有一处**：ADR-0012 定下的退役规则（内容行序号 > `start_seq` + 运行
+  已结束时的轮边界）在客户端被重新推导了三次且分叉不同——网页端 `live-projection.ts`
+  只有内容行那一半，reducer 在模块外又拼轮边界与复活守卫，baseline（重连）路径又
+  只看内容行（与增量路径自相矛盾）；TUI `app.rs` 缺轮**开始**那一半，迟到的旧投影
+  帧能在 TUI 里复活。现在网页端由 `live-projection.ts` 拥有整条规则
+  （`retiresProjection` / `liveFrameAdmitted`），TUI 由新增的 `supersession.rs`
+  拥有同一职责，两个读模型只问不推。
+- **行为变更两条**（向 ADR-0012 的规则对齐）：网页端重连时，若基线里只有轮结束行
+  （失败轮、无内容行），投影被退役——页面显示持久转录而非陈旧的流式回答；TUI 的
+  轮开始行也退役投影并打标，迟到的旧投影帧不再复活（`suspended` 的轮结束行仍不
+  退役，该例外不变）。测试：网页端 `live-projection.test.ts` 覆盖整条规则，TUI
+  `supersession/tests.rs` 逐条件覆盖。决策记录见
+  docs/adr/0016-supersession-rule-in-one-module-per-host.md。
+
+### Changed (行构造归一个模块：uva-session 之外无人拼 SessionEvent 变体)
+
+- **builder 集补全，14 处字面量归一**：`typed_event_builders` 新增
+  `warning` / `tool_result` / `hook_block` / `tool_result_transformed` /
+  `parked_prompt` / `park_consumed` / `feedback` / `session_shutdown` 与两个
+  语义入口 `message_row`（带角色的 provider 消息 → 行，种子路径的 role match
+  整体搬进 uva-session）、`turn_prompt_row`（本轮 prompt 行：attachments +
+  fold 算好的 `surface_op`）。app-server 9 处与 harness 5 处的
+  `SessionEvent::X { ... }` 字面量全部改走 builder；`SessionShutdown` 不再
+  带调用侧的时钟读（`LogWriter::stamp` 在 append 时总是重盖，双钟读病灶消除）。
+  读侧 pattern（fold / render / scan）是读模型，不动。
+- **不变量进门禁**：`check-row-vocabulary` 的 Rust 扫描器加构造判别——
+  `uva-session` 之外拼构造形状的 `SessionEvent` 变体即红（pattern 标记
+  `..` / `=>` / `matches!` 与 `let `/`Some(` 前缀豁免读侧），裸 match 臂进
+  审计表（`uva-approval` 三处，同一 ratchet）；`--self-test` 补构造夹具。
+  决策记录见 docs/adr/0015-row-construction-in-one-module.md。
+
+### Changed (挂载管线归一个模块：装配变成运行时的路径只有一份)
+
+- **build 只有一份配方**：boot 的挂载与 HMR 重挂（`remount_row` / `apply` / rollback）
+  此前各拼一遍 factories → `BootContext` → `build_plugins` → `mount_all_with`，且
+  `BootContext` 配方已行为性分叉——重挂丢阻塞池、显式 `sessions_dir` 与压缩模型
+  （`context-compactor` 会以空 model 重建）。现在收成 `composition/kernel` 的
+  `build_rows` + `mount_built` 一个 stanza：一个配方，「先 build、再 unload、后
+  mount」的次序约束留给调用方；`Assembly` 存 boot 的 `BootExtras`，重挂行与 boot
+  同配方（回归测试 `a_remount_keeps_the_boots_session_corpus` 钉住）。
+- **审计进挂载点**：停泊审计（`audit_pending`）从 boot-only 移进 `mount_built`，审计
+  本次挂载的行；`REQUIRED_ROWS`（`agent-loop` / `model-adapter`）停泊在任何挂载点
+  fatal。行为变更：把必需行挂到停泊的 settings 编辑现在整笔失败并走既有
+  best-effort rollback（旧行为：静默停泊 + dep_lost 写回）。纯移除不触发挂载、
+  不审计——「移除成功、消费侧大声失败」的既有语义原样。
+
+### Changed (控制器状态转移表归一个模块：怎么走只有一份)
+
+- **写路径有了 owner**：`SessionState`（控制器状态）的 6 个写点散在 4 个文件
+  （`mark_awaiting_approval`、`mark_running`、resume parked、cancel、settle、
+  `adopt_state`），「哪些转移合法」没有被任何一处拥有；快照总线的 3 个发布点与
+  `inner.rs` 的文档承诺（Running / Idle / Cancelled）不一致——`Idle` 从未发布。
+  现在收成 `session/controller/state.rs` 一个模块：封闭转移枚举 + 穷尽 `apply`
+  （全函数，停留也是定义格）、快照发布、`is_running` / `is_startable` 查询。
+- **settle 发两帧**：`Completing`（最后一轮的结局，流上仍可读）之后紧跟 `Idle`
+  （会话的当下）。行为变更两条：`delete_session` 在一次运行完成后不再永远
+  `session_busy`（`latest` 此前永远停在 `Completing`，而 `turn_in_flight` 把它算
+  in-flight）；`sessions/status` 的 `latest` 在 settle 后报 `idle` 而非
+  `completing`。`turn_in_flight` 与 `OperationState` 枚举零改动，契约零再生成。
+- **`suspended` 收成模块私有记录**：Suspended 事件记账、settle 消费、BeginRun 清零；
+  延迟翻转语义原样（立即翻转会让 `is_startable` 在旧任务排干时放行新 run）。
+- **`adopt_state` 走表**：接管重建是转移表的 `Adopt` 一格（拒绝覆盖 `Running` 原样），
+  不再是绕过表的裸 setter。
+- **读路径与纯折叠不动**：`status.rs` 一字不动（ADR-0008 的裁定保持）；路由读
+  `state()` 喂 `StatusFacts` 的既有读法不变。
+- 决策记录见 [`docs/adr/0013-controller-state-transition-table-in-one-module.md`]。
+
+### Changed (委派发现归一个模块：枚举窗口、头部解析与镜像方言只有一份)
+
+- **一个 `discover(index, scope)`**：「枚举最近会话、认头部的 `subagent_enter`、报出
+  委派」此前在两个 crate 写了三遍（`uva-tool-task` 的 `scan.rs`、app-server 的
+  `routes/tasks.rs` 与 `routes/sessions` 的 `subagent_attribution`、`routes/follow` 的
+  `agent_attribution`），且已分歧——头部垫元数据行的子会话名册找得到、tasks 页看不见；
+  镜像方言只有 tasks 页认。现在收成 `uva-tool-task::control::scan` 一个模块、
+  两个作用域（`Scope::Parent` 名册用、`Scope::User` tasks 页用）、一个
+  `SCAN_LIMIT`。
+- **头部规则统一**：头 4 行窗口内第一个 `subagent_enter`——自名的是自有日志记录，
+  名别人的孩子是旧构建写进父日志开头的镜像（降级记录：无派发词、无结局），
+  同一孩子自有日志压过镜像。归因（列表 / 详情 / follow）从「只认第一条事件」
+  放宽到同一窗口规则。
+- **名册只收养自有日志的孩子**：镜像孩子无日志可开，冷唤醒要的 writer 不存在——
+  收养在发现处过滤，不再靠遗漏。
+- **`SessionIndex` 增 `session_ids_of_user`**：按用户枚举是宿主知识，归
+  `ServerSessionIndex`（单用户目录 + 注册表）；路由侧的 `recent_session_ids` 删除。
+- **窗口预算成真**：`SessionSink` 增默认方法 `read_head_rows(window)`，
+  `JsonlSessionSink` 按字节预算实现；`ServerSessionIndex::read_head` 此前是
+  **全文读再 `take(4)`**，名册每个会话都在付全文读——现在委托有界读。
+  冻结面记名字不记方法（ADR-0009 同一裁定），基线不动。
+- **发现 / 描述分界**：发现答「谁存在」（窗口证据），描述答「它说了什么」（全文：
+  派发词、`subagent_exit`、状态）留在 tasks 路由；`get_task` 不动。
+- 决策记录见 [`docs/adr/0011-delegation-discovery-in-one-module.md`]。
+
+### Changed (活动投影按步铸造，身份是它的持久位置)
+
+- **活动投影的身份换成持久位置**：投影带 `start_seq` = 该步开始时日志已落盘的序号，
+  客户端的取代判据只有一条 —— **一条内容行（助手消息 / 工具结果）的序号大于
+  `start_seq`，即取代该投影**（另有一条边界规则保留：轮边界行在运行已结束时取代
+  投影）。行与投影之间的关联因此是日志序号本身：不需要服务端打标、不需要 id
+  匹配、不需要比较文本。
+- **投影按步铸造**（一次模型调用一步，步边界处文本 / 推理 / 工具调用清空）：
+  投影与 durable 行同粒度，一条助手行就是它那一步的投影。此前投影按运行铸造、
+  文本跨步累加，而助手行是每次模型调用一条 —— 身份比投影的寿命粗，第一条助手行
+  就足以退休整轮投影。
+- **两个缺陷随之修掉**：多步（用工具的）运行里，网页端此前从第二步起不再流式
+  （同一轮的 live 帧被“已取代”守卫丢弃），TUI 则重复显示第一步的文本（它把帧里的
+  `turn_id` 丢掉，只能比较文本形状）。现在每一步都流式，两端都不再重复。
+- **服务端不再给行打标**：`row` 帧上的 `turn_id`、`turn_labels` 与
+  `carries_live_content` 整套删除；结算后落地的行与 baseline 里的行都按同一条
+  序号规则处理，不再需要特判。
+- **线上字段**：`live` 帧的 `turn_id`（字符串）→ `start_seq`（数值），契约随之
+  重新生成；网页端手写的帧解析器同步。TUI 补齐网页端已有的两个直播守卫
+  （已被取代的投影、`live_seq` 单调）。
+- 决策记录见 [`docs/adr/0012-live-projection-is-identified-by-its-durable-position.md`]。
+
+### Changed (载荷的读法归行词汇：消费者不再自己拼载荷的键)
+
+- **词汇现在也管「这一行带了什么」的读法**：`GLOSSARY.md` 的「行词汇」条目早就写着「载荷带
+  哪些字段」由它说了算，代码没兑现——TUI 有 14 处手写载荷读取、浏览器近 20 处、
+  `uva-session` 内部 2 处，每个消费者各自重新实现一遍 provider 消息的形状。
+- **一个真缺陷修掉**：崩溃修复（`repair`）把助手的 `data["content"]` 当**裸数组**读，而
+  harness 写的是 `{"Single":{…}}`（`Content::parts` 决定形状，单个 part 是 `Single`）。
+  于是「模型发了 `tool_use`、崩溃发生在 dispatch 行之前」这一种崩溃**拿不到那条合成
+  closer**，下一次请求带一个没人答的 `tool_use`。夹具写成了 harness 不写的那种形状，
+  所以测试是绿的、生产是坏的——夹具与生产形状对齐之后，测试第一次覆盖生产形状。
+- **`SessionEvent::message()`**（新增，与它已有的十五个派生访问器同族）：这一行投影成的
+  provider 消息。它与 `CurrentRow::message()` 共用同一套解码（provider 的完整编码、
+  手写的 `{"role":…,"content":[…]}` 形状、带文本或调用 id 的兜底）——一份解码实现。
+  `interrupted_turn_closers` 的签名不动；冻结面记的是 crate 根的 `pub use` 名字，
+  新方法不是新名字，基线与 `docs/api-frozen.md` 都不用动。
+- **消费者改问词汇**：TUI 的行折叠从「还原成 JSON 再手读」改成「还原成类型化的行与消息」，
+  手写载荷读取 14 → 4（剩下四处是**自由格式**的袋：警告行、hook 行、崩溃修复 closer
+  自己的标记、边界行的 `reason`——它们没有类型化字段可问）。`search/text.rs` 的手写
+  `Single`/`Multi` 信封解析换成类型化解码。`uva-tui` 因此多一条依赖边
+  `uva-provider`（不带 HTTP，不新增编译单元）。
+- **写入者只写一个键**：三个挂起行（`turn_suspended` / `step_end_suspended` /
+  `turn_end_suspended`）的 `data.phase` 改成 `data.kind`。`kind`/`phase` 这组封闭词汇此前
+  有**三种优先级**（Rust：类型化字段 → `data.kind` → `data.phase`；TUI：`data.kind` →
+  `data.phase`；Web：`data.phase` → `data.kind`）——今天值不冲突所以不会分歧，但写入者
+  只写一个键，漂移的可能就没了。旧日志的 `phase` 由还原的宽松回退继续读。
+- **provider 的消息类型进线上契约**：`uva-provider` 加 `schemars`，`Message` / `Content` /
+  `ContentPart` / `Role` / `ToolUse` / `ToolResult` 与叶子类型派生 `JsonSchema`——契约从此
+  发布 provider 自己的类型，浏览器不再手写信封的读法。**线上字节不变**，变的是生成的
+  TS 类型。
+- **`SessionTurn` 收成按标签的判别联合**：33 个分支——每个标签一个，**从 `RowTag` 自己的
+  标签联合里读出来**，没有第二份清单要维持（契约测试把联合钉在词汇上：分支 = 词汇的
+  标签）。`user_message` 与 `assistant_message` 的 `data` 是 provider 的 `Message`（联合按
+  标签窄化，浏览器不再 cast）；`tool_result` **不窄化**——运行自己的行装工具消息、崩溃
+  修复 closer 装自己的标记袋，一个标签两种载荷，说了哪种都是撒谎。
+- **浏览器迁移**：`messageParts` 收 `Message` 出 `ContentPart[]`（不再猜 `Single`/`Multi`
+  信封）；`applyContentPart` 按生成的联合分派；`tool_result` 的一次 cast 收在一处并注明
+  为什么（那一行有两种形状）；`ChatPage` 的三份 `kind`/`phase` 回退缩成投影模块里的
+  一份。
+
+### Changed (会话写入者的类型化事实不再经 JSON 键绕一圈)
+
+- **bound 搬到序列化之前**：`LogWriter` 收到类型化的 `SessionEvent` 后，此前**先序列化
+  成 `Value` 再按 JSON 键把类型化事实读回来**——`Plugin` 变体上就有
+  `kind`/`payload`/`original_bytes`，`bound_plugin_row` 却在序列化行上
+  `remove("payload")`/`remove("kind")`；`ToolOutput` 变体上就有 `call_id`，
+  `tool_output_call` 却读 `.get("call_id")`。现在 `append_event` /
+  `append_event_nowait` 在序列化前 bound 类型化事件（`bounded_event`：只有两个带
+  上限的行付一次拷贝，普通行原引用直通），Value 级的两个 bound 函数删除。
+- **合并路由问类型化字段**：流式分片「进队列还是并进上一行」的判定从按键读
+  `call_id` 改为问 `SessionEvent::tool_output_call()`（只匹配 `ToolOutput`；`tool_call`
+  自己的 id 是另一个事实，从不路由进合并）。`enqueue` / `append_nowait` 里的同一判定
+  删除——它们的唯一调用方就是两个类型化门，路由已经做完。
+- **`append_copied` 不再重复 bound**：抄来的行来自本 crate 写的子日志，写入那一刻已
+  bound（幂等），删掉逐行重跑；重映射的 `seq` 改问 `CurrentRow::seq()`。
+- **不动**：`stamp()` 的 `seq`/`ts`/`ignorable`（信封是写入者自己的知识，`ignorable`
+  本来就问词汇）、`merge_tool_output_row`（`data.output` 是袋里的自由格式，没有类型化
+  字段可问）、批次缓冲的形状。线上字节不变；冻结面不变（删掉的都是 `pub(crate)`）。
+
+### Changed (会话状态归一个模块所有：控制器状态与对外状态是两个枚举)
+
+- **新模块 `crates/uva-app-server/src/session/status.rs`**：「这个会话现在是什么状态」从此
+  只有一份答案。模块是纯函数，收调用方已经折好的事实（控制器的内存状态、日志里有无
+  未决审批、日志空不空），窗口规则与错误策略留在调用方——各调用点能证明的窗口不同，
+  而「状态形状的调用方没有错误通道」是仓里已有的规矩。
+- **两个枚举，不是一个**：`SessionState`（控制器状态：空闲 / 运行中 / 等待审批 / 已取消，
+  从 `session/controller/ops.rs` 搬进模块）与 `SessionStatus`（会话状态：从未开始 /
+  进行中 / 等待审批 / 已取消 / 已完成，对外报告）。合成一个被否：控制器写「空闲」时
+  不知道该写 `unspecified` 还是 `completed`——它不关心日志空不空。
+- **降级规则以日志为准**：内存记着「等待审批」而日志里没有未决审批时，报**空闲**。
+  这条规则此前只有 `follow` 的 baseline 用（`reported_state`），`sessions/list` 与
+  `sessions/get` 的两处推导（`derived_live_state` 与磁盘扫描路径）都不降级——于是同一个
+  会话在两个响应里可以答得不一样。现在四处统一到同一条规则。
+- **行为变更两处**：①审批在别的节点被答掉、内存标记陈旧时，`sessions/list` 与
+  `sessions/get` 由 `input_required` 改为 `completed`；②运行中的会话在
+  `approval_asked` 行落盘与挂起标记翻转之间的那个窄窗口里，`sessions/list` 由
+  `input_required` 改为 `working`——`follow` 的头今天就报 `running`，这一刀让两个端点
+  在同一时刻说同一句话。
+- **9 个标签是筛选词汇，不是状态词汇**：状态产出者只覆盖 5 个；`submitted` /
+  `failed` / `rejected` / `auth_required` 今天没有产出者，但作为筛选词保留——线上
+  breaking，且砍掉的是别人在用的筛选词。筛选词汇与状态词汇分开声明。
+- **`OperationState` 不动**：它答的是「这一次 agent 循环跑到哪了」，与控制器状态是两套
+  不相交的词汇（中间没有转换函数），且在冻结面里；浏览器不消费它。
+- **旧实现删除**：`infer_status_from_parts`、`derived_live_state`、`reported_state`、
+  `state_label`、`parse_status_filter` 与 `SessionState` 在 `controller/ops.rs` 的定义
+  一并删掉。它们的单测搬进 `src/session/status/tests.rs`，按新接口重写，并补上一张
+  穷尽表——其中「内存标记陈旧」那一格此前**一个测试都没有**。
+- **文档改正**：`api/v1/page_query.rs` 的「规范集合」说的是 5 个连字符标签，代码认的是
+  9 个下划线标签；`SessionSummary.status` 的注释说「9 个标签的封闭集合」，字段值集其实
+  是 5 个。两处都改成代码真正在做的事。
+- **线上收紧成封闭 union**：`SessionSummary.status` 与 `SessionDetail.status` 从裸 `string`
+  变成 `SessionStatus` 的五值联合（`unspecified` / `working` / `input_required` /
+  `canceled` / `completed`），**拼写逐字不变**。变体名即线上标签——照行词汇的规矩
+  （ADR-0006），`rename_all = "snake_case"` 派生一切，`as_wire()` 是它手写的镜像，
+  两者由一个测试钉住。`FollowHeader.state` 仍是 `string`——那套 4 标签词汇下一刀退役。
+- **前端的死类名清掉**：`ChatPage.css` 给 `.status-submitted`、`.status-unspecified`、
+  `.status-rejected`、`.status-auth-required`、`.status-unknown` 定了样式，而消息态
+  只产出 `working` / `completed` / `failed` / `canceled` / `input-required` 五个值——
+  那五个类名是照着会话状态的词汇写的，却挂在消息状态上。
+- **线上只剩一套会话状态词汇**：`follow` 的头原来自带一套 4 标签词汇（`idle` /
+  `running` / `awaiting_approval` / `cancelled`），与列表的 5 标签词汇并立——同一个会话
+  在两个响应里用两套说法，取消一个作 `cancelled` 一个作 `canceled`。这一刀把
+  `follow` 头的 `state` 换成**会话状态**本身（`unspecified` / `working` /
+  `input_required` / `canceled` / `completed`），4 标签词汇退场，控制器状态不再上线。
+  **这是线上 breaking 变更**：读 `header.state` 的客户端要跟着改，而且字段的**含义**
+  也变了——本节点没有活着的运行，过去报 `idle`，现在报 `completed`（日志有行）或
+  `unspecified`（日志空）。仓内的读者只有一个：TUI 的 `turn_from_state`（`working` →
+  运行中，`input_required` → 等待审批，其余 → 空闲）；浏览器不读这个字段。
+
+### Changed (服务端发布当前行：浏览器不再见到方言)
+
+- **线上只发布当前行**：`sessions/get` 的 `history`、`follow` 的 baseline 与逐帧行
+  都经行词汇的新原语 `publish_row` / `publish_rows` 发布——当前行原样（零拷贝移动），
+  旧方言的行改写成它的当前对应物（标签、载荷拼写、附件引用抬到行顶层、失败标志与
+  调用 id 补进顶层），没有当前形式的行（`Agent`、未知标签、无类型）**不发布**；
+  `sessions/events` 的 `legacy` / `unknown` 桶继续报告它们。发布的行是**原始行，
+  只在词汇说它不对的地方改**：序号与时间戳连同它们的缺席原样保留，绝不重序列化
+  事件（`SessionEvent` 的必填 `seq` 表达不了「这一行没有序号」，捏造 0 会被评分
+  目标查询拒绝）。
+- **浏览器方言表退场**：`SessionTurn.type` 收窄为 33 个当前标签，生成的
+  `SessionRowDialect` / `SessionRowTag` 联合、`DIALECT_ROW_TREATMENT` 表、四个
+  `applyLegacy*` 处理器、`isDialectTag` 与 `ChatPage` 的两处 `UserInput` 比较全部
+  删除；还原行走当前行同一条分派路径。
+- **归一补上三个会丢内容的缺口**：`Model`+推理行此前整行被丢（浏览器今天画得出
+  thinking 段）；只带附件无文本的 `UserInput` 此前整行被丢（文件气泡）；`Message`
+  方言的宽松 `{"role":…,"content":[…]}` 拼写此前解不出（当前行同款宽松回退现在
+  也归方言用）。规则：归一必须接受浏览器今天渲染的每一种载荷形状，且不得接受
+  浏览器丢弃的形状。
+- **还原事件带上行自己的事实**：`dialect_event` 此前硬编码 `seq: 0` / `ts: ""` /
+  空附件；现在取原始行的序号、时间戳、`source`、附件引用与工具结果的失败标志。
+  这修复了 `sessions/events` `typed` 桶的行身份，也让引用方言行真序号的 `compaction`
+  替换校验通过——上下文计价器对这类旧日志从多算改为算对。
+- **带序号的旧方言助手轮从此有评分目标**：此前浏览器不给它们渲染评分控件；
+  现在 `feedback_target` 能把还原后的 `Model` 行解析成 `AssistantMessage`，点击有效。
+- **门禁扩到浏览器**：`check-row-vocabulary` 新增 Web 半边——`uva-web/scripts/
+  check-row-vocabulary.mjs`（TypeScript compiler API）扫描 `uva-web/src` 的四个方言
+  拼写，走同一张审计例外表与同一只棘轮；33 个当前标签在 Web 仍合法（`tsc` 已用
+  生成的 union 强制那张 `Record` 记账）。
+- **冻结面**：`uva-session` 135 → 137（增 `publish_row`、`publish_rows`）；
+  `RowDialect` 留在公开面（服务端仍要能指名旧行才能归一它），只是不再上线路。
+
+### Changed (行词汇在读边界归一一次：读者不再见到方言)
+
+- **归一在读边界**：会话日志的任意一行在那里被还原成**当前行**——它在当前
+  词汇里的标签、它投影成的模型消息、它在表面里的位置。旧方言于是不再是运行期
+  类别，而成了归一的**输入**：读者只见当前行，不见方言。
+- **方言按载荷判定**：`Message` 与 `Model` 的对应物取自载荷里的角色或 part
+  种类，不由方言本身决定——这是 omp 那个「标签说不是用户消息、载荷说是用户
+  消息」的真缺陷所在。类型化行以**标签**为准：载荷的角色不推翻标签，于是两个
+  折叠路径对同一行给出同一个答案。
+- **未知类型 fail-closed**：一行的类型当前构建不认识，且那一行没有「可忽略」
+  标记 ⇒ **这份会话日志读不了**，而不是「跳过这一行」。静默跳过一条必需事件
+  会重建出一个错误的会话，所以宁可拒读整个日志。「可忽略」是逐标签声明的，由
+  会话写入者盖在行的顶层（`type` 的兄弟）；今天 33 个标签全部不可忽略。
+- **读点不再有两分支 match**：`routes/follow.rs` 的活内容判断此前漏掉了方言
+  分支（旧方言日志里的助手行拿不到回合标签）；现在「这一行是什么」只有一处
+  答案，漏分支不再是可能。
+- **表面成员资格进词汇**：`RowTag::surface_role()` 公开；「进不进表面」由行词汇
+  声明，「进不进转录」仍由每个读模型自己决定。
+- **两个行为变化随同一刀落地**：旧方言的行现在算「活内容」，TUI 与工件集的
+  转录会开始渲染它们今天跳过的旧方言行；`sessions/list-events` 的四分桶里，
+  能还原的旧方言行从 `legacy` 移到 `typed`。
+- **冻结面变动**：删 `RowClass` / `RowReading` / `carries` / `classify_row`；增
+  `CurrentRow` / `RowDefect` / `UnreadableLog` / `restore_row` / `SurfaceRole`。
+  `uva-session` 134 → 135。
+- **决策记录**：[ADR-0007](docs/adr/0007-row-vocabulary-restores-at-the-read-boundary.md)；
+  ADR-0006 的后果段就地修正（它的「不再在每个读点各写一遍双标签匹配」当时没兑现）。
+
+### Changed (profile 文档 = 插件树的唯一真源：dsh entry 模型移植)
+
+- **行形状**：profile 文档的一行现在是一份 **manifest**（dsh
+  `EntryOptions` 的直译）：`{ id, name, config, capabilities, group,
+  children, disabled, inject, intercept, isolate }`。`id` 是行身份、`name`
+  是它装的插件（工厂目录的键，取代了旧的 `runtime` 字段——`[core]` /
+  `[ui]` 段已决定装载器）；`disabled` 是布尔位，取代旧的**三态** `enabled`
+  （`true` / `false` / 判定表 `{ service, check, arg }`）与其判定器、
+  开机两波挂载机制（判定服务由插件提供的「鸡蛋问题」随之消失）；组行
+  （`group = true`）的子行写在 `config` 数组里，`disabled` 沿祖先链禁用
+  整棵子树。
+- **依赖由文档声明**：每行的 `inject` 是它**额外**声明的服务键；有效边 =
+  插件 manifest 自己的 `inject` ∪ 行的 `inject`（同名键以行为准，文档只能
+  加、不能挖掉插件的固有最小依赖）。内核的静态「缺依赖即整组拒绝」删除：
+  缺依赖的行挂起（PENDING），开机**审计**逐行列出挂起的行与它缺的服务名，
+  只有 `agent-loop` 与 `model-adapter` 挂起才致命。
+- **组是运行时插件**：`group` 行像 dsh 的 `Group` 那样挂载成一个 fiber，
+  子行挂在它下面（内核新增子挂载原语与按行派生上下文：`isolate` 标签作用域
+  与 `intercept` 配置叠加沿子树组合）。
+- **运行时写回**：一行因失去 provider 而不再能运行时，文档把它写回
+  `disabled = true`（dsh 的自禁用写回）。
+- **wire 形状**：`profile/list` / `profile/get` 的行带上 `name` /
+  `group` / `disabled` / 有效 `inject` / `intercept` / `isolate`，不再有
+  `runtime` 与三态 `enabled`；`profile/set` 的参数从 `enabled` 改为
+  `disabled`（布尔）；自管 MCP 的 `profile` 工具同形。
+- **`model-adapter` 行配置摊平**：provider 目录（`providers` /
+  `default_provider` / `default_model`）成为行配置的**顶层键**，不再嵌在
+  `workspace` 下（`WorkspaceConfig` 本身不变）。
+- **新门禁** `check-profile-document`：入库的 `.agents/profile.toml` 必须
+  复述每个插件 manifest 的依赖边（有效边与文档声明不一致即红）。
+- **迁移**：旧形状文档在解析时点名报错（未知字段 `runtime` / `enabled`），
+  不做双形状兼容；`uva-app-server translate --config config.yaml --out
+  .agents/profile.toml` 重新生成完整文档（内置装配 + 迁移后的两行，每行
+  列全有效边）。
+
 ### Added (子代理生命周期：停放/唤醒、工件集、名册真源)
 
 - **停放（parking）**：`uva-tool-task` 的句柄表开始自己管内存生命周期。
@@ -46,6 +429,202 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   只有 idle 老化、主会话不停放）、唤醒→running 与接管、aborted 终态、
   收养与活行优先、停放循环自走、工件集落盘/`patch` 条件/无会话目录、以及
   `agents_list` 收养重启前的子代理与给 `parked` 子代理发消息的用例。
+
+### Changed (行词汇预重构：变体名即线上标签)
+
+- **变体改名**：`SessionEvent::LifecycleShutdown` 改名 `SessionShutdown`——
+  线上标签仍是 `session_shutdown`，序列化字节逐字不变；Rust 侧这一变体的
+  名字变了，是破坏性改名（冻结基线的名单是 crate 根名字，`SessionEvent`
+  未动，故基线不变）。
+- **serde rename 清零**：33 个显式 `#[serde(rename)]` 全部删除，标签由枚举级
+  `rename_all = "snake_case"` 从变体名派生——「变体名即线上标签」此后对标签与
+  方言两个枚举都成立。
+
+### Changed (工件集渲染：一张穷尽 match 替九个手写标签)
+
+- **穷尽匹配**：`uva-tool-task` 的工件集渲染器不再拿九个手写标签字符串
+  分派，改成对 `uva_session::RowTag` 的一张穷尽 `match`——渲不渲染这一行
+  仍是工件集这个读模型自己的决定，但「整个词汇都被表态过」改由编译器证明：
+  词汇新增一个标签，这个 crate 先编译不过（`error[E0004]: non-exhaustive
+  patterns`）。
+- **取值走类型化事件**：九个标签的值不再从原始行手抄——「顶层优先、
+  `data/` 兜底」的 `string()` 助手删掉，改从 `SessionEvent::from_value`
+  得到的类型化事件读：顶层字段缺失时由 `uva-session` 的 `normalize` 从
+  `data` 补齐，读取点不再各写一遍兜底。
+- **覆盖断言**：新用例遍历词汇里的每个标签（从词汇自己发布的 schema 读，
+  不抄一份手写表），断言工件集对它有表态——渲染，或显式省略；少一个即红。
+  另有新用例断言词汇外的行（旧方言、版本偏斜的未知标签、没有标签的行）
+  仍旧被丢弃，语义不变。
+- **渲染输出**：既有渲染断言（工件集落盘那条与 `tests/control_surface.rs`
+  集成套件）全绿。一处差别：turn 行的边界名改读类型化的 `kind` 字段——
+  载荷把边界写作 `phase` 的停摆 turn（`turn_suspended` /
+  `turn_end_suspended`）此前渲染成空的「> turn 」，现在渲染出它的边界名。
+
+### Added (行词汇：会话行是什么，一处声明)
+
+- **词汇模块**（`uva-session` 纯扩展）：`RowTag` 封闭标签枚举（33 个
+  变体，变体名即线上标签，`rename_all` 派生一切，`JsonSchema` 发布
+  `oneOf` of consts——线上契约标签 union 的唯一来源）；`RowDialect`
+  封闭方言枚举（`UserInput`/`Model`/`Message`/`Agent`，只读、永不再写）。
+- **一次问答**：`classify_row` 对任意输入全同、零分配——当前词汇 / 旧
+  方言 / 未知标签（携带原字符串）/ 无标签四分；`Rows` 借用读视图先比
+  标签再解码（`of`/`first_of`/`last_of`/`typed`），被排除的行不付解码
+  代价；`readings()` 一次读完整本日志（位置 + 分类 + 解码结果，每行最多
+  解码一次），`RowReading::unreadable()` 是「这一构建读不动的行」——
+  已知标签载荷解不动 ∪ 无标签——而 `broken()` 仍是更窄的缺陷查询（只报
+  已知标签），与 `foreign()`（方言与未知）分账。app-server 的会话详情
+  分桶与 resume 的 provider 快照读点都走这条读视图；冻结面新增
+  `RowReading`（133 → 134）。
+- **一处声明**：`surface_role` 与行种挪到 `RowTag` 上声明（crate 内
+   私有），`SessionEvent::surface_role()` 与折叠的 `row_view` 读同一份；
+  `from_value` 的 33 字面量改读词汇；`SessionEvent::tag()` 与
+  `RowTag::empty_event()` 两个方向的穷尽 match 由平局测试钉住（换一处
+  配对即红）；新旧对应 `carries`（用户提示 ↔ `UserInput`、模型输出 ↔
+  `Model`）由模块拥有。
+- **读点迁移**（`uva-app-server`）：七处生产裸标签读点（follow 路由三处、
+  tasks 路由一处、`run_task` 两处、会话状态一处）改经词汇——标签比对走
+  `classify_row`，新旧方言对应走 `carries`（`user_message` ↔ `UserInput`
+  的双标签规则不再在每个读点各写一遍）。该 crate 生产代码零裸标签字符串。
+- **会话详情四分**（`GET /api/v1/sessions/{id}/events`）：响应不再把
+  「读不动的行」全叫 `legacy`——`typed`（当前词汇且载荷可解）/ `legacy`
+  （旧方言）/ `unknown`（本构建不认识的标签，即版本偏斜）/ `broken`
+  （已知标签而载荷解不动，或无标签行）各一桶，各带计数；版本偏斜不再与
+  历史方言共用一个名字。
+- **新构造器**（`uva-session`）：`assistant_message(data)`——助手轮的
+  类型化构造器，与 `user_message` 同形；子会话开启者的写入从此走类型化
+  构造器，落盘行形状不变。冻结面 134→135。
+- **裸写入口关闭**（`uva-session`）：`LogWriter::append` /
+  `append_nowait` 从固有公开方法收成 `pub(crate)`——行形状（标签与载荷）
+  从此不再是对仓外调用方的知识：仓外的唯一**单行**写入口是按事件命名的
+  `append_event` / `append_event_nowait`，保留历史原样的**批量**复制仍走
+  `append_copied`（它把一批既有行写进本日志：保留各行自己的 `ts`，只给它们
+  分配本会话的序号；拼一个新标签与载荷的自由没有回来）。所有既有调用点随之迁移
+  （app-server 的四处测试、harness 的生命周期与压缩测试、`durable_hitl`
+  示例）；确实要写旧方言信封的测试改用 `append_copied`，不为测试重新
+  打开裸门。冻结面名字不变（`LogWriter` 本身仍在，收窄的只是方法）。
+
+### Changed (契约换源：标签 union 来自词汇)
+
+- **手写镜像枚举删除**：`crates/uva-app-server` 的契约目录不再自带一份
+  33 变体的镜像枚举（`api/v1/session_view.rs` 的 `SessionEventType`），
+  改为收录 `uva_session::RowTag`——变体名即线上标签的那份封闭枚举。
+  线上标签的 union 从此由词汇派生，镜像与真源之间的漂移无处可生。
+- **TS 导出名不变**：目录的既有改名机制（`SessionHeader` →
+  `FollowHeader` 那种 Rust 名→TS 名）把 `RowTag` 以 `SessionEventType`
+  发布，浏览器的 `Record<SessionEventType, …>` 逐标签记账表一行不用改。
+- **对账测试删除**：契约目录与 `KNOWN_SESSION_EVENT_TYPES` 的「集合
+  相等」对账测试没了——union 由词汇派生，人工对账的前提消失。
+- **前端类型重新生成**：`uva-web/src/api/types.ts` 重新生成。union 的
+  成员一个不多一个不少；变的只有文档注释的出处——union 的说明现在来自
+  词汇模块自己的文档（真源），`SessionTurn.type` 的说明改指词汇的
+  类型名。
+
+### Changed (行词汇契约：方言 union 发布进生成的线上类型)
+
+- **方言发布**：`uva-session::RowDialect` 进入线上契约目录，TS 名
+  `SessionRowDialect`（四个字面量 `UserInput` / `Model` / `Message` /
+  `Agent`），与标签 union 同源——两种 union 各自就是词汇自己的 schema。
+- **行类型拓宽**：`SessionTurn.type` 从「标签 union 或空」改成
+  `SessionRowTag | null`——一个由 `RowTag` 与 `RowDialect` 组成的并集，
+  目录里的 schema 视图 `RowTagOrDialect` 经既有改名机制发布为
+  `SessionRowTag`。线上类型终于能表示真实会话里出现的旧标签；服务端
+  运行时行为不变（类型只是视图，路由照旧写 `serde_json::Value`）。
+- **生成物**：`uva-web/src/api/types.ts` 由生成器原样重生成，新增
+  `SessionRowDialect` 与 `SessionRowTag` 两个导出。
+
+### Changed (TUI 的转录取舍：一张穷尽 match 替两张字符串表)
+
+- **穷尽匹配**：`uva-tui` 的 `apply_row` 不再拿 `APPLIED_ROW_TYPES` 与
+  `IGNORED_ROW_TYPES` 两张手写字符串表分派，改成对 `uva_session::RowTag`
+  的一张穷尽 `match`——收不收这一行仍是终端这个读模型自己的决定，但
+  「整个词汇都被表态过」改由编译器证明：词汇新增一个标签，这个 crate
+  先编译不过（`error[E0004]: non-exhaustive patterns`）。
+- **一次问答**：行先经 `classify_row` 问一次「这是什么行」；词汇外的行
+  （旧方言、版本偏斜的未知标签、没有标签的行）仍旧早退，语义不变。
+- **无 `unreachable!`**：那支「表里声明了却没有分支」的兜底分支删掉——
+  穷尽匹配没有漏网的臂，编译器接管了它的职责。
+- **会计测试**：全词汇覆盖那条（`every_known_row_kind_is_applied_or_
+  ignored_by_design`）随穷尽匹配自然消失——它的两条断言（每个标签都被
+  表态过、不会既应用又忽略）改由编译器保证；「每个应用标签真的过一遍
+  匹配」那条保留，改用类型化标签驱动，并补一条词汇外的行确实被丢弃
+  （版本偏斜与旧方言）的新用例。
+- **依赖**：`uva-session` 从 dev-dependency 变成 `uva-tui` 的正常依赖——
+  投影的生产代码按行词汇读行，不再自己认标签字符串。
+
+### Changed (Web 的行方言识别：读生成的 union，`Message` 行不再被丢弃)
+
+- **零手写方言**：`uva-web/src/lib/session-to-messages.ts` 的
+  `EVENT_USER_INPUT` / `EVENT_MODEL` / `EVENT_AGENT` 三个常量与
+  `legacyRowType()` 拓宽函数删除（`ChatPage` 的两处读点改为直读
+  `row.type`，类型由生成的 `SessionRowTag` 收窄）。分派先判方言、再查标签表：
+  `DIALECT_ROW_TREATMENT: Record<SessionRowDialect, Handler>` 的键就是
+  生成的方言 union，`isDialectTag()` 拿表的键做运行时判断，负分支由
+  TS 收窄成 `SessionEventType`（原 TS7053 消失）。词汇或方言增长而表不
+  跟随时，`tsc` 直接红。`TYPED_ROW_TREATMENT` 仍是
+  `Record<SessionEventType, Handler | null>`。
+- **`Message` 方言表态：渲染**。此前浏览器静默丢弃 legacy `Message` 行，
+  而服务端的折叠把它读进表面。现在按 `role` 投影，与服务端 `kind_of`
+  对齐：`user` / `system` → 用户气泡，`assistant` → 助手轮（复用
+  `assistant_message` 的 part 分派），`tool` → `tool_call_id` 配对的
+  工具块；其余 role 两侧都视为坏信封而忽略。`Agent` 仍是父转录显式不收
+  （子代理 trace 只在子会话里展开），但现在是记账表里一条有注释的条目。
+- **测试**：`WireRow` 拓宽类型与 `legacyRow()` cast 删除，fixture 直接写
+  生成的 `SessionRowTag`；补 legacy `Message` 的角色投影、工具配对与坏
+  信封忽略用例。跨接缝方言分歧（issue 32）随之关闭。
+
+### Removed (行词汇收口：旧公开形态删除)
+
+- **两个零生产调用方的公开项**：`uva_session::KNOWN_SESSION_EVENT_TYPES`
+  （33 个线上标签的字符串表）与 `uva_session::empty_event_of`（按字符串
+  造空事件）删除。词汇自己的 `RowTag` 已是标签的事实来源，骨架由
+  `RowTag::empty_event` 给出；契约目录与前端 union 从来读的是 `RowTag`
+  的 schema，不是那张表。
+- **旧的标签访问方法**：`SessionEvent::type_tag()` 删除，统一由
+  `SessionEvent::tag().as_wire()` 回答；全仓调用点（events / builders /
+  policy-plugins 测试）随之迁移。
+- **源码文本与散文角色解析**：`log_surface` 测试里 `include_str!` 读
+  `events/mod.rs`、从变体名推导标签、从文档散文解析角色的解析器与两条
+  测试整体删除；枚举变体文档末尾的「surface message / log-only」散文
+  标记也一并删掉——角色只在 `RowTag` 上声明一次，由测试对行为与分类器
+  做对账，不再有第二份可被机器读的事实。
+- **虚假声称**：删掉那张表「持久化层拒绝未知类型」的说法；文档改为
+  按事实描述：写侧原样落盘，未知 `type` 是读侧的分类（`RowClass::Unknown`），
+  不是持久化层的拒绝。
+- **冻结面**：`scripts/frozen-api/baseline` 与 `docs/api-frozen.md` 同步
+  删除两个名字，`uva-session` 冻结名 135 → 133。
+
+### Added (行词汇门禁：生产代码不得自己拼标签)
+
+- **新门禁** `make check-row-vocabulary`（`scripts/check-row-vocabulary.sh`）：
+  生产代码（`crates/*/src/**`；内联 `#[cfg(test)]` 模块、`tests/` 目录、
+  `tests.rs` 与被 `#[cfg(test)] mod NAME;` 拉进来的文件除外）不得在**标签
+  位置**写出 33 个标签或 4 个方言字符串——`"type": "…"` 的裸写、
+  `== "…"` / `!= Some("…")` 的比较、`Some("…")` / `json!("…")` 的包装、
+  `"…" =>` / `"…" |` 的匹配臂、`=> "…"` 的变体映射都算。读行一律问
+  `uva_session::classify_row`（或 `RowTag` / `RowDialect`），写行走类型化
+  构造器。词表本身与 `events/vocab/mod.rs` 对账：改名后残留的旧拼写会让
+  门禁先红。
+- **审计例外表**（脚本内，一行一个 `文件|字面量|理由`）：不是行标签
+  的同名拼写在标签位置之外本来就不触发；落在标签位置但并非行标签的拼写
+  （operation 种类、memory 种类、`AgentEvent` 种类、provider 内容块种类、
+  TUI 的消息 part 种类）才进表，不做目录级豁免。两处**范围**排除：词典
+  模块 `events/vocab/mod.rs` 是拼写的定义处（按文件），`uva-test-support`
+  是测试基础设施（按 crate——它的 `src/` 解析录制的 `events.jsonl` 夹具，
+  且这个 crate 不依赖 `uva-session`）。
+- **收尾迁移**：门禁第一次跑就抓到 8 处仍在按拼写认行的生产代码，一并迁
+  到词汇上——`uva-approval::merge_grants` 的 grant 行过滤；`uva-session`
+  的 `plugin` / `tool_output` 行边界（`bound_*_row`）、`writer` 的分块合并
+  过滤、`repair::parked_prompts` 的停放/消费分派、`log_surface` 的旧分派器
+  （改成对 `events::classify_row` 的薄适配，方言**解码器**留在原处）。行为
+  不变（`uva-session` 334、`uva-approval` 8 等既有测试全绿），生产代码里
+  不再有一处自己拼行标签。
+- **自测**：`--self-test` 用固定 fixture 证明检测器仍会报出标签位置
+  （`Some("…")`、`"type": "…"`、`json!("…")`、匹配臂、比较），并证明注释、
+  非标签位置（`"turn": 1` 这类数据键）、整行 raw JSON 与内联 `#[cfg(test)]`
+  模块不产生误报；`--print` 按站点列出每处命中的处置，供审计例外表。
+- **清单同步**：`Makefile` 的 `check-*` 目标与 `make ci` 聚合、`lint-sh`
+  清单（18 个脚本）、`.github/workflows/shellcheck.yml`、`AGENTS.md`
+  §3.6 的门禁表与 `lint-sh` 行。
 
 ### Fixed (取消的轮也收尾：footer、工件集与名册不再随 dispatch future 一起丢)
 

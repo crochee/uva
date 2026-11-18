@@ -957,7 +957,7 @@ async fn cancelling_spends_the_parks_it_drops() {
     use parking_lot::Mutex;
 
     use super::{
-        super::{SessionOp, SessionState},
+        super::SessionOp,
         support::{
             BlockingFactory,
             RecordedCall,
@@ -965,6 +965,7 @@ async fn cancelling_spends_the_parks_it_drops() {
             wait_for_runs,
         },
     };
+    use crate::session::status::SessionState;
 
     let calls = Arc::new(Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
@@ -1071,18 +1072,17 @@ async fn a_steer_is_not_blocked_by_a_manual_compaction_pass() {
         make_manager_and_controller(Duration::from_secs(60), factory).await;
 
     // The gate a `/compact` request holds for its whole pass.
-    let _pass = controller
-        .compaction_gate()
-        .await
-        .expect("the owner has a gate");
-
-    let delivery = tokio::time::timeout(
-        Duration::from_millis(1_000),
-        controller.steer("steer behind a pass".to_string(), None),
-    )
-    .await
-    .expect("the steer decides while the pass holds its gate")
-    .expect("the steer is accepted");
+    let delivery = controller
+        .with_compaction_gate(async {
+            tokio::time::timeout(
+                Duration::from_millis(1_000),
+                controller.steer("steer behind a pass".to_string(), None),
+            )
+            .await
+            .expect("the steer decides while the pass holds its gate")
+            .expect("the steer is accepted")
+        })
+        .await;
 
     assert!(
         matches!(delivery, SteerDelivery::Queue),
@@ -1220,9 +1220,10 @@ async fn the_cancelled_state_never_outlives_its_park_consumed_rows() {
     use std::sync::atomic::AtomicUsize;
 
     use super::{
-        super::{SessionOp, SessionState},
+        super::SessionOp,
         support::{BlockingFactory, RecordedCall, wait_for_runs},
     };
+    use crate::session::status::SessionState;
     let calls = Arc::new(parking_lot::Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(BlockingFactory {
@@ -1331,9 +1332,10 @@ async fn the_cancels_park_spending_does_not_hold_the_steer_gate() {
     use std::sync::atomic::AtomicUsize;
 
     use super::{
-        super::{SessionOp, SessionState},
+        super::SessionOp,
         support::{BlockingFactory, RecordedCall, wait_for_runs},
     };
+    use crate::session::status::SessionState;
     let calls = Arc::new(parking_lot::Mutex::new(Vec::<RecordedCall>::new()));
     let factory: Arc<dyn super::super::RunStreamFactory> =
         Arc::new(BlockingFactory {

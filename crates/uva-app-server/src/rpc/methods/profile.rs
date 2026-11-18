@@ -12,12 +12,7 @@ use serde_json::Value;
 use super::{parse, parse_raw};
 use crate::{
     api::v1::profile::ProfileChange,
-    profile::{
-        CapabilityAction,
-        CapabilityDomain,
-        ProfileAction,
-        RowEdit,
-    },
+    profile::{CapabilityAction, CapabilityDomain, ProfileAction, RowEdit},
     rpc::{RpcError, RpcRouter, encode},
 };
 
@@ -199,7 +194,7 @@ mod tests {
             state,
             "1",
             "profile/set",
-            json!({ "id": "skills", "enabled": false }),
+            json!({ "id": "skills", "disabled": true }),
         )
         .await;
         assert_eq!(answer["result"]["state"], "applied");
@@ -231,19 +226,22 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "capabilities",
                 "config",
-                "enabled",
+                "disabled",
+                "group",
                 "id",
+                "inject",
+                "name",
                 "plugin_state",
-                "runtime",
                 "segment",
                 "status",
             ]
         );
         assert_eq!(row["id"], "skills");
         assert_eq!(row["segment"], "core");
-        assert_eq!(row["runtime"], "native");
-        assert_eq!(row["enabled"], true);
+        assert_eq!(row["name"], "skills");
+        assert_eq!(row["disabled"], false);
         assert_eq!(row["status"], "mounted");
     }
 
@@ -259,7 +257,7 @@ mod tests {
             state,
             "1",
             "profile/set",
-            json!({ "id": "skills", "enabled": false }),
+            json!({ "id": "skills", "disabled": true }),
         )
         .await;
         let receipt = answer["result"].as_object().expect("a receipt");

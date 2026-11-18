@@ -190,13 +190,13 @@ pub fn merge_grants(policy: &mut ApprovalPolicy, rows: &[Value]) {
     for row in rows {
         // Decode only the rows that can carry a grant: a log holds
         // thousands of other rows, and a `serde` decode of each one
-        // is the expensive half of this fold.
-        if row.get("type").and_then(Value::as_str) != Some("approval_granted") {
+        // is the expensive half of this fold. What a row is comes
+        // from the vocabulary, not from a spelling held here.
+        let restored = uva_session::restore_row(row);
+        if !restored.restores_to(uva_session::RowTag::ApprovalGranted) {
             continue;
         }
-        let Ok(event) =
-            serde_json::from_value::<uva_session::SessionEvent>(row.clone())
-        else {
+        let Some(event) = restored.event() else {
             continue;
         };
         match event {

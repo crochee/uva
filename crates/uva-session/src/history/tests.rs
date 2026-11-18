@@ -118,6 +118,34 @@ fn derive_history_applies_a_compaction_replace() {
     assert_eq!(text(&history[0]).as_deref(), Some("summary"));
 }
 
+/// The fold is strict: a surface payload that is neither a message
+/// nor a compaction summary fails the projection instead of being
+/// guessed into one. The decoder now lives in the vocabulary — this
+/// pins that the strictness travelled with it.
+#[test]
+fn a_payload_that_is_neither_shape_fails_the_projection() {
+    // A compaction row whose payload carries no summary: the fold
+    // keeps it (it is a compaction), and the payload decodes to
+    // neither shape.
+    let rows = vec![
+        user_row(1, "hi"),
+        row(SessionEvent::Compaction {
+            seq: 2,
+            ts: "2026-10-25T00:00:03Z".into(),
+            data: json!({ "unexpected": true }),
+            surface_op: SurfaceOp::Replace {
+                start: 0,
+                end: 1,
+                source_event_seqs: vec![1],
+            },
+        }),
+    ];
+    assert!(
+        matches!(derive_history(&rows), Err(HistoryError::Decode(_))),
+        "a payload the vocabulary cannot decode is an error, not a guess"
+    );
+}
+
 #[test]
 fn derive_history_skips_the_metadata_header() {
     let rows = vec![header_row(), user_row(1, "hello")];

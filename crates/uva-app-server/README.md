@@ -192,9 +192,10 @@ profile 文档层缺省落在工作区的配置层 `<workspace>/.agents/profile.
 `<workspace>/.agents/skills/` 同一层；`--profile` 显式指定时以它为准，
 设置面也写回同一路径。文档层是设置面的生成物（整篇重写），不是仓库里
 该提交的配置源。
-`--dump-config` 打印确定性 JSON 后以 0 退出；`provides` / `inject` 来自
-已注册工厂的 manifest，工厂尚未注册的行显式输出空数组（`ui` 段同样输出
-空数组，因为 UI 行没有核心工厂）。
+`--dump-config` 打印确定性 JSON 后以 0 退出；`provides` 来自已注册工厂的
+manifest，`inject` 是**有效边**（工厂 manifest 的 `inject` ∪ 行自己声明的
+`inject`，同名键以行为准），工厂尚未注册的行显式输出空数组（`ui` 段同样
+输出空数组，因为 UI 行没有核心工厂）。
 `config.yaml` 的 provider 段不再被 boot 直接翻译成插件配置：用
 `uva-app-server translate --config config.yaml --out .agents/profile.toml`
 写出一份**完整**的 profile 文档 —— 内置插件集合 + 迁移后的两行：
@@ -208,34 +209,53 @@ profile 文档层缺省落在工作区的配置层 `<workspace>/.agents/profile.
 `ServerConfig::load` 直读。provider 的回退输入是
 `<workspace>/.agents/config.toml`（TOML 形状）。
 
-显式 `[core]` 行是权威装配：boot 通过 `build_plugins` → `mount_all`
-挂载这些行，省略某个内置 id 即禁用该插件（`agent-loop` / `model-adapter`
-缺失时 boot 直接失败），未知 id 直接失败。空的 profile 解析结果挂载
-内置原生集合。`hmr = true` 时核心每秒轮询 profile 各层，变更后
+显式 `[core]` 行是权威装配：boot 通过 `build_plugins` →
+`mount_all_with` 挂载这些行，省略某个内置行即不装该插件，未知 `name`
+直接失败；必需行（`agent-loop` / `model-adapter`）挂着缺服务时 boot 直接
+失败（缺依赖不整机报错，但这两行不允许静默停摆）。空的
+profile 解析结果挂载内置原生集合。`hmr = true` 时核心每秒轮询 profile 各层，变更后
 用 `diff_profiles` 只卸载 / 重挂 `added` / `removed` / `remounted` 的行；
 volatile-only 变更不重挂，已开始的 turn 继续用其已解析的服务句柄。
 `hmr = false` 的变更只记录「需要重启」。
 
-### 启用位与事务性变更（刀 7）
+### 行形状与事务性变更
 
-每一行还可以写 `enabled`：
+每一行都是一份 **manifest**（dsh entry 模型）：行自己声明装什么、依赖谁、
+开不开。
 
 ```toml
-[core]
-entries = [
-  { id = "skills", runtime = "native", enabled = false },
-  { id = "eval", runtime = "native",
-    enabled = { service = "skill-checks", check = "is_enabled", arg = "code-review" } },
+[[core.entries]]
+id = "agent-loop"
+name = "agent-loop"
+inject = ["llm.default", "tools", "sessions", "events"]
+
+[[core.entries]]
+id = "batch"
+group = true
+config = [
+  { id = "skills", name = "skills" },
 ]
+
+[[core.entries]]
+id = "skills"
+name = "skills"
+disabled = false
 ```
 
-三态是 `true`（缺省）/ `false` / 判定表 `{ service, check, arg }`。装配边界
-（`build_plugins` / `mount_all` / `load_ui_manifest` 之前）把 profile 过滤成
-**effective 行集**：`false` 的行与判定不可用的行都不进 Fiber 树，UI 段同样
-过滤；启用位翻转因此复用 `diff_profiles` 的 `removed` / `added` 语义。判定
-服务由插件以 `Arc<dyn EnableChecks>` 发布（第一个实现是 `skills` 行的
-`skill-checks`，读 SKILL.md 的 `metadata.enabled`），boot 分两波挂载以解开
-「判定服务由本代插件提供」的鸡蛋问题。
+- `id` 是行身份，`name` 是它装的插件（工厂目录的键）。
+- `disabled = true` 的行不进装配；组行（`group = true`）的 `disabled`
+  禁用其全部后代，组自己的子行写在 `config` 数组里。
+- `inject` 是这一行**额外**声明的依赖：有效边 = 插件 manifest 自己的
+  `inject` ∪ 行的 `inject`（同名键以行为准），文档只能加、不能挖掉插件的
+  固有最小依赖。
+- `isolate = { tools = true }` 让该行在自己的服务作用域里读 `tools`；
+  `isolate = { tools = "batch" }` 让同标签的行共享一个作用域。
+  `intercept = { llm = {...} }` 给服务携带拦截配置，沿组子树组合。
+
+缺依赖**不报错**：该行的 fiber 挂起（PENDING），开机审计逐行列出挂起的行
+与它还缺的服务名；只有 `agent-loop` 与 `model-adapter` 挂起才致命（没有
+模型循环的整机不许「看起来正常」）。行因失去 provider 而不再能运行时，
+文档把它写回 `disabled = true`（dsh 的自禁用写回）。
 
 显式写入（JSON-RPC `profile/set` 与自管 MCP 的 `profile` 工具）走同一条
 `AppState::profile_apply` 事务：内存重解析整层栈 → `overridden` 检测（home
@@ -247,7 +267,7 @@ patch / CLI overlay 拥有该字段时不写）→ 试装（build 在 unload 之
 `reload_profile` 保留旧的「只报需要重启」语义。写入会重排 `profile.toml`
 并丢失操作员注释（文档是设置面的生成物）。
 
-`[ui]` 条目必须是 `ui.` 命名空间、`ui-bundle` 运行时；行的 `config` 可以
+`[ui]` 段里的行必须在 `ui.` 命名空间；行的 `config` 可以
 声明插槽（`slots = [{ id = "chat.sidebar", cardinality = "many" }]`，
 `cardinality` 取 `one` / `many`，缺省 `many`）并向已声明的插槽注册组件
 （`components = [{ slot, kind, props }]`）。插槽 id 与宿主无关：浏览器渲染成

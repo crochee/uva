@@ -76,7 +76,7 @@ fn parses_user_message_with_surface_op() {
     assert!(ev.is_surface_eligible());
     assert_eq!(ev.seq(), 0);
     assert!(ev.surface_op().unwrap().is_append());
-    assert_eq!(ev.type_tag(), "user_message");
+    assert_eq!(ev.tag().as_wire(), "user_message");
 }
 
 /// A `user_message` row written before the attachments field
@@ -171,23 +171,22 @@ fn parses_compaction_with_surface_op() {
 #[test]
 fn log_only_events_carry_no_surface_op() {
     // The list is derived, not hand-written: every tag whose
-    // declared role is log-only, read off the enum through the
-    // const (which the cross-check in `log_surface`'s tests holds
-    // to the enum as a set). A hand-written list of the log-only
+    // declared role is log-only, read off the vocabulary's own
+    // exhaustive declaration. A hand-written list of the log-only
     // tags shrank silently when a variant joined the enum, and a
     // row that quietly stopped being asserted here is a row nobody
     // re-checked.
-    for tag in KNOWN_SESSION_EVENT_TYPES {
-        let skeleton = empty_event_of(tag)
-            .unwrap_or_else(|| panic!("{tag} has no skeleton"));
-        if skeleton.surface_role() != SurfaceRole::LogOnly {
+    for tag in RowTag::ALL {
+        if tag.surface_role() != SurfaceRole::LogOnly {
             continue;
         }
-        let v = event_json(tag, 99, false);
+        let name = tag.as_wire();
+        let v = event_json(name, 99, false);
         let ev = SessionEvent::from_value(&v)
-            .unwrap_or_else(|| panic!("{tag} should parse"));
-        assert!(!ev.is_surface_eligible(), "{tag} should not be surface");
-        assert!(ev.surface_op().is_none(), "{tag} should carry no op");
+            .unwrap_or_else(|| panic!("{name} should parse"));
+        assert_eq!(ev.tag(), tag, "{name} should parse back as itself");
+        assert!(!ev.is_surface_eligible(), "{name} should not be surface");
+        assert!(ev.surface_op().is_none(), "{name} should carry no op");
     }
 }
 
@@ -212,7 +211,7 @@ fn a_plugin_payload_under_the_cap_is_kept_verbatim() {
     assert_eq!(kind, "acme.span");
     assert_eq!(kept, &payload, "under the cap the payload is untouched");
     assert_eq!(*original_bytes, None);
-    assert_eq!(ev.type_tag(), "plugin");
+    assert_eq!(ev.tag().as_wire(), "plugin");
     assert!(!ev.is_surface_eligible());
     assert!(ev.surface_op().is_none());
 }
@@ -264,7 +263,7 @@ fn a_plugin_payload_over_the_cap_is_cut_to_its_encoded_budget() {
     );
     let replayed = SessionEvent::from_value(&written).expect("replays");
     assert_eq!(replayed.seq(), 6);
-    assert_eq!(replayed.type_tag(), "plugin");
+    assert_eq!(replayed.tag().as_wire(), "plugin");
 }
 
 #[test]
@@ -292,36 +291,69 @@ fn a_plugin_kind_is_capped_and_an_empty_one_is_named() {
 }
 
 #[test]
-fn bounding_a_row_twice_is_a_no_op() {
-    // `append_copied` re-spills a stamped row that already went
-    // through `enqueue`, so the bound runs over its own output.
-    // If the second pass re-cut, a bounded row would lose bytes
-    // every time it was re-spilled, and `original_bytes` would
-    // drift off the size the plugin actually sent.
+fn bounding_a_hand_built_plugin_event_cuts_once() {
+    // Variant fields are public, so a row built through the literal
+    // skips the constructor's caps — the writer bounds the typed
+    // event at the log boundary, before the one serialization. The
+    // bound is idempotent: a row it already cut passes through
+    // unchanged, or a re-bound row would lose bytes and
+    // `original_bytes` would drift off what the plugin sent.
     let filler = "\"".repeat(MAX_PLUGIN_PAYLOAD_BYTES);
-    let row = serde_json::to_value(SessionEvent::plugin(
-        9,
-        "2026-10-26T00:00:02Z",
-        "k".repeat(MAX_PLUGIN_KIND_BYTES * 4),
-        json!({"blob": filler}),
-    ))
-    .expect("the row serialises");
+    let hand_built = SessionEvent::Plugin {
+        seq: 9,
+        ts: "2026-10-26T00:00:02Z".to_string(),
+        kind: "k".repeat(MAX_PLUGIN_KIND_BYTES * 4),
+        payload: json!({"blob": filler}),
+        original_bytes: None,
+    };
 
-    let once = bound_plugin_row(row);
-    let twice = bound_plugin_row(once.clone());
-    assert_eq!(twice, once);
+    let once = bounded_event(&hand_built).expect("the event needs bounding");
+    let SessionEvent::Plugin {
+        kind,
+        payload,
+        original_bytes,
+        ..
+    } = &once
+    else {
+        panic!("a plugin row, got {once:?}");
+    };
+    assert!(
+        kind.len() <= MAX_PLUGIN_KIND_BYTES,
+        "the kind is capped: {}",
+        kind.len()
+    );
+    let Value::String(kept) = payload else {
+        panic!("an over-long payload is recorded as its leading bytes");
+    };
+    assert!(
+        kept.len() <= MAX_PLUGIN_PAYLOAD_BYTES,
+        "the payload is capped: {}",
+        kept.len()
+    );
+    assert!(
+        original_bytes.is_some(),
+        "the cap records the size the plugin actually sent"
+    );
+
+    let twice = bounded_event(&once).expect("a bounded row is still a row");
+    assert_eq!(
+        serde_json::to_value(&twice).expect("serialises"),
+        serde_json::to_value(&once).expect("serialises"),
+        "a bounded row is bounded once"
+    );
 }
 
 #[test]
-fn a_tool_output_row_keeps_its_tail_and_is_idempotent() {
+fn a_tool_output_chunk_keeps_its_tail_and_is_idempotent() {
+    // `tool_output`'s constructor does not cap — the log boundary
+    // does — so a constructor-built chunk exercises the same path a
+    // hand-built variant takes.
     let huge = "0123456789".repeat(MAX_TOOL_OUTPUT_BYTES);
-    let row = serde_json::to_value(crate::tool_output("c1", "shell", &huge))
-        .expect("the row serialises");
+    let event = crate::tool_output("c1", "shell", &huge);
 
-    let bounded = bound_tool_output_row(row);
-    let text = bounded["data"]["output"]
-        .as_str()
-        .expect("the chunk is text");
+    let bounded = bounded_event(&event).expect("the chunk needs bounding");
+    let row = serde_json::to_value(&bounded).expect("the row serialises");
+    let text = row["data"]["output"].as_str().expect("the chunk is text");
     let stored = serde_json::to_string(text).expect("serialises");
     assert!(
         stored.len() <= MAX_TOOL_OUTPUT_BYTES,
@@ -333,13 +365,17 @@ fn a_tool_output_row_keeps_its_tail_and_is_idempotent() {
         "the tail window keeps the newest output"
     );
     assert_eq!(
-        bounded["data"]["original_bytes"].as_u64(),
+        row["data"]["original_bytes"].as_u64(),
         Some(huge.len() as u64),
         "the cap records how much it summarized"
     );
 
-    let twice = bound_tool_output_row(bounded.clone());
-    assert_eq!(twice, bounded, "a bounded row is bounded once");
+    let twice = bounded_event(&bounded).expect("a bounded row is still a row");
+    assert_eq!(
+        serde_json::to_value(&twice).expect("serialises"),
+        row,
+        "a bounded row is bounded once"
+    );
 }
 
 #[test]
@@ -529,51 +565,16 @@ fn compaction_event_requires_surface_op() {
 }
 
 #[test]
-fn known_session_event_types_matches_type_tag_arm_count() {
-    // Every wire tag in `KNOWN_SESSION_EVENT_TYPES` must round-trip
-    // through `empty_event_of` -> `type_tag`. The round trip must
-    // be stable across the wire alphabet.
-    for tag in KNOWN_SESSION_EVENT_TYPES {
-        let event = empty_event_of(tag).expect(tag);
-        assert_eq!(event.type_tag(), *tag);
-    }
-}
-
-#[test]
-fn known_session_event_types_round_trips_via_serde() {
+fn every_skeleton_round_trips_via_serde() {
     // Each skeleton must serialise + deserialise without losing
     // its type discriminant; downstream consumers may persist
     // the skeleton and expect the shape to round-trip.
-    for tag in KNOWN_SESSION_EVENT_TYPES {
-        let event = empty_event_of(tag).expect(tag);
+    for tag in RowTag::ALL {
+        let event = tag.empty_event();
         let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["type"].as_str(), Some(*tag));
+        assert_eq!(json["type"].as_str(), Some(tag.as_wire()));
         let restored: SessionEvent = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.type_tag(), *tag);
-    }
-}
-
-#[test]
-fn empty_event_of_returns_none_for_unknown_tag() {
-    assert!(empty_event_of("not_a_real_event").is_none());
-    assert!(empty_event_of("").is_none());
-}
-
-#[test]
-fn known_session_event_types_lists_no_tag_twice() {
-    // The const is the public contract, so no tag may appear
-    // twice. The per-variant half — that the const names every
-    // variant's wire tag, and only those — is held by the
-    // cross-check in `log_surface`'s tests, which compares the
-    // const with the enum's tags as sets. A count cannot hold it:
-    // the number does not move when the enum grows, so a variant
-    // forgotten in the const kept the count green.
-    let mut seen = std::collections::HashSet::new();
-    for tag in KNOWN_SESSION_EVENT_TYPES {
-        assert!(
-            seen.insert(*tag),
-            "duplicate tag in KNOWN_SESSION_EVENT_TYPES: {tag}"
-        );
+        assert_eq!(restored.tag(), tag);
     }
 }
 
@@ -590,7 +591,7 @@ fn feedback_row_round_trips_as_a_log_only_event() {
         "thumbs_up": true,
     });
     let event = SessionEvent::from_value(&row).expect("the typed row parses");
-    assert_eq!(event.type_tag(), "feedback");
+    assert_eq!(event.tag().as_wire(), "feedback");
     assert_eq!(event.seq(), 11);
     assert!(!event.is_surface_eligible());
     assert!(event.surface_op().is_none());
@@ -614,7 +615,7 @@ fn tool_output_row_round_trips_as_a_log_only_partial() {
         "data": {"output": "first half"},
     });
     let event = SessionEvent::from_value(&row).expect("the partial row parses");
-    assert_eq!(event.type_tag(), "tool_output");
+    assert_eq!(event.tag().as_wire(), "tool_output");
     assert_eq!(event.seq(), 12);
     assert!(
         !event.is_surface_eligible(),
@@ -636,7 +637,7 @@ fn assistant_chunk_round_trips_and_omits_finish_reason_when_none() {
     });
     let ev = SessionEvent::from_value(&v).expect("parses");
     assert_eq!(ev.seq(), 4);
-    assert_eq!(ev.type_tag(), "assistant_chunk");
+    assert_eq!(ev.tag().as_wire(), "assistant_chunk");
     assert!(!ev.is_surface_eligible());
     let SessionEvent::AssistantChunk {
         chunk_seq,
@@ -654,7 +655,7 @@ fn assistant_chunk_round_trips_and_omits_finish_reason_when_none() {
     let s = serde_json::to_string(&ev).unwrap();
     assert!(!s.contains("finish_reason"), "got {s}");
     let back: SessionEvent = serde_json::from_str(&s).unwrap();
-    assert_eq!(back.type_tag(), "assistant_chunk");
+    assert_eq!(back.tag().as_wire(), "assistant_chunk");
 
     // A terminal chunk carries the provider stop reason.
     let terminal = json!({
@@ -683,7 +684,7 @@ fn lifecycle_shutdown_round_trips() {
         "data": {"reason": "controller_close", "children": 2},
     });
     let ev = SessionEvent::from_value(&v).expect("parses");
-    assert_eq!(ev.type_tag(), "session_shutdown");
+    assert_eq!(ev.tag().as_wire(), "session_shutdown");
     assert_eq!(ev.seq(), 11);
     assert!(!ev.is_surface_eligible());
     assert!(ev.surface_op().is_none());
@@ -692,7 +693,7 @@ fn lifecycle_shutdown_round_trips() {
     let restored =
         SessionEvent::from_value(&serde_json::from_str::<Value>(&s).unwrap())
             .expect("round-trip");
-    assert_eq!(restored.type_tag(), "session_shutdown");
+    assert_eq!(restored.tag().as_wire(), "session_shutdown");
     assert_eq!(restored.seq(), 11);
 }
 
@@ -705,7 +706,7 @@ fn lifecycle_shutdown_round_trips() {
 fn sandbox_mode_row_parses_and_preserves_unknown_modes() {
     let ev = SessionEvent::from_value(&event_json("sandbox_mode", 9, false))
         .expect("parses");
-    assert_eq!(ev.type_tag(), "sandbox_mode");
+    assert_eq!(ev.tag().as_wire(), "sandbox_mode");
     assert_eq!(ev.seq(), 9);
     assert_eq!(ev.sandbox_mode(), Some("workspace-write"));
     assert!(!ev.is_surface_eligible());
@@ -868,7 +869,7 @@ fn typed_usage_field_round_trips_through_json() {
     };
     let restored = round_trip_value(&event);
     assert_eq!(restored.provider_usage(), event.provider_usage());
-    assert_eq!(restored.type_tag(), "usage");
+    assert_eq!(restored.tag().as_wire(), "usage");
 }
 
 fn round_trip_value(event: &SessionEvent) -> SessionEvent {
@@ -910,10 +911,10 @@ fn a_transformed_result_row_names_its_plugin_and_its_two_versions() {
     // Log-only: it never joins the model's history or the surface.
     assert!(!event.is_surface_eligible());
     assert!(event.surface_op().is_none());
-    assert_eq!(event.type_tag(), "tool_result_transformed");
+    assert_eq!(event.tag().as_wire(), "tool_result_transformed");
     assert_eq!(event.seq(), 11);
     assert_eq!(
-        round_trip_value(&event).type_tag(),
+        round_trip_value(&event).tag().as_wire(),
         "tool_result_transformed"
     );
 }

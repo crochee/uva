@@ -433,14 +433,14 @@ mod tests {
         std::fs::create_dir_all(&agents).expect("the configuration layer");
         std::fs::write(
             agents.join("profile.toml"),
-            "[core]\nentries = [{ id = \"probe-document-row\", runtime = \
-             \"native\" }]\n",
+            "[core]\nentries = [{ id = \"probe-document-row\", name = \
+             \"probe-document-row\" }]\n",
         )
         .expect("the document");
         std::fs::write(
             dir.path().join("profile.toml"),
-            "[core]\nentries = [{ id = \"probe-retired-row\", runtime = \
-             \"native\" }]\n",
+            "[core]\nentries = [{ id = \"probe-retired-row\", name = \
+             \"probe-retired-row\" }]\n",
         )
         .expect("the retired document");
 

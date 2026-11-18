@@ -66,10 +66,10 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use serde_json::Value;
-use uva_provider::{Content, ContentPart, Message, Role};
+use uva_provider::Message;
 
 use crate::{
-    events::{SessionEvent, SurfaceOp},
+    events::{CurrentRow, RowTag, SessionEvent, SurfaceOp, restore_row},
     ledger_key,
     surface::{
         FoldError,
@@ -98,26 +98,38 @@ enum LogRow {
 
 /// Classify one raw row.
 ///
-/// Typed message tags (`user_message` / `assistant_message` /
-/// `tool_result`) carry a `uva_provider::Message`-shaped `data`
-/// payload; the legacy envelopes (`Message` / `UserInput` /
-/// `Model`) carry the shapes the pre-typed controller wrote. Rows
-/// outside the surface vocabulary (iteration / step / usage / …)
-/// are log-only.
+/// The question «what row is this» is answered by the row vocabulary:
+/// the row is restored to its current form first, so this function
+/// never sees a dialect and never guesses what a row meant. A
+/// current row's **tag** says which surface row it is — the payload
+/// never overrides it — and the restore hands over the message the
+/// row carries. Rows outside the surface vocabulary (iteration / step
+/// / usage / …) are log-only.
 fn classify_row(row: &Value) -> LogRow {
-    let Some(tag) = row.get("type").and_then(Value::as_str) else {
+    let current = restore_row(row);
+    let Some(tag) = current.tag() else {
         return LogRow::Ignored;
     };
     match tag {
-        "compaction" => classify_compaction(row),
-        "user_message" | "assistant_message" | "tool_result" => {
-            classify_typed_message(row)
+        RowTag::Compaction => classify_compaction(row),
+        RowTag::UserMessage | RowTag::AssistantMessage | RowTag::ToolResult => {
+            classify_message_row(&current, tag)
         }
-        "Message" => classify_message_envelope(row),
-        "UserInput" => classify_user_input(row),
-        "Model" => classify_model_part(row),
         _ => LogRow::Ignored,
     }
+}
+
+/// A surface message row: its kind comes from the tag, its payload
+/// from the restore.
+fn classify_message_row(current: &CurrentRow<'_>, tag: RowTag) -> LogRow {
+    let Some(message) = current.message() else {
+        return LogRow::Ignored;
+    };
+    let Some(kind) = tag.row_kind() else {
+        return LogRow::Ignored;
+    };
+    let key = ledger_key::key_of(&message);
+    message_row(message, kind, key, row_op(current.raw()))
 }
 
 /// The op a row asks for: its own `surface_op` when it carries one,
@@ -128,215 +140,6 @@ fn row_op(row: &Value) -> SurfaceOp {
             serde_json::from_value::<SurfaceOp>(value.clone()).ok()
         })
         .unwrap_or_else(SurfaceOp::append)
-}
-
-/// Typed message row: `data` is the message payload.
-fn classify_typed_message(row: &Value) -> LogRow {
-    let data = row.get("data").cloned().unwrap_or(Value::Null);
-    match decode_message(&data) {
-        Some((message, key)) => {
-            let kind = kind_of(message.role);
-            message_row(message, kind, key, row_op(row))
-        }
-        // A typed row whose payload is not a full `Message` (e.g. a
-        // repair-synthesised tool result) still names a real row.
-        None => classify_fallback_payload(row, &data),
-    }
-}
-
-/// Decode a message-bearing payload.
-///
-/// Accepts the exact `Message` wire form and the looser
-/// `{"role": …, "content": [<ContentPart>, …]}` form callers write
-/// by hand; the returned key is the row's durable identity (see
-/// [`ledger_key::key_of`]) when the payload carries one.
-fn decode_message(data: &Value) -> Option<(Message, Option<String>)> {
-    if let Ok(message) = serde_json::from_value::<Message>(data.clone()) {
-        let key = ledger_key::key_of(&message);
-        return Some((message, key));
-    }
-    let role = role_of(data.get("role").and_then(Value::as_str)?)?;
-    let parts: Vec<ContentPart> = data
-        .get("content")?
-        .as_array()?
-        .iter()
-        .filter_map(|part| {
-            serde_json::from_value::<ContentPart>(part.clone()).ok()
-        })
-        .collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let mut key = data
-        .get("tool_call_id")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    if key.is_none() && role == Role::Tool {
-        key = parts.iter().find_map(|part| match part {
-            ContentPart::ToolResult(result) => Some(result.tool_use_id.clone()),
-            _ => None,
-        });
-    }
-    let message = Message {
-        role,
-        content: Content::parts(parts),
-        tool_call_id: key,
-        ..Message::default()
-    };
-    let key = ledger_key::key_of(&message);
-    Some((message, key))
-}
-
-/// The provider role a wire tag names.
-fn role_of(tag: &str) -> Option<Role> {
-    match tag {
-        "user" => Some(Role::User),
-        "assistant" => Some(Role::Assistant),
-        "tool" => Some(Role::Tool),
-        "system" => Some(Role::System),
-        _ => None,
-    }
-}
-
-/// Map a provider role onto the typed surface variant.
-fn kind_of(role: Role) -> RowKind {
-    match role {
-        Role::User | Role::System => RowKind::User,
-        Role::Tool => RowKind::Tool,
-        _ => RowKind::Assistant,
-    }
-}
-
-/// The lossless `SessionMemory` envelope: the legacy `Message` tag
-/// with a whole provider [`Message`] as its payload.
-fn classify_message_envelope(row: &Value) -> LogRow {
-    let Some(data) = row.get("data").cloned() else {
-        return LogRow::Ignored;
-    };
-    match serde_json::from_value::<Message>(data) {
-        Ok(message) => {
-            let key = ledger_key::key_of(&message);
-            let kind = kind_of(message.role);
-            message_row(message, kind, key, row_op(row))
-        }
-        Err(error) => {
-            tracing::warn!(
-                target: "uva.session",
-                %error,
-                "log surface: dropping malformed Message envelope"
-            );
-            LogRow::Ignored
-        }
-    }
-}
-
-/// The controller's user-prompt envelope: the legacy `UserInput` tag
-/// with the turn's text under `data`.
-fn classify_user_input(row: &Value) -> LogRow {
-    match row
-        .get("data")
-        .and_then(|data| data.get("text"))
-        .and_then(Value::as_str)
-    {
-        Some(text) => {
-            message_row(Message::user(text), RowKind::User, None, row_op(row))
-        }
-        None => {
-            tracing::warn!(
-                target: "uva.session",
-                "log surface: dropping malformed UserInput envelope"
-            );
-            LogRow::Ignored
-        }
-    }
-}
-
-/// `{"type":"Model","data":<ContentPart>}` — one streamed model
-/// part per row.
-fn classify_model_part(row: &Value) -> LogRow {
-    let Some(data) = row.get("data").cloned() else {
-        return LogRow::Ignored;
-    };
-    match serde_json::from_value::<ContentPart>(data) {
-        Ok(part) => classify_part(part, row_op(row)),
-        Err(error) => {
-            tracing::warn!(
-                target: "uva.session",
-                %error,
-                "log surface: dropping malformed Model envelope"
-            );
-            LogRow::Ignored
-        }
-    }
-}
-
-/// Project one legacy `ContentPart` onto a message row.
-///
-/// Every row that can be shadowed carries a durable identity — the
-/// call it makes or the call it answers — so the compaction manager
-/// can name it without trusting an index. The identity is the
-/// message's own ([`ledger_key::key_of`]): a tool-result row carries
-/// the call id on its message, exactly as the typed row does.
-fn classify_part(part: ContentPart, op: SurfaceOp) -> LogRow {
-    match part {
-        ContentPart::Text(text) => {
-            let message = Message {
-                role: Role::Assistant,
-                content: Content::Single(ContentPart::Text(text)),
-                ..Message::default()
-            };
-            let key = ledger_key::key_of(&message);
-            message_row(message, RowKind::Assistant, key, op)
-        }
-        ContentPart::ToolUse(tool_use) => {
-            let message = Message {
-                role: Role::Assistant,
-                content: Content::Single(ContentPart::ToolUse(tool_use)),
-                ..Message::default()
-            };
-            let key = ledger_key::key_of(&message);
-            message_row(message, RowKind::Assistant, key, op)
-        }
-        ContentPart::ToolResult(tool_result) => {
-            let call_id = tool_result.tool_use_id.clone();
-            let message = Message {
-                role: Role::Tool,
-                content: Content::Single(ContentPart::ToolResult(tool_result)),
-                // The row's identity travels on the message, as it
-                // does for the typed row: the call this result
-                // answers.
-                tool_call_id: Some(call_id),
-                ..Message::default()
-            };
-            let key = ledger_key::key_of(&message);
-            message_row(message, RowKind::Tool, key, op)
-        }
-        ContentPart::Image(_)
-        | ContentPart::Audio(_)
-        | ContentPart::Reasoning(_)
-        | ContentPart::Resource(_) => LogRow::Ignored,
-    }
-}
-
-/// Last-resort normalisation: a payload that does not decode as a
-/// `Message` but still carries text or a call id.
-fn classify_fallback_payload(row: &Value, data: &Value) -> LogRow {
-    let op = row_op(row);
-    if let Some(text) = data.get("text").and_then(Value::as_str) {
-        return message_row(Message::user(text), RowKind::User, None, op);
-    }
-    let key = data
-        .get("call_id")
-        .or_else(|| data.get("tool_call_id"))
-        .and_then(Value::as_str);
-    match key {
-        Some(key) => {
-            let message = Message::tool(Content::text(data.to_string()), key);
-            let key = ledger_key::key_of(&message);
-            message_row(message, RowKind::Tool, key, op)
-        }
-        None => LogRow::Ignored,
-    }
 }
 
 /// A `compaction` row: its `surface_op` must be a `Replace` (the

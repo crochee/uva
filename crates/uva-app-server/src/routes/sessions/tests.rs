@@ -1,49 +1,6 @@
-use uva::session::{SessionSink, manager::SERVER_DEFAULT_USER_ID};
+use uva::session::manager::SERVER_DEFAULT_USER_ID;
 
 use super::*;
-
-/// Seed one row through a writer — the way every row reaches a
-/// session's log. The writer stamps the row's `seq` and `ts`,
-/// and the flush lands it.
-async fn seed_row(sink: &Arc<dyn SessionSink>, row: Value) {
-    let writer = uva::session::LogWriter::new(
-        Arc::clone(sink),
-        Arc::new(uva::core::SystemClock),
-    );
-    writer.append(row).await.expect("seed append");
-    writer.flush().await.expect("seed flush");
-}
-
-#[test]
-fn parse_status_filter_accepts_all_known_labels() {
-    for (label, expected) in [
-        ("unspecified", "unspecified"),
-        ("submitted", "submitted"),
-        ("working", "working"),
-        ("completed", "completed"),
-        ("failed", "failed"),
-        ("canceled", "canceled"),
-        ("input_required", "input_required"),
-        ("rejected", "rejected"),
-        ("auth_required", "auth_required"),
-    ] {
-        assert_eq!(parse_status_filter(label).unwrap(), expected);
-    }
-}
-
-#[test]
-fn parse_status_filter_rejects_unknown_label() {
-    let err = parse_status_filter("not_a_state").expect_err("unknown label");
-    assert!(matches!(err, uva::core::Error::InvalidItem { .. }));
-    assert!(err.to_string().contains("status filter 'not_a_state'"));
-}
-
-#[test]
-
-fn parse_status_filter_is_case_sensitive() {
-    let err = parse_status_filter("Completed").expect_err("uppercase");
-    assert!(matches!(err, uva::core::Error::InvalidItem { .. }));
-}
 
 #[test]
 fn parse_rfc3339_returns_none_for_invalid_input() {
@@ -72,69 +29,6 @@ fn parse_rfc3339_roundtrips_valid_timestamp() {
     assert_eq!(parsed.to_rfc3339(), "2026-08-22T10:00:00+00:00");
 }
 
-/// Non-empty sink with no live controller ⇒ the run finished
-/// ⇒ "completed". This is the regression guard for the bug
-/// where every finished session was reported "working"
-/// forever because `SessionEnded` is ephemeral and never
-/// reaches the JSONL sink.
-#[tokio::test]
-async fn infer_status_reports_completed_without_live_controller() {
-    let sink: Arc<dyn SessionSink> =
-        Arc::new(uva::session::in_memory::InMemorySessionSink::new("s1"));
-    seed_row(
-        &sink,
-        serde_json::json!({
-            "type": "Model",
-            "data": {"text": "hi"},
-        }),
-    )
-    .await;
-    let rows = sink.read().await.expect("rows");
-    let status = infer_status_from_parts(None, !rows.is_empty());
-    assert_eq!(status, "completed");
-}
-
-/// A live Running controller ⇒ "working" even before any
-/// durable event has been persisted.
-#[tokio::test]
-async fn infer_status_reports_working_for_running_controller() {
-    let sink = uva::session::in_memory::InMemorySessionSink::new("s1");
-    let rows = sink.read().await.expect("rows");
-    let status =
-        infer_status_from_parts(Some(SessionState::Running), !rows.is_empty());
-    assert_eq!(status, "working");
-}
-
-/// Empty sink + no live run ⇒ "unspecified" (never touched).
-#[tokio::test]
-async fn infer_status_reports_unspecified_for_untouched_session() {
-    let sink = uva::session::in_memory::InMemorySessionSink::new("s1");
-    let rows = sink.read().await.expect("rows");
-    let status = infer_status_from_parts(None, !rows.is_empty());
-    assert_eq!(status, "unspecified");
-}
-
-/// A cancelled controller with durable history ⇒ "canceled".
-#[tokio::test]
-async fn infer_status_reports_canceled_for_cancelled_controller() {
-    let sink: Arc<dyn SessionSink> =
-        Arc::new(uva::session::in_memory::InMemorySessionSink::new("s1"));
-    seed_row(
-        &sink,
-        serde_json::json!({
-            "type": "UserInput",
-            "data": {"text": "go"},
-        }),
-    )
-    .await;
-    let rows = sink.read().await.expect("rows");
-    let status = infer_status_from_parts(
-        Some(SessionState::Cancelled),
-        !rows.is_empty(),
-    );
-    assert_eq!(status, "canceled");
-}
-
 /// `live_session_state` maps the DashMap key to the
 /// controller state and returns `None` when absent.
 #[tokio::test]
@@ -147,7 +41,7 @@ async fn live_session_state_none_when_controller_absent() {
 fn session_detail_serialises_with_legacy_artifacts_field() {
     let detail = SessionDetail {
         id: "abc".into(),
-        status: "completed",
+        status: SessionStatus::Completed,
         context_id: "abc".into(),
         created_at: None,
         updated_at: None,
@@ -169,23 +63,205 @@ fn session_detail_serialises_with_legacy_artifacts_field() {
 }
 
 /// R5-10: `TypedEventResponse` serialises the typed event
-/// split (typed / legacy) with counts. Pin the field shape
-/// so the JSON contract is locked.
+/// split (typed / legacy / unknown / broken) with counts. Pin the
+/// field shape so the JSON contract is locked.
 #[test]
 fn typed_event_response_serialises_with_counts() {
     let resp = TypedEventResponse {
         id: "abc".to_string(),
         typed_count: 2,
         legacy_count: 1,
+        unknown_count: 3,
+        broken_count: 4,
         typed: Vec::new(),
         legacy: Vec::new(),
+        unknown: Vec::new(),
+        broken: Vec::new(),
     };
     let v = serde_json::to_value(&resp).expect("serialise");
     assert_eq!(v["id"], "abc");
     assert_eq!(v["typed_count"], 2);
     assert_eq!(v["legacy_count"], 1);
+    assert_eq!(v["unknown_count"], 3);
+    assert_eq!(v["broken_count"], 4);
     assert_eq!(v["typed"], serde_json::json!([]));
     assert_eq!(v["legacy"], serde_json::json!([]));
+    assert_eq!(v["unknown"], serde_json::json!([]));
+    assert_eq!(v["broken"], serde_json::json!([]));
+}
+
+/// The four buckets of the events response say what each row **is**.
+///
+/// A tag this build does not know is version skew — a row a newer
+/// build wrote. One bucket for it and for the old dialects said
+/// "history" about a row that is neither, and a client could not
+/// tell a row it must keep from a row it must not interpret.
+///
+/// An old dialect is no longer history either: the row vocabulary
+/// restores it to a current row, so it answers in `typed` — the
+/// split reports what the row **is**, not how it was written.
+#[tokio::test]
+async fn the_events_response_restores_old_dialects_and_keeps_unknown_tags_apart()
+ {
+    let (state, dir) = durable_state().await;
+    write_current_transcript(
+        dir.path(),
+        "mixed",
+        &[
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 1,
+                "ts": "2026-09-25T08:00:00+00:00",
+                "data": {"role": "user", "content": "hi"},
+            }),
+            serde_json::json!({
+                "type": "UserInput",
+                "seq": 2,
+                "ts": "2026-09-25T08:00:01+00:00",
+                "data": {"text": "hi"},
+            }),
+            serde_json::json!({
+                "type": "row_from_the_future",
+                "seq": 3,
+                "ts": "2026-09-25T08:00:02+00:00",
+                "data": {},
+            }),
+        ],
+    );
+    state
+        .session_manager
+        .create_with_user(
+            "mixed".to_string(),
+            SERVER_DEFAULT_USER_ID.to_string(),
+        )
+        .await
+        .expect("the session is registered");
+
+    let response = list_session_events(Arc::clone(&state), "mixed".to_string())
+        .await
+        .expect("the events read");
+
+    assert_eq!(
+        response.typed_count, 2,
+        "the typed row and the restored dialect row both decode"
+    );
+    assert_eq!(
+        response.legacy_count, 0,
+        "a dialect the vocabulary restores is a current row"
+    );
+    assert_eq!(response.unknown_count, 1, "the unknown tag is version skew");
+    assert_eq!(response.broken_count, 0, "no row is unreadable");
+    assert_eq!(response.unknown[0]["type"], "row_from_the_future");
+    // The restored row is the user message the legacy envelope held.
+    let restored = response
+        .typed
+        .iter()
+        .find_map(|event| match event {
+            uva::session::SessionEvent::UserMessage { data, .. } => {
+                serde_json::from_value::<uva::provider::Message>(data.clone())
+                    .ok()
+            }
+            _ => None,
+        })
+        .expect("the legacy prompt is a user message now");
+    assert_eq!(
+        restored.content.extract_text().as_deref(),
+        Some("hi"),
+        "the restored row carries the text the legacy envelope held"
+    );
+}
+
+/// A known tag whose payload does not decode is a **defect**, not a
+/// dialect: the row is in the log, this build knows what it is, and
+/// the payload is broken. It never becomes history.
+#[tokio::test]
+async fn the_events_response_reports_a_broken_row_apart_from_history() {
+    let (state, dir) = durable_state().await;
+    write_current_transcript(
+        dir.path(),
+        "broken",
+        &[
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 1,
+                "ts": "2026-09-25T08:00:00+00:00",
+                "data": {"role": "user", "content": "hi"},
+            }),
+            serde_json::json!({
+                "type": "tool_result",
+                "data": {"role": "tool"},
+            }),
+        ],
+    );
+    state
+        .session_manager
+        .create_with_user(
+            "broken".to_string(),
+            SERVER_DEFAULT_USER_ID.to_string(),
+        )
+        .await
+        .expect("the session is registered");
+
+    let response =
+        list_session_events(Arc::clone(&state), "broken".to_string())
+            .await
+            .expect("the events read");
+
+    assert_eq!(response.typed_count, 1, "the sound row decodes");
+    assert_eq!(response.legacy_count, 0, "a broken row is not history");
+    assert_eq!(response.unknown_count, 0, "its tag is known");
+    assert_eq!(response.broken_count, 1, "the broken row is reported");
+}
+
+/// The `broken` bucket is the vocabulary's «this build cannot read
+/// this row» answer, not a local re-take on it: a current row whose
+/// payload does not decode **and** a row with no usable tag. A
+/// dialect that restores and an unfamiliar tag stay readable — a
+/// current row and version skew, in their own buckets.
+///
+/// The `legacy` bucket is what is left of the old dialects: a row
+/// written in one the current vocabulary has no counterpart for
+/// (the `Agent` envelope, whose delegated child lives in its own
+/// session now).
+#[test]
+fn classify_rows_buckets_every_unreadable_row_as_broken() {
+    let raw = vec![
+        serde_json::json!({
+            "type": "user_message",
+            "seq": 1,
+            "ts": "2026-09-25T08:00:00+00:00",
+            "data": {"role": "user", "content": "hi"},
+        }),
+        serde_json::json!({"type": "UserInput", "data": {"text": "hi"}}),
+        serde_json::json!({"type": "Agent", "data": {}}),
+        serde_json::json!({"type": "a_tag_this_build_predates"}),
+        serde_json::json!({"type": "feedback", "seq": "broken"}),
+        serde_json::json!({"seq": 5}),
+        serde_json::json!("not an object"),
+    ];
+    let rows = classify_rows(raw);
+
+    assert_eq!(
+        rows.typed.len(),
+        2,
+        "the sound row and the restored dialect row decode"
+    );
+    assert_eq!(
+        rows.legacy.len(),
+        1,
+        "a dialect the vocabulary cannot restore is history"
+    );
+    assert_eq!(rows.legacy[0]["type"], "Agent");
+    assert_eq!(rows.unknown.len(), 1, "the unfamiliar tag is version skew");
+    assert_eq!(
+        rows.broken,
+        vec![
+            serde_json::json!({"type": "feedback", "seq": "broken"}),
+            serde_json::json!({"seq": 5}),
+            serde_json::json!("not an object"),
+        ],
+        "a known tag that fails to decode, and every row with no usable tag",
+    );
 }
 
 /// A hermetic `AppState` over a temp workspace: these tests build a
@@ -451,7 +527,7 @@ async fn fork_session_copies_the_transcript_into_an_addressable_child() {
             serde_json::json!({
                 "type": "Model",
                 "ts": "2026-09-25T08:00:05+00:00",
-                "data": {"text": "hi"},
+                "data": {"type": "text", "text": "hi"},
             }),
         ],
     );
@@ -495,17 +571,18 @@ async fn fork_session_drops_the_parent_metadata_header() {
         .session_manager
         .writer(SERVER_DEFAULT_USER_ID, "meta-origin");
     parent
-        .append(serde_json::json!({
-            "type": "UserInput",
-            "data": {"text": "hello"},
-        }))
+        .append_event(&uva::session::user_message(
+            serde_json::to_value(uva::provider::Message::user("hello"))
+                .expect("a user message serialises"),
+            None,
+        ))
         .await
         .expect("seed parent row 1");
     parent
-        .append(serde_json::json!({
-            "type": "Model",
-            "data": {"text": "hi"},
-        }))
+        .append_event(&uva::session::assistant_message(
+            serde_json::to_value(uva::provider::Message::assistant("hi"))
+                .expect("an assistant message serialises"),
+        ))
         .await
         .expect("seed parent row 2");
     parent.flush().await.expect("seed parent flush");
@@ -575,7 +652,7 @@ async fn fork_session_truncates_at_the_requested_stream_index() {
             serde_json::json!({
                 "stream_index": 2,
                 "type": "Model",
-                "data": {"text": "b"},
+                "data": {"type": "text", "text": "b"},
             }),
             serde_json::json!({
                 "stream_index": 3,
@@ -600,7 +677,8 @@ async fn fork_session_truncates_at_the_requested_stream_index() {
         .await
         .expect("the child is a session");
     assert_eq!(child.history.len(), 2);
-    assert_eq!(child.history[1]["data"]["text"], "b");
+    assert_eq!(child.history[1]["type"], "assistant_message");
+    assert_eq!(child.history[1]["data"]["content"]["Single"]["text"], "b");
 }
 
 /// The child's future is its own: a row appended after the fork
@@ -622,7 +700,7 @@ async fn fork_session_gives_the_child_an_independent_future() {
             serde_json::json!({
                 "type": "Model",
                 "ts": "2026-09-25T08:00:05+00:00",
-                "data": {"text": "beta"},
+                "data": {"type": "text", "text": "beta"},
             }),
         ],
     );
@@ -641,10 +719,11 @@ async fn fork_session_gives_the_child_an_independent_future() {
         .session_manager
         .writer(SERVER_DEFAULT_USER_ID, &forked.session_id);
     child_writer
-        .append(serde_json::json!({
-            "type": "UserInput",
-            "data": {"text": "gamma"},
-        }))
+        .append_event(&uva::session::user_message(
+            serde_json::to_value(uva::provider::Message::user("gamma"))
+                .expect("a user message serialises"),
+            None,
+        ))
         .await
         .expect("append to the child");
     child_writer.flush().await.expect("child flush");
@@ -776,7 +855,7 @@ async fn list_sessions_includes_a_session_known_only_from_disk() {
         .iter()
         .find(|row| row.id == "earlier-run")
         .expect("a durable transcript must be listed");
-    assert_eq!(row.status, "completed");
+    assert_eq!(row.status, SessionStatus::Completed);
     assert_eq!(row.context_id.as_deref(), Some("earlier-run"));
     // The creation time is the transcript's first event, not the
     // time of the request.
@@ -835,7 +914,7 @@ async fn list_sessions_reports_input_required_for_a_registered_session_awaiting_
         .iter()
         .find(|row| row.id == "paused-registered")
         .expect("the paused session is listed");
-    assert_eq!(row.status, "input_required");
+    assert_eq!(row.status, SessionStatus::InputRequired);
 }
 
 /// The same judgement for a session only the disk knows: after a
@@ -860,7 +939,7 @@ async fn list_sessions_reports_input_required_for_a_disk_only_session_awaiting_a
         .iter()
         .find(|row| row.id == "paused-durable")
         .expect("the paused session is listed");
-    assert_eq!(row.status, "input_required");
+    assert_eq!(row.status, SessionStatus::InputRequired);
 }
 
 /// A disk-only transcript written **through the session's
@@ -897,7 +976,7 @@ async fn disk_only_projections_skip_the_metadata_header() {
                 "seq": 2,
                 "type": "Model",
                 "ts": "2026-09-19T08:00:05+00:00",
-                "data": {"text": "hi"},
+                "data": {"type": "text", "text": "hi"},
             }),
         ])
         .await
@@ -1142,7 +1221,7 @@ async fn get_session_reads_a_transcript_the_registry_never_saw() {
             serde_json::json!({
                 "type": "Model",
                 "ts": "2026-09-19T08:00:05+00:00",
-                "data": {"text": "hi"},
+                "data": {"type": "text", "text": "hi"},
             }),
         ],
     );
@@ -1153,9 +1232,13 @@ async fn get_session_reads_a_transcript_the_registry_never_saw() {
 
     assert_eq!(detail.id, "earlier-run");
     assert_eq!(detail.context_id, "earlier-run");
-    assert_eq!(detail.status, "completed");
+    assert_eq!(detail.status, SessionStatus::Completed);
     assert_eq!(detail.history.len(), 2);
-    assert_eq!(detail.history[0]["data"]["text"], "hello");
+    assert_eq!(detail.history[0]["type"], "user_message");
+    assert_eq!(
+        detail.history[0]["data"]["content"]["Single"]["text"],
+        "hello"
+    );
     assert_eq!(
         detail.created_at.expect("first event ts").to_rfc3339(),
         "2026-09-19T08:00:00+00:00"
@@ -1223,4 +1306,107 @@ async fn get_session_rejects_a_traversal_id() {
         };
         assert_eq!(err.code, "invalid_item", "{id}");
     }
+}
+
+/// The detail view publishes every dialect row in the current
+/// vocabulary: legacy `UserInput` / `Model` rows reach the caller as
+/// `user_message` / `assistant_message`, their text in the current
+/// payload shape, and attachment references lifted to the row's top
+/// level.
+#[tokio::test]
+async fn get_session_publishes_dialect_rows_in_the_current_vocabulary() {
+    let (state, dir) = durable_state().await;
+    write_transcript(
+        dir.path(),
+        "dialect-log",
+        &[
+            serde_json::json!({
+                "type": "UserInput",
+                "ts": "2026-09-19T08:00:00+00:00",
+                "data": {
+                    "text": "hello",
+                    "attachments": [
+                        {"kind": "file", "name": "a.md",
+                         "mime_type": "text/markdown", "byte_len": 12}
+                    ]
+                },
+            }),
+            serde_json::json!({
+                "type": "Model",
+                "ts": "2026-09-19T08:00:05+00:00",
+                "data": {"type": "text", "text": "hi"},
+            }),
+        ],
+    );
+
+    let detail = get_session(Arc::clone(&state), "dialect-log".to_string())
+        .await
+        .expect("the dialect log reads");
+
+    assert_eq!(detail.history.len(), 2);
+    assert!(
+        detail
+            .history
+            .iter()
+            .all(|row| restore_row(row).is_current()),
+        "every published row is already in the current vocabulary"
+    );
+    assert_eq!(detail.history[0]["type"], "user_message");
+    assert_eq!(
+        detail.history[0]["data"]["content"]["Single"]["text"],
+        "hello"
+    );
+    assert_eq!(
+        detail.history[0]["attachments"][0]["name"], "a.md",
+        "the dialect payload's attachment refs are lifted to the row"
+    );
+    assert_eq!(detail.history[1]["type"], "assistant_message");
+    assert_eq!(detail.history[1]["data"]["content"]["Single"]["text"], "hi");
+}
+
+/// Rows with no current counterpart — an `Agent` delegation row, a
+/// tag this build does not know — are not published: the online
+/// surface never sees a dialect row, while `sessions/events` keeps
+/// reporting them in its `legacy` / `unknown` buckets.
+#[tokio::test]
+async fn get_session_does_not_publish_rows_without_a_current_shape() {
+    let (state, dir) = durable_state().await;
+    write_transcript(
+        dir.path(),
+        "no-counterpart",
+        &[
+            serde_json::json!({
+                "type": "UserInput",
+                "ts": "2026-09-19T08:00:00+00:00",
+                "data": {"text": "hello"},
+            }),
+            serde_json::json!({
+                "type": "Agent",
+                "ts": "2026-09-19T08:00:01+00:00",
+                "data": {},
+            }),
+            serde_json::json!({
+                "type": "NotATagThisBuildKnows",
+                "ts": "2026-09-19T08:00:02+00:00",
+                "data": {"text": "?"},
+            }),
+        ],
+    );
+
+    let detail = get_session(Arc::clone(&state), "no-counterpart".to_string())
+        .await
+        .expect("the log reads");
+
+    assert_eq!(
+        detail.history.len(),
+        1,
+        "only the row with a current counterpart is published"
+    );
+    assert_eq!(detail.history[0]["type"], "user_message");
+    // The dropped rows still moved the facts: the update time is the
+    // last raw row's, not the last published row's.
+    assert_eq!(
+        detail.updated_at.expect("last raw ts").to_rfc3339(),
+        "2026-09-19T08:00:02+00:00"
+    );
 }

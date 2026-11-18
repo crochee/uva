@@ -16,16 +16,35 @@ struct Fixture {
     state: uva_context::AgentState,
     sink: crate::agent::sink::EventSink,
     cancel: Arc<dyn uva_core::CancelToken>,
+    events: futures::channel::mpsc::UnboundedReceiver<crate::AgentEvent>,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let (tx, _rx) = futures::channel::mpsc::unbounded();
+        let (tx, rx) = futures::channel::mpsc::unbounded();
         Self {
             state: uva_context::AgentState::with_window(1_000),
             sink: crate::agent::sink::EventSink::new(Arc::new(tx), None),
             cancel: uva_core::AtomicCancelToken::shared(),
+            events: rx,
         }
+    }
+
+    /// The hook warnings the run published.
+    fn hook_warnings(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        while let Ok(event) = self.events.try_recv() {
+            if let crate::AgentEvent::System(uva_events::SystemEvent::Warning {
+                kind,
+                message,
+                ..
+            }) = event
+                && kind == uva_events::WarningKind::Hook
+            {
+                warnings.push(message);
+            }
+        }
+        warnings
     }
 
     fn ctx(&self) -> HookContext<'_> {
@@ -262,12 +281,13 @@ async fn a_panicking_gate_is_a_block() {
         .await;
 
     // Fail closed: a gate that could not answer does not get to
-    // approve the call.
-    assert!(matches!(arbitration.decision, HookDecision::Block { .. }));
-    let diagnostics = seams.host().diagnostics();
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].kind, DiagnosticKind::GateFailed);
-    assert_eq!(diagnostics[0].source, "broken");
+    // approve the call — and the refusal says which gate it was.
+    match &arbitration.decision {
+        HookDecision::Block { reason } => {
+            assert!(reason.contains("broken"), "{reason}");
+        }
+        other => panic!("expected a block, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -286,11 +306,12 @@ async fn a_failing_gate_is_a_block() {
         .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
         .await;
 
-    assert!(matches!(arbitration.decision, HookDecision::Block { .. }));
-    assert_eq!(
-        seams.host().diagnostics()[0].kind,
-        DiagnosticKind::GateFailed
-    );
+    match &arbitration.decision {
+        HookDecision::Block { reason } => {
+            assert!(reason.contains("broken"), "{reason}");
+        }
+        other => panic!("expected a block, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -325,8 +346,8 @@ async fn dropping_the_plugin_handle_unregisters_every_hook() {
 }
 
 #[tokio::test]
-async fn unsupported_decision_at_a_point_is_a_noop_with_a_diagnostic() {
-    let fixture = Fixture::new();
+async fn unsupported_decision_at_a_point_is_a_noop_and_is_reported() {
+    let mut fixture = Fixture::new();
     let ctx = fixture.ctx();
     let mut host = Host::new();
     let _reg1 = host.hook(Arc::new(FixedObserver {
@@ -343,16 +364,17 @@ async fn unsupported_decision_at_a_point_is_a_noop_with_a_diagnostic() {
     let arbitration =
         seams.run_started(&ctx, &fixture.sink, "default", 0).await;
 
+    // The decision does not apply — and it is not silently dropped:
+    // the run's durable record says which registration decided it.
     assert_eq!(arbitration.decision, HookDecision::Allow);
-    let diagnostics = seams.host().diagnostics();
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].kind, DiagnosticKind::UnsupportedDecision);
-    assert_eq!(diagnostics[0].source, "blocker");
+    let warnings = fixture.hook_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("blocker"), "{}", warnings[0]);
 }
 
 #[tokio::test]
-async fn a_panicking_observer_is_disabled_with_a_diagnostic() {
-    let fixture = Fixture::new();
+async fn a_panicking_observer_is_disabled_and_reported() {
+    let mut fixture = Fixture::new();
     let ctx = fixture.ctx();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut host = Host::new();
@@ -377,9 +399,11 @@ async fn a_panicking_observer_is_disabled_with_a_diagnostic() {
     assert_eq!(second.decision, HookDecision::Allow);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-    let diagnostics = seams.host().diagnostics();
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].kind, DiagnosticKind::Disabled);
+    // The panic is reported in the run's durable record: an operator
+    // reading the session sees which registration broke.
+    let warnings = fixture.hook_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("broken"), "{}", warnings[0]);
 }
 
 #[tokio::test]
@@ -481,7 +505,7 @@ async fn the_request_transformers_chain() {
 
 #[tokio::test]
 async fn a_panicking_transformer_is_disabled_and_the_chain_continues() {
-    let fixture = Fixture::new();
+    let mut fixture = Fixture::new();
     let ctx = fixture.ctx();
     let mut host = Host::new();
     let _reg1 = host.request_transformer(Arc::new(StampingTransformer {
@@ -504,9 +528,10 @@ async fn a_panicking_transformer_is_disabled_and_the_chain_continues() {
 
     // The broken transformer is skipped, the healthy one still ran.
     assert_eq!(params.model, "healthy-model");
-    let diagnostics = host.diagnostics();
-    assert_eq!(diagnostics.len(), 1);
-    assert_eq!(diagnostics[0].kind, DiagnosticKind::Disabled);
+    // The panic is reported in the run's durable record.
+    let warnings = fixture.hook_warnings();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("broken"), "{}", warnings[0]);
 }
 
 #[tokio::test]

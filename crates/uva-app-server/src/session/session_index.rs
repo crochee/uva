@@ -26,6 +26,7 @@ use uva::{
 };
 
 use super::EPHEMERAL_SESSION_PREFIX;
+use crate::routes::sessions::is_path_component;
 
 /// The server's session index: the sessions this deployment can read.
 pub struct ServerSessionIndex {
@@ -61,6 +62,22 @@ impl ServerSessionIndex {
     }
 }
 
+/// The session ids one directory holds, ephemeral sessions excluded.
+///
+/// The directory listing is blocking `std::fs`, so the caller rides
+/// the blocking pool; every enumeration in this module funnels
+/// through here so the exclusion is one rule.
+fn session_dir_ids(dir: &std::path::Path) -> Vec<String> {
+    let Ok(sessions) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    sessions
+        .flatten()
+        .map(|session| session.file_name().to_string_lossy().to_string())
+        .filter(|id| !id.starts_with(EPHEMERAL_SESSION_PREFIX))
+        .collect()
+}
+
 #[async_trait]
 impl SessionIndex for ServerSessionIndex {
     async fn session_ids(&self) -> Vec<String> {
@@ -85,21 +102,48 @@ impl SessionIndex for ServerSessionIndex {
                 return found;
             };
             for user in users.flatten() {
-                let Ok(sessions) = std::fs::read_dir(user.path()) else {
-                    continue;
-                };
-                for session in sessions.flatten() {
-                    let id = session.file_name().to_string_lossy().to_string();
-                    if id.starts_with(EPHEMERAL_SESSION_PREFIX) {
-                        continue;
-                    }
-                    found.push(id);
-                }
+                found.extend(session_dir_ids(&user.path()));
             }
             found
         })
         .await
         .unwrap_or_default();
+        ids.extend(scanned);
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    async fn session_ids_of_user(&self, user_id: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .registry
+            .list_all()
+            .await
+            .map(|sessions| {
+                sessions
+                    .into_iter()
+                    .filter(|session| {
+                        session.user_id == user_id
+                            && !session.id.starts_with(EPHEMERAL_SESSION_PREFIX)
+                    })
+                    .map(|session| session.id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        // The user-scoped half of `session_ids`: the registry holds
+        // what this process opened for the user, the user's one
+        // directory holds what any process ever wrote — a delegated
+        // child is exactly the kind of session only the directory
+        // knows. A hand-built `user_id` must not climb out of the
+        // sessions root, so it is held to one path component.
+        if !is_path_component(user_id) {
+            return ids;
+        }
+        let dir = self.registry.sessions_root().join(user_id);
+        let scanned =
+            tokio::task::spawn_blocking(move || session_dir_ids(&dir))
+                .await
+                .unwrap_or_default();
         ids.extend(scanned);
         ids.sort();
         ids.dedup();
@@ -112,8 +156,7 @@ impl SessionIndex for ServerSessionIndex {
         limit: usize,
     ) -> Result<Vec<Value>, SessionError> {
         let user = self.user_of(id);
-        let rows = self.registry.sink(&user, id).read().await?;
-        Ok(rows.into_iter().take(limit).collect())
+        self.registry.sink(&user, id).read_head_rows(limit).await
     }
 
     async fn read_tail(
@@ -183,6 +226,14 @@ impl SessionIndex for SessionIndexSlot {
         let index = { self.inner.read().clone() };
         match index {
             Some(index) => index.session_ids().await,
+            None => Vec::new(),
+        }
+    }
+
+    async fn session_ids_of_user(&self, user_id: &str) -> Vec<String> {
+        let index = { self.inner.read().clone() };
+        match index {
+            Some(index) => index.session_ids_of_user(user_id).await,
             None => Vec::new(),
         }
     }
@@ -278,6 +329,51 @@ mod tests {
         );
     }
 
+    /// The user-scoped half of the enumeration: one user's sessions
+    /// from both sources, ephemeral sessions excluded, and a
+    /// hand-built user id that is not one path component answers
+    /// with nothing from the directory.
+    #[tokio::test]
+    async fn user_scoped_enumeration_reads_one_users_half() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = Arc::new(SessionRegistry::new(dir.path().to_path_buf()));
+        let alice = registry.writer("alice", "alice-child");
+        alice.append_event_nowait(&subagent_enter(
+            "alice-child",
+            "parent",
+            1,
+            "scout",
+        ));
+        alice.flush().await.expect("the rows are durable");
+        let bob = registry.writer("bob", "bob-child");
+        bob.append_event_nowait(&subagent_enter(
+            "bob-child",
+            "parent",
+            1,
+            "scout",
+        ));
+        bob.flush().await.expect("the rows are durable");
+        std::fs::create_dir_all(
+            dir.path().join("alice").join("anthropic-ephemeral"),
+        )
+        .expect("the ephemeral session's directory");
+        let index = ServerSessionIndex::new(Arc::clone(&registry));
+
+        let ids = index.session_ids_of_user("alice").await;
+        assert!(ids.contains(&"alice-child".to_string()), "{ids:?}");
+        assert!(
+            !ids.contains(&"bob-child".to_string()),
+            "another user's session is not enumerated: {ids:?}"
+        );
+        assert!(
+            !ids.contains(&"anthropic-ephemeral".to_string()),
+            "ephemeral sessions are excluded: {ids:?}"
+        );
+        assert!(
+            index.session_ids_of_user("../bob").await.is_empty(),
+            "a hand-built user id reads no directory"
+        );
+    }
     /// A session the process has never opened is still found: the
     /// directory is where a restarted process's sessions live.
     #[tokio::test]

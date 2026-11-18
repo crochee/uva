@@ -55,6 +55,7 @@ pub mod app;
 pub mod cli;
 pub mod domains;
 pub mod render;
+pub mod supersession;
 pub mod transport;
 pub mod ui_schema;
 pub mod views;

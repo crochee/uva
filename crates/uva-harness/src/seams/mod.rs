@@ -776,15 +776,15 @@ impl Seams {
         sink: &EventSink,
     ) -> RegistryStep {
         let pass = self.registry.dispatch(key, event, ctx).await;
-        // A gate that could not answer at a point with no denial to
-        // carry (`llm/request`, `llm/result`) cannot refuse the pass.
-        // The registry reports it instead of folding it into `Allow` —
-        // it becomes a `hook` warning on the run's event stream, which
-        // the session controller persists like every other warning, so
-        // an operator reading the session sees the gate that never
-        // answered.
-        for failure in &pass.failures {
-            sink.warn(WarningKind::Hook, None, failure.clone());
+        // What the pass learned about the registrations that ran: a
+        // gate that could not answer where no denial exists, a
+        // decision the point did not accept, a registration that
+        // panicked. They become `hook` warnings on the run's event
+        // stream, which the session controller persists like every
+        // other warning, so an operator reading the session sees the
+        // registration that misbehaved.
+        for fact in &pass.facts {
+            sink.warn(WarningKind::Hook, None, fact.message().to_owned());
         }
         let Some(rewritten) = pass.event else {
             let name = pass.denied_by.as_deref().unwrap_or("hook registry");
@@ -848,6 +848,14 @@ impl Seams {
             AssertUnwindSafe(chain.run(request, recorder(Arc::clone(&seen))))
                 .catch_unwind()
                 .await;
+        // What the chain learned about the registrations that ran. The
+        // chain runs where the run's sink is not reachable, so the
+        // facts travelled with the pass; they are written here, where
+        // the sink lives — the same warning the registry's path
+        // reports.
+        for fact in pass.take_facts() {
+            sink.warn(WarningKind::Hook, None, fact.message().to_owned());
+        }
         match ran {
             Ok(Ok(Outcome::Continue)) => {
                 let event = lock(&seen).take();

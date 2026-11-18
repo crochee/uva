@@ -13,7 +13,7 @@ use uva::{core::CancelToken, provider::traits::ModelProvider};
 
 use super::{
     inner::{ControllerInner, ParkedPrompt},
-    ops::{SessionOp, SessionState},
+    ops::SessionOp,
     pin::{OpAck, SubmittedOp},
     run_log::{attachment_refs_of_parts, prompt_text_of_parts, truncate},
 };
@@ -86,19 +86,11 @@ pub(super) async fn run_controller_loop(
     let lease_held = !inner.lease.is_empty();
 
     loop {
-        // The lease renewal comes FIRST, and the check below runs
-        // before the select: a slow disk must not be able to push the
-        // renewal out by a whole batch of fsyncs — that is a real
-        // distance from `lease_ttl / 3`, and a lease that expires
-        // mid-turn hands the session to another node.
-        if lease_held
-            && !renew_lease_if_due(&inner, &mut renew_at, lease_ttl).await
-        {
-            break;
-        }
-        // The lease deadline is checked before the select, so the
-        // renewal is at most one round late however long the select
-        // takes.
+        // The lease renewal comes first, before the select: a slow
+        // disk must not be able to push the renewal out by a whole
+        // batch of fsyncs — that is a real distance from
+        // `lease_ttl / 3`, and a lease that expires mid-turn hands
+        // the session to another node.
         if lease_held
             && !renew_lease_if_due(&inner, &mut renew_at, lease_ttl).await
         {
@@ -508,17 +500,15 @@ async fn park_durably(
         (provider, model, Arc::clone(&deps.attachment_store))
     };
     let park_id = uuid::Uuid::new_v4().to_string();
-    let event = uva::session::SessionEvent::ParkedPrompt {
-        seq: 0,
-        ts: String::new(),
-        park_id: park_id.clone(),
-        text: prompt_text_of_parts(parts),
-        attachments: attachment_refs_of_parts(parts, store.as_ref()),
-        agent_name: agent_name.clone(),
-        provider: Some(provider),
-        model: Some(model),
+    let event = uva::session::parked_prompt(
+        park_id.clone(),
+        prompt_text_of_parts(parts),
+        attachment_refs_of_parts(parts, store.as_ref()),
+        agent_name.clone(),
+        Some(provider),
+        Some(model),
         rerun,
-    };
+    );
     // The flush lands the row before the op returns: the park is the
     // promise, and a queued-but-unflushed row does not survive a crash.
     // The variant owns the row's shape; the writer stamps its ordinal.
@@ -596,14 +586,9 @@ async fn handle_feedback_op(
         thumbs_up,
         "op_rx: received Feedback; persisting to sink"
     );
-    // The writer stamps the row's `seq` and `ts`; the variant owns
+    // The writer stamps the row's `seq` and `ts`; the builder owns
     // the row's shape, so the call site names no wire keys.
-    let event = uva::session::SessionEvent::Feedback {
-        seq: 0,
-        ts: String::new(),
-        message_id,
-        thumbs_up,
-    };
+    let event = uva::session::feedback(message_id, thumbs_up);
     // The feedback row goes through the session's one writer, so
     // it carries the writer's ordinal — and the flush lands it
     // before the op returns: feedback has no broadcast of its own
@@ -687,11 +672,7 @@ async fn spend_parked_turns(
 ) -> Option<String> {
     let mut failure = None;
     for parked in dropped {
-        let event = uva::session::SessionEvent::ParkConsumed {
-            seq: 0,
-            ts: String::new(),
-            park_id: parked.park_id,
-        };
+        let event = uva::session::park_consumed(parked.park_id);
         if let Err(e) = inner.append_durable_event(&event).await {
             tracing::warn!(
                 target: "uva.session",
@@ -803,8 +784,7 @@ async fn handle_resume_op(
         allow_drift,
         "op_rx: received Resume; parking it for the next run"
     );
-    let live = *inner.state.lock().expect("state mutex poisoned");
-    if live == SessionState::Running {
+    if inner.state.is_running() {
         // The route refuses this; a wire-forwarded op could still
         // reach an owner mid-run. Parking here would attach the token
         // to a later, unrelated run.
@@ -840,10 +820,7 @@ async fn handle_resume_op(
             "Resume replaced an unconsumed token; last writer wins",
         );
     }
-    let mut state = inner.state.lock().expect("state mutex poisoned");
-    if *state == SessionState::AwaitingApproval {
-        *state = SessionState::Idle;
-    }
+    inner.state.advance(super::state::Transition::ResumedParked);
 }
 
 /// `true` when the log has already decided every call `token` names.
@@ -887,30 +864,16 @@ async fn is_spent_resume(
     })
 }
 
-/// Flip the controller state to `Cancelled` and publish the
-/// R11 `Cancelled` operation snapshot on the snapshot bus.
-/// Shared shape with the run task's terminal snapshots.
+/// Walk the `Cancelled` transition: the table flips the state and
+/// publishes the R11 `Cancelled` operation snapshot.
 fn publish_cancelled_snapshot(
     inner: &ControllerInner,
     reason: &Option<String>,
 ) {
-    let mut state = inner.state.lock().expect("state mutex poisoned");
-    *state = SessionState::Cancelled;
-    let _seq =
-        inner
-            .snapshot_bus
-            .publish(uva::session::OperationSnapshot::new(
-                inner.session_id.clone(),
-                "default".to_string(),
-                uva::session::OperationState::Cancelled {
-                    reason: reason
-                        .clone()
-                        .unwrap_or_else(|| "cancelled".into()),
-                },
-                0,
-                inner.deps.lock().default_max_iterations,
-                uva::provider::TokenUsage::default(),
-            ));
+    inner.state.advance(super::state::Transition::Cancelled {
+        reason: reason.clone().unwrap_or_else(|| "cancelled".into()),
+        max_iterations: inner.deps.lock().default_max_iterations,
+    });
 }
 
 /// `Shutdown`: take + fire the cancel token, then bound the

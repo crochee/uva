@@ -18,11 +18,7 @@
 //! the UI tree with it — so the tree and the read models cannot drift
 //! apart.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, sync::Arc};
 
 use parking_lot::RwLock;
 use uva::{
@@ -33,14 +29,18 @@ use uva::{
 use super::mcp::McpRuntime;
 use crate::{
     api::v1::profile::{ProfileRow, ProfileSegment},
-    composition::kernel::{BootServices, profile_factories},
+    composition::kernel::{
+        BootExtras,
+        BootServices,
+        build_rows,
+        mount_built,
+        profile_factories,
+    },
     profile::{
-        BootContext,
         Profile,
         ProfileDiff,
         ProfileStore,
         Realms,
-        build_plugins,
         diff_profiles,
         effective,
     },
@@ -49,13 +49,13 @@ use crate::{
 
 /// The process handles an assembly change needs but does not own.
 ///
-/// The assembly owns the mounted tree and its read models; the
-/// workspace the rows read, the clock they stamp with, and the MCP
-/// runtime the `mcp` row's teardown stops belong to the process state
-/// that built them, so a change borrows them.
+/// The assembly owns the mounted tree and its read models; the clock
+/// the rows stamp with and the MCP runtime the `mcp` row's teardown
+/// stops belong to the process state that built them, so a change
+/// borrows them. The workspace the rows build from is not borrowed
+/// per change: it lives in the assembly's stored build recipe, so a
+/// remount builds from what the boot built from.
 pub(crate) struct AssemblyContext<'a> {
-    /// The workspace the rows build their files from.
-    pub(crate) workspace_root: &'a Path,
     /// The process clock every row stamps with.
     pub(crate) clock: &'a SharedClock,
     /// The MCP runtime the `mcp` row's teardown stops.
@@ -72,6 +72,59 @@ pub struct Reconciled {
     /// process restart (see [`crate::state::AppState::reload_profile`]'s
     /// Residuals).
     pub mcp_touched: bool,
+    /// Rows that lost a provider because that provider left the
+    /// document: they can no longer run, so the host writes
+    /// `disabled = true` back for them (dsh's self-disable write-back).
+    pub dep_lost: Vec<String>,
+}
+
+/// Flattens one segment's row tree (group children included) into wire
+/// rows, carrying the group `disabled` inheritance.
+struct RowCollector<'a> {
+    out: Vec<ProfileRow>,
+    assembled: &'a Profile,
+    factories: &'a crate::profile::PluginFactories,
+}
+
+impl RowCollector<'_> {
+    fn push(
+        &mut self,
+        assembly: &Assembly,
+        segment: ProfileSegment,
+        row: &crate::profile::Manifest,
+        inherited_disabled: bool,
+    ) {
+        let off = row.disabled || inherited_disabled;
+        let status = if off || self.assembled.find(&row.id).is_none() {
+            "off: disabled".to_owned()
+        } else {
+            "mounted".to_owned()
+        };
+        let plugin_state = assembly
+            .plugin_state(&row.id)
+            .map(|state| format!("{state:?}"));
+        let inject = self
+            .factories
+            .get(&row.name)
+            .map(|factory| {
+                let manifest = factory.manifest();
+                crate::profile::effective_inject(
+                    &manifest.inject,
+                    row.inject.as_deref(),
+                )
+            })
+            .unwrap_or_else(|| row.inject.clone().unwrap_or_default());
+        self.out.push(ProfileRow::new(
+            segment,
+            row,
+            inject,
+            status,
+            plugin_state,
+        ));
+        for child in &row.children {
+            self.push(assembly, segment, child, off);
+        }
+    }
 }
 
 /// The mounted tree and the two read models that describe it.
@@ -94,6 +147,13 @@ pub struct Assembly {
     /// with it and every HMR remount reuses it, so a `Shared` label
     /// keeps naming one scope for the process's life.
     realms: Arc<Realms>,
+    /// The boot's build recipe: the workspace, blocking pool,
+    /// compaction policy and session corpus every row builds from. A
+    /// hot reload builds with exactly this recipe — [`Self::apply`]
+    /// and [`Self::remount_row`] go through the one
+    /// [`build_rows`](crate::composition::kernel::build_rows) stanza —
+    /// so a remounted row is built the way the boot built it.
+    extras: BootExtras,
     /// The mounted plugin groups. The boot group comes first; an HMR
     /// remount appends one group for the rows it rebuilt, so an
     /// untouched plugin's fiber and effects stay where they were.
@@ -119,23 +179,38 @@ pub struct Assembly {
     ui_tree: RwLock<UiTree>,
 }
 
+/// What the boot hands the assembly: the kernel context, the containers
+/// the factories build from, and the mounted tree with its shared
+/// isolation-label registry.
+pub(crate) struct BootedAssembly {
+    /// The kernel context every service was registered in.
+    pub kernel: Context,
+    /// The containers a hot reload builds new rows from.
+    pub boot_services: Arc<BootServices>,
+    /// The mounted groups, in mount order.
+    pub mount: Vec<MountHandle>,
+    /// The process-wide isolation-label registry.
+    pub realms: Arc<Realms>,
+    /// The build recipe a hot reload reuses, so a remounted row is
+    /// built the way the boot built it.
+    pub extras: BootExtras,
+}
+
 impl Assembly {
     /// Build the sub-state from the boot's mounted tree.
     pub(crate) fn new(
-        kernel: Context,
-        boot_services: Arc<BootServices>,
-        realms: Arc<Realms>,
-        mount: Vec<MountHandle>,
+        booted: BootedAssembly,
         profile: Profile,
         assembly: Profile,
         profile_store: Option<ProfileStore>,
         ui_tree: UiTree,
     ) -> Self {
         Self {
-            kernel,
-            boot_services,
-            realms,
-            mount: parking_lot::Mutex::new(mount),
+            kernel: booted.kernel,
+            boot_services: booted.boot_services,
+            realms: booted.realms,
+            mount: parking_lot::Mutex::new(booted.mount),
+            extras: booted.extras,
             profile: RwLock::new(profile),
             assembly: RwLock::new(assembly),
             profile_store,
@@ -155,6 +230,13 @@ impl Assembly {
         self.assembly.read().clone()
     }
 
+    /// The layer paths a write goes through, when the deployment has
+    /// them.
+    #[must_use]
+    pub(crate) fn profile_store(&self) -> Option<&ProfileStore> {
+        self.profile_store.as_ref()
+    }
+
     /// The settings page's read model: every row of the raw profile,
     /// with the assembly's verdict and the kernel's plugin state.
     ///
@@ -165,71 +247,20 @@ impl Assembly {
         let raw = self.raw();
         let assembled = effective(&raw);
         let factories = profile_factories(Arc::clone(&self.boot_services));
-        let mut rows = Vec::new();
+        let mut collector = RowCollector {
+            out: Vec::new(),
+            assembled: &assembled,
+            factories: &factories,
+        };
         for (segment, tree) in [
             (ProfileSegment::Core, &raw.core),
             (ProfileSegment::Ui, &raw.ui),
         ] {
             for row in tree {
-                self.collect_rows(
-                    &mut rows,
-                    segment,
-                    row,
-                    false,
-                    &assembled,
-                    &factories,
-                );
+                collector.push(self, segment, row, false);
             }
         }
-        rows
-    }
-
-    /// Flatten one row (and its group children) into wire rows.
-    fn collect_rows(
-        &self,
-        rows: &mut Vec<ProfileRow>,
-        segment: ProfileSegment,
-        row: &crate::profile::Manifest,
-        inherited_disabled: bool,
-        assembled: &Profile,
-        factories: &crate::profile::PluginFactories,
-    ) {
-        let off = row.disabled || inherited_disabled;
-        let status = if off || assembled.find(&row.id).is_none() {
-            "off: disabled".to_owned()
-        } else {
-            "mounted".to_owned()
-        };
-        let plugin_state = self
-            .plugin_state(&row.id)
-            .map(|state| format!("{state:?}"));
-        let inject = factories
-            .get(&row.name)
-            .map(|factory| {
-                let manifest = factory.manifest();
-                crate::profile::effective_inject(
-                    &manifest.inject,
-                    row.inject.as_deref(),
-                )
-            })
-            .unwrap_or_else(|| row.inject.clone().unwrap_or_default());
-        rows.push(ProfileRow::new(
-            segment,
-            row,
-            inject,
-            status,
-            plugin_state,
-        ));
-        for child in &row.children {
-            self.collect_rows(
-                rows,
-                segment,
-                child,
-                off,
-                assembled,
-                factories,
-            );
-        }
+        collector.out
     }
 
     /// A mounted service, by key.
@@ -354,19 +385,6 @@ impl Assembly {
         }
     }
 
-    /// Mount one extra group of test plugins into the kernel.
-    ///
-    /// A fixture that needs a delegated enablement check answers it
-    /// from the same scope the rows resolve their checks against, so
-    /// the plugin has to go into this kernel — not a fresh one.
-    #[cfg(test)]
-    pub(crate) fn mount_for_test(
-        &self,
-        plugins: &[Arc<dyn uva::kernel::Plugin>],
-    ) -> Result<MountHandle, uva::kernel::MountError> {
-        uva::kernel::mount_all(&self.kernel, plugins)
-    }
-
     /// Swap the UI tree outright.
     ///
     /// Test-only: the production tree moves with
@@ -398,18 +416,16 @@ impl Assembly {
             ui: Vec::new(),
             hmr: assembly.hmr,
         };
-        let factories = profile_factories(Arc::clone(&self.boot_services));
-        let boot = BootContext::new(context.workspace_root.to_path_buf())
-            .with_host(Arc::clone(&self.boot_services))
-            .with_clock(context.clock.clone());
-        let mounted_rows = build_plugins(&one, &factories, &boot, &self.realms)
-            .map_err(|error| error.to_string())?;
-        let pairs = mounted_rows
-            .into_iter()
-            .map(|mounted| (mounted.plugin, mounted.row))
-            .collect::<Vec<_>>();
+        let built = build_rows(
+            &self.boot_services,
+            &self.realms,
+            context.clock.clone(),
+            &self.extras,
+            &one,
+        )
+        .map_err(|error| error.to_string())?;
         self.unload_plugin(context, id).await;
-        match uva::kernel::mount_all_with(&self.kernel, &self.realms, &pairs) {
+        match mount_built(&self.kernel, &self.realms, built, &assembly) {
             Ok(mounted) => {
                 self.mount.lock().push(mounted);
                 Ok(())
@@ -491,6 +507,7 @@ impl Assembly {
             return Ok(Reconciled {
                 diff,
                 mcp_touched: false,
+                dep_lost: Vec::new(),
             });
         }
         let tree = load_ui_tree(&next.ui).map_err(|error| error.to_string())?;
@@ -501,23 +518,21 @@ impl Assembly {
             .chain(diff.remounted.iter())
             .map(String::as_str)
             .collect();
-        let boot = BootContext::new(context.workspace_root.to_path_buf())
-            .with_host(Arc::clone(&self.boot_services))
-            .with_clock(context.clock.clone());
-        let mount_rows = rows_for(&next, &changed);
-        let mounted_rows =
-            build_plugins(&mount_rows, &factories, &boot, &self.realms)
-                .map_err(|error| error.to_string())?;
-        let plugins = mounted_rows
-            .into_iter()
-            .map(|mounted| (mounted.plugin, mounted.row))
-            .collect::<Vec<_>>();
+        let changed_rows = rows_for(&next, &changed);
+        let built = build_rows(
+            &self.boot_services,
+            &self.realms,
+            context.clock.clone(),
+            &self.extras,
+            &changed_rows,
+        )
+        .map_err(|error| error.to_string())?;
 
         for id in diff.removed.iter().chain(diff.remounted.iter()) {
             self.unload_plugin(context, id).await;
         }
-        if !plugins.is_empty() {
-            match uva::kernel::mount_all_with(&self.kernel, &self.realms, &plugins) {
+        if !changed.is_empty() {
+            match mount_built(&self.kernel, &self.realms, built, &next) {
                 Ok(mounted) => self.mount.lock().push(mounted),
                 Err(error) => {
                     tracing::error!(
@@ -535,19 +550,18 @@ impl Assembly {
                         .map(String::as_str)
                         .collect();
                     let rollback_rows = rows_for(&previous, &rollback_ids);
-                    if let Ok(old) = build_plugins(
-                        &rollback_rows,
-                        &factories,
-                        &boot,
+                    if let Ok(built) = build_rows(
+                        &self.boot_services,
                         &self.realms,
-                    ) && let Ok(mounted) = uva::kernel::mount_all_with(
+                        context.clock.clone(),
+                        &self.extras,
+                        &rollback_rows,
+                    ) && let Ok(mounted) = mount_built(
                         &self.kernel,
                         &self.realms,
-                        &old.into_iter()
-                            .map(|mounted| (mounted.plugin, mounted.row))
-                            .collect::<Vec<_>>(),
-                    )
-                    {
+                        built,
+                        &previous,
+                    ) {
                         self.mount.lock().push(mounted);
                     }
                     return Err(error.to_string());
@@ -561,11 +575,70 @@ impl Assembly {
             .chain(diff.remounted.iter())
             .any(|id| id == uva::mcp::KEY_MCP);
 
+        let dep_lost = dep_lost_rows(&previous, &next_raw, &diff, &factories);
+
         *self.ui_tree.write() = tree;
         *self.profile.write() = next_raw;
         *self.assembly.write() = next;
-        Ok(Reconciled { diff, mcp_touched })
+        Ok(Reconciled {
+            diff,
+            mcp_touched,
+            dep_lost,
+        })
     }
+}
+
+/// The rows that lost a provider because that provider left the
+/// document.
+///
+/// dsh's self-disable write-back: a row whose injected service is gone
+/// can no longer run, so the document records `disabled = true` for it
+/// instead of leaving a row that silently never mounts. Only rows that
+/// are still in the document qualify — a row that left with its
+/// provider is a removal, not a write-back.
+fn dep_lost_rows(
+    previous: &Profile,
+    next: &Profile,
+    diff: &ProfileDiff,
+    factories: &crate::profile::PluginFactories,
+) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    // The service keys the removed rows used to provide.
+    let mut lost_keys: BTreeSet<String> = BTreeSet::new();
+    for row in previous.all_rows() {
+        if !diff.removed.iter().any(|id| id == &row.id) {
+            continue;
+        }
+        if let Some(factory) = factories.get(&row.name) {
+            lost_keys.extend(factory.manifest().provides);
+        }
+    }
+    if lost_keys.is_empty() {
+        return Vec::new();
+    }
+    previous
+        .all_rows()
+        .into_iter()
+        .filter(|row| !diff.removed.iter().any(|id| id == &row.id))
+        .filter(|row| {
+            let Some(factory) = factories.get(&row.name) else {
+                return false;
+            };
+            let manifest = factory.manifest();
+            crate::profile::effective_inject(
+                &manifest.inject,
+                row.inject.as_deref(),
+            )
+            .iter()
+            .any(|key| lost_keys.contains(key))
+        })
+        .filter(|row| {
+            // Still in the document, and not already off.
+            next.find(&row.id).is_some_and(|row| !row.disabled)
+        })
+        .map(|row| row.id.clone())
+        .collect()
 }
 
 /// Carry the boot's materialized row configs forward.

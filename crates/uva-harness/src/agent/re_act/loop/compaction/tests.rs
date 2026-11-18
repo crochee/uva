@@ -32,6 +32,7 @@ use uva_session::{
     CompactionPlan,
     Compactor,
     LogWriter,
+    SessionEvent,
     TokenBudget,
     in_memory::InMemorySessionSink,
 };
@@ -210,16 +211,15 @@ async fn seeded_writer() -> Arc<LogWriter> {
     let sink = Arc::new(InMemorySessionSink::new("compaction"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
     for turn in 0..4 {
-        writer
-            .append(json!({
-                "type": "user_message",
-                "data": Message::user(format!(
-                    "turn {turn}: {}",
-                    "x".repeat(4_000)
-                )),
-            }))
-            .await
-            .expect("seed the turn");
+        let row = uva_session::user_message(
+            serde_json::to_value(Message::user(format!(
+                "turn {turn}: {}",
+                "x".repeat(4_000)
+            )))
+            .expect("a user message serialises"),
+            None,
+        );
+        writer.append_event(&row).await.expect("seed the turn");
     }
     writer.flush().await.expect("flush the seeded rows");
     writer
@@ -345,34 +345,39 @@ async fn steered_writer() -> Arc<LogWriter> {
         name: "read".into(),
         input: json!({"path": "a.rs"}),
     })];
-    writer
-        .append(json!({
-            "type": "user_message",
-            "data": Message::user("start"),
-        }))
-        .await
-        .expect("seed the turn");
-    writer
-        .append(json!({
-            "type": "assistant_message",
-            "data": Message::new(Role::Assistant, Content::parts(parts)),
-        }))
-        .await
-        .expect("seed the tool call");
-    writer
-        .append(json!({
-            "type": "user_message",
-            "data": Message::user("steer: focus on the tests"),
-        }))
-        .await
-        .expect("seed the steer");
-    writer
-        .append(json!({
-            "type": "tool_result",
-            "data": Message::tool(Content::text("ok"), "call-1"),
-        }))
-        .await
-        .expect("seed the tool result");
+    for row in [
+        uva_session::user_message(
+            serde_json::to_value(Message::user("start"))
+                .expect("a user message serialises"),
+            None,
+        ),
+        uva_session::assistant_message(
+            serde_json::to_value(Message::new(
+                Role::Assistant,
+                Content::parts(parts),
+            ))
+            .expect("an assistant message serialises"),
+        ),
+        uva_session::user_message(
+            serde_json::to_value(Message::user("steer: focus on the tests"))
+                .expect("a user message serialises"),
+            None,
+        ),
+        SessionEvent::ToolResult {
+            seq: 0,
+            ts: String::new(),
+            data: serde_json::to_value(Message::tool(
+                Content::text("ok"),
+                "call-1",
+            ))
+            .expect("a tool message serialises"),
+            is_error: false,
+            tool_call_id: Some("call-1".to_string()),
+            surface_op: None,
+        },
+    ] {
+        writer.append_event(&row).await.expect("seed the row");
+    }
     writer.flush().await.expect("flush the seeded rows");
     writer
 }

@@ -214,7 +214,7 @@ fn catalogue_from_config_builds_the_configured_provider() {
         .providers
         .insert("local".to_string(), entry("openai", Some("gpt-4o")));
     let config = ModelAdapterConfig {
-        workspace,
+        catalogue: workspace,
         cache: None,
         resilience: None,
         budget: None,
@@ -253,7 +253,7 @@ async fn service_plugin_publishes_catalogue_and_wrapped_default() {
         inner.clone() as Arc<dyn uva_provider::ModelProvider>,
     ));
     let config = ModelAdapterConfig {
-        workspace: WorkspaceConfig::default(),
+        catalogue: WorkspaceConfig::default(),
         cache: Some(CacheSection {
             enabled: true,
             threshold: 0.99,

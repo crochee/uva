@@ -81,7 +81,7 @@ impl AppState {
         self.profile_rows().into_iter().find(|row| row.id == id)
     }
 
-    async fn apply_row_edit(
+    pub(crate) async fn apply_row_edit(
         &self,
         store: &ProfileStore,
         edit: RowEdit,
@@ -152,6 +152,24 @@ impl AppState {
         outcome
             .reasons
             .push(format!("committed `{}`", store.doc.display()));
+        // dsh's self-disable write-back: a row that lost its provider
+        // can no longer run, so the document records `disabled = true`
+        // for it. The write happens after the commit above, so the
+        // write-back transaction reads the document this one wrote.
+        for id in reconciled.dep_lost {
+            let write_back = RowEdit::SetDisabled {
+                id: id.clone(),
+                disabled: true,
+            };
+            let mut result =
+                Box::pin(self.apply_row_edit(store, write_back)).await;
+            outcome.reasons.append(&mut result.reasons);
+            outcome.reasons.push(format!(
+                "row `{id}` lost its provider; the document write-back \
+                 ({:?})",
+                result.state
+            ));
+        }
         outcome
     }
 

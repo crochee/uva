@@ -4,12 +4,13 @@
 //! `IntoIterator` impls, and the `is_tool_use` / `text` /
 //! `cache_control` accessors.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::tool::{ResourceLink, ToolResult, ToolUse};
 use crate::cache_mark::CacheControlMark;
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 // `Single` holds a full `ContentPart` inline (≈296 bytes for the
 // largest variant `Reasoning`) so the common single-part path
 // avoids a heap allocation. `Multi` only holds a 24-byte `Vec`
@@ -116,14 +117,14 @@ impl<'a> IntoIterator for &'a Content {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct TextContent {
     pub text: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cache_control: Option<CacheControlMark>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct ReasoningContent {
     pub text: String,
     /// Anthropic `signature_delta` value attached to the most recent
@@ -133,21 +134,21 @@ pub struct ReasoningContent {
     pub signature: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct ImageContent {
     pub data: String,
     pub mime_type: String,
     pub detail: Option<ImageDetail>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub struct AudioContent {
     pub data: String,
     pub mime_type: String,
     pub format: Option<AudioFormat>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     Text(TextContent),
@@ -192,7 +193,7 @@ impl ContentPart {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageDetail {
     Low,
@@ -200,7 +201,7 @@ pub enum ImageDetail {
     Auto,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioFormat {
     Wav,

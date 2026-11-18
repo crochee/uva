@@ -6,6 +6,8 @@
 //! - `ops`: `SessionOp` / `SessionState` wire types.
 //! - `run_stream`: the run-stream factory seam.
 //! - `deps`: `RunDependencies` — what every run is handed.
+//! - `state`: the controller-state transition table — how the
+//!   lifecycle moves and what each move publishes, in one place.
 //! - `SessionController` (this file): the shared handle.
 //! - `inner`: the shared inner state + lifecycle gates.
 //! - `run_task` / `persist`: the run task and its event sink,
@@ -14,6 +16,7 @@
 //! - `run_log`: the helpers that shape a run's prompt rows.
 
 use std::{
+    future::Future,
     sync::{
         Arc,
         Mutex,
@@ -29,6 +32,7 @@ use uva::session::SessionLog;
 use crate::{
     cluster::{ClusterRuntime, ControlFrame, SessionKey, SessionOpWire},
     event_stream::EventBroadcaster,
+    session::status::{self, SessionState},
 };
 
 mod deps;
@@ -42,12 +46,13 @@ pub(crate) mod run_log;
 mod run_stream;
 mod run_task;
 mod spawn_gate;
+mod state;
 
 pub use deps::{ProviderResolver, RunDependencies};
 use dispatch::run_controller_loop;
 use inner::ControllerInner;
 pub use live::{LiveToolCall, LiveTurn};
-pub use ops::{SessionOp, SessionState, SteerDelivery};
+pub use ops::{SessionOp, SteerDelivery};
 pub use pin::PinnedProvider;
 use pin::{OpAck, SubmittedOp};
 pub use run_stream::{AgentRunStreamFactory, RunStreamFactory};
@@ -87,7 +92,7 @@ const DURABLE_SUBMIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Shared handle to a running session controller.
 pub struct SessionController {
     session_id: String,
-    state: Arc<Mutex<SessionState>>,
+    state: Arc<state::ControllerState>,
     op_tx: mpsc::Sender<SubmittedOp>,
     broadcaster: EventBroadcaster,
     alive: Arc<AtomicBool>,
@@ -168,11 +173,16 @@ impl SessionController {
         let broadcaster =
             EventBroadcaster::with_label(format!("{user_id}/{session_id}"));
         let (op_tx, op_rx) = mpsc::channel(64);
-        let state = Arc::new(Mutex::new(SessionState::Idle));
         let alive = Arc::new(AtomicBool::new(true));
         // R11: one bus shared between the outer handle and the
         // inner loop (Clone shares the Arc interior).
         let snapshot_bus = uva::session::SnapshotBus::new();
+        // The controller state owns the transition table; the bus it
+        // publishes on is the handle's own.
+        let state = state::ControllerState::new(
+            session_id.clone(),
+            snapshot_bus.clone(),
+        );
         // Cloned out before `deps` moves into the inner mutex: the
         // counters are the controller's write handle on the
         // process-wide totals.
@@ -192,7 +202,6 @@ impl SessionController {
             run_cancel: Mutex::new(None),
             run_factory,
             alive: alive.clone(),
-            snapshot_bus: snapshot_bus.clone(),
             pending_turns: parking_lot::Mutex::new(
                 std::collections::VecDeque::new(),
             ),
@@ -202,7 +211,6 @@ impl SessionController {
             lease,
             live: parking_lot::Mutex::new(LiveTurn::default()),
             pending_resume: parking_lot::Mutex::new(None),
-            suspended: AtomicBool::new(false),
             steer_gate: tokio::sync::Mutex::new(()),
             compaction_pass_gate: tokio::sync::Mutex::new(()),
             on_exit: parking_lot::Mutex::new(None),
@@ -267,9 +275,14 @@ impl SessionController {
         let broadcaster =
             EventBroadcaster::with_label(format!("{user_id}/{session_id}"));
         let (op_tx, mut op_rx) = mpsc::channel(64);
-        let state = Arc::new(Mutex::new(SessionState::Idle));
         let alive = Arc::new(AtomicBool::new(true));
         let snapshot_bus = uva::session::SnapshotBus::new();
+        // A remote handle reads the state but never advances it: the
+        // owning node owns the transitions.
+        let state = state::ControllerState::new(
+            session_id.clone(),
+            snapshot_bus.clone(),
+        );
 
         let controller = Arc::new(Self {
             session_id,
@@ -537,16 +550,18 @@ impl SessionController {
     /// [`Self::session_state`] is the wire answer — it also derives
     /// `AwaitingApproval` from the log.
     pub fn state(&self) -> SessionState {
-        *self.state.lock().expect("state mutex poisoned")
+        self.state.current()
     }
 
     /// The state the wire reports.
     ///
-    /// A live run wins outright. Otherwise the log decides whether a
-    /// suspended turn is waiting for decisions: an `approval_asked`
-    /// row with no `approval_decided` in the last suspended segment
-    /// means `AwaitingApproval`, whatever this process remembers. That
-    /// is what lets a restarted server report the same state.
+    /// A live run wins outright. Otherwise the log decides, through
+    /// the session-status module: an `approval_asked` row with no
+    /// `approval_decided` in the last suspended segment means
+    /// `AwaitingApproval`, whatever this process remembers, and a flag
+    /// that still says `AwaitingApproval` while the log holds no open
+    /// ask is stale — the module demotes it to `Idle`. That is what
+    /// lets a restarted server report the same state.
     ///
     /// A status-shaped surface has no error channel, so an unreadable
     /// log reports the in-memory state after a warning. The run path
@@ -561,8 +576,10 @@ impl SessionController {
             return state;
         };
         match inner.awaiting_approval().await {
-            Ok(true) => SessionState::AwaitingApproval,
-            Ok(false) => state,
+            Ok(awaiting) => status::controller_state(status::StatusFacts {
+                controller: Some(state),
+                awaiting,
+            }),
             Err(error) => {
                 tracing::warn!(
                     target: "uva.session",
@@ -617,11 +634,7 @@ impl SessionController {
     /// the answer here. A live run is never overwritten: the adoption is
     /// the takeover path, which runs before this controller has a run.
     pub(crate) fn adopt_state(&self, state: SessionState) {
-        let mut current = self.state.lock().expect("state mutex poisoned");
-        if *current == SessionState::Running {
-            return;
-        }
-        *current = state;
+        self.state.advance(state::Transition::Adopt { state });
     }
 
     /// Drop the folded history this controller cached.
@@ -630,9 +643,12 @@ impl SessionController {
     /// takes a session over inherits nothing from the node that lost
     /// it, so the cache goes with the takeover: the log is the truth
     /// now.
+    ///
+    /// The eviction itself belongs to the inner: the handle asks by
+    /// name and never names the lock that holds the cache.
     pub(crate) fn clear_cached_history(&self) {
         if let Some(inner) = self.inner.as_ref() {
-            *inner.cached_history.lock() = None;
+            inner.clear_cached_history();
         }
     }
 
@@ -672,24 +688,31 @@ impl SessionController {
         }
     }
 
-    /// Serialise a manual compaction pass against run starts — and
-    /// only run starts.
+    /// Run `work` while no new run may start.
     ///
-    /// `maybe_start_run` takes the same gate across its transition to
-    /// `Running`, so a pass that holds this gate cannot have a run
-    /// begin underneath it and read a surface the replace is about to
-    /// rewrite; a run start that loses the race waits for the pass to
-    /// finish instead. Steers and cancels do **not** queue behind a
-    /// pass: they touch neither the surface nor the span the pass
-    /// replaces, and the pass itself is bounded by
-    /// `COMPACTION_TIMEOUT` (the follow route's compaction deadline),
-    /// so there is no wedge left to protect them from.
-    pub async fn compaction_gate(
-        &self,
-    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    /// This is the promise a manual compaction pass needs: the pass
+    /// rewrites the surface a run start reads, so a run must not
+    /// begin underneath it. `maybe_start_run` takes the same gate
+    /// across its transition to `Running`, so a run start that loses
+    /// the race waits for the pass to finish instead. Steers and
+    /// cancels do **not** queue behind a pass: they touch neither the
+    /// surface nor the span the pass replaces, and the pass itself is
+    /// bounded by `COMPACTION_TIMEOUT` (the follow route's compaction
+    /// deadline), so there is no wedge left to protect them from.
+    ///
+    /// The gate's shape is the controller's business — the caller gets
+    /// the promise, not a lock to hold, and the gate covers exactly
+    /// the work it is given.
+    ///
+    /// A remote handle owns no run and no gate: there is nothing to
+    /// serialise against, so the work runs as it would anywhere else.
+    pub async fn with_compaction_gate<Fut, R>(&self, work: Fut) -> R
+    where
+        Fut: Future<Output = R>,
+    {
         match self.inner.as_ref() {
-            Some(inner) => Some(inner.compaction_pass_gate.lock().await),
-            None => None,
+            Some(inner) => inner.with_compaction_gate(work).await,
+            None => work.await,
         }
     }
 

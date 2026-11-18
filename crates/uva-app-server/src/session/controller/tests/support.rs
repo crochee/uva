@@ -225,11 +225,12 @@ pub(super) async fn wait_for_log_row(
 /// True for a row that records a user turn: the typed
 /// `user_message` this build writes, or the legacy `UserInput`
 /// envelope an older log holds.
+///
+/// The question is asked of the restored row, so the test does not
+/// care which spelling the log carries.
 pub(super) fn is_prompt_row(row: &serde_json::Value) -> bool {
-    matches!(
-        row.get("type").and_then(serde_json::Value::as_str),
-        Some("user_message" | "UserInput")
-    )
+    uva::session::restore_row(row)
+        .restores_to(uva::session::RowTag::UserMessage)
 }
 
 /// The user text of a prompt row, in either dialect.
@@ -238,14 +239,13 @@ pub(super) fn is_prompt_row(row: &serde_json::Value) -> bool {
 /// `data` is the provider message the model saw; a log written before
 /// the typed writer kept `{"text": …}` in the payload of a
 /// `UserInput` row. Both are prompt records, so a test that asks "did
-/// this turn run?" must not care which dialect it is reading.
+/// this turn run?" must not care which dialect it is reading — the
+/// restored row projects the model message either way, and its text
+/// is the turn's.
 pub(super) fn prompt_text_of(row: &serde_json::Value) -> Option<String> {
-    let data = row.get("data")?;
-    if let Some(text) = data.get("text").and_then(serde_json::Value::as_str) {
-        return Some(text.to_string());
-    }
-    let message: Message = serde_json::from_value(data.clone()).ok()?;
-    message.content.extract_text()
+    uva::session::restore_row(row)
+        .message()
+        .and_then(|message| message.content.extract_text())
 }
 
 /// The flat text of a message, for asserting fold output.

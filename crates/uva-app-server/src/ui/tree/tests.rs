@@ -1,5 +1,4 @@
 use serde_json::json;
-use uva::kernel::RuntimeKind;
 
 use super::{
     Cardinality,
@@ -9,19 +8,16 @@ use super::{
     UiTree,
     load_ui_tree,
 };
-use crate::profile::Entry;
+use crate::profile::Manifest;
 
-fn row(id: &str, config: serde_json::Value) -> Entry {
-    Entry {
-        id: id.to_owned(),
-        runtime: RuntimeKind::UiBundle,
+fn row(id: &str, config: serde_json::Value) -> Manifest {
+    Manifest {
         config,
-        capabilities: Vec::new(),
-        enabled: crate::profile::Enabled::On,
+        ..Manifest::plain(id, id)
     }
 }
 
-fn shell() -> Entry {
+fn shell() -> Manifest {
     row(
         "ui.shell",
         json!({ "version": 1, "slots": [
@@ -31,7 +27,7 @@ fn shell() -> Entry {
     )
 }
 
-fn notes(version: u32, title: &str) -> Entry {
+fn notes(version: u32, title: &str) -> Manifest {
     row(
         "ui.slot.notes",
         json!({ "version": version, "components": [
@@ -88,21 +84,6 @@ fn unknown_schema_component_falls_back() {
     assert_eq!(schemas[1].components[0].slot, "chat.sidebar");
     assert_eq!(schemas[1].components[0].kind, "not-yet-known");
     assert_eq!(schemas[1].components[0].props, json!({ "title": "Hello" }));
-}
-
-#[test]
-fn ui_loader_rejects_a_non_ui_runtime() {
-    let mut entry = row(
-        "ui.slot.chat.sidebar",
-        json!({ "components": [{ "slot": "chat.sidebar", "kind": "panel" }] }),
-    );
-    entry.runtime = RuntimeKind::Native;
-    let error = load_ui_tree(&[entry])
-        .expect_err("the UI loader owns `ui-bundle` rows only");
-    assert!(
-        matches!(error, UiError::WrongRuntime { .. }),
-        "unexpected error: {error}"
-    );
 }
 
 #[test]

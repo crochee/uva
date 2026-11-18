@@ -3,7 +3,10 @@
 use std::sync::{Arc, Weak};
 
 use dashmap::mapref::entry::Entry;
-use uva::harness::AgentEvent;
+use uva::{
+    harness::AgentEvent,
+    session::{RowTag, restore_row},
+};
 
 use super::AppState;
 use crate::session::controller::{
@@ -17,12 +20,12 @@ use crate::session::controller::{
 /// owner parked and never ran.
 ///
 /// A starting point, not a bound: the read widens (×4) until it reaches
-/// the log's start or a consumption frontier — a `park_consumed` row,
-/// or a legacy `UserInput` one — because a prompt queued behind a busy
-/// run sits before every row that run writes, and 200 rows is ~40
-/// iterations of a live session. A `parked_prompt` row is only spent by
-/// the `park_consumed` row naming it, so a park that reaches the window
-/// is answered exactly: its consumer is always written after it.
+/// the log's start or a consumption frontier — a `park_consumed` row —
+/// because a prompt queued behind a busy run sits before every row that
+/// run writes, and 200 rows is ~40 iterations of a live session. A
+/// `parked_prompt` row is only spent by the `park_consumed` row naming
+/// it, so a park that reaches the window is answered exactly: its
+/// consumer is always written after it.
 pub(crate) const PARKED_PROMPT_WINDOW: usize = 200;
 
 /// How long a cold open waits for its session's gate, in total.
@@ -493,9 +496,8 @@ impl AppState {
         // park can sit behind a long run — 200 rows is ~40 iterations of
         // a busy session. So widen until the window either reaches the
         // log's start or holds the consumption frontier (the newest
-        // `park_consumed` row, or a legacy `UserInput` one): everything
-        // after that row is the queue, and nothing before it can still
-        // be waiting.
+        // `park_consumed` row): everything after that row is the queue,
+        // and nothing before it can still be waiting.
         let mut window = PARKED_PROMPT_WINDOW;
         let rows = loop {
             let rows = match sink.read_tail(window).await {
@@ -805,16 +807,23 @@ impl AppState {
 
 /// The row that consumes a parked prompt: the run's own record that a
 /// queued turn reached the model.
+///
+/// Only the `park_consumed` row says so. A prompt row does not: every
+/// turn this build runs writes one — and a steer or a seeded history
+/// turn writes one too — so reading a user turn as the consumption
+/// record stops the takeover's widening early and silently drops a
+/// prompt queued behind a long run, which is the one outcome the
+/// park row exists to prevent.
+///
+/// A log written before `park_consumed` existed carried the record in
+/// the run's own prompt row instead. The vocabulary restores that row
+/// to today's prompt shape, so the two spellings cannot be told apart
+/// row by row — and telling them apart is exactly what the frontier
+/// must not do. The read therefore widens until the whole log is in
+/// hand: an old log costs more rows read, and recovers every queued
+/// park the old read could have missed.
 fn is_consumption_marker(row: &serde_json::Value) -> bool {
-    matches!(
-        row.get("type").and_then(serde_json::Value::as_str),
-        // The link this build writes …
-        Some("park_consumed")
-            // … and the run's own prompt row, which is the only
-            // consumption record a log written before `park_consumed`
-            // existed carries.
-            | Some("UserInput")
-    )
+    restore_row(row).restores_to(RowTag::ParkConsumed)
 }
 
 /// The exit notification one cached controller leaves behind:

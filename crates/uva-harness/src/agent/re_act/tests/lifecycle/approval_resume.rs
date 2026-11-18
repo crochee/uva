@@ -84,12 +84,12 @@ async fn simulate_approved_dispatch(
         None,
     );
     writer
-        .append(serde_json::to_value(&decided).expect("decision serializes"))
+        .append_event(&decided)
         .await
         .expect("append the decision");
     let dispatch = uva_session::tool_dispatch(call_id, tool, arguments_hash);
     let seq = writer
-        .append(serde_json::to_value(&dispatch).expect("dispatch serializes"))
+        .append_event(&dispatch)
         .await
         .expect("append the dispatch");
     writer.flush().await.expect("flush the resume rows");
@@ -128,12 +128,27 @@ pub(super) async fn resume_dispatches_the_approved_call_and_continues() {
     // The setup's crash repair may close an earlier turn; what the
     // suspension itself must never do is close this one with an
     // ordinary `turn_end`.
+    // The setup's crash repair may close an earlier turn; what the
+    // suspension itself must never do is close this one with an
+    // ordinary `turn_end`.
+    //
+    // The suspension's own closer names its reason (`suspended`);
+    // an ordinary end names `completed` / `cancelled` / `failed`.
+    // The repair's closer may be in the log too — it closes an
+    // *earlier* turn, so it is written before the suspension's marker
+    // and does not close this one.
+    let suspension_at = suspended_rows
+        .iter()
+        .find(|row| row["type"] == "turn" && row["data"]["kind"] == "suspended")
+        .and_then(|row| row["seq"].as_u64())
+        .expect("the suspension wrote its marker");
     assert_eq!(
         suspended_rows
             .iter()
             .filter(|row| row["type"] == "turn"
                 && row["data"]["kind"] == "end"
-                && row["data"]["reason"] == "suspended")
+                && row["data"]["reason"] != "suspended"
+                && row["seq"].as_u64().is_some_and(|seq| seq > suspension_at))
             .count(),
         0,
         "a suspension writes its own closer, never an ordinary one"
@@ -220,8 +235,9 @@ fn count_turn(rows: &[serde_json::Value], kind: &str) -> usize {
 fn count_turn_end(rows: &[serde_json::Value], reason: &str) -> usize {
     rows.iter()
         .filter(|row| {
-            // The ordinary closer carries `kind: end`; the suspended
-            // one carries `phase: end`. Both name their reason.
+            // Both closers carry `kind: end`; a log written before
+            // the writer settled on one key carries `phase: end`.
+            // Both name their reason.
             row["type"] == "turn"
                 && (row["data"]["kind"] == "end"
                     || row["data"]["phase"] == "end")

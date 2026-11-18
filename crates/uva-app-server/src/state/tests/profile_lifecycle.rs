@@ -33,17 +33,14 @@ async fn state(dir: &Path) -> AppState {
     state
 }
 
-/// A `ui-bundle` row with one slot and one component.
-fn ui_row() -> crate::profile::Entry {
-    crate::profile::Entry {
-        id: "ui.demo".to_owned(),
-        runtime: crate::profile::RuntimeKind::UiBundle,
+/// A `[ui]` row with one slot and one component.
+fn ui_row() -> crate::profile::Manifest {
+    crate::profile::Manifest {
         config: json!({
             "slots": [{ "id": "chat.sidebar" }],
             "components": [{ "kind": "panel", "slot": "chat.sidebar", "props": { "text": "demo" } }],
         }),
-        capabilities: Vec::new(),
-        enabled: crate::profile::Enabled::On,
+        ..crate::profile::Manifest::plain("ui.demo", "ui.demo")
     }
 }
 
@@ -82,13 +79,13 @@ async fn one_disabled_row_withdraws_the_capability_and_its_block() {
         .iter_mut()
         .find(|entry| entry.id == "skills")
         .expect("the native set has skills");
-    skills.enabled = crate::profile::Enabled::Off;
+    skills.disabled = true;
     let ui = disabled
         .ui
         .iter_mut()
         .find(|entry| entry.id == "ui.demo")
         .expect("the ui row is there");
-    ui.enabled = crate::profile::Enabled::Off;
+    ui.disabled = true;
 
     state
         .reload_profile(disabled)
@@ -140,7 +137,7 @@ async fn a_failed_mcp_write_changes_neither_the_document_nor_the_tree() {
             "ui",
             ProfileAction::Edit(RowEdit::SetConfig {
                 id: "model-adapter".to_owned(),
-                config: json!({ "workspace": { "providers": "not-an-object" } }),
+                config: json!({ "providers": "not-an-object" }),
             }),
         )
         .await;

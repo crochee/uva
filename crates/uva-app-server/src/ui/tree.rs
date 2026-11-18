@@ -505,7 +505,10 @@ fn slot_decl(
     Ok(SlotDecl { id, cardinality })
 }
 
-fn version(entry: &Manifest, config: &Map<String, Value>) -> Result<u32, UiError> {
+fn version(
+    entry: &Manifest,
+    config: &Map<String, Value>,
+) -> Result<u32, UiError> {
     match config.get("version") {
         None => Ok(1),
         Some(Value::Number(number)) => number

@@ -207,6 +207,58 @@ async fn read_head_returns_the_first_event_not_the_header() {
 }
 
 #[tokio::test]
+async fn read_head_rows_returns_the_first_n_rows_in_order() {
+    let dir = temp_dir().join("s_head_n");
+    let sink = JsonlSessionSink::new("s_head_n", dir);
+    for i in 0..10 {
+        write(&sink, json!({"i": i})).await;
+    }
+    let head = sink.read_head_rows(3).await.expect("a head window");
+    assert_eq!(
+        head.iter()
+            .map(|row| row["i"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2],
+        "the window is the log's start, in order"
+    );
+}
+
+#[tokio::test]
+async fn read_head_rows_of_a_short_log_is_the_whole_log() {
+    let dir = temp_dir().join("s_head_short");
+    let sink = JsonlSessionSink::new("s_head_short", dir);
+    write(&sink, json!({"i": 0})).await;
+    write(&sink, json!({"i": 1})).await;
+    let head = sink.read_head_rows(200).await.expect("a head window");
+    assert_eq!(head.len(), 2, "the metadata header is not a row");
+    assert_eq!(head[0]["i"], 0);
+    assert_eq!(head[1]["i"], 1);
+}
+
+#[tokio::test]
+async fn read_head_rows_grows_the_budget_for_wide_rows() {
+    // Rows wider than the first chunk force a growth pass; the
+    // window must still return whole rows in order, never a
+    // fragment.
+    let dir = temp_dir().join("s_head_wide");
+    let sink = JsonlSessionSink::new("s_head_wide", dir);
+    let filler = "z".repeat(4000);
+    for i in 0..6 {
+        write(&sink, json!({"i": i, "text": filler})).await;
+    }
+    let head = sink.read_head_rows(5).await.expect("a head window");
+    assert_eq!(head.len(), 5);
+    for (index, row) in head.iter().enumerate() {
+        assert_eq!(row["i"], index, "order is the log's own");
+        assert_eq!(
+            row["text"].as_str().expect("the row's own payload"),
+            filler,
+            "no row may be a fragment of another"
+        );
+    }
+}
+
+#[tokio::test]
 async fn jsonl_sink_round_trips_events_across_instances() {
     let dir = temp_dir().join("s1");
     let sink = JsonlSessionSink::new("s1", dir.clone());

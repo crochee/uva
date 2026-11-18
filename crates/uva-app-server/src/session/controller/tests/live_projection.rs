@@ -16,7 +16,7 @@ use std::{sync::Arc, time::Duration};
 use serde_json::json;
 use uva::{
     harness::AgentEvent,
-    provider::{ContentPart, Message, StreamChunk, TextContent},
+    provider::{ContentPart, Message, StreamChunk},
     test_support::FakeTool,
     tool::{ToolEntry, ToolRegistry},
 };
@@ -40,18 +40,6 @@ fn tool_call_chunks(id: &str, name: &str) -> Vec<StreamChunk> {
     ]
 }
 
-fn text_chunks(text: &str) -> Vec<StreamChunk> {
-    vec![
-        StreamChunk::Content(ContentPart::Text(TextContent {
-            text: text.to_string(),
-            cache_control: None,
-        })),
-        StreamChunk::IsDone {
-            result: Box::default(),
-        },
-    ]
-}
-
 /// A failed tool is answered on both paths, and both answers say
 /// `failed`.
 ///
@@ -62,10 +50,10 @@ fn text_chunks(text: &str) -> Vec<StreamChunk> {
 /// about the call.
 #[tokio::test]
 async fn a_failed_call_reads_failed_in_the_live_projection_and_in_the_log() {
-    let provider = Arc::new(ScriptedStreamProvider::new(vec![
-        tool_call_chunks("c1", "boom"),
-        text_chunks("done"),
-    ]));
+    let provider =
+        Arc::new(ScriptedStreamProvider::new(vec![tool_call_chunks(
+            "c1", "boom",
+        )]));
     let boom: Arc<dyn uva::tool::Tool> =
         Arc::new(FakeTool::failing("boom", "denied by policy"));
     let registry = {

@@ -27,6 +27,11 @@ async-trait.workspace = true
 # produce/consume the same JSON array format as `Vec<T>`.
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
+# The wire contract publishes the provider's own message types, so the
+# browser reads the same shapes the provider serializes — one
+# declaration, generated into the contract rather than hand-written
+# twice.
+schemars.workspace = true
 futures.workspace = true
 # Only the HTTP adapters need an HTTP client, so `reqwest` is optional
 # and enabled by the `anthropic` / `openai` features. A consumer who

@@ -19,7 +19,13 @@ use std::{
 
 use serde::Deserialize;
 use serde_json::Value;
-pub use uva::kernel::{Capability, Plugin, PluginError, PluginManifest, RuntimeKind};
+pub use uva::kernel::{
+    Capability,
+    Plugin,
+    PluginError,
+    PluginManifest,
+    RuntimeKind,
+};
 
 use super::PluginFactory;
 
@@ -307,7 +313,9 @@ pub enum ProfileError {
         id: String,
     },
     /// A group row's `config` was not an array of child rows.
-    #[error("group entry `{id}` config must be an array of child rows: {message}")]
+    #[error(
+        "group entry `{id}` config must be an array of child rows: {message}"
+    )]
     GroupConfig {
         /// The group row.
         id: String,
@@ -333,7 +341,9 @@ pub enum ProfileError {
         id: String,
     },
     /// A profile row names a plugin with no registered factory.
-    #[error("unknown plugin `{name}` (entry `{id}`); registered factories: {known:?}")]
+    #[error(
+        "unknown plugin `{name}` (entry `{id}`); registered factories: {known:?}"
+    )]
     UnknownPluginId {
         /// The row that named it.
         id: String,
@@ -430,12 +440,11 @@ struct WireEntry {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum WireIsolateLabel {
-    /// `true` — a fresh row-private scope.
-    Bool(bool),
+    /// `true` (or `false`) — a fresh row-private scope.
+    Bool,
     /// A label string — one shared scope per label.
     Shared(String),
 }
-
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -493,12 +502,12 @@ pub(crate) fn children_from_config(
     items
         .iter()
         .map(|item| {
-            serde_json::from_value::<WireEntry>(item.clone()).map_err(
-                |error| ProfileError::GroupConfig {
+            serde_json::from_value::<WireEntry>(item.clone()).map_err(|error| {
+                ProfileError::GroupConfig {
                     id: id.to_owned(),
                     message: error.to_string(),
-                },
-            )
+                }
+            })
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -506,12 +515,11 @@ pub(crate) fn children_from_config(
         .collect()
 }
 
-
 impl From<WireIsolateLabel> for IsolateLabel {
     fn from(wire: WireIsolateLabel) -> Self {
         match wire {
             WireIsolateLabel::Shared(label) => Self::Shared(label),
-            WireIsolateLabel::Bool(_) => Self::Local,
+            WireIsolateLabel::Bool => Self::Local,
         }
     }
 }
@@ -529,11 +537,8 @@ impl Manifest {
             }
             // dsh Group plugin shape: the group's children ARE its
             // config, an array of child rows.
-            let children = children_from_config(
-                &wire.id,
-                wire.config.as_ref(),
-                layer,
-            )?;
+            let children =
+                children_from_config(&wire.id, wire.config.as_ref(), layer)?;
             (String::new(), Value::Null, children)
         } else if wire.name.trim().is_empty() {
             return Err(ProfileError::MissingName { id: wire.id });
@@ -560,7 +565,9 @@ impl Manifest {
             inject: wire.inject,
             intercept: wire.intercept,
             isolate: wire.isolate.map(|map| {
-                map.into_iter().map(|(key, label)| (key, label.into())).collect()
+                map.into_iter()
+                    .map(|(key, label)| (key, label.into()))
+                    .collect()
             }),
         })
     }
@@ -595,7 +602,11 @@ impl Profile {
             .into_iter()
             .map(|row| Manifest::from_wire(row, "the profile"))
             .collect::<Result<Vec<_>, _>>()?;
-        let profile = Self { core, ui, hmr: wire.hmr };
+        let profile = Self {
+            core,
+            ui,
+            hmr: wire.hmr,
+        };
         profile.validate_unique()?;
         Ok(profile)
     }
@@ -717,7 +728,7 @@ impl Patch {
                             "unknown insert segment `{other}`; accepted: \
                              core, ui"
                         ),
-                    })
+                    });
                 }
             };
             insert.push(PatchInsert {
@@ -758,14 +769,11 @@ impl Patch {
     /// Returns [`ProfileError::DuplicateId`] naming the repeated id.
     pub fn validate_unique(&self) -> Result<(), ProfileError> {
         let mut seen = BTreeSet::new();
-        for id in self
-            .replace
-            .iter()
-            .map(|row| row.id.as_str())
-            .chain(self.insert.iter().flat_map(|insertion| {
+        for id in self.replace.iter().map(|row| row.id.as_str()).chain(
+            self.insert.iter().flat_map(|insertion| {
                 insertion.row.rows().into_iter().map(|row| row.id.as_str())
-            }))
-        {
+            }),
+        ) {
             if !seen.insert(id) {
                 return Err(ProfileError::DuplicateId { id: id.to_owned() });
             }
@@ -781,17 +789,6 @@ pub enum Segment {
     Core,
     /// The frontend loader's segment.
     Ui,
-}
-
-impl Segment {
-    /// The segment's wire name.
-    #[must_use]
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Core => "core",
-            Self::Ui => "ui",
-        }
-    }
 }
 
 /// A factory directory keyed by plugin name.
@@ -827,7 +824,10 @@ impl PluginFactories {
 
     /// Look a factory up by plugin name.
     #[must_use]
-    pub fn get(&self, name: &str) -> Option<&std::sync::Arc<dyn PluginFactory>> {
+    pub fn get(
+        &self,
+        name: &str,
+    ) -> Option<&std::sync::Arc<dyn PluginFactory>> {
         self.by_id.get(name)
     }
 

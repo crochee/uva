@@ -7,13 +7,13 @@ ADR-0002 把会话日志的**写**路径收成一条类型化的接缝（`Arc<dy
 我们把「一行是什么」收成 `uva-session` 内的**行词汇**模块。接口形状经四路并行设计（design-it-twice：最小接口 / 最大弹性 / 最常见调用方 / 跨语言接缝）比较后定案为混合：
 
 - **`RowTag`**：封闭枚举，**变体名即线上标签**——`LifecycleShutdown` 改名 `SessionShutdown` 之后，33 个显式 `#[serde(rename)]` 全部删除，`rename_all = "snake_case"` 派生一切。`RowTag` 派生 `JsonSchema`，是 schema 的 `oneOf` 与前端 TS union 的唯一来源；app-server 手写的 33 变体 `SessionEventType` 随之删除。
-- **`RowDialect`**：第二个封闭枚举（`UserInput` / `Model` / `Message` / `Agent`），同样发布进 schema；`SessionTurn.type` 拓宽为 `SessionEventType | SessionRowDialect`——方言集从此只有一份答案，Web 被迫对 legacy `Message` 行表态（今天它静默丢弃一个 Rust 会折叠的行）。
+- **`RowDialect`**：第二个封闭枚举（`UserInput` / `Model` / `Message` / `Agent`），同样发布进 schema；`SessionTurn.type` 的生成类型是一个具名别名 `SessionRowTag`（Rust 侧是 schema 视图 `RowTagOrDialect`：`Tag(RowTag) | Dialect(RowDialect)`，TS 侧展开成 `SessionEventType | SessionRowDialect`）——方言集从此只有一份答案，Web 被迫对 legacy `Message` 行表态（今天它静默丢弃一个 Rust 会折叠的行）。
 - **`RowClass`**：`Typed(RowTag) | Legacy(RowDialect) | Unknown(&str) | Untyped` 四分；「当前词汇之外的新标签」不再被 app-server 归进 `legacy`（`routes/sessions/mod.rs:872`）。**解码失败另立 `broken()`**——已知标签但载荷解析不了是缺陷，不是方言；今天 `from_value` 把两者混在一个 `None` 里。
 - **`carries(tag)`**：「同一种逻辑事件、新旧两种方言」的对应关系（`user_message ↔ UserInput`）由模块拥有，不再在每个读点各写一遍双标签匹配。
 - **`Rows<'a>`**：借用视图，`of(tag)` **先比标签再解码**——今天 `from_value` 为读一个标签要 `clone` 整行再反序列化。
 - **`surface_role` 与行种挪到 `RowTag` 上一处声明**，散文角色解析随之删除。
 - **对应关系靠两个穷尽 `match`**（`SessionEvent::tag()` 穷尽于 `SessionEvent`，`RowTag` 侧穷尽于 `RowTag`）加一条平局测试钉住；每变体的代码（`seq()` / `surface_parts()` / `normalize()`）保持穷尽 `match` 不动——编译器本来就守着它们。
-- **消费者策略 = 各消费者一张穷尽 `match`**（TUI、tool-task、Web 各自的转录取舍），不是数据表——rustc 的全同性是比自觉的会计测试更强的门禁，且 GLOSSARY 明文要求「新增一种行而不声明它的角色，代码不编译」。
+- **消费者策略 = 各消费者自己的穷尽记账**（TUI 与 tool-task 各一张穷尽 `match`；Web 是两张 `Record`——`TYPED_ROW_TREATMENT` 覆盖 `SessionEventType`、`DIALECT_ROW_TREATMENT` 覆盖 `SessionRowDialect`——加一个按方言表键做的运行时分区判定 `isDialectTag`），不是数据表——`rustc` / `tsc` 的全同性是比自觉的会计测试更强的门禁，且 GLOSSARY 明文要求「新增一种行而不声明它的角色，代码不编译」。
 - 无宏、无 codegen、无新依赖。
 
 ## Considered Options
@@ -26,8 +26,9 @@ ADR-0002 把会话日志的**写**路径收成一条类型化的接缝（`Arc<dy
 
 ## Consequences
 
+- **本 ADR 的「不再在每个读点各写一遍双标签匹配」没有兑现**：`carries` 只被两个读点用上，其余读点仍在自己写两分支 match，`routes/follow.rs:953` 还漏掉了方言分支——旧方言日志里的助手行拿不到回合标签。根因是 `RowDialect` 是**运行期类别**：每个读点都要自己判断这一行是当前词汇写的还是旧方言写的。**[ADR-0007](0007-row-vocabulary-restores-at-the-read-boundary.md)** 把归一移到读边界，读者不再见到方言，该承诺在那里兑现；本 ADR 的决策（行词汇住在 `uva-session`、「一行是什么」由它说了算）不变。
 - **冻结面变动**：`KNOWN_SESSION_EVENT_TYPES`（`scripts/frozen-api/baseline:242`）与 `empty_event_of`（`:302`）删除（两者零生产调用方）；`SessionEvent::type_tag()` 由 `SessionEvent::tag().as_wire()` 取代；`SessionEvent::LifecycleShutdown` 改名 `SessionShutdown`；新增 `RowTag` / `RowDialect` / `RowClass` / `classify_row` / `Rows` / `carries` / `broken`。按 `AGENTS.md` §3.10 同步 `docs/api-frozen.md` 与基线。
 - **删除而非留兼容层**：`contract.rs:741` 的漂移测试、`log_surface/tests.rs:283` 的源码文本解析与 `:609-640` 的散文角色解析、手写的 `session_view.rs:54` 枚举、app-server 的 7 处生产裸 tag 读点（`follow.rs:870/952/1618`、`tasks.rs:345`、`run_task.rs:57/102`、`sessions.rs:810`）、`subagent_router.rs:359` 的裸写、`artifacts.rs:137` 的手写 `match`、`LogWriter` 的仓外裸 `Value` 写入口，一并删掉。切面之间只有依赖顺序，没有共享的半成品状态。
-- **切面一（Rust 侧）先做，切面二（跨语言）依赖它**：切面二比初估小——`types.ts` 已是生成的、`TYPED_ROW_TREATMENT` 已是编译器强制的 `Record`，Web 侧真正要动的只有三处手写方言识别改为读生成的 `SessionRowDialect` union；TUI 的两张表是**转录取舍**（每个读模型自己决定收哪些行），保留为穷尽 `match` 而非生成物。
+- **切面一（Rust 侧）先做，切面二（跨语言）依赖它**：切面二已随 ADR-0007 落地，且比这里的初估**更小也更彻底**——服务端经 `publish_row` 只发布当前行后，Web 侧的手写方言识别不是「改为读生成的 union」，而是**整表退场**（`DIALECT_ROW_TREATMENT`、四个 `applyLegacy*`、`isDialectTag`、`SessionRowDialect` / `SessionRowTag` 联合全删）；TUI 的两张手写表是**转录取舍**（每个读模型自己决定收哪些行），换成一张穷尽 `match` 而非生成物。
 - **新门禁**：`check-row-vocabulary` 断言生产代码不得自己认 tag 字符串，按 `AGENTS.md` §3.6 同步四处清单。
 - **本 ADR 不裁定的**：前端转录的折叠语义（Web 按 `min..max` 区间影子、Rust 按被引用的行逐位对账）——那是另一件事，不在本次收拢范围内。

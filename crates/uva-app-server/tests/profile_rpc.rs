@@ -2,13 +2,12 @@
 //!
 //! Spawns the real core binary over a temp workspace whose
 //! `.agents/profile.toml` — the project's configuration layer —
-//! switches the `tool-todo` row off and delegates the `eval` row to
-//! the `skill-checks` judge provided by the `skills` row. Drives the
-//! four acceptance behaviours over the stdio wire: the off row is
-//! visible with a reason, turning it on mounts the capability and
-//! broadcasts `profile/changed`, a row that cannot mount reports
-//! `failed` and leaves the document byte-identical, and turning it
-//! off removes the capability again.
+//! switches the `tool-todo` row off. Drives the four acceptance
+//! behaviours over the stdio wire: the off row is visible with a
+//! reason, turning it on mounts the capability and broadcasts
+//! `profile/changed`, a row that cannot mount reports `failed` and
+//! leaves the document byte-identical, and turning it off removes the
+//! capability again.
 
 use std::{
     io::{BufRead, BufReader, Read as _, Write},
@@ -186,14 +185,10 @@ default_model = "demo-model"
     for id in NATIVE_IDS {
         match *id {
             "tool-todo" => rows.push_str(
-                "  { id = \"tool-todo\", runtime = \"native\", enabled = false },\n",
-            ),
-            "eval" => rows.push_str(
-                "  { id = \"eval\", runtime = \"native\", enabled = { service = \
-                 \"skill-checks\", check = \"is_enabled\", arg = \"code-review\" } },\n",
+                "  { id = \"tool-todo\", name = \"tool-todo\", disabled = true },\n",
             ),
             other => rows.push_str(&format!(
-                "  {{ id = \"{other}\", runtime = \"native\" }},\n"
+                "  {{ id = \"{other}\", name = \"{other}\" }},\n"
             )),
         }
     }
@@ -228,8 +223,8 @@ fn the_profile_transaction_survives_the_stdio_wire() {
     let mut core = Core::spawn(temp.path());
     core.await_ready();
 
-    // 1. Both the off row and the delegated row are visible, with the
-    //    effective status the settings page renders.
+    // 1. The off row is visible, with the effective status the
+    //    settings page renders.
     let listed = core.call("p1", "profile/list", json!({}));
     let rows = &listed["result"];
     assert!(
@@ -240,7 +235,7 @@ fn the_profile_transaction_survives_the_stdio_wire() {
         "the disabled tool-todo row is reported off: {}",
         row(rows, "tool-todo")
     );
-    assert_eq!(row(rows, "tool-todo")["enabled"], json!(false));
+    assert_eq!(row(rows, "tool-todo")["disabled"], json!(true));
     assert_eq!(row(rows, "eval")["status"], "mounted");
     let tools = core.call("p2", "tools/list", json!({}));
     assert!(
@@ -252,7 +247,7 @@ fn the_profile_transaction_survives_the_stdio_wire() {
     let applied = core.call(
         "p3",
         "profile/set",
-        json!({ "id": "tool-todo", "enabled": true }),
+        json!({ "id": "tool-todo", "disabled": false }),
     );
     assert_eq!(applied["result"]["state"], "applied", "{applied}");
     let tools = core.call("p4", "tools/list", json!({}));
@@ -270,7 +265,7 @@ fn the_profile_transaction_survives_the_stdio_wire() {
     let failed = core.call(
         "p5",
         "profile/set",
-        json!({ "id": "model-adapter", "config": { "workspace": {} } }),
+        json!({ "id": "model-adapter", "config": { "providers": "not-an-object" } }),
     );
     assert_eq!(failed["result"]["state"], "failed", "{failed}");
     assert_eq!(
@@ -284,7 +279,7 @@ fn the_profile_transaction_survives_the_stdio_wire() {
     let off = core.call(
         "p6",
         "profile/set",
-        json!({ "id": "tool-todo", "enabled": false }),
+        json!({ "id": "tool-todo", "disabled": true }),
     );
     assert_eq!(off["result"]["state"], "applied", "{off}");
     let tools = core.call("p7", "tools/list", json!({}));

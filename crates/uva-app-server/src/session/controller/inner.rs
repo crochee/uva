@@ -3,6 +3,7 @@
 //! state gates, and run-config assembly live on it.
 
 use std::{
+    future::Future,
     sync::{
         Arc,
         Mutex,
@@ -12,7 +13,7 @@ use std::{
 };
 
 use uva::{
-    core::{AtomicCancelToken, Clock},
+    core::AtomicCancelToken,
     harness::{
         AgentEvent,
         ApprovalRequest,
@@ -27,7 +28,6 @@ use uva::{
 use super::{
     deps::RunDependencies,
     live::LiveTurn,
-    ops::SessionState,
     run_stream::RunStreamFactory,
 };
 use crate::{
@@ -83,7 +83,7 @@ pub(super) struct CachedHistory {
 pub(super) struct ControllerInner {
     pub(super) session_id: String,
     pub(super) user_id: String,
-    pub(super) state: Arc<Mutex<SessionState>>,
+    pub(super) state: Arc<super::state::ControllerState>,
     /// The history the session's log derives, cached between the
     /// turns of one controller.
     ///
@@ -108,12 +108,6 @@ pub(super) struct ControllerInner {
     pub(super) run_cancel: Mutex<Option<Arc<AtomicCancelToken>>>,
     pub(super) run_factory: Arc<dyn RunStreamFactory>,
     pub(super) alive: Arc<AtomicBool>,
-    /// R11: read-only operation-snapshot bus. Publishes an
-    /// [`uva::session::OperationSnapshot`] at every run-state
-    /// transition (Running / Idle / Cancelled) so HTTP `/status`,
-    /// TUI, and replay consumers can observe progress without
-    /// touching the run task internals.
-    pub(super) snapshot_bus: uva::session::SnapshotBus,
     /// The turns queued for the next runs: one durable park per
     /// queued message — a single `Text` part for `Prompt` / `Steer`,
     /// lossless parts for `PromptMulti` / `Rerun` — consumed one
@@ -154,11 +148,6 @@ pub(super) struct ControllerInner {
     /// The resume a `SessionOp::Resume` parked. Taken by exactly one
     /// `maybe_start_run`, so a resume cannot govern two runs.
     pub(super) pending_resume: parking_lot::Mutex<Option<PendingResume>>,
-    /// Set when the harness emits `Suspended`, cleared when the next run
-    /// starts. The log remains the authority (`session_state()` derives
-    /// from it); this only lets the list view report the pause without a
-    /// second scan of a log it already read.
-    pub(super) suspended: AtomicBool,
     /// Serialises the "is the run live?" decision for a steer against
     /// the run task's transition to `Idle` and against the cancel
     /// path.
@@ -218,11 +207,10 @@ impl ControllerInner {
         if self.shutdown_finalised.swap(true, Ordering::SeqCst) {
             return;
         }
-        let event = uva::session::SessionEvent::SessionShutdown {
-            seq: 0,
-            ts: self.deps.lock().clock.now().to_rfc3339(),
-            data: serde_json::json!({ "reason": reason }),
-        };
+        // The builder stamps `ts: ""` — the writer re-stamps at
+        // append time, so the row never carries a clock read the
+        // log discards anyway.
+        let event = uva::session::session_shutdown(reason);
         self.append_lifecycle_event(&event).await;
         self.close_sink(reason).await;
     }
@@ -326,9 +314,7 @@ impl ControllerInner {
         // every steer against the disk.
         let committed = {
             let _live = self.steer_gate.lock().await;
-            if *self.state.lock().expect("state mutex poisoned")
-                != SessionState::Running
-            {
+            if !self.state.is_running() {
                 return Ok(false);
             }
             let data =
@@ -420,10 +406,8 @@ impl ControllerInner {
     /// view and the follow baseline agree without each re-reading the
     /// log. Refuses to overwrite a live run.
     pub(super) fn mark_awaiting_approval(&self) {
-        let mut state = self.state.lock().expect("state mutex poisoned");
-        if *state == SessionState::Idle || *state == SessionState::Cancelled {
-            *state = SessionState::AwaitingApproval;
-        }
+        self.state
+            .advance(super::state::Transition::ApprovalAwaited);
     }
 
     /// Append a decision for every open interrupt and flush, so a
@@ -458,13 +442,18 @@ impl ControllerInner {
 
     /// Start a fresh live projection for the run about to start.
     pub(super) fn reset_live(&self) {
-        self.suspended.store(false, Ordering::SeqCst);
-        self.live.lock().reset(uuid::Uuid::new_v4().to_string());
+        // The suspended record belongs to the controller state:
+        // `BeginRun` clears it there.
+        self.live.lock().reset();
     }
 
     /// Fold one run event into the live projection.
     pub(super) fn tap_live(&self, event: &AgentEvent) {
-        self.live.lock().apply(event);
+        // The projection's identity is the log's durable position: the
+        // step's own rows are flushed before its events are emitted,
+        // so this is where the step's content starts.
+        let log_seq = self.writer.last_seq();
+        self.live.lock().apply_at(event, log_seq);
     }
 
     /// A consistent copy of the live projection for a `follow`
@@ -473,23 +462,35 @@ impl ControllerInner {
         self.live.lock().clone()
     }
 
-    /// The state-gate check `maybe_start_run` runs first: the
-    /// controller only starts a new run when it's Idle or
-    /// Cancelled (the latter because a cancellation marks the
-    /// state, then maybe_start_run wakes the controller back
-    /// up — see the Cancel op handler).
-    pub(super) fn is_startable(&self) -> bool {
-        let state = self.state.lock().expect("state mutex poisoned");
-        if *state != SessionState::Idle && *state != SessionState::Cancelled {
-            tracing::trace!(
-                target: "uva.session",
-                session_id = %self.session_id,
-                state = ?*state,
-                "maybe_start_run: skipped (not Idle/Cancelled)"
-            );
-            return false;
-        }
-        true
+    /// Drop the folded history this controller cached.
+    ///
+    /// The cache is the log's history at one ordinal. A node that
+    /// takes a session over inherits nothing from the node that lost
+    /// it, so the cache goes with the takeover: the log is the truth
+    /// now.
+    ///
+    /// The eviction is the inner's business — the handle asks by name
+    /// and never names the lock that holds the cache.
+    pub(super) fn clear_cached_history(&self) {
+        *self.cached_history.lock() = None;
+    }
+
+    /// Run `work` while the compaction gate is held.
+    ///
+    /// The gate is the inner's: its shape (`tokio::sync::Mutex<()>`)
+    /// and the lock order it takes part in stay here, and the caller
+    /// gets the promise instead of the mechanism — "no run starts
+    /// while this work runs".
+    ///
+    /// Holding the gate across `work`'s awaits is the point of the
+    /// gate: the pass rewrites the surface a run start reads, so a
+    /// run must not begin underneath it.
+    pub(super) async fn with_compaction_gate<Fut, R>(&self, work: Fut) -> R
+    where
+        Fut: Future<Output = R>,
+    {
+        let _gate = self.compaction_pass_gate.lock().await;
+        work.await
     }
 
     /// Transition the controller to `Running`, log the run's
@@ -498,10 +499,6 @@ impl ControllerInner {
     /// install a fresh cancel token for the run about to
     /// start.
     pub(super) fn mark_running(&self, parked_turn: bool) {
-        {
-            let mut state = self.state.lock().expect("state mutex poisoned");
-            *state = SessionState::Running;
-        }
         let pending_count = self.pending_turns.lock().len();
         tracing::info!(
             target: "uva.session",
@@ -518,13 +515,12 @@ impl ControllerInner {
             .and_then(|l| l.read().clone())
             .unwrap_or_else(|| "default".to_string());
         let max_iters = self.deps.lock().default_max_iterations;
-        let _seq = self.snapshot_bus.publish(
-            uva::session::OperationSnapshot::started(
-                self.session_id.clone(),
-                agent_name,
-                max_iters,
-            ),
-        );
+        // The transition table flips the state, clears the suspended
+        // record, and publishes the Running snapshot.
+        self.state.advance(super::state::Transition::BeginRun {
+            agent_name,
+            max_iterations: max_iters,
+        });
 
         let cancel_token = Arc::new(AtomicCancelToken::new());
         *self.run_cancel.lock().expect("run_cancel mutex poisoned") =

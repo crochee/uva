@@ -34,13 +34,7 @@ import type { ProfileChange, ProfileChangedEvent, ProfileRow } from './types';
  * re-exported because this module is the settings surface's single entry
  * point.
  */
-export type {
-  ProfileChange,
-  ProfileChangeState,
-  ProfileChangedEvent,
-  ProfileEnableCheck,
-  ProfileRow,
-} from './types';
+export type { ProfileChange, ProfileChangeState, ProfileChangedEvent, ProfileRow } from './types';
 
 /** The two capability domains `profile/create` / `profile/delete`
  *  accept (D28). */
@@ -67,7 +61,7 @@ export const settingsProfile = {
   /** `profile/set` — flip one row's enable bit. The receipt names the
    *  outcome; a caller must render it, never assume success. */
   setEnabled: (id: string, enabled: boolean, signal?: AbortSignal): Promise<ProfileChange> =>
-    rpc.request<ProfileChange>(METHOD.set, { id, enabled }, signal),
+    rpc.request<ProfileChange>(METHOD.set, { id, disabled: !enabled }, signal),
 
   /** `profile/create` — write a capability definition to disk. */
   create: (
@@ -89,17 +83,9 @@ export const settingsProfile = {
 /**
  * The row's effective enable state as a plain boolean.
  *
- * A delegated check (D39) cannot be evaluated in the browser: the
- * kernel service answers it. Such a row is reported as enabled — that
- * is what `status` says — and the UI marks the toggle as locked
- * rather than offering a write that would replace the check with a
- * literal. Callers that need the distinction read `enabled` directly.
+ * The row carries a plain `disabled` bit (the dsh entry model); a row
+ * inside a disabled group is reported by `status` instead.
  */
 export function rowEnabled(row: ProfileRow): boolean {
-  return row.enabled !== false;
-}
-
-/** True when a plugin, not the user, decides the row's enablement. */
-export function rowDelegated(row: ProfileRow): boolean {
-  return typeof row.enabled === 'object' && row.enabled !== null;
+  return !row.disabled;
 }

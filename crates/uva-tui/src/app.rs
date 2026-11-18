@@ -27,9 +27,12 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use uva_provider::{ContentPart, Message};
+use uva_session::{CurrentRow, RowTag, SessionEvent, restore_row};
 
 use crate::{
     domains,
+    supersession,
     transport::{Request, RequestKind, RpcFailure, TransportEvent},
     views::catalog::{Catalog, ResumeMaterial},
 };
@@ -410,6 +413,16 @@ pub struct App {
     messages: Vec<TranscriptLine>,
     live_text: String,
     reasoning: String,
+    /// The live projection's start position: the log ordinal where its
+    /// step began. A durable content row past this position retires
+    /// the projection.
+    live_start_seq: u64,
+    /// The live frame counter the client last accepted: a frame at or
+    /// below it predates the window the client accepted.
+    live_seq: u64,
+    /// The start position of the projection the durable rows already
+    /// superseded: a frame for it must not come back.
+    superseded_start: u64,
     composer: String,
     turn: TurnState,
     approval: Option<ApprovalPrompt>,
@@ -457,6 +470,9 @@ impl Default for App {
             messages: Vec::new(),
             live_text: String::new(),
             reasoning: String::new(),
+            live_start_seq: 0,
+            live_seq: 0,
+            superseded_start: 0,
             composer: String::new(),
             turn: TurnState::Idle,
             approval: None,
@@ -1633,11 +1649,18 @@ impl App {
         self.messages.clear();
         self.live_text.clear();
         self.reasoning.clear();
+        self.live_start_seq = 0;
+        self.live_seq = 0;
+        self.superseded_start = 0;
         self.approval = None;
         self.approval_answered = false;
         // The baseline's rows replace the transcript, so the join
         // between a call and its result is rebuilt from them too.
         self.tool_names.clear();
+        // The live projection comes before the rows: a row that already
+        // carries the projection's content retires it, exactly as an
+        // incremental row would.
+        self.apply_live(snapshot.get("live"));
         if let Some(rows) = snapshot.get("rows").and_then(Value::as_array) {
             for row in rows {
                 self.apply_row(row);
@@ -1648,7 +1671,6 @@ impl App {
         {
             self.turn = turn_from_state(state);
         }
-        self.apply_live(snapshot.get("live"));
         if let Some(prompt) = snapshot
             .get("pending_interrupts")
             .and_then(Value::as_array)
@@ -1697,6 +1719,23 @@ impl App {
         let Some(live) = live else {
             return;
         };
+        let start_seq =
+            live.get("start_seq").and_then(Value::as_u64).unwrap_or(0);
+        let frame_seq =
+            live.get("live_seq").and_then(Value::as_u64).unwrap_or(0);
+        // A frame older than the last accepted one predates the window the
+        // client accepted.
+        if frame_seq < self.live_seq {
+            return;
+        }
+        // A frame for a projection the durable rows already superseded
+        // must not come back.
+        if !supersession::live_frame_admitted(start_seq, self.superseded_start)
+        {
+            return;
+        }
+        self.live_seq = frame_seq;
+        self.live_start_seq = start_seq;
         if let Some(text) = live.get("text").and_then(Value::as_str) {
             self.live_text = text.to_string();
         }
@@ -1708,43 +1747,113 @@ impl App {
         }
     }
 
+    /// Retire the live projection: its content is durable now.
+    ///
+    /// The mark of the retired position keeps a late frame from
+    /// bringing the projection back. The reasoning stays: the
+    /// transcript folds it into its one-line summary once the turn is
+    /// over, and that fold needs the text it folds.
+    fn retire_live(&mut self) {
+        if self.live_start_seq > 0 {
+            self.superseded_start = self.live_start_seq;
+        }
+        self.live_start_seq = 0;
+        self.live_text.clear();
+    }
+
+    /// Fold one durable row into the transcript.
+    ///
+    /// The projection's accounting of the row vocabulary is the match
+    /// below: it is exhaustive over [`RowTag`], so a tag the
+    /// vocabulary gains does not compile until this read model says
+    /// what it does with it. That is what the two hand-written
+    /// string tables — and the accounting test that watched them —
+    /// did by hand; see
+    /// `docs/adr/0006-row-vocabulary-owns-the-row.md`.
+    ///
+    /// A row is restored into the current vocabulary first, so a row
+    /// written in an older dialect renders in the current shape
+    /// instead of being skipped. A row that is not a current row at
+    /// all returns early: a tag this build does not know (version
+    /// skew), or a row with no usable tag.
     pub(crate) fn apply_row(&mut self, row: &Value) {
-        let Some(tag) = row.get("type").and_then(Value::as_str) else {
+        let restored = restore_row(row);
+        let Some(tag) = restored.tag() else {
             return;
         };
-        if IGNORED_ROW_TYPES.contains(&tag) {
-            // Declared ignore: log-only bookkeeping the transcript
-            // deliberately does not render.
-            return;
-        }
-        if !APPLIED_ROW_TYPES.contains(&tag) {
-            // A tag this build predates (version skew); the
-            // accounting test classifies every tag of the current
-            // vocabulary, so this branch is empty for same-version
-            // peers.
-            return;
-        }
         // The row's ordinal: the row's identity in the session log,
         // and what a `chat/feedback` target names. An old log's rows
         // carry none, and a line without one offers no rating.
-        let seq = row.get("seq").and_then(Value::as_u64);
+        let seq = restored.seq();
+        // The projection is retired by the durable row that carries its
+        // content: a content row past the projection's start position
+        // is that step's own answer. The rule lives in the
+        // supersession module — this read model asks it.
+        if supersession::retires_projection(
+            tag,
+            seq,
+            self.live_start_seq,
+            false,
+        ) {
+            self.retire_live();
+        }
+        // The row's payload comes from the vocabulary: the typed
+        // message it carries, and the typed event behind it. The
+        // arms below read those, not the payload's keys — the row's
+        // shape is the vocabulary's knowledge, not this crate's.
         match tag {
-            "user_message" => self.push_row(Role::User, row, seq),
-            "assistant_message" => self.apply_assistant_row(row, seq),
-            "tool_result" => self.apply_tool_result_row(row, seq),
-            "hook_block" => self.apply_hook_block_row(row, seq),
-            "turn" => self.apply_turn_row(row),
-            "approval_asked" => self.apply_approval_row(row),
-            "session_shutdown" => {
-                self.turn = TurnState::Idle;
-                self.live_text.clear();
+            RowTag::UserMessage => {
+                if let Some(message) = restored.message() {
+                    self.push_row(Role::User, &message, seq);
+                }
             }
-            "warning" => self.apply_warning_row(row, seq),
-            // The arm test feeds one row of every `APPLIED_ROW_TYPES`
-            // tag through this match: a tag added to the accounting
-            // without an arm fails that test, not the first
-            // production row.
-            _ => unreachable!("APPLIED_ROW_TYPES names `{tag}` with no arm"),
+            RowTag::AssistantMessage => {
+                if let Some(message) = restored.message() {
+                    self.apply_assistant_row(&message, seq);
+                }
+            }
+            RowTag::ToolResult => self.apply_tool_result_row(restored, seq),
+            RowTag::HookBlock => self.apply_hook_block_row(restored.raw(), seq),
+            RowTag::Turn => self.apply_turn_row(restored),
+            RowTag::ApprovalAsked => self.apply_approval_row(restored),
+            RowTag::SessionShutdown => {
+                self.turn = TurnState::Idle;
+                self.retire_live();
+            }
+            RowTag::Warning => self.apply_warning_row(restored.raw(), seq),
+            // Log-only bookkeeping the transcript deliberately does
+            // not render: the facts either never reach the operator
+            // or arrive through the `live` projection instead.
+            //
+            // The streamed chunks of a running tool (`tool_output`)
+            // are the sharpest case: the `live` projection paints
+            // them while the call runs, and a reload's transcript is
+            // rebuilt from the settled `tool_result` row.
+            RowTag::AssistantChunk
+            | RowTag::Compaction
+            | RowTag::CompactionStart
+            | RowTag::CompactionSummary
+            | RowTag::CompactionEnd
+            | RowTag::ToolCall
+            | RowTag::ToolOutput
+            | RowTag::Step
+            | RowTag::Iteration
+            | RowTag::SteeringGuard
+            | RowTag::SteeringHint
+            | RowTag::SubagentEnter
+            | RowTag::SubagentExit
+            | RowTag::RequestHeader
+            | RowTag::ApprovalDecided
+            | RowTag::ApprovalGranted
+            | RowTag::ToolDispatch
+            | RowTag::RequestSnapshot
+            | RowTag::Usage
+            | RowTag::SandboxMode
+            | RowTag::ToolResultTransformed
+            | RowTag::ParkedPrompt
+            | RowTag::ParkConsumed
+            | RowTag::Feedback
+            | RowTag::Plugin => {}
         }
     }
 
@@ -1765,19 +1874,12 @@ impl App {
         self.push_line(Role::System, format!("warning: {text}"), seq);
     }
 
-    fn apply_assistant_row(&mut self, row: &Value, seq: Option<u64>) {
-        let text = row_text(row);
+    fn apply_assistant_row(&mut self, message: &Message, seq: Option<u64>) {
+        let text = message_text(message);
         if !text.is_empty() {
-            // The live projection usually carries the same text until
-            // the terminal `turn` row; once the durable row lands, drop
-            // the copy so the transcript is not rendered twice. The
-            // server's live text concatenates the streamed pieces, so
-            // the copy is compared in that shape ([`glued_row_text`])
-            // while the line above joins the row's parts with a
-            // space.
-            if self.live_text == glued_row_text(row) {
-                self.live_text.clear();
-            }
+            // The live copy of this step's text is dropped by the row
+            // itself: `apply_row` retires the projection when the row's
+            // ordinal passes the projection's start position.
             self.push_line(Role::Assistant, text, seq);
         }
         // The turn's calls travel in the same row as its text: each
@@ -1789,7 +1891,7 @@ impl App {
         // assistant line is the one a rating names. Without it the
         // row's ordinal would be lost the moment a turn called a
         // tool.
-        for call in row_tool_calls(row) {
+        for call in message_tool_calls(message) {
             let ToolCall {
                 id,
                 name,
@@ -1817,8 +1919,15 @@ impl App {
     /// not the tool, so the tool's name comes from the join the
     /// assistant row filled; a result whose call the transcript never
     /// saw names no tool and says so.
-    fn apply_tool_result_row(&mut self, row: &Value, seq: Option<u64>) {
-        let outcome = tool_outcome(row);
+    fn apply_tool_result_row(
+        &mut self,
+        restored: CurrentRow<'_>,
+        seq: Option<u64>,
+    ) {
+        let row = restored.raw();
+        let event = restored.event();
+        let message = restored.message();
+        let outcome = tool_outcome(event.as_ref(), message.as_ref(), row);
         // The outcome says more than ok/failed: a call that never
         // finished carries why (the crash-repair closer's recovery
         // code), and a tool that answered carries what it said — the
@@ -1831,7 +1940,16 @@ impl App {
             .cloned()
             .or(outcome.name)
             .unwrap_or_else(|| UNKNOWN_TOOL.to_string());
-        let output = tool_output_text(row);
+        // The crash-repair closer holds no output — its recovery code
+        // is the only thing it knows. The vocabulary's fallback
+        // reading of a payload that is not a message turns the whole
+        // bag into the tool's "output", so the closer is recognised
+        // by its own markers and no output is read from it.
+        let output = if outcome.error_code.is_some() || outcome.interrupted {
+            String::new()
+        } else {
+            tool_output_text(message.as_ref())
+        };
         let text = if output.is_empty() {
             format!("{name}: {status}")
         } else {
@@ -1865,8 +1983,8 @@ impl App {
         self.push_line(Role::System, format!("hook: {text}"), seq);
     }
 
-    fn push_row(&mut self, role: Role, row: &Value, seq: Option<u64>) {
-        let text = row_text(row);
+    fn push_row(&mut self, role: Role, message: &Message, seq: Option<u64>) {
+        let text = message_text(message);
         if !text.is_empty() {
             self.push_line(role, text, seq);
         }
@@ -1896,21 +2014,36 @@ impl App {
         self.messages.push(TranscriptLine { role, text, seq });
     }
 
-    fn apply_turn_row(&mut self, row: &Value) {
-        let data = row.get("data");
-        let kind = data
-            .and_then(|data| data.get("kind").or_else(|| data.get("phase")))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+    fn apply_turn_row(&mut self, restored: CurrentRow<'_>) {
+        // The boundary kind comes from the typed row: the vocabulary
+        // reads the typed field first and falls back to the payload,
+        // so a row written before the field existed still answers.
+        let Some(event) = restored.event() else {
+            return;
+        };
+        let kind = event.boundary_kind().unwrap_or_default();
         match kind {
             "start" => {
                 self.turn = TurnState::Running;
-                self.live_text.clear();
+                // The run this turn opens is over, so the projection it
+                // inherits retires: nothing else will replace it, and a
+                // late frame must not bring it back (ADR-0012).
+                if supersession::retires_projection(
+                    RowTag::Turn,
+                    None,
+                    self.live_start_seq,
+                    true,
+                ) {
+                    self.retire_live();
+                }
                 self.reasoning.clear();
             }
             "end" => {
-                let reason = data
-                    .and_then(|data| data.get("reason"))
+                // The reason is the boundary row's own bag — the
+                // vocabulary has no typed field for it.
+                let reason = restored
+                    .raw()
+                    .pointer("/data/reason")
                     .and_then(Value::as_str)
                     .unwrap_or("completed");
                 self.turn = if reason == "suspended" {
@@ -1918,8 +2051,16 @@ impl App {
                 } else {
                     TurnState::Idle
                 };
-                if reason != "suspended" {
-                    self.live_text.clear();
+                // The run is over unless the turn suspended — a
+                // suspended turn resumes and keeps its projection.
+                let run_over = reason != "suspended";
+                if supersession::retires_projection(
+                    RowTag::Turn,
+                    None,
+                    self.live_start_seq,
+                    run_over,
+                ) {
+                    self.retire_live();
                     self.approval = None;
                     self.approval_answered = false;
                 }
@@ -1929,74 +2070,44 @@ impl App {
         }
     }
 
-    fn apply_approval_row(&mut self, row: &Value) {
-        let data = row.get("data").unwrap_or(row);
-        if let Some(prompt) = approval_from(data, self.session_id.as_deref()) {
-            self.approval = Some(prompt);
-            self.approval_answered = false;
-            self.turn = TurnState::AwaitingApproval;
-            self.status = "awaiting approval".to_string();
-        }
+    fn apply_approval_row(&mut self, restored: CurrentRow<'_>) {
+        let Some(event) = restored.event() else {
+            return;
+        };
+        let SessionEvent::ApprovalAsked {
+            id,
+            call_id,
+            tool,
+            risk,
+            agent,
+            ..
+        } = event
+        else {
+            return;
+        };
+        self.approval = Some(ApprovalPrompt {
+            session_id: self.session_id.clone().unwrap_or_default(),
+            approval_id: id,
+            call_id,
+            tool,
+            risk,
+            agent,
+        });
+        self.approval_answered = false;
+        self.turn = TurnState::AwaitingApproval;
+        self.status = "awaiting approval".to_string();
     }
 }
-/// Durable row kinds the transcript renders or tracks. Together with
-/// [`IGNORED_ROW_TYPES`] this is the projection's accounting of the
-/// wire vocabulary — pinned against
-/// `uva_session::KNOWN_SESSION_EVENT_TYPES` by the test
-/// `every_known_row_kind_is_applied_or_ignored_by_design`, so a tag
-/// added to the vocabulary cannot land here silently unrendered.
-pub(crate) const APPLIED_ROW_TYPES: &[&str] = &[
-    "user_message",
-    "assistant_message",
-    "tool_result",
-    "hook_block",
-    "turn",
-    "approval_asked",
-    "session_shutdown",
-    "warning",
-];
-
-/// Row kinds the transcript deliberately does not render: log-only
-/// bookkeeping whose facts either never reach the operator or arrive
-/// through the `live` projection instead. Declared, not accidental —
-/// the test named on [`APPLIED_ROW_TYPES`] fails if a vocabulary tag
-/// is in neither list.
-pub(crate) const IGNORED_ROW_TYPES: &[&str] = &[
-    "assistant_chunk",
-    "compaction",
-    "compaction_start",
-    "compaction_summary",
-    "compaction_end",
-    "tool_call",
-    // Streamed chunks of a running tool: the `live` projection paints
-    // them while the call runs, and a reload's transcript is rebuilt
-    // from the settled `tool_result` row.
-    "tool_output",
-    "step",
-    "iteration",
-    "steering_guard",
-    "steering_hint",
-    "subagent_enter",
-    "subagent_exit",
-    "request_header",
-    "approval_decided",
-    "approval_granted",
-    "tool_dispatch",
-    "request_snapshot",
-    "usage",
-    "sandbox_mode",
-    "tool_result_transformed",
-    "parked_prompt",
-    "park_consumed",
-    "feedback",
-    "plugin",
-];
-
-/// Map a `sessions/follow` header's state label.
+/// Map a `sessions/follow` header's session status.
+///
+/// The header carries the same closed vocabulary the session listing
+/// does: `working` is a run in flight, `input_required` is a turn
+/// waiting for an approval decision, and the rest — `unspecified`,
+/// `canceled`, `completed` — is a session with no live run here.
 fn turn_from_state(state: &str) -> TurnState {
     match state {
-        "running" => TurnState::Running,
-        "awaiting_approval" => TurnState::AwaitingApproval,
+        "working" => TurnState::Running,
+        "input_required" => TurnState::AwaitingApproval,
         _ => TurnState::Idle,
     }
 }
@@ -2060,91 +2171,48 @@ fn approval_from(
     })
 }
 
-/// The text of one durable row (`data.content`), independent of
-/// whether the core serialized it as `Single`, `Multi` or a bare
-/// string. Its parts join with a space ([`joined_content_text`]): the
+/// The text of one message, its parts joined with a space: the
 /// parts are pieces of one message, not one glued word.
-fn row_text(row: &Value) -> String {
-    row.get("data")
-        .and_then(|data| data.get("content"))
-        .map(joined_content_text)
-        .unwrap_or_default()
+fn message_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(part_text)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
-/// The same row's text with its parts concatenated — the shape the
-/// server's live projection holds, since it appends each streamed
-/// piece. The durable row and the live copy it duplicates are
-/// compared in this shape; the row's own line joins the parts with a
-/// space instead ([`row_text`]).
-fn glued_row_text(row: &Value) -> String {
-    row.get("data")
-        .and_then(|data| data.get("content"))
-        .map(content_text)
-        .unwrap_or_default()
-}
-
-/// Extract the text parts of a serialized provider `Content`,
-/// concatenated as they came.
-fn content_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        other => content_parts(other)
-            .iter()
-            .map(|part| part_text(part))
-            .collect(),
-    }
-}
-
-/// The parts of one serialized provider `Content`, in the shapes the
-/// core serializes it in: `Single`, `Multi`, a bare part — and a bare
-/// array, the shape a `tool_result` part's own `content` list uses.
-fn content_parts(content: &Value) -> Vec<&Value> {
-    match content {
-        Value::Object(map) => {
-            if let Some(single) = map.get("Single") {
-                vec![single]
-            } else if let Some(parts) =
-                map.get("Multi").and_then(Value::as_array)
-            {
-                parts.iter().collect()
-            } else {
-                vec![content]
-            }
-        }
-        Value::Array(parts) => parts.iter().collect(),
-        _ => Vec::new(),
-    }
-}
-
-/// Extract the text of one serialized `ContentPart` (or a bare text
-/// object).
-fn part_text(part: &Value) -> String {
+/// The text of one part of a message, if it carries any.
+fn part_text(part: &ContentPart) -> Option<&str> {
     match part {
-        Value::String(text) => text.clone(),
-        Value::Object(map) => {
-            let kind = map.get("type").and_then(Value::as_str);
-            if matches!(kind, Some("text") | None) {
-                map.get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            } else {
-                String::new()
-            }
-        }
-        _ => String::new(),
+        ContentPart::Text(text) => Some(text.text.as_str()),
+        _ => None,
     }
 }
 
 /// The tool calls one assistant row carries: each `tool_use` part's
 /// call id and the tool's name.
-fn row_tool_calls(row: &Value) -> Vec<ToolCall> {
-    row.get("data")
-        .and_then(|data| data.get("content"))
-        .map(content_parts)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(ToolCall::of)
+fn message_tool_calls(message: &Message) -> Vec<ToolCall> {
+    message
+        .content
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::ToolUse(call) => Some(ToolCall {
+                id: Some(call.id.clone()),
+                name: if call.name.is_empty() {
+                    UNNAMED_TOOL.to_string()
+                } else {
+                    call.name.clone()
+                },
+                // `null` is no arguments and `{}` an empty ask;
+                // neither adds anything to the line, so neither
+                // renders.
+                arguments: Some(call.input.to_string())
+                    .filter(|input| input != "null" && input != "{}"),
+            }),
+            _ => None,
+        })
         .collect()
 }
 
@@ -2186,65 +2254,60 @@ impl ToolOutcome {
 
 /// Read one `tool_result` row.
 ///
-/// Two rows carry this type. The run's own row holds the tool
-/// message the loop committed: the provider `Message` with
-/// `role: "tool"`, the tool's output as its `content`, and the id of
-/// the call it answers. The crash-repair closer holds a marker
-/// instead — `call_id`, the tool's name, an `error` code and
-/// `interrupted: true` — because the call never finished. A row whose
-/// content is a `tool_result` part carries the whole payload in that
-/// part. All three name the call, so all three join.
-fn tool_outcome(row: &Value) -> ToolOutcome {
-    let part = row
-        .get("data")
-        .and_then(|data| data.get("content"))
-        .map(content_parts)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|part| {
-            part.get("type").and_then(Value::as_str) == Some("tool_result")
+/// Two rows carry this type. The run's own row holds the tool message
+/// the loop committed: the provider `Message` with `role: "tool"`, the
+/// tool's output as its `content`, and the id of the call it answers.
+/// The crash-repair closer holds a marker instead — `call_id`, the
+/// tool's name, an `error` code and `interrupted: true` — because the
+/// call never finished. A row whose content is a `tool_result` part
+/// carries the whole payload in that part. All three name the call,
+/// so all three join.
+///
+/// The call and the failure come from the typed row and the typed
+/// message; the closer's own markers (`error`, `interrupted`) are its
+/// bag, with no typed field to read them from.
+fn tool_outcome(
+    event: Option<&SessionEvent>,
+    message: Option<&Message>,
+    row: &Value,
+) -> ToolOutcome {
+    let call_id = event
+        .and_then(|event| event.tool_call_id())
+        .map(str::to_string)
+        .or_else(|| {
+            message.and_then(|message| {
+                message.content.iter().find_map(|part| match part {
+                    ContentPart::ToolResult(result) => {
+                        Some(result.tool_use_id.clone())
+                    }
+                    _ => None,
+                })
+            })
         });
-    let call_id = row
-        .get("tool_call_id")
-        .and_then(Value::as_str)
-        .or_else(|| row.pointer("/data/tool_call_id").and_then(Value::as_str))
-        .or_else(|| row.pointer("/data/call_id").and_then(Value::as_str))
-        .or_else(|| {
-            part.and_then(|part| part.get("tool_use_id"))
-                .and_then(Value::as_str)
+    let name = message
+        .and_then(|message| {
+            message.content.iter().find_map(|part| match part {
+                ContentPart::ToolResult(result) => result.tool_name.clone(),
+                _ => None,
+            })
         })
-        .map(str::to_string);
-    let name = row
-        .pointer("/data/tool_name")
-        .and_then(Value::as_str)
-        .or_else(|| row.pointer("/data/name").and_then(Value::as_str))
-        .or_else(|| {
-            part.and_then(|part| part.get("tool_name"))
-                .and_then(Value::as_str)
-        })
-        .map(str::to_string);
-    // A failed tool says so three ways: the row's own flag, the
-    // part's flag, and the closer's error code or `interrupted`
-    // marker. A call that never finished must not read as one that
-    // returned.
-    let error_code = row
-        .pointer("/data/error")
-        .and_then(Value::as_str)
-        .filter(|code| !code.is_empty())
-        .map(str::to_string);
+        .or_else(|| data_field(row, "tool_name"))
+        .or_else(|| data_field(row, "name"));
+    // A failed tool says so four ways: the row's own flag, the part's
+    // flag, and the closer's error code or `interrupted` marker. A
+    // call that never finished must not read as one that returned.
+    let error_code = data_field(row, "error").filter(|code| !code.is_empty());
     let interrupted = row
         .pointer("/data/interrupted")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let failed = row
-        .get("is_error")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        || part
-            .and_then(|part| part.get("is_error"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        || error_code.is_some()
+    let failed = event.is_some_and(|event| {
+        matches!(event, SessionEvent::ToolResult { is_error: true, .. })
+    }) || message.is_some_and(|message| {
+        message.content.iter().any(|part| {
+            matches!(part, ContentPart::ToolResult(result) if result.is_error == Some(true))
+        })
+    }) || error_code.is_some()
         || interrupted;
     ToolOutcome {
         call_id,
@@ -2268,34 +2331,6 @@ struct ToolCall {
     arguments: Option<String>,
 }
 
-impl ToolCall {
-    /// Read one `tool_use` part. A part without an id still names a
-    /// call the operator should see; it just cannot be joined to a
-    /// result.
-    fn of(part: &Value) -> Option<Self> {
-        let map = part.as_object()?;
-        if map.get("type").and_then(Value::as_str) != Some("tool_use") {
-            return None;
-        }
-        // `null` is no arguments and `{}` an empty ask; neither adds
-        // anything to the line, so neither renders.
-        let arguments = map
-            .get("input")
-            .map(|input| input.to_string())
-            .filter(|input| input != "null" && input != "{}");
-        Some(Self {
-            id: map.get("id").and_then(Value::as_str).map(str::to_string),
-            name: map
-                .get("name")
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(UNNAMED_TOOL)
-                .to_string(),
-            arguments,
-        })
-    }
-}
-
 /// One transcript line's worth of a payload: whitespace collapsed to
 /// single spaces — a tool's output is usually many lines — then cut
 /// to [`ONE_LINE_LIMIT`] characters on a character boundary and
@@ -2316,41 +2351,25 @@ fn one_line(text: &str) -> String {
 /// seeded history holds a `tool_result` part whose own `content` list
 /// is the output. The crash-repair closer holds neither — its
 /// recovery code is the only thing it knows. A multi-part output
-/// joins with a space ([`joined_content_text`]): the parts are
-/// pieces of one result, not one glued word.
-fn tool_output_text(row: &Value) -> String {
-    let content = row.get("data").and_then(|data| data.get("content"));
-    let part = content
-        .map(content_parts)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|part| {
-            part.get("type").and_then(Value::as_str) == Some("tool_result")
-        });
-    match part {
-        Some(part) => part
-            .get("content")
-            .map(joined_content_text)
-            .unwrap_or_default(),
-        None => content.map(joined_content_text).unwrap_or_default(),
-    }
-}
-
-/// The text of a serialized provider `Content`, its non-empty parts
-/// joined by a space — the tool line's preview of a multi-part
-/// output, and the text of the row lines.
-///
-/// [`content_text`] keeps the parts' own concatenation for the caller
-/// that needs it: the live copy's comparison.
-fn joined_content_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        other => content_parts(other)
+/// joins with a space: the parts are pieces of one result, not one
+/// glued word.
+fn tool_output_text(message: Option<&Message>) -> String {
+    let Some(message) = message else {
+        return String::new();
+    };
+    let result = message.content.iter().find_map(|part| match part {
+        ContentPart::ToolResult(result) => Some(result),
+        _ => None,
+    });
+    match result {
+        Some(result) => result
+            .content
             .iter()
-            .map(|part| part_text(part))
+            .filter_map(part_text)
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join(" "),
+        None => message_text(message),
     }
 }
 

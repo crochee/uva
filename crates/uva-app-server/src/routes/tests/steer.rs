@@ -33,11 +33,9 @@ use crate::{
         WireAttachment,
         send_message,
     },
-    session::controller::{
-        RunDependencies,
-        RunStreamFactory,
-        SessionController,
-        SessionState,
+    session::{
+        controller::{RunDependencies, RunStreamFactory, SessionController},
+        status::SessionState,
     },
     state::AppState,
 };

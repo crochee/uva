@@ -178,12 +178,8 @@ use crate::{
     rpc::{Outbound, RpcError},
     session::{
         EPHEMERAL_SESSION_PREFIX,
-        controller::{
-            PinnedProvider,
-            SessionController,
-            SessionOp,
-            SessionState,
-        },
+        controller::{PinnedProvider, SessionController, SessionOp},
+        status::SessionState,
     },
     state::{AppState, ModelSelectionError},
 };
@@ -645,28 +641,10 @@ async fn append_message(
     writer: &Arc<uva::session::LogWriter>,
     message: Message,
 ) -> anyhow::Result<()> {
-    use uva::{provider::Role, session::SessionEvent};
-
-    let role = message.role;
-    let data = serde_json::to_value(&message)
+    // The row-construction seam routes each role to its row — the
+    // call site names no variant and no wire key.
+    let event = uva::session::message_row(&message)
         .map_err(|error| anyhow::anyhow!("seed session history: {error}"))?;
-    let event = match role {
-        Role::User | Role::System => uva::session::user_message(data, None),
-        Role::Assistant => SessionEvent::AssistantMessage {
-            seq: 0,
-            ts: String::new(),
-            data,
-            surface_op: None,
-        },
-        Role::Tool => SessionEvent::ToolResult {
-            seq: 0,
-            ts: String::new(),
-            data,
-            is_error: false,
-            tool_call_id: message.tool_call_id,
-            surface_op: None,
-        },
-    };
     writer
         .append_event(&event)
         .await

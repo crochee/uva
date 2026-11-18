@@ -65,12 +65,7 @@ pub use builtin::skill_tool::{
 };
 pub use discovery::{PROJECT_SKILLS_DIR, discover_skills};
 pub use loader::SkillLoader;
-pub use plugin::{
-    KEY_SKILL_CHECKS,
-    KEY_SKILLS,
-    SkillPlugin,
-    SkillPluginConfig,
-};
+pub use plugin::{KEY_SKILLS, SkillPlugin, SkillPluginConfig};
 pub use provider::{
     BoxedSkillProvider,
     FileSkillProvider,

@@ -1,4 +1,5 @@
 use serde_json::json;
+use uva_provider::{Content, ContentPart, Message, Role, ToolUse};
 
 use super::*;
 use crate::CompactionLifecycleOutcome;
@@ -105,30 +106,62 @@ fn tool_result(seq: u64, ts: &str, call_id: &str) -> SessionEvent {
     }
 }
 
-/// The shape the harness actually writes: the row payload is
-/// the provider `Message`, with the calls in its content parts.
+/// The shape the harness actually writes: the row payload is the
+/// provider `Message`, with the calls in its content parts.
+///
+/// The harness has one construction of an assistant turn
+/// (`Transcript::assistant_message` → `Content::parts`), and the
+/// log row keeps the same bytes the next request sends — so the
+/// fixture builds the message the same way. A fixture that *guesses*
+/// the shape hides a reader drifting away from it: the repair reads
+/// the calls out of this row, and a guessed shape made that read
+/// dead in production while the test stayed green.
 fn assistant_message(
     seq: u64,
     ts: &str,
     calls: &[(&str, &str)],
 ) -> SessionEvent {
+    let message = Message::new(
+        Role::Assistant,
+        Content::parts(
+            calls
+                .iter()
+                .map(|(id, name)| {
+                    ContentPart::ToolUse(ToolUse {
+                        id: (*id).to_string(),
+                        name: (*name).to_string(),
+                        input: json!({}),
+                    })
+                })
+                .collect(),
+        ),
+    );
     SessionEvent::AssistantMessage {
         seq,
         ts: ts.into(),
-        data: json!({
-            "role": "assistant",
-            "content": calls
-                .iter()
-                .map(|(id, name)| json!({
-                    "type": "tool_use",
-                    "id": id,
-                    "name": name,
-                    "input": {},
-                }))
-                .collect::<Vec<_>>(),
-        }),
+        data: serde_json::to_value(&message).expect("the message serializes"),
         surface_op: None,
     }
+}
+
+/// The fixture must be the shape the harness writes — the provider
+/// `Message`, whose `Content::parts` puts a lone part under
+/// `Single`.
+///
+/// This is the line that says the repair's reader and the harness's
+/// writer agree. Without it, a fixture that guessed the shape made
+/// the repair's tool-call read dead in production while the test
+/// stayed green.
+#[test]
+fn the_assistant_fixture_is_the_shape_the_harness_writes() {
+    let row = assistant_message(3, "2026-09-10T00:00:00Z", &[("c1", "read")]);
+    let SessionEvent::AssistantMessage { data, .. } = row else {
+        panic!("the fixture builds an assistant message");
+    };
+    assert_eq!(
+        data["content"]["Single"]["type"], "tool_use",
+        "the fixture is not the harness's shape: {data}"
+    );
 }
 
 /// The shape the harness actually writes for a result: the
@@ -171,7 +204,7 @@ fn suspension_closes_the_turn_with_suspended_not_interrupted() {
             seq: 5,
             ts: ts.into(),
             data: json!({
-                "phase": "end",
+                "kind": "end",
                 "status": "suspended",
                 "pending": ["c1"],
             }),
@@ -181,7 +214,7 @@ fn suspension_closes_the_turn_with_suspended_not_interrupted() {
         SessionEvent::Step {
             seq: 6,
             ts: ts.into(),
-            data: json!({"phase": "end", "status": "suspended"}),
+            data: json!({"kind": "end", "status": "suspended"}),
             kind: Some("end".to_string()),
             turn: None,
             step: None,
@@ -189,7 +222,7 @@ fn suspension_closes_the_turn_with_suspended_not_interrupted() {
         SessionEvent::Turn {
             seq: 7,
             ts: ts.into(),
-            data: json!({"phase": "end", "reason": "suspended"}),
+            data: json!({"kind": "end", "reason": "suspended"}),
             kind: Some("end".to_string()),
             turn: None,
         },

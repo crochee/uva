@@ -25,7 +25,10 @@ use uva::{
 use super::{
     BootExtras,
     BootServices,
+    KernelBootError,
     SharedClock,
+    build_rows,
+    mount_built,
     mount_profile,
     native_profile,
 };
@@ -85,16 +88,14 @@ fn profile_with_catalogue() -> crate::profile::Profile {
         .find(|entry| entry.id == "model-adapter")
         .expect("the native set has model-adapter");
     row.config = serde_json::json!({
-        "workspace": {
-            "providers": {
-                "fake": {
-                    "type": "demo",
-                    "api_key_env": "NONE",
-                    "default_model": "fake-model"
-                }
-            },
-            "default_provider": "fake"
-        }
+        "providers": {
+            "fake": {
+                "type": "demo",
+                "api_key_env": "NONE",
+                "default_model": "fake-model"
+            }
+        },
+        "default_provider": "fake"
     });
     profile
 }
@@ -215,13 +216,10 @@ async fn an_explicit_profile_mounts_only_the_rows_it_names() {
     let dir = tempdir().expect("tempdir");
     let (services, extras) = boot_services(dir.path());
     let profile = crate::profile::Profile {
-        core: vec![crate::profile::Entry {
-            id: "tool-registry".to_owned(),
-            runtime: uva::kernel::RuntimeKind::Native,
-            config: serde_json::Value::Null,
-            capabilities: Vec::new(),
-            enabled: crate::profile::Enabled::On,
-        }],
+        core: vec![crate::profile::Manifest::plain(
+            "tool-registry",
+            "tool-registry",
+        )],
         ui: Vec::new(),
         hmr: false,
     };
@@ -260,7 +258,7 @@ async fn a_profile_without_the_hooks_row_still_mounts_the_loop() {
                 .iter_mut()
                 .find(|entry| entry.id == "hooks")
                 .expect("the native set has hooks");
-            row.enabled = crate::profile::Enabled::Off;
+            row.disabled = true;
         } else {
             profile.core.retain(|entry| entry.id != "hooks");
         }
@@ -294,23 +292,18 @@ async fn model_adapter_row_config_drives_the_plugin() {
     let dir = tempdir().expect("tempdir");
     let (services, extras) = boot_services(dir.path());
     let profile = crate::profile::Profile {
-        core: vec![crate::profile::Entry {
-            id: "model-adapter".to_owned(),
-            runtime: uva::kernel::RuntimeKind::Native,
+        core: vec![crate::profile::Manifest {
             config: serde_json::json!({
-                "workspace": {
-                    "providers": {
-                        "echo": {
-                            "type": "demo",
-                            "api_key_env": "NONE",
-                            "default_model": "echo-model"
-                        }
-                    },
-                    "default_provider": "echo"
-                }
+                "providers": {
+                    "echo": {
+                        "type": "demo",
+                        "api_key_env": "NONE",
+                        "default_model": "echo-model"
+                    }
+                },
+                "default_provider": "echo"
             }),
-            capabilities: Vec::new(),
-            enabled: crate::profile::Enabled::On,
+            ..crate::profile::Manifest::plain("model-adapter", "model-adapter")
         }],
         ui: Vec::new(),
         hmr: false,
@@ -397,12 +390,9 @@ fn agent_loop_profile(config: serde_json::Value) -> crate::profile::Profile {
                 | "hooks"
         )
     });
-    profile.core.push(crate::profile::Entry {
-        id: "agent-loop".to_owned(),
-        runtime: uva::kernel::RuntimeKind::Native,
+    profile.core.push(crate::profile::Manifest {
         config,
-        capabilities: Vec::new(),
-        enabled: crate::profile::Enabled::On,
+        ..crate::profile::Manifest::plain("agent-loop", "agent-loop")
     });
     profile
 }
@@ -540,27 +530,9 @@ async fn the_search_row_mounts_with_its_own_session_index() {
     let (services, extras) = boot_services(dir.path());
     let profile = crate::profile::Profile {
         core: vec![
-            crate::profile::Entry {
-                id: "tool-registry".to_owned(),
-                runtime: uva::kernel::RuntimeKind::Native,
-                config: serde_json::Value::Null,
-                capabilities: Vec::new(),
-                enabled: crate::profile::Enabled::On,
-            },
-            crate::profile::Entry {
-                id: "memory".to_owned(),
-                runtime: uva::kernel::RuntimeKind::Native,
-                config: serde_json::Value::Null,
-                capabilities: Vec::new(),
-                enabled: crate::profile::Enabled::On,
-            },
-            crate::profile::Entry {
-                id: "search".to_owned(),
-                runtime: uva::kernel::RuntimeKind::Native,
-                config: serde_json::Value::Null,
-                capabilities: Vec::new(),
-                enabled: crate::profile::Enabled::On,
-            },
+            crate::profile::Manifest::plain("tool-registry", "tool-registry"),
+            crate::profile::Manifest::plain("memory", "memory"),
+            crate::profile::Manifest::plain("search", "search"),
         ],
         ui: Vec::new(),
         hmr: false,
@@ -596,13 +568,7 @@ async fn the_approval_row_mounts_the_default_policy() {
     let dir = tempdir().expect("tempdir");
     let (services, extras) = boot_services(dir.path());
     let profile = crate::profile::Profile {
-        core: vec![crate::profile::Entry {
-            id: "approval".to_owned(),
-            runtime: uva::kernel::RuntimeKind::Native,
-            config: serde_json::Value::Null,
-            capabilities: Vec::new(),
-            enabled: crate::profile::Enabled::On,
-        }],
+        core: vec![crate::profile::Manifest::plain("approval", "approval")],
         ui: Vec::new(),
         hmr: false,
     };
@@ -624,63 +590,36 @@ async fn the_approval_row_mounts_the_default_policy() {
     );
 }
 
-/// The boot's two waves: a row whose enablement is delegated to the
-/// `skills` row's judge can only be answered once wave 1 has mounted
-/// that judge. The judge row itself is in wave 1, the checked row in
-/// wave 2.
-#[test]
-fn a_delegated_check_is_answered_after_the_judge_wave_mounts() {
-    let dir = tempdir().unwrap();
-    let skill = dir.path().join(".agents").join("skills").join("wave-probe");
-    std::fs::create_dir_all(&skill).unwrap();
-    std::fs::write(
-        skill.join("SKILL.md"),
-        "---\nname: wave-probe\ndescription: probe\nmetadata:\n  enabled: false\n---\n\nbody\n",
-    )
-    .unwrap();
+/// A parked required row is fatal on **every** mount path, not only
+/// the boot's: an HMR subset mount that strands `agent-loop` (its
+/// provider is not in the scope) must fail the mount, so a settings
+/// edit cannot leave the host without its model loop looking alive.
+#[tokio::test]
+async fn a_subset_mount_that_parks_a_required_row_is_fatal() {
+    let dir = tempdir().expect("tempdir");
     let (services, extras) = boot_services(dir.path());
-    let mut profile = profile_with_catalogue();
-    let eval = profile
-        .core
-        .iter_mut()
-        .find(|entry| entry.id == "eval")
-        .expect("the native set has eval");
-    eval.enabled =
-        crate::profile::Enabled::Check(crate::profile::EnableCheck {
-            service: "skill-checks".into(),
-            check: "is_enabled".into(),
-            arg: serde_json::json!("wave-probe"),
-        });
-
-    let (ctx, mounted) =
-        mount_profile(services, &profile, SharedClock::system(), extras)
-            .expect("both waves mount");
-    assert!(
-        mounted.plugin_state("skills").is_some(),
-        "wave 1 mounted the judge's provider"
-    );
-    assert!(
-        ctx.get::<EvalRunner>(KEY_EVAL)
-            .expect("read eval")
-            .is_none(),
-        "the judge answered false, so wave 2 leaves the row out"
-    );
-
-    // Flip the skill on and re-mount: the same profile now answers
-    // enabled and wave 2 mounts the row.
-    std::fs::write(
-        skill.join("SKILL.md"),
-        "---\nname: wave-probe\ndescription: probe\nmetadata:\n  enabled: true\n---\n\nbody\n",
+    let profile = crate::profile::Profile {
+        core: vec![crate::profile::Manifest::plain("agent-loop", "agent-loop")],
+        ui: Vec::new(),
+        hmr: false,
+    };
+    let context = uva::kernel::Context::new();
+    let realms = Arc::new(uva::kernel::Realms::default());
+    let built = build_rows(
+        &services,
+        &realms,
+        SharedClock::system(),
+        &extras,
+        &profile,
     )
-    .unwrap();
-    let (services, extras) = boot_services(dir.path());
-    let (ctx, _mounted) =
-        mount_profile(services, &profile, SharedClock::system(), extras)
-            .expect("both waves mount");
+    .expect("the row builds without its provider present");
+    let error = mount_built(&context, &realms, built, &profile)
+        .expect_err("a parked required row is fatal on the HMR path");
     assert!(
-        ctx.get::<EvalRunner>(KEY_EVAL)
-            .expect("read eval")
-            .is_some(),
-        "the judge answered true, so wave 2 mounts the row"
+        matches!(
+            &error,
+            KernelBootError::RequiredParked { id, .. } if id == "agent-loop"
+        ),
+        "the audit names the stranded row: {error:?}"
     );
 }

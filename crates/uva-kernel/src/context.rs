@@ -43,6 +43,7 @@ impl Context {
             inner: self.inner.isolate(name),
         }
     }
+
     /// Derive a child context isolating `name` under a supplied scope
     /// label.
     ///
@@ -79,7 +80,6 @@ impl Context {
             inner: self.inner.intercept(name.into(), config),
         }
     }
-
 
     /// Provide a shared service.
     ///

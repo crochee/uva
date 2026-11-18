@@ -1,15 +1,25 @@
 use serde_json::{Value, json};
+use uva_provider::{
+    Content,
+    ContentPart,
+    ReasoningContent,
+    Role as ProviderRole,
+    TextContent,
+    ToolUse,
+};
 
 use super::*;
-use crate::transport::{RequestKind, RpcFailure, TransportEvent};
+use crate::{
+    tests::{FIXTURE_TS, message_data, message_role},
+    transport::{RequestKind, RpcFailure, TransportEvent},
+};
 
 fn text_row(kind: &str, seq: u64, text: &str) -> Value {
     json!({
         "type": kind,
         "seq": seq,
-        "data": {
-            "content": { "Single": { "type": "text", "text": text } },
-        },
+        "ts": FIXTURE_TS,
+        "data": message_data(message_role(kind), Content::text(text)),
     })
 }
 
@@ -19,9 +29,14 @@ fn reasoning_row(seq: u64, text: &str) -> Value {
     json!({
         "type": "assistant_message",
         "seq": seq,
-        "data": {
-            "content": { "Single": { "type": "reasoning", "text": text } },
-        },
+        "ts": FIXTURE_TS,
+        "data": message_data(
+            ProviderRole::Assistant,
+            Content::parts(vec![ContentPart::Reasoning(ReasoningContent {
+                text: text.to_string(),
+                signature: None,
+            })]),
+        ),
     })
 }
 
@@ -31,12 +46,20 @@ fn multi_text_row(kind: &str, seq: u64, first: &str, second: &str) -> Value {
     json!({
         "type": kind,
         "seq": seq,
-        "data": {
-            "content": { "Multi": [
-                { "type": "text", "text": first },
-                { "type": "text", "text": second },
-            ] },
-        },
+        "ts": FIXTURE_TS,
+        "data": message_data(
+            message_role(kind),
+            Content::parts(vec![
+                ContentPart::Text(TextContent {
+                    text: first.to_string(),
+                    cache_control: None,
+                }),
+                ContentPart::Text(TextContent {
+                    text: second.to_string(),
+                    cache_control: None,
+                }),
+            ]),
+        ),
     })
 }
 
@@ -44,6 +67,7 @@ fn turn_end() -> Value {
     json!({
         "type": "turn",
         "seq": 9,
+        "ts": FIXTURE_TS,
         "data": { "kind": "end", "turn": 0, "reason": "completed" },
     })
 }
@@ -59,7 +83,7 @@ fn baseline(rows: Vec<Value>) -> Value {
         "rows": rows,
         "cursor": 9,
         "live": {
-            "turn_id": "",
+            "start_seq": 0,
             "live_seq": 0,
             "running": false,
             "text": "",
@@ -118,7 +142,7 @@ fn a_completed_turn_row_returns_the_projection_to_idle() {
             "session_id": "s1",
             "kind": "live",
             "live": {
-                "turn_id": "t1",
+                "start_seq": 8,
                 "live_seq": 1,
                 "running": true,
                 "text": "Sunny",
@@ -151,7 +175,7 @@ fn the_assistant_row_replaces_the_live_copy() {
         method: "session/event".to_string(),
         params: json!({
             "kind": "live",
-            "live": { "running": true, "text": "partial" },
+            "live": { "start_seq": 3, "live_seq": 1, "running": true, "text": "partial" },
         }),
     });
     assert_eq!(app.live_text(), "partial");
@@ -165,6 +189,95 @@ fn the_assistant_row_replaces_the_live_copy() {
     });
     assert!(app.live_text().is_empty());
     assert_eq!(app.messages().last().expect("a line").text, "partial");
+}
+
+/// A row older than the projection's step does not retire it.
+///
+/// The projection began at a log position, and only a row past that
+/// position carries the step's content. A row from an earlier step
+/// arriving late says nothing about this one — so the answer keeps
+/// streaming.
+#[test]
+fn an_older_row_does_not_retire_the_projection() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "live",
+            "live": { "start_seq": 12, "live_seq": 1, "running": true, "text": "streaming" },
+        }),
+    });
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "row",
+            "seq": 11,
+            "row": text_row("assistant_message", 11, "an earlier step"),
+        }),
+    });
+    assert_eq!(
+        app.live_text(),
+        "streaming",
+        "the projection is still the step's live text"
+    );
+}
+
+/// A frame at or below the counter the client accepted predates the
+/// window: it is discarded.
+#[test]
+fn a_frame_at_or_below_the_accepted_counter_is_ignored() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "live",
+            "live": { "start_seq": 3, "live_seq": 5, "running": true, "text": "newer" },
+        }),
+    });
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "live",
+            "live": { "start_seq": 3, "live_seq": 4, "running": true, "text": "older" },
+        }),
+    });
+    assert_eq!(app.live_text(), "newer", "the older frame is discarded");
+}
+
+/// A frame for a projection the durable rows already superseded must
+/// not bring it back.
+#[test]
+fn a_frame_for_a_superseded_projection_is_ignored() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "live",
+            "live": { "start_seq": 3, "live_seq": 1, "running": true, "text": "streaming" },
+        }),
+    });
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "row",
+            "seq": 4,
+            "row": text_row("assistant_message", 4, "the answer"),
+        }),
+    });
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "live",
+            "live": { "start_seq": 3, "live_seq": 2, "running": true, "text": "streaming" },
+        }),
+    });
+    assert!(
+        app.live_text().is_empty(),
+        "the superseded projection does not come back"
+    );
 }
 
 /// A row with two text parts renders them as the pieces they are: the
@@ -181,44 +294,6 @@ fn a_row_with_two_text_parts_renders_them_separated() {
     let lines = app.messages();
     assert_eq!(lines[0].text, "part one part two");
     assert_eq!(lines[1].text, "part one part two");
-}
-
-/// The live copy is compared in the server's shape — the streamed
-/// pieces concatenated — so a row whose parts arrive separately still
-/// replaces it, while the row's own line joins the parts with a
-/// space.
-#[test]
-fn the_live_copy_is_dropped_against_the_concatenated_row_text() {
-    let mut app = App::new();
-    app.apply(follow(Vec::new()));
-    app.apply(TransportEvent::Notification {
-        method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "running": true, "text": "part onepart two" },
-        }),
-    });
-    assert_eq!(app.live_text(), "part onepart two");
-
-    app.apply(TransportEvent::Notification {
-        method: "session/event".to_string(),
-        params: json!({
-            "kind": "row",
-            "seq": 5,
-            "row": multi_text_row("assistant_message", 5, "part one", "part two"),
-        }),
-    });
-
-    assert!(
-        app.live_text().is_empty(),
-        "the live copy is dropped: the server's text is the row's \\
-         parts concatenated"
-    );
-    assert_eq!(
-        app.messages().last().expect("a line").text,
-        "part one part two",
-        "the row's line joins the parts with a space"
-    );
 }
 
 #[test]
@@ -960,18 +1035,21 @@ fn a_tool_calling_turn_still_offers_its_ordinal() {
         json!({
             "type": "assistant_message",
             "seq": 5,
-            "data": {
-                "role": "assistant",
-                "content": { "Multi": [
-                    { "type": "text", "text": "let me look" },
-                    {
-                        "type": "tool_use",
-                        "id": "call_1",
-                        "name": "shell",
-                        "input": { "command": "ls" },
-                    },
-                ]},
-            },
+            "ts": FIXTURE_TS,
+            "data": message_data(
+                ProviderRole::Assistant,
+                Content::parts(vec![
+                    ContentPart::Text(TextContent {
+                        text: "let me look".to_string(),
+                        cache_control: None,
+                    }),
+                    ContentPart::ToolUse(ToolUse {
+                        id: "call_1".to_string(),
+                        name: "shell".to_string(),
+                        input: json!({ "command": "ls" }),
+                    }),
+                ]),
+            ),
         }),
     ]));
 

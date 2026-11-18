@@ -1,15 +1,18 @@
-//! The in-progress turn's transient projection.
+//! The in-progress step's transient projection.
 //!
-//! The durable log is the transcript's source of truth, but a turn's
+//! The durable log is the transcript's source of truth, but a step's
 //! rows land at its boundaries: while the model streams, the only
 //! evidence is the event tap. [`LiveTurn`] is that evidence — text,
 //! reasoning and tool calls accumulated from the run's events — and
 //! it is never written to disk.
 //!
-//! A `follow` client renders it until the durable row for the turn
-//! arrives, at which point the row supersedes the projection. A
-//! process that dies mid-turn therefore loses the projection and
-//! leaves no half-written assistant row: the next run starts from
+//! A projection belongs to one **step** (one model call): the next
+//! step opens a new projection, and the previous step's content is
+//! the durable rows' by then. Its identity is the log position where
+//! the step began, so a client can tell which projection a durable row
+//! supersedes by comparing ordinals — no id to match, no text to
+//! guess. A process that dies mid-step therefore loses the projection
+//! and leaves no half-written assistant row: the next run starts from
 //! `turn/start`, which is the "one row per turn" trade-off.
 
 use schemars::JsonSchema;
@@ -71,14 +74,18 @@ pub struct LiveToolCall {
     pub(crate) streamed_bytes: u64,
 }
 
-/// The transient projection of the turn that is running (or just
+/// The transient projection of the step that is running (or just
 /// ended) in this process.
-#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct LiveTurn {
-    /// Identifies the turn the projection belongs to. A fresh run gets
-    /// a fresh id, so a client can tell a superseded projection from
-    /// the current one.
-    pub turn_id: String,
+    /// The log position where this projection's step began.
+    ///
+    /// A durable content row whose ordinal is greater than this
+    /// supersedes the projection: the row is that step's own answer.
+    /// `0` means "no position" — a projection whose step began before
+    /// this process knew the log's numbering (a remote owner's step,
+    /// projected here).
+    pub start_seq: u64,
     /// Monotone per-controller frame counter. A baseline carries the
     /// current value; a client discards an increment whose `live_seq`
     /// is not greater than its baseline.
@@ -91,58 +98,134 @@ pub struct LiveTurn {
     pub reasoning: String,
     /// Tool calls proposed by the turn, in call order.
     pub tool_calls: Vec<LiveToolCall>,
+    /// Whether the next model part opens a new step.
+    ///
+    /// Not on the wire: it is the projection's own bookkeeping about
+    /// where it stands — the way the tool call's streamed byte count
+    /// is.
+    #[serde(skip)]
+    #[schemars(skip)]
+    step_open: bool,
+}
+
+impl Default for LiveTurn {
+    fn default() -> Self {
+        Self {
+            start_seq: 0,
+            live_seq: 0,
+            running: false,
+            text: String::new(),
+            reasoning: String::new(),
+            tool_calls: Vec::new(),
+            step_open: true,
+        }
+    }
 }
 
 impl LiveTurn {
     /// Start a fresh projection for a new run.
-    pub(super) fn reset(&mut self, turn_id: String) {
-        self.turn_id = turn_id;
+    pub(super) fn reset(&mut self) {
         self.live_seq += 1;
         self.running = true;
         self.text.clear();
         self.reasoning.clear();
         self.tool_calls.clear();
+        self.start_seq = 0;
+        self.step_open = true;
     }
 
-    /// Fold one run event into the projection.
+    /// Open the step a model part belongs to.
+    ///
+    /// The step's boundary is the model's own: a part after the
+    /// previous response's end opens the next step. The projection's
+    /// content is that step's alone — the durable row that lands at
+    /// the step's end supersedes it — so the content clears here, and
+    /// the projection's position becomes the log's position at this
+    /// moment: the step's rows are flushed before its events are
+    /// emitted, so this is where the step's content starts.
+    fn open_step(&mut self, log_seq: u64) {
+        if !self.step_open {
+            return;
+        }
+        self.step_open = false;
+        self.start_seq = log_seq;
+        self.text.clear();
+        self.reasoning.clear();
+        self.tool_calls.clear();
+    }
+
+    /// Fold one run event into the projection, with no log position.
+    ///
+    /// A projection of another node's run carries no position: the
+    /// owner's log numbering is not this node's to publish, so a client
+    /// falls back to "any content row supersedes it".
+    pub fn apply(&mut self, event: &AgentEvent) {
+        self.apply_at(event, 0);
+    }
+
+    /// Fold one run event into the projection, stamping the log
+    /// position its step began at.
     ///
     /// The same reducer serves the owner (which feeds it from the
     /// run's event tap) and a non-owner `follow` (which feeds it the
     /// events the tail bridge decoded from the owner's frames), so
     /// both sides project a run identically.
-    pub fn apply(&mut self, event: &AgentEvent) {
+    ///
+    /// `log_seq` is the log's durable position as of this event: the
+    /// step that opens here began at that position, and it is what
+    /// makes the projection's identity durable rather than arbitrary.
+    pub fn apply_at(&mut self, event: &AgentEvent, log_seq: u64) {
         let before = self.signature();
         match event {
             AgentEvent::Model(ContentPart::Text(text)) => {
+                self.open_step(log_seq);
                 self.text.push_str(&text.text);
             }
             AgentEvent::Model(ContentPart::Reasoning(reasoning)) => {
+                self.open_step(log_seq);
                 self.reasoning.push_str(&reasoning.text);
             }
             AgentEvent::Model(ContentPart::ToolUse(call)) => {
+                self.open_step(log_seq);
                 self.ensure_call(call, "running");
             }
             AgentEvent::Model(ContentPart::ToolResult(result)) => {
                 self.finish_result(result);
             }
             AgentEvent::ModelDone(result) => {
-                // A provider that streamed deltas has already put the
-                // text on the projection; only the unstreamed tail is
-                // added (the harness dedups the same way).
-                if !result.text.is_empty() && !self.text.ends_with(&result.text)
-                {
-                    self.text.push_str(&result.text);
+                // A response with no content opens no step: an empty
+                // answer is the harness's "nothing more" signal, and
+                // it must not wipe the step that is still live.
+                let has_content = !result.text.is_empty()
+                    || !result.reasoning.is_empty()
+                    || !result.tool_calls.is_empty();
+                if has_content {
+                    // A provider that never streamed opens the step
+                    // here: its answer arrives whole.
+                    self.open_step(log_seq);
+                    // A provider that streamed deltas has already put
+                    // the text on the projection; only the unstreamed
+                    // tail is added (the harness dedups the same way).
+                    if !result.text.is_empty()
+                        && !self.text.ends_with(&result.text)
+                    {
+                        self.text.push_str(&result.text);
+                    }
+                    // Same rule as the text: a provider that streamed
+                    // reasoning deltas already put them on the
+                    // projection.
+                    if !result.reasoning.is_empty()
+                        && !self.reasoning.ends_with(&result.reasoning)
+                    {
+                        self.reasoning.push_str(&result.reasoning);
+                    }
+                    for call in &result.tool_calls {
+                        self.ensure_call(call, "running");
+                    }
                 }
-                // Same rule as the text: a provider that streamed
-                // reasoning deltas already put them on the projection.
-                if !result.reasoning.is_empty()
-                    && !self.reasoning.ends_with(&result.reasoning)
-                {
-                    self.reasoning.push_str(&result.reasoning);
-                }
-                for call in &result.tool_calls {
-                    self.ensure_call(call, "running");
-                }
+                // The response is over: the next model part opens the
+                // next step, and that step's projection is its own.
+                self.step_open = true;
             }
             AgentEvent::System(SystemEvent::ToolProgress {
                 tool_name,
@@ -151,10 +234,10 @@ impl LiveTurn {
             }) => {
                 self.append_progress(tool_name, call_id, output);
             }
-            AgentEvent::System(SystemEvent::SessionStarted { session_id }) => {
+            AgentEvent::System(SystemEvent::SessionStarted { .. }) => {
                 // A new run on this stream: the projection starts
                 // from scratch, exactly as the owner's tap does.
-                self.reset(format!("remote:{session_id}"));
+                self.reset();
             }
             AgentEvent::System(SystemEvent::SessionEnded { .. })
             | AgentEvent::System(SystemEvent::Suspended(_)) => {
@@ -184,7 +267,7 @@ impl LiveTurn {
     /// as its length: `running` and `failed` differ by one character,
     /// so a length alone would let a call that settles with a
     /// one-character answer keep the frame the client already holds.
-    fn signature(&self) -> (usize, usize, usize, usize, usize, u64, bool) {
+    fn signature(&self) -> (u64, usize, usize, usize, usize, usize, u64, bool) {
         let mut settled = 0usize;
         let mut output_bytes = 0usize;
         let mut streamed_bytes = 0u64;
@@ -198,6 +281,7 @@ impl LiveTurn {
             streamed_bytes = streamed_bytes.saturating_add(call.streamed_bytes);
         }
         (
+            self.start_seq,
             self.text.len(),
             self.reasoning.len(),
             self.tool_calls.len(),

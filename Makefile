@@ -114,6 +114,7 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-pub-surface-strict.sh \
 	  scripts/check-harness-docs.sh \
 	  scripts/check-single-writer.sh \
+	  scripts/check-row-vocabulary.sh \
 	  scripts/check-frozen-api.sh \
 	  scripts/check-publishable.sh \
 	  scripts/check-public-docs.sh \
@@ -122,7 +123,8 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/verify-harness-e2e.sh \
 	  scripts/check-stdout.sh \
 	  scripts/check-web-contract.sh \
-	  scripts/check-web-methods.sh
+	  scripts/check-web-methods.sh \
+	  scripts/check-profile-document.sh
 
 check-web: ## Frontend gates: types, lint, formatting, unit tests (no browser needed)
 	cd $(WEB_DIR) && npx tsc --noEmit
@@ -493,7 +495,7 @@ CRATES := $(shell cargo metadata --no-deps --format-version 1 2>/dev/null \
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-hook-external check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-plugin-shape check-host-capabilities check-test-layout check-deny check-web check-web-contract check-web-methods test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + frontend type/lint/contract/method gates + every …
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-hook-external check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-row-vocabulary check-plugin-shape check-host-capabilities check-profile-document check-test-layout check-deny check-web check-web-contract check-web-methods test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + frontend type/lint/contract/method gates + every …
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -813,6 +815,20 @@ check-public-docs: ## Fail when a frozen crate grows an undocumented public item
 check-single-writer: ## Fail when a session's rows are written outside the session's one writer
 	@bash scripts/check-single-writer.sh
 
+# ---- Row vocabulary (one place spells a row's type) ----
+# A session row's `type` is declared once, by `uva-session`'s
+# `RowTag` / `RowDialect` (`events/vocab/mod.rs`). Production code
+# reads it through `classify_row` and writes it through the typed
+# constructors; a hand-spelled tag in a tag position (`"type": "…"`,
+# `== Some("…")`, a `"…" =>` arm) is a second declaration that drifts
+# the first time the vocabulary renames. The gate's audited table
+# covers spellings that are not row tags (an operation kind, a
+# content-block kind, …); `--self-test` proves the detector still
+# fires.
+check-row-vocabulary: ## Fail when production code spells a session row tag itself
+	@bash scripts/check-row-vocabulary.sh --self-test
+	@bash scripts/check-row-vocabulary.sh
+
 # ---- Plugin shape (R-G) ----
 # Plugin tool roots (`crates/uva-tool-plugins`, `crates/uva-tool-task`
 # plus `crates/uva-mcp` / `-skill` / `-attachment`) ship one tool (or
@@ -849,6 +865,18 @@ check-plugin-shape: ## Fail when a plugin-crate production file grows past the b
 # above `scripts/host-capabilities/baseline`.
 check-host-capabilities: ## Fail when the capability matrix regresses
 	@bash scripts/check-host-capabilities.sh
+
+# ---- Committed profile document (the deployment's own tree) ----
+# `.agents/profile.toml` is a project asset: the deployment's statement
+# of the whole plugin tree. It drifts silently — a plugin gains an
+# `inject` edge, the document keeps describing the old tree — so the
+# gate compares the document's `inject` against the effective edge set
+# the kernel resolves per row (manifest ∪ row declaration). A manifest
+# edge the document does not restate is red; a document edge the
+# manifest does not declare is legal (the document widening a plugin
+# is the feature).
+check-profile-document: ## Fail when the committed profile document drifts from the plugin manifests
+	@bash scripts/check-profile-document.sh
 
 # ---- Inline test-module layout (R105–R109) ----
 # No production file may grow an inline `#[cfg(test)] mod` block to

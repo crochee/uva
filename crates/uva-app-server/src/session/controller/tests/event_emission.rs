@@ -16,9 +16,10 @@ use uva::{
 };
 
 use super::{
-    super::{AgentEvent, SessionOp, SessionState},
+    super::{AgentEvent, SessionOp},
     support::{RecordedCall, VecFactory, make_manager_and_controller},
 };
+use crate::session::status::SessionState;
 
 /// A run leaves exactly one `request_header` row. The header is the
 /// harness's epoch marker — the server no longer stamps a second one

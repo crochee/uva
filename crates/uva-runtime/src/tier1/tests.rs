@@ -12,7 +12,7 @@ fn sleeper() -> Arc<dyn uva_core::sleeper::Sleeper> {
 
 fn config(cache: bool, resilience: bool, budget: bool) -> ModelAdapterConfig {
     ModelAdapterConfig {
-        workspace: WorkspaceConfig::default(),
+        catalogue: WorkspaceConfig::default(),
         cache: cache.then(|| super::super::model_adapter::CacheSection {
             enabled: true,
             ..super::super::model_adapter::CacheSection::default()
@@ -172,7 +172,7 @@ mod behavior_tests {
         budget: Option<BudgetSection>,
     ) -> ModelAdapterConfig {
         ModelAdapterConfig {
-            workspace: WorkspaceConfig::default(),
+            catalogue: WorkspaceConfig::default(),
             cache,
             resilience,
             budget,

@@ -394,15 +394,21 @@ impl std::fmt::Display for ModelSelectionError {
 
 impl std::error::Error for ModelSelectionError {}
 
-/// The `model-adapter` plugin's configuration: the workspace provider
-/// map plus the tier-1 wrapping toggles, all read from a profile
-/// entry's `config`.
+/// The `model-adapter` plugin's configuration: the provider catalogue
+/// plus the tier-1 wrapping toggles, all read from a profile row's
+/// `config`.
+///
+/// The catalogue is flattened: `providers` / `default_provider` /
+/// `default_model` sit at the **top level** of the row's config, next
+/// to `cache` / `resilience` / `budget` — the document reads one
+/// object, not a nested `workspace` table (dsh entry config shape).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModelAdapterConfig {
     /// The provider map, in the same shape
     /// `<workspace>/.agents/config.toml` uses (`default_provider` /
     /// `default_model` / `providers`).
-    pub workspace: WorkspaceConfig,
+    #[serde(flatten)]
+    pub catalogue: WorkspaceConfig,
     /// Semantic-cache wrap. Absent = disabled.
     #[serde(default)]
     pub cache: Option<CacheSection>,
@@ -520,7 +526,7 @@ fn default_cost_cents() -> u64 {
 /// Build the catalogue a `model-adapter` profile entry configures.
 #[must_use]
 pub fn catalogue_from_config(config: &ModelAdapterConfig) -> ProviderCatalogue {
-    ProviderCatalogue::from_workspace_config(&config.workspace)
+    ProviderCatalogue::from_workspace_config(&config.catalogue)
 }
 
 /// The manifest every [`ModelAdapterServicePlugin`] carries: the

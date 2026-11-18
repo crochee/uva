@@ -6,7 +6,13 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use uva_agent::AgentRegistry;
 use uva_provider::Message;
-use uva_session::{SessionEvent, subagent_enter, subagent_exit, user_message};
+use uva_session::{
+    RowTag,
+    SessionEvent,
+    subagent_enter,
+    subagent_exit,
+    user_message,
+};
 
 use super::{
     super::{
@@ -189,4 +195,145 @@ fn the_surface_writes_the_set_through_the_hosts_index() {
 fn a_host_without_session_directories_writes_nothing() {
     let surface = ControlSurface::new(Arc::new(AgentRegistry::new()));
     surface.write_artifacts("parent", "child-1", "scout", 1, "completed", None);
+}
+
+/// The tags the artefact set renders: the child's own conversation —
+/// who spoke, which tools ran, how the round ended. Every other tag
+/// in the vocabulary is left out on purpose.
+const RENDERED: [RowTag; 9] = [
+    RowTag::UserMessage,
+    RowTag::AssistantMessage,
+    RowTag::ToolCall,
+    RowTag::ToolResult,
+    RowTag::SubagentEnter,
+    RowTag::SubagentExit,
+    RowTag::Turn,
+    RowTag::Warning,
+    RowTag::HookBlock,
+];
+
+/// Every tag in the vocabulary, read from the vocabulary's own
+/// published schema — the same source the wire contract derives its
+/// union from. The test keeps no list of its own: a tag added to the
+/// vocabulary arrives here on its own.
+fn vocabulary() -> Vec<RowTag> {
+    let schema = schemars::schema_for!(uva_session::RowTag);
+    let variants = schema
+        .as_object()
+        .and_then(|object| object.get("oneOf"))
+        .and_then(Value::as_array)
+        .expect("the vocabulary publishes a closed union of tags");
+    variants
+        .iter()
+        .map(|variant| {
+            let wire = variant
+                .get("const")
+                .and_then(Value::as_str)
+                .expect("every variant of the union is one tag");
+            RowTag::from_wire(wire).expect("the union holds vocabulary tags")
+        })
+        .collect()
+}
+
+/// The artefact set's rendering of a transcript holding exactly these
+/// rows.
+fn rendering_of(tags: &[RowTag]) -> String {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut transcript = String::new();
+    for tag in tags {
+        let row = serde_json::to_value(tag.empty_event())
+            .expect("the row serialises");
+        transcript.push_str(&row.to_string());
+        transcript.push('\n');
+    }
+    std::fs::write(dir.path().join(SESSION_LOG_FILE), transcript)
+        .expect("the transcript");
+    let paths = write(dir.path(), &record(None)).expect("the set is written");
+    std::fs::read_to_string(&paths.markdown).expect("the rendering")
+}
+
+/// The artefact set's rendering of a transcript holding exactly these
+/// raw rows.
+fn rendering_of_rows(rows: &[Value]) -> String {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let mut transcript = String::new();
+    for row in rows {
+        transcript.push_str(&row.to_string());
+        transcript.push('\n');
+    }
+    std::fs::write(dir.path().join(SESSION_LOG_FILE), transcript)
+        .expect("the transcript");
+    let paths = write(dir.path(), &record(None)).expect("the set is written");
+    std::fs::read_to_string(&paths.markdown).expect("the rendering")
+}
+
+/// A row the current vocabulary does not cover is dropped, not
+/// rendered: a tag a newer build wrote (version skew), and a row with
+/// no usable tag at all. A row written in an old dialect is not one
+/// of these — it is restored into the current vocabulary first, and
+/// rendered in current shape.
+#[test]
+fn a_row_outside_the_vocabulary_is_dropped() {
+    let rows = [
+        json!({ "type": "a_tag_this_build_predates", "seq": 1, "data": {} }),
+        json!({ "seq": 1, "data": { "text": "hi" } }),
+    ];
+    let empty = rendering_of_rows(&[]);
+    for row in rows {
+        let rendering = rendering_of_rows(std::slice::from_ref(&row));
+        assert_eq!(
+            rendering, empty,
+            "a row outside the vocabulary reached the rendering: {row}"
+        );
+    }
+}
+
+/// A row written in an old dialect is restored into the current
+/// vocabulary before it is rendered, so the set shows what the round
+/// did rather than which spelling the log happened to use: a legacy
+/// user turn reads as a user turn.
+#[test]
+fn a_legacy_row_is_restored_and_rendered() {
+    let row =
+        json!({ "type": "UserInput", "seq": 1, "data": { "text": "hi" } });
+    let rendering = rendering_of_rows(std::slice::from_ref(&row));
+    assert!(
+        rendering.contains("### User\n\nhi"),
+        "the restored row did not reach the rendering:\n{rendering}"
+    );
+}
+
+/// The artefact set takes a stance on every tag in the vocabulary: the
+/// tags the transcript is made of are rendered, and the rest are left
+/// out on purpose. A tag nobody decided about would render nothing
+/// and read as «nothing happened» — this test says every tag is
+/// accounted for. The renderer's own match over the vocabulary says
+/// the same thing at compile time; this one says it about the
+/// rendering that actually comes out.
+#[test]
+fn every_tag_in_the_vocabulary_is_rendered_or_left_out_on_purpose() {
+    let vocabulary = vocabulary();
+    for tag in RENDERED {
+        assert!(
+            vocabulary.contains(&tag),
+            "`{}` is not a tag in the vocabulary",
+            tag.as_wire(),
+        );
+    }
+
+    let empty = rendering_of(&[]);
+    for tag in vocabulary {
+        let rendered = rendering_of(&[tag]) != empty;
+        assert_eq!(
+            rendered,
+            RENDERED.contains(&tag),
+            "the artefact set's stance on `{}` drifted: it {}",
+            tag.as_wire(),
+            if rendered {
+                "renders the row"
+            } else {
+                "leaves the row out"
+            },
+        );
+    }
 }

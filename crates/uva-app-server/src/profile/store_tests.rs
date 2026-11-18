@@ -4,21 +4,16 @@ use serde_json::json;
 
 use crate::profile::{
     CapabilityDomain,
-    Enabled,
-    Entry,
+    Manifest,
     Profile,
     ProfileStore,
     RowEdit,
-    RuntimeKind,
 };
 
-fn doc_row(id: &str) -> Entry {
-    Entry {
-        id: id.to_owned(),
-        runtime: RuntimeKind::Native,
+fn doc_row(id: &str) -> Manifest {
+    Manifest {
         config: json!({}),
-        capabilities: Vec::new(),
-        enabled: Enabled::On,
+        ..Manifest::plain(id, id)
     }
 }
 
@@ -50,25 +45,25 @@ fn a_missing_document_materializes_the_fallback() {
     let mut edited = loaded;
     ProfileStore::apply_edit(
         &mut edited,
-        &RowEdit::SetEnabled {
+        &RowEdit::SetDisabled {
             id: "skills".to_owned(),
-            enabled: Enabled::Off,
+            disabled: true,
         },
     )
     .expect("edit");
-    assert_eq!(edited.core[0].enabled, Enabled::Off);
+    assert!(edited.core[0].disabled);
 }
 
 #[test]
-fn an_enabled_edit_round_trips_through_toml() {
+fn a_disabled_edit_round_trips_through_toml() {
     let dir = tempfile::tempdir().unwrap();
     let _store = store(dir.path());
     let mut document = doc();
     ProfileStore::apply_edit(
         &mut document,
-        &RowEdit::SetEnabled {
+        &RowEdit::SetDisabled {
             id: "skills".to_owned(),
-            enabled: Enabled::Off,
+            disabled: true,
         },
     )
     .expect("edit");
@@ -83,7 +78,7 @@ fn an_enabled_edit_round_trips_through_toml() {
 
     let text = ProfileStore::to_toml(&document).expect("serialize");
     let parsed = Profile::from_toml_str(&text).expect("the document parses");
-    assert_eq!(parsed.core[0].enabled, Enabled::Off);
+    assert!(parsed.core[0].disabled);
     assert_eq!(
         parsed.core[1].config,
         json!({ "limit": 3, "nested": { "a": true } })

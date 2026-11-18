@@ -58,12 +58,15 @@ base64.workspace = true
 # workspace's canonical character-boundary truncator. The `…` marker
 # and the limit stay here, where the rendering lives.
 uva-core.workspace = true
+# The row vocabulary: the projection asks the session crate to restore
+# a durable row into the current vocabulary (`restore_row`) and its
+# accounting of the vocabulary is an exhaustive match over `RowTag` —
+# so a tag the vocabulary gains does not compile until the transcript
+# says what it does with it (`docs/adr/0006-row-vocabulary-owns-the-row.md`).
+uva-provider.workspace = true
+uva-session.workspace = true
 
 [dev-dependencies]
-# The row-accounting test iterates the session wire vocabulary's
-# source of truth; the projection itself stays a client of the wire
-# and never links against the session crate in production code.
-uva-session = { workspace = true }
 # The tests run against an in-process WebSocket gateway, so they need
 # the axum the gateway crate's own tests use; `net` covers the test
 # server's listener, `sync` the notification broadcast.
@@ -75,3 +78,6 @@ tokio = { workspace = true, features = [
   "sync",
   "time",
 ] }
+# The vocabulary's own published schema is how the projection's test
+# enumerates every tag — the test keeps no copy of the vocabulary.
+schemars.workspace = true

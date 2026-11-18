@@ -330,32 +330,11 @@ pub(crate) fn first_tool_use_id(message: &Message) -> Option<&str> {
 /// blocks appear.
 ///
 /// The raw half of [`first_tool_use_id`]: the same `tool_use` blocks,
-/// read out of the JSON a log row carries.
+/// read out of the JSON a log row carries — by the one reader that
+/// knows the provider's content-block shape
+/// ([`crate::content_blocks`]).
 pub(crate) fn collect_tool_use_ids(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            // tool_use block: { "type": "tool_use", "id": "..." }
-            if matches!(
-                map.get("type").and_then(Value::as_str),
-                Some("tool_use")
-            ) && let Some(id) = map.get("id").and_then(Value::as_str)
-            {
-                out.push(id.to_string());
-            }
-            // Recurse into nested arrays / objects so we catch
-            // tool-use blocks no matter where they sit in the
-            // payload.
-            for v in map.values() {
-                collect_tool_use_ids(v, out);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_tool_use_ids(item, out);
-            }
-        }
-        _ => {}
-    }
+    crate::content_blocks::collect_tool_use_ids(value, out);
 }
 
 fn extract_tool_use_id(data: &Value) -> Option<String> {

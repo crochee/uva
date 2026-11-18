@@ -147,15 +147,16 @@ async fn a_feedback_row_does_not_break_the_run_ordinals() {
     // A checkpoint citing those seqs is a legitimate compaction:
     // the strict fold accepts it and the shadowed span disappears.
     writer
-        .append(json!({
-            "type": "compaction",
-            "surface_op": {
-                "start": resolved.start,
-                "end": resolved.end,
-                "source_event_seqs": resolved.source_event_seqs,
+        .append_event(&uva::session::SessionEvent::Compaction {
+            seq: 0,
+            ts: String::new(),
+            data: json!({"summary": "the tool turn, compacted"}),
+            surface_op: uva::session::SurfaceOp::Replace {
+                start: resolved.start,
+                end: resolved.end,
+                source_event_seqs: resolved.source_event_seqs.clone(),
             },
-            "data": {"summary": "the tool turn, compacted"},
-        }))
+        })
         .await
         .unwrap();
     writer.flush().await.unwrap();
@@ -501,7 +502,11 @@ async fn a_forked_session_restamps_its_inherited_rows() {
         .session_manager
         .writer(SERVER_DEFAULT_USER_ID, &forked.session_id);
     let next = writer
-        .append(json!({"type": "UserInput", "data": {"text": "after"}}))
+        .append_event(&uva::session::user_message(
+            serde_json::to_value(uva::provider::Message::user("after"))
+                .expect("a user message serialises"),
+            None,
+        ))
         .await
         .expect("the child's next row");
     writer.flush().await.expect("flush");
@@ -612,23 +617,30 @@ async fn the_writer_feeds_the_ledger_with_log_ordinals() {
     );
     // The rows are the writer's: it stamps each one with the ordinal
     // the reader will reproduce and feeds the same ordinals to the
-    // ledger.
+    // ledger. The tool row is the typed event a tool result now
+    // takes; the legacy `Model` envelope it replaced folded to the
+    // same surface row.
     writer
-        .append(json!({
-            "type": "UserInput",
-            "data": {"text": "hi"},
-        }))
+        .append_event(&uva::session::user_message(
+            serde_json::to_value(uva::provider::Message::user("hi"))
+                .expect("a user message serialises"),
+            None,
+        ))
         .await
         .unwrap();
     writer
-        .append(json!({
-            "type": "Model",
-            "data": {
-                "type": "tool_result",
-                "tool_use_id": "c1",
-                "content": [{"type": "text", "text": "out"}],
-            }
-        }))
+        .append_event(&uva::session::SessionEvent::ToolResult {
+            seq: 0,
+            ts: String::new(),
+            data: serde_json::to_value(uva::provider::Message::tool(
+                uva::provider::Content::text("out"),
+                "c1",
+            ))
+            .expect("a tool message serialises"),
+            is_error: false,
+            tool_call_id: Some("c1".to_string()),
+            surface_op: None,
+        })
         .await
         .unwrap();
     writer.flush().await.unwrap();
@@ -726,14 +738,18 @@ async fn the_writer_takes_its_ordinal_from_the_sink_not_a_local_counter() {
         .unwrap();
 
     writer
-        .append(json!({
-            "type": "Model",
-            "data": {
-                "type": "tool_result",
-                "tool_use_id": "c9",
-                "content": [{"type": "text", "text": "out"}],
-            }
-        }))
+        .append_event(&uva::session::SessionEvent::ToolResult {
+            seq: 0,
+            ts: String::new(),
+            data: serde_json::to_value(uva::provider::Message::tool(
+                uva::provider::Content::text("out"),
+                "c9",
+            ))
+            .expect("a tool message serialises"),
+            is_error: false,
+            tool_call_id: Some("c9".to_string()),
+            surface_op: None,
+        })
         .await
         .unwrap();
     writer.flush().await.unwrap();

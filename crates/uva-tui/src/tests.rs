@@ -15,12 +15,22 @@ use std::sync::{
 
 use axum::{
     Router,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     routing::get,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use uva_provider::{
+    Content,
+    ContentPart,
+    Message,
+    Role,
+    TextContent,
+    ToolResult,
+    ToolUse,
+};
+use uva_session::RowTag;
 
 use crate::{
     app::{Action, App, ConnectionState, Decision, TurnState},
@@ -170,7 +180,7 @@ async fn serve_connection(
     loop {
         tokio::select! {
             frame = socket.recv() => match frame {
-                Some(Ok(Message::Text(text))) => {
+                Some(Ok(WsMessage::Text(text))) => {
                     let Ok(value) = serde_json::from_str::<Value>(&text)
                     else {
                         continue;
@@ -194,7 +204,7 @@ async fn serve_connection(
                             }),
                         };
                         let _ = socket
-                            .send(Message::Text(reply.to_string().into()))
+                            .send(WsMessage::Text(reply.to_string().into()))
                             .await;
                     }
                 }
@@ -203,7 +213,7 @@ async fn serve_connection(
             notified = notify_rx.recv() => match notified {
                 Ok(envelope) => {
                     if socket
-                        .send(Message::Text(envelope.into()))
+                        .send(WsMessage::Text(envelope.into()))
                         .await
                         .is_err()
                     {
@@ -238,7 +248,7 @@ fn baseline(session_id: &str, state: &str, rows: Vec<Value>) -> Value {
         "rows": rows,
         "cursor": 0,
         "live": {
-            "turn_id": "",
+            "start_seq": 0,
             "live_seq": 0,
             "running": false,
             "text": "",
@@ -251,13 +261,47 @@ fn baseline(session_id: &str, state: &str, rows: Vec<Value>) -> Value {
     })
 }
 
+/// The timestamp every fixture row carries: the writer stamps one on
+/// every row it appends, and the typed event a row's arm reads needs
+/// it to decode.
+pub(crate) const FIXTURE_TS: &str = "2026-11-18T00:00:00Z";
+
+/// The role a message row carries: a user row is the user's, every
+/// other message row is the assistant's.
+pub(crate) fn message_role(kind: &str) -> Role {
+    if kind == "user_message" {
+        Role::User
+    } else {
+        Role::Assistant
+    }
+}
+
+/// A row's payload: the provider `Message` the loop commits.
+///
+/// The harness builds a turn one way and the log row keeps the same
+/// bytes the next request sends — so the fixture builds the message
+/// the same way. A fixture that guesses the shape hides a reader
+/// drifting from it: the payload's shape is the vocabulary's
+/// knowledge, not a test's.
+pub(crate) fn message_data(role: Role, content: Content) -> Value {
+    serde_json::to_value(Message::new(role, content))
+        .expect("the message serializes")
+}
+
+/// A tool message's payload: the provider `Message` with the id of
+/// the call it answers.
+pub(crate) fn tool_message_data(content: Content, call_id: &str) -> Value {
+    let mut message = Message::new(Role::Tool, content);
+    message.tool_call_id = Some(call_id.to_string());
+    serde_json::to_value(message).expect("the message serializes")
+}
+
 fn text_row(kind: &str, seq: u64, text: &str) -> Value {
     json!({
         "type": kind,
         "seq": seq,
-        "data": {
-            "content": { "Single": { "type": "text", "text": text } },
-        },
+        "ts": FIXTURE_TS,
+        "data": message_data(message_role(kind), Content::text(text)),
     })
 }
 
@@ -265,6 +309,7 @@ fn turn_end(reason: &str) -> Value {
     json!({
         "type": "turn",
         "seq": 9,
+        "ts": FIXTURE_TS,
         "data": { "kind": "end", "turn": 0, "reason": reason },
     })
 }
@@ -369,14 +414,14 @@ async fn one_conversation_turn_ends_idle_with_the_assistant_text() {
             json!({
                 "session_id": "s1",
                 "kind": "live",
-                "live": {
-                    "turn_id": "t1",
-                    "live_seq": 1,
-                    "running": true,
-                    "text": "Sunny with",
-                    "reasoning": "",
-                    "tool_calls": [],
-                },
+            "live": {
+                "start_seq": 1,
+                "live_seq": 1,
+                "running": true,
+                "text": "Sunny with",
+                "reasoning": "",
+                "tool_calls": [],
+            },
             }),
         )
         .await;
@@ -647,36 +692,230 @@ async fn the_sidebar_populates_from_sessions_list() {
     assert_eq!(tree[0].sessions[1].id, "s1");
 }
 
-/// The transcript's accounting of the wire vocabulary: every tag
-/// `uva-session` knows is either applied or ignored-by-design, and
-/// never both. A tag added to `KNOWN_SESSION_EVENT_TYPES` without a
-/// classification fails here — the drop can no longer be accidental.
+/// Every tag in the vocabulary, read from the vocabulary's own
+/// published schema — the same source the wire contract derives its
+/// union from. The test keeps no list of its own: a tag added to the
+/// vocabulary arrives here on its own.
+fn vocabulary() -> Vec<RowTag> {
+    let schema = schemars::schema_for!(uva_session::RowTag);
+    let variants = schema
+        .as_object()
+        .and_then(|object| object.get("oneOf"))
+        .and_then(Value::as_array)
+        .expect("the vocabulary publishes a closed union of tags");
+    variants
+        .iter()
+        .map(|variant| {
+            let wire = variant
+                .get("const")
+                .and_then(Value::as_str)
+                .expect("every variant of the union is one tag");
+            RowTag::from_wire(wire).expect("the union holds vocabulary tags")
+        })
+        .collect()
+}
+
+/// The applied tags whose arm appends a transcript line: the row
+/// carries text the operator reads.
+const RENDERED_ROW_TAGS: [RowTag; 5] = [
+    RowTag::UserMessage,
+    RowTag::AssistantMessage,
+    RowTag::ToolResult,
+    RowTag::HookBlock,
+    RowTag::Warning,
+];
+
+/// The applied tags whose arm moves the operator-visible session
+/// state instead of appending a line: a turn boundary, the held call
+/// the operator answers, and the writer's shutdown.
+const STATE_ROW_TAGS: [RowTag; 3] =
+    [RowTag::Turn, RowTag::ApprovalAsked, RowTag::SessionShutdown];
+
+/// What the projection visibly chose to do with a row.
+type Snapshot = (TurnState, String, usize, bool, String);
+
+/// The projection's visible state: the turn lifecycle, the header's
+/// status line, the transcript's length, whether a call is held, and
+/// the in-progress streamed text.
+fn snapshot(app: &App) -> Snapshot {
+    (
+        app.turn(),
+        app.status().to_string(),
+        app.messages().len(),
+        app.approval().is_some(),
+        app.live_text().to_string(),
+    )
+}
+
+/// The row each tag's arm reads: an applied arm gets the payload its
+/// own fields come from, so the effect under test is the arm's doing
+/// and not an accident of an empty payload.
+fn row_for(tag: RowTag) -> Value {
+    // The held call the operator answers: its fields ride beside the
+    // row, the way the writer's typed event carries them.
+    if tag == RowTag::ApprovalAsked {
+        return json!({
+            "type": tag.as_wire(),
+            "seq": 1,
+            "ts": FIXTURE_TS,
+            "id": "a1",
+            "call_id": "c1",
+            "tool": "shell",
+            "arguments_hash": "sha256:args",
+            "risk": "high",
+            "agent": "main",
+        });
+    }
+    let data = match tag {
+        // The text-bearing rows: `data` is the provider message the
+        // loop committed.
+        RowTag::UserMessage => message_data(Role::User, Content::text("hi")),
+        RowTag::AssistantMessage => {
+            message_data(Role::Assistant, Content::text("hi"))
+        }
+        RowTag::ToolResult => tool_message_data(Content::text("hi"), "c1"),
+        // The veto notice names the policy, the call and the reason.
+        RowTag::HookBlock => json!({
+            "hook": "policy",
+            "tool": "shell",
+            "reason": "refused",
+        }),
+        // The turn boundary that ends a run.
+        RowTag::Turn => json!({ "kind": "end", "reason": "completed" }),
+        // Every other tag is log-only: its arm reads nothing.
+        _ => json!({}),
+    };
+    json!({ "type": tag.as_wire(), "seq": 1, "ts": FIXTURE_TS, "data": data })
+}
+
+/// Every tag in the vocabulary gets the treatment its arm declares:
+/// the five message rows append a transcript line, the three state
+/// rows move the operator-visible state without a line, and every
+/// log-only row changes nothing.
+///
+/// The test this replaced only asserted «no panic», which a
+/// projection that silently dropped every row would also pass. Here
+/// each tag gets a row carrying what its arm reads, and the effect
+/// is read back: a tag moved between the three groups, or an arm
+/// that stops acting, fails.
 #[test]
-fn every_known_row_kind_is_applied_or_ignored_by_design() {
-    for tag in uva_session::KNOWN_SESSION_EVENT_TYPES {
-        let applied = crate::app::APPLIED_ROW_TYPES.contains(tag);
-        let ignored = crate::app::IGNORED_ROW_TYPES.contains(tag);
-        assert!(
-            applied || ignored,
-            "the transcript has no accounting for `{tag}`: classify it \
-             in APPLIED_ROW_TYPES or IGNORED_ROW_TYPES"
+fn every_row_tag_gets_the_treatment_its_arm_declares() {
+    for tag in vocabulary() {
+        let mut app = App::new();
+        // The shutdown arm's effect is a *running* turn ending, and a
+        // fresh app is already idle: start a turn first.
+        if tag == RowTag::SessionShutdown {
+            app.apply_row(&json!({
+                "type": "turn",
+                "seq": 1,
+                "ts": FIXTURE_TS,
+                "data": { "kind": "start" },
+            }));
+        }
+        let before = snapshot(&app);
+        app.apply_row(&row_for(tag));
+        let after = snapshot(&app);
+
+        let rendered = after.2 > before.2;
+        assert_eq!(
+            rendered,
+            RENDERED_ROW_TAGS.contains(&tag),
+            "{}: the transcript {}",
+            tag.as_wire(),
+            if rendered {
+                "gained a line"
+            } else {
+                "stayed unchanged"
+            },
         );
-        assert!(!applied || !ignored, "`{tag}` is both applied and ignored");
+        let marked = after != before;
+        assert_eq!(
+            marked,
+            RENDERED_ROW_TAGS.contains(&tag) || STATE_ROW_TAGS.contains(&tag),
+            "{}: the projection {} the row",
+            tag.as_wire(),
+            if marked { "acted on" } else { "ignored" },
+        );
     }
 }
 
-/// The `apply_row` match must have an arm for every tag the
-/// accounting declares applied: the accounting test above only sorts
-/// tags into lists, so a tag added to `APPLIED_ROW_TYPES` without an
-/// arm would otherwise compile, pass every test, and panic on the
-/// first production row. One minimal row of each applied tag through
-/// the real match makes that drift fail here instead.
+/// A row this build cannot read is dropped, not rendered: a tag a
+/// newer build wrote (version skew), and a row with no usable tag at
+/// all.
 #[test]
-fn every_applied_row_kind_survives_apply_row() {
-    for tag in crate::app::APPLIED_ROW_TYPES {
+fn a_row_outside_the_vocabulary_is_dropped() {
+    let rows = [
+        json!({ "type": "a_tag_this_build_predates", "seq": 1, "data": {} }),
+        json!({ "seq": 1, "data": { "text": "hi" } }),
+    ];
+    for row in rows {
         let mut app = App::new();
-        app.apply_row(&json!({ "type": tag, "seq": 1, "data": {} }));
+        app.apply_row(&row);
+        assert!(
+            app.messages().is_empty(),
+            "a row outside the vocabulary renders nothing: {row}"
+        );
     }
+}
+
+/// A row written in an older dialect is restored into the current
+/// vocabulary and renders in the current shape: the transcript shows
+/// the turn, not which spelling the log happened to use.
+///
+/// The dialects are frozen history, and a session opened today can
+/// still hold one. The row is a user turn either way, so the operator
+/// sees it — see
+/// `docs/adr/0007-row-vocabulary-restores-at-the-read-boundary.md`.
+#[test]
+fn a_row_written_in_an_older_dialect_renders_in_the_current_shape() {
+    let mut app = App::new();
+    app.apply_row(&json!({
+        "type": "UserInput",
+        "seq": 1,
+        "data": { "text": "hi" },
+    }));
+    let line = app.messages().last().expect("the user turn");
+    assert_eq!(line.role, crate::app::Role::User);
+    assert_eq!(line.text, "hi");
+    assert_eq!(line.seq, Some(1));
+}
+
+/// The same for a legacy `Model` row: its payload is one part, and
+/// the restored row is the assistant turn that part says.
+#[test]
+fn a_legacy_model_row_renders_as_the_assistant_turn() {
+    let mut app = App::new();
+    app.apply_row(&json!({
+        "type": "Model",
+        "seq": 2,
+        "data": { "type": "text", "text": "hi" },
+    }));
+    let line = app.messages().last().expect("the assistant turn");
+    assert_eq!(line.role, crate::app::Role::Assistant);
+    assert_eq!(line.text, "hi");
+    assert_eq!(line.seq, Some(2));
+}
+
+/// A legacy row that carries a tool result is the tool outcome the
+/// transcript shows: the part names the call it answers and what the
+/// tool said.
+#[test]
+fn a_legacy_tool_result_row_renders_the_outcome_it_carries() {
+    let mut app = App::new();
+    app.apply_row(&json!({
+        "type": "Model",
+        "seq": 3,
+        "data": {
+            "type": "tool_result",
+            "tool_use_id": "c1",
+            "tool_name": "shell",
+            "is_error": false,
+            "content": [{ "type": "text", "text": "ONE" }],
+        },
+    }));
+    let line = app.messages().last().expect("the tool outcome");
+    assert_eq!(line.role, crate::app::Role::Tool);
+    assert_eq!(line.text, "shell: ok ONE");
 }
 
 /// Mirrors the web projection: a warning row without a `message`
@@ -734,21 +973,35 @@ async fn a_warning_row_becomes_a_one_line_transcript_notice() {
 /// turn's text and its `tool_use` part travel in one row, the way
 /// the harness's `write_assistant_turn` persists them.
 fn tool_call_row(seq: u64, call_id: &str, name: &str) -> Value {
+    assistant_tool_call_row(seq, call_id, name, json!({ "command": "ls" }))
+}
+
+/// The same row with another argument payload: the turn's text and
+/// the call's `tool_use` part, in one provider message.
+fn assistant_tool_call_row(
+    seq: u64,
+    call_id: &str,
+    name: &str,
+    input: Value,
+) -> Value {
     json!({
         "type": "assistant_message",
         "seq": seq,
-        "data": {
-            "role": "assistant",
-            "content": { "Multi": [
-                { "type": "text", "text": "let me look" },
-                {
-                    "type": "tool_use",
-                    "id": call_id,
-                    "name": name,
-                    "input": { "command": "ls" },
-                },
-            ]},
-        },
+        "ts": FIXTURE_TS,
+        "data": message_data(
+            Role::Assistant,
+            Content::parts(vec![
+                ContentPart::Text(TextContent {
+                    text: "let me look".to_string(),
+                    cache_control: None,
+                }),
+                ContentPart::ToolUse(ToolUse {
+                    id: call_id.to_string(),
+                    name: name.to_string(),
+                    input,
+                }),
+            ]),
+        ),
     })
 }
 
@@ -762,22 +1015,12 @@ const LONG_OUTPUT: &str =
 /// The same call row with an argument payload longer than one
 /// transcript line carries, for the truncation rule to cut.
 fn long_tool_call_row(seq: u64, call_id: &str, name: &str) -> Value {
-    json!({
-        "type": "assistant_message",
-        "seq": seq,
-        "data": {
-            "role": "assistant",
-            "content": { "Multi": [
-                { "type": "text", "text": "let me look" },
-                {
-                    "type": "tool_use",
-                    "id": call_id,
-                    "name": name,
-                    "input": { "command": LONG_ARGUMENT },
-                },
-            ]},
-        },
-    })
+    assistant_tool_call_row(
+        seq,
+        call_id,
+        name,
+        json!({ "command": LONG_ARGUMENT }),
+    )
 }
 
 /// A multi-byte argument payload: each character is three bytes, so
@@ -788,22 +1031,12 @@ const MULTIBYTE_ARGUMENT: &str = "中中中中中中中中中中中中中中中�
 /// The same call row with a multi-byte argument payload, so the
 /// truncation rule proves it counts characters, not bytes.
 fn multibyte_tool_call_row(seq: u64, call_id: &str, name: &str) -> Value {
-    json!({
-        "type": "assistant_message",
-        "seq": seq,
-        "data": {
-            "role": "assistant",
-            "content": { "Multi": [
-                { "type": "text", "text": "let me look" },
-                {
-                    "type": "tool_use",
-                    "id": call_id,
-                    "name": name,
-                    "input": { "command": MULTIBYTE_ARGUMENT },
-                },
-            ]},
-        },
-    })
+    assistant_tool_call_row(
+        seq,
+        call_id,
+        name,
+        json!({ "command": MULTIBYTE_ARGUMENT }),
+    )
 }
 
 /// The row the crash repair writes for a call that never finished:
@@ -828,11 +1061,8 @@ fn long_tool_result_row(seq: u64, call_id: &str) -> Value {
     json!({
         "type": "tool_result",
         "seq": seq,
-        "data": {
-            "role": "tool",
-            "content": { "Single": { "type": "text", "text": LONG_OUTPUT } },
-            "tool_call_id": call_id,
-        },
+        "ts": FIXTURE_TS,
+        "data": tool_message_data(Content::text(LONG_OUTPUT), call_id),
         "tool_call_id": call_id,
     })
 }
@@ -844,11 +1074,8 @@ fn tool_result_row(seq: u64, call_id: &str, is_error: bool) -> Value {
     json!({
         "type": "tool_result",
         "seq": seq,
-        "data": {
-            "role": "tool",
-            "content": { "Single": { "type": "text", "text": "a.txt\nb.txt" } },
-            "tool_call_id": call_id,
-        },
+        "ts": FIXTURE_TS,
+        "data": tool_message_data(Content::text("a.txt\nb.txt"), call_id),
         "is_error": is_error,
         "tool_call_id": call_id,
     })
@@ -860,14 +1087,20 @@ fn multipart_tool_result_row(seq: u64, call_id: &str) -> Value {
     json!({
         "type": "tool_result",
         "seq": seq,
-        "data": {
-            "role": "tool",
-            "content": { "Multi": [
-                { "type": "text", "text": "part one" },
-                { "type": "text", "text": "part two" },
-            ]},
-            "tool_call_id": call_id,
-        },
+        "ts": FIXTURE_TS,
+        "data": tool_message_data(
+            Content::parts(vec![
+                ContentPart::Text(TextContent {
+                    text: "part one".to_string(),
+                    cache_control: None,
+                }),
+                ContentPart::Text(TextContent {
+                    text: "part two".to_string(),
+                    cache_control: None,
+                }),
+            ]),
+            call_id,
+        ),
         "tool_call_id": call_id,
     })
 }
@@ -1053,16 +1286,19 @@ async fn a_tool_result_part_names_the_tool_it_answers() {
         json!({
             "type": "tool_result",
             "seq": 3,
-            "data": {
-                "role": "tool",
-                "content": { "Single": {
-                    "type": "tool_result",
-                    "tool_use_id": "call_1",
-                    "tool_name": "shell",
-                    "content": [],
-                    "is_error": true,
-                }},
-            },
+            "ts": FIXTURE_TS,
+            "data": tool_message_data(
+                Content::parts(vec![ContentPart::ToolResult(ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    tool_name: Some("shell".to_string()),
+                    content: Vec::new(),
+                    structured_content: None,
+                    is_error: Some(true),
+                    metadata: serde_json::Map::new(),
+                    truncated_by: None,
+                })]),
+                "call_1",
+            ),
         }),
     )
     .await;
@@ -1317,20 +1553,35 @@ async fn a_multibyte_payload_fills_the_line_by_characters() {
     );
 }
 
-/// The tool rows are applied, not ignored: the accounting lists them
-/// on the applied side, so the transcript renders them.
+/// The tool rows are applied, not ignored: the transcript renders
+/// them.
 #[test]
 fn the_tool_rows_are_applied_not_ignored() {
-    for tag in ["tool_result", "hook_block"] {
-        assert!(
-            crate::app::APPLIED_ROW_TYPES.contains(&tag),
-            "`{tag}` is applied: the transcript renders it"
-        );
-        assert!(
-            !crate::app::IGNORED_ROW_TYPES.contains(&tag),
-            "`{tag}` is no longer ignored by design"
-        );
-    }
+    let mut app = App::new();
+    app.apply_row(&json!({
+        "type": RowTag::ToolResult.as_wire(),
+        "seq": 1,
+        "data": {},
+    }));
+    assert!(
+        app.messages()
+            .iter()
+            .any(|line| line.role == crate::app::Role::Tool),
+        "the tool result row is applied: the transcript renders it"
+    );
+
+    let mut app = App::new();
+    app.apply_row(&json!({
+        "type": RowTag::HookBlock.as_wire(),
+        "seq": 1,
+        "data": {},
+    }));
+    assert!(
+        app.messages()
+            .iter()
+            .any(|line| line.role == crate::app::Role::System),
+        "the hook block row is applied: the transcript renders it"
+    );
 }
 
 /// A tool output of several text parts is one result in several

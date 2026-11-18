@@ -65,6 +65,17 @@
 //! `serde_json::Value`. The `#[schemars(with = …)]` attributes on the
 //! three response fields are the join.
 //!
+//! The row vocabulary is the one row type whose union is *not*
+//! declared here: a row's `type` is `uva_session::RowTag` — the
+//! vocabulary that owns the tag set, catalogued under the TypeScript
+//! name `SessionEventType` — through the same Rust-name-to-
+//! TypeScript-name rewrite the other renamed rows go through. The
+//! server **publishes current rows only** (`uva_session::publish_row`
+//! restores a dialect row before it reaches the wire), so a legacy
+//! dialect spelling is not part of the wire's `type` at all: the
+//! published union is the vocabulary's own schema, not a hand-written
+//! mirror that has to be kept in step.
+//!
 //! Two kinds of frontend type are deliberately outside the catalog, and
 //! the header above does not claim otherwise: RPC *request envelopes*
 //! the browser sends (`ApprovalRequestParams`, `SendChatMessageOptions`,
@@ -202,7 +213,9 @@ pub fn catalog() -> Vec<CatalogEntry> {
             ResumeToken,
         },
         eval::{EvalReport, EvalSuite},
+        provider::{Content, ContentPart, Message},
         scheduler::{JobKind, JobStatus},
+        session::RowTag,
     };
 
     use crate::{
@@ -213,12 +226,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
                 ProfileRow,
                 ProfileSegment,
             },
-            session_view::{
-                SessionArtifact,
-                SessionEventType,
-                SessionPart,
-                SessionTurn,
-            },
+            session_view::{SessionArtifact, SessionPart, SessionTurn},
         },
         routes::{
             agents::AgentDetail,
@@ -250,7 +258,10 @@ pub fn catalog() -> Vec<CatalogEntry> {
             tool::{ToolDetail, ToolInfo},
             ui::UiSchemaResponse,
         },
-        session::controller::{LiveToolCall, LiveTurn},
+        session::{
+            controller::{LiveToolCall, LiveTurn},
+            status::SessionStatus,
+        },
         ui::{
             schema::{UiComponent, UiSchema},
             tree::{Cardinality, SlotInfo},
@@ -282,17 +293,26 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "SessionSummary",
             "SessionSummary",
         ),
+        response::<SessionStatus>(
+            "sessions/list",
+            "SessionStatus",
+            "SessionStatus",
+        ),
         response::<SessionDetail>(
             "sessions/get",
             "SessionDetail",
             "SessionDetail",
         ),
         response::<SessionTurn>("sessions/get", "SessionTurn", "SessionTurn"),
-        response::<SessionEventType>(
-            "sessions/get",
-            "SessionEventType",
-            "SessionEventType",
-        ),
+        response::<RowTag>("sessions/get", "SessionEventType", "RowTag"),
+        // The provider's own message shapes: a message row's payload
+        // IS the provider `Message`, so the browser reads the same
+        // types the provider serializes instead of re-guessing the
+        // envelope. One declaration — generated into the contract,
+        // not hand-written twice.
+        response::<Message>("sessions/get", "Message", "Message"),
+        response::<Content>("sessions/get", "Content", "Content"),
+        response::<ContentPart>("sessions/get", "ContentPart", "ContentPart"),
         response::<SessionArtifact>(
             "sessions/get",
             "SessionArtifact",
@@ -560,288 +580,4 @@ fn rewrite_ref(value: Value, renames: &BTreeMap<&str, &str>) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::*;
-
-    fn document_entries() -> (Value, Vec<String>) {
-        let document = document();
-        let definitions = document["definitions"]
-            .as_object()
-            .expect("the document has definitions")
-            .keys()
-            .cloned()
-            .collect();
-        (document, definitions)
-    }
-
-    #[test]
-    fn every_row_is_exported_under_a_unique_typescript_name() {
-        let mut seen = BTreeSet::new();
-        for entry in catalog() {
-            assert!(
-                seen.insert(entry.ts_name),
-                "two rows export `{}`",
-                entry.ts_name
-            );
-            assert!(
-                entry
-                    .ts_name
-                    .chars()
-                    .next()
-                    .is_some_and(|c| c.is_ascii_uppercase()),
-                "`{}` is not a TypeScript type name",
-                entry.ts_name
-            );
-            assert!(
-                !entry.method.is_empty(),
-                "`{}` names no method",
-                entry.ts_name
-            );
-        }
-    }
-
-    #[test]
-    fn every_row_reaches_a_definition_and_every_ref_resolves() {
-        let (document, definitions) = document_entries();
-        let known: BTreeSet<&str> =
-            definitions.iter().map(String::as_str).collect();
-        for entry in catalog() {
-            assert!(
-                known.contains(entry.ts_name),
-                "`{}` is missing from definitions",
-                entry.ts_name
-            );
-        }
-        let mut dangling = Vec::new();
-        collect_dangling(&document, &known, &mut dangling);
-        assert!(dangling.is_empty(), "dangling $refs: {dangling:?}");
-    }
-
-    #[test]
-    fn a_renamed_rust_type_is_not_also_exported_under_its_rust_name() {
-        let (_document, definitions) = document_entries();
-        for name in [
-            "SessionHeader",
-            "ContextMeter",
-            "SendMessageResponse",
-            "CompactResponse",
-            "SessionUsageResponse",
-            "ScheduleInfo",
-            "ScheduleDetail",
-            "ScheduleTickResponse",
-            "SkillInfo",
-            "Delivery",
-            "ChangeState",
-        ] {
-            assert!(
-                !definitions.iter().any(|definition| definition == name),
-                "`{name}` is exported beside its TypeScript name"
-            );
-        }
-    }
-
-    #[test]
-    fn the_list_row_is_the_one_generic_and_drops_the_phantom_field() {
-        let entry = catalog()
-            .into_iter()
-            .find(|entry| entry.ts_name == "List")
-            .expect("the list envelope is catalogued");
-        assert_eq!(entry.generic, Some(GENERIC_PARAMETER));
-        let properties = entry.schema["properties"]
-            .as_object()
-            .expect("the envelope names its properties");
-        assert!(
-            !properties.contains_key("has_more"),
-            "the envelope never carried `has_more`: {properties:?}"
-        );
-        let required: Vec<&str> = entry.schema["required"]
-            .as_array()
-            .expect("the envelope requires its data field")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        assert_eq!(required, vec!["data"]);
-        assert!(
-            catalog()
-                .iter()
-                .filter(|entry| entry.generic.is_some())
-                .count()
-                == 1,
-            "only the list envelope is generic"
-        );
-    }
-
-    #[test]
-    fn an_always_present_optional_is_required_and_nullable() {
-        // `compact` always writes `start`, `null` when it commits
-        // nothing: the schema must demand the field and allow the null.
-        let document = document();
-        let compact = &document["definitions"]["CompactResult"];
-        let required: Vec<&str> = compact["required"]
-            .as_array()
-            .expect("the response requires its committed flag")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        assert!(required.contains(&"start"), "{compact}");
-        assert!(required.contains(&"end"), "{compact}");
-        assert!(
-            compact["properties"]["start"].to_string().contains("null"),
-            "`start` is nullable: {compact}"
-        );
-        // …while a field the writer omits is optional and not null.
-        assert!(!required.contains(&"summary"), "{compact}");
-    }
-
-    #[test]
-    fn a_request_body_keeps_the_fields_its_reader_defaults() {
-        let document = document();
-        let create = &document["definitions"]["CreateScheduleRequest"];
-        let required: Vec<&str> = create["required"]
-            .as_array()
-            .expect("the body requires its name and kind")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect();
-        let mut required = required;
-        required.sort_unstable();
-        assert_eq!(required, vec!["kind", "name"]);
-    }
-
-    #[test]
-    fn the_document_is_deterministic_and_carries_no_environment() {
-        assert_eq!(document_json(), document_json());
-        let text = document_json();
-        assert!(
-            !text.contains(
-                "$schema\": \"http://json-schema.org/draft-07/schema#\",\n \"x"
-            ),
-            "one meta-schema"
-        );
-        assert_eq!(text.matches(META_SCHEMA).count(), 1);
-        assert!(!text.contains(env!("CARGO_MANIFEST_DIR")));
-        assert!(!text.contains("/home/"));
-        assert!(!text.contains(env!("CARGO_PKG_VERSION")));
-    }
-
-    #[test]
-    fn the_catalogued_event_type_union_is_the_session_vocabulary() {
-        // The union the browser's exhaustive row accounting dispatches
-        // on must be exactly `KNOWN_SESSION_EVENT_TYPES` — the list
-        // `uva-session` derives its own invariants from. A tag added
-        // to one and not the other fails here.
-        let entry = catalog()
-            .into_iter()
-            .find(|entry| entry.ts_name == "SessionEventType")
-            .expect("the vocabulary is catalogued");
-        let emitted: BTreeSet<&str> = entry.schema["oneOf"]
-            .as_array()
-            .expect("the union is a closed string vocabulary")
-            .iter()
-            .filter_map(|variant| variant["const"].as_str())
-            .collect();
-        let known: BTreeSet<&str> = uva::session::KNOWN_SESSION_EVENT_TYPES
-            .iter()
-            .copied()
-            .collect();
-        assert_eq!(
-            emitted, known,
-            "SessionEventType drifted from KNOWN_SESSION_EVENT_TYPES"
-        );
-    }
-
-    #[test]
-    fn a_session_turn_types_its_row_over_the_catalogued_union() {
-        // `SessionTurn.type` must be the union, not an open string:
-        // the whole point of cataloguing the vocabulary is that the
-        // generated `SessionTurn` closes the field the renderer
-        // dispatches on.
-        let document = document();
-        let reference =
-            document["definitions"]["SessionTurn"]["properties"]["type"]
-                .to_string();
-        assert!(
-            reference.contains("\"$ref\":\"#/definitions/SessionEventType\""),
-            "`type` does not reference the union: {reference}"
-        );
-    }
-
-    #[test]
-    fn no_definition_is_an_orphan() {
-        // A definition either is a catalogued row (exported on purpose) or
-        // is reached by a `$ref` from one. Anything else is a leftover the
-        // catalog no longer names — dead weight in the generated file.
-        let document = document();
-        let catalogued: BTreeSet<&str> = document["x-uva-catalog"]
-            .as_array()
-            .expect("the document carries its catalog")
-            .iter()
-            .filter_map(|row| row["tsName"].as_str())
-            .collect();
-        let mut reached = BTreeSet::new();
-        collect_refs(&document, &mut reached);
-        let orphans: Vec<&str> = document["definitions"]
-            .as_object()
-            .expect("definitions")
-            .keys()
-            .map(String::as_str)
-            .filter(|name| {
-                !catalogued.contains(name) && !reached.contains(*name)
-            })
-            .collect();
-        assert!(orphans.is_empty(), "unreferenced definitions: {orphans:?}");
-    }
-
-    fn collect_refs(value: &Value, out: &mut BTreeSet<String>) {
-        match value {
-            Value::Object(object) => {
-                for (key, value) in object {
-                    if key == "$ref"
-                        && let Some(name) = value.as_str().and_then(|pointer| {
-                            pointer.strip_prefix("#/definitions/")
-                        })
-                    {
-                        out.insert(name.to_owned());
-                    }
-                    collect_refs(value, out);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    collect_refs(item, out);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn collect_dangling(
-        value: &Value,
-        known: &BTreeSet<&str>,
-        out: &mut Vec<String>,
-    ) {
-        match value {
-            Value::Object(object) => {
-                for (key, value) in object {
-                    if key == "$ref"
-                        && let Some(pointer) = value.as_str()
-                        && let Some(name) =
-                            pointer.strip_prefix("#/definitions/")
-                        && !known.contains(name)
-                    {
-                        out.push(pointer.to_owned());
-                    }
-                    collect_dangling(value, known, out);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    collect_dangling(item, known, out);
-                }
-            }
-            _ => {}
-        }
-    }
-}
+mod tests;

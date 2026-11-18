@@ -237,33 +237,37 @@ fn index_log(
         .collect();
     let folded = fold_log_surface(&rows);
     let mut entries = Vec::new();
-    for (position, message) in folded.messages.iter().enumerate() {
-        let text = message_text(message);
+    let surface_seqs = folded.surface_seqs;
+    for (position, message) in folded.messages.into_iter().enumerate() {
+        // The folded surface carries the provider's own message — the
+        // one the model is about to see — so the index reads it
+        // through the provider's types, not through a hand-written
+        // guess at their wire shape.
+        let Ok(message) =
+            serde_json::from_value::<uva_provider::Message>(message)
+        else {
+            continue;
+        };
+        let text = message_text(&message);
         if text.trim().is_empty() {
             continue;
         }
-        let seq = folded
-            .surface_seqs
+        let seq = surface_seqs
             .get(position)
             .copied()
             .unwrap_or(position as u64 + 1);
         entries.push(IndexedEntry {
             seq,
-            timestamp: message
-                .get("ts")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-                .or_else(|| {
-                    rows.iter()
-                        .find(|row| {
-                            row.get("seq").and_then(serde_json::Value::as_u64)
-                                == Some(seq)
-                        })
-                        .and_then(|row| {
-                            row.get("ts")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string)
-                        })
+            timestamp: rows
+                .iter()
+                .find(|row| {
+                    row.get("seq").and_then(serde_json::Value::as_u64)
+                        == Some(seq)
+                })
+                .and_then(|row| {
+                    row.get("ts")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
                 }),
             text: text.to_lowercase(),
         });

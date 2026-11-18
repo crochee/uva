@@ -3,9 +3,9 @@
  *
  * Seam: `src/lib/session-to-messages.ts` turns durable session-log rows
  * into the chat UI's message list. It catches a change in how a row
- * becomes a UI message — the row dialects, the tool-block pairing, the
- * surface replace op. It misses everything about the server that writes
- * those rows.
+ * becomes a UI message — the published row shapes, the tool-block
+ * pairing, the surface replace op. It misses everything about the
+ * server that writes those rows.
  *
  * Expectations here are worked examples built from known row shapes
  * (a literal row, a hand-worked answer). They are never recomputed by
@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import type { SessionDetail, SessionTurn } from '../src/api/types';
+import type { Content, Message, SessionDetail, SessionTurn } from '../src/api/types';
 import type { ChatMessageLike } from '../src/lib/session-to-messages';
 import {
   carriesModelContent,
@@ -25,6 +25,7 @@ import {
   projectRows,
   reconstructMessagesFromSession,
   selectLastAssistant,
+  feedbackTarget,
 } from '../src/lib/session-to-messages';
 
 /** A user's bubble, as the chat UI holds it. */
@@ -59,22 +60,33 @@ function outline(messages: ReadonlyArray<ChatMessageLike>) {
   }));
 }
 
-/** A durable row as the fixtures spell it: today's typed vocabulary
- *  plus the pre-vocabulary envelope dialect (`UserInput` / `Model` /
- *  `Agent`) the projection still reads via `legacyRowType`. The
- *  generated `SessionTurn` closes `type` to what the typed writer
- *  emits, so the legacy spellings enter through this widening. */
-type WireRow = Omit<SessionTurn, 'type'> & { type?: string | null };
-
-/** Fold a window of rows onto a fresh projection. */
-function fold(rows: ReadonlyArray<WireRow>, sessionId = 'sess-1') {
-  return projectRows(newRowProjection(sessionId), rows as ReadonlyArray<SessionTurn>);
+/** Fold a window of rows onto a fresh projection. Fixtures are
+ *  written as the wire spells them: the server publishes only
+ *  current-shape rows (`SessionTurn.type` is the published
+ *  `SessionEventType` union), so every tag is spelled literally
+ *  and none needs a widening cast. */
+function fold(rows: ReadonlyArray<SessionTurn>, sessionId = 'sess-1') {
+  return projectRows(newRowProjection(sessionId), rows);
 }
 
-/** One pre-vocabulary envelope row, for the fixtures that feed
- *  `projectRows` / `SessionDetail.history` directly. */
-function legacyRow(row: WireRow): SessionTurn {
-  return row as SessionTurn;
+/** The provider `Message` a row carries — the wire type, complete.
+ *  A fixture that omits `tool_call_id`, `name` or
+ *  `tool_result_cleared_at` would be spelling a payload the contract
+ *  does not publish, so every message row is built through this one
+ *  shape. */
+function providerMessage(
+  role: Message['role'],
+  content: Content,
+  extra: Partial<Omit<Message, 'role' | 'content'>> = {},
+): Message {
+  const message: Message = {
+    role,
+    content,
+    tool_call_id: null,
+    name: null,
+    tool_result_cleared_at: null,
+  };
+  return { ...message, ...extra };
 }
 
 describe('isToolEchoText', () => {
@@ -147,48 +159,30 @@ describe('carriesModelContent', () => {
 });
 
 describe('messageParts', () => {
-  it('reads the loose content array spelling', () => {
-    expect(messageParts({ content: [{ type: 'text', text: 'hi' }] })).toEqual([
-      { type: 'text', text: 'hi' },
-    ]);
+  it('returns the one part of a Single content', () => {
+    expect(messageParts(providerMessage('user', { Single: { type: 'text', text: 'hi' } }))).toEqual(
+      [{ type: 'text', text: 'hi' }],
+    );
   });
 
-  it('reads the externally tagged Single spelling', () => {
-    expect(messageParts({ content: { Single: { type: 'text', text: 'hi' } } })).toEqual([
-      { type: 'text', text: 'hi' },
-    ]);
-  });
-
-  it('reads the externally tagged Multi spelling', () => {
+  it('returns every part of a Multi content', () => {
     expect(
-      messageParts({
-        content: {
+      messageParts(
+        providerMessage('assistant', {
           Multi: [
             { type: 'text', text: 'a' },
             { type: 'text', text: 'b' },
           ],
-        },
-      }),
+        }),
+      ),
     ).toEqual([
       { type: 'text', text: 'a' },
       { type: 'text', text: 'b' },
     ]);
   });
 
-  it('drops the parts that are not objects', () => {
-    expect(messageParts({ content: [{ type: 'text', text: 'a' }, 'junk', null] })).toEqual([
-      { type: 'text', text: 'a' },
-    ]);
-  });
-
-  it('returns nothing for a content spelling it does not know', () => {
-    expect(messageParts({ content: { Other: 1 } })).toEqual([]);
-  });
-
-  it('returns nothing for a payload that is not an object', () => {
-    expect(messageParts('nope')).toEqual([]);
-    expect(messageParts(null)).toEqual([]);
-    expect(messageParts({})).toEqual([]);
+  it('returns an empty list for an empty Multi content', () => {
+    expect(messageParts(providerMessage('user', { Multi: [] }))).toEqual([]);
   });
 });
 
@@ -199,10 +193,18 @@ describe('newRowProjection', () => {
 });
 
 describe('projectRows', () => {
-  it('reads the legacy envelope dialect: a prompt row and a model row', () => {
+  it('reads a published prompt row and an assistant row', () => {
     const state = fold([
-      { type: 'UserInput', seq: 1, data: { text: 'hello' } },
-      { type: 'Model', seq: 2, data: { type: 'text', text: 'hi there' } },
+      {
+        type: 'user_message',
+        seq: 1,
+        data: providerMessage('user', { Single: { type: 'text', text: 'hello' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 2,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'hi there' } }),
+      },
     ]);
 
     expect(outline(state.messages)).toEqual([
@@ -214,8 +216,16 @@ describe('projectRows', () => {
 
   it('binds an assistant turn to the session and leaves the prompt unbound', () => {
     const state = fold([
-      { type: 'UserInput', seq: 1, data: { text: 'hello' } },
-      { type: 'Model', seq: 2, data: { type: 'text', text: 'hi there' } },
+      {
+        type: 'user_message',
+        seq: 1,
+        data: providerMessage('user', { Single: { type: 'text', text: 'hello' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 2,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'hi there' } }),
+      },
     ]);
 
     expect(state.messages[0].sessionId).toBeUndefined();
@@ -227,21 +237,21 @@ describe('projectRows', () => {
       {
         type: 'assistant_message',
         seq: 7,
-        data: {
-          content: [
+        data: providerMessage('assistant', {
+          Multi: [
             { type: 'text', text: 'reading the file' },
             { type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'a.txt' } },
           ],
-        },
+        }),
       },
       {
         type: 'tool_result',
         seq: 8,
-        data: {
-          tool_call_id: 'call_1',
-          tool_name: 'read',
-          content: [{ type: 'text', text: 'file body' }],
-        },
+        data: providerMessage(
+          'tool',
+          { Multi: [{ type: 'text', text: 'file body' }] },
+          { tool_call_id: 'call_1', name: 'read' },
+        ),
       },
     ]);
 
@@ -270,7 +280,11 @@ describe('projectRows', () => {
 
   it('renders a warning row as a one-line transcript notice', () => {
     const state = fold([
-      legacyRow({ type: 'UserInput', seq: 1, data: { text: 'hello' } }),
+      {
+        type: 'user_message',
+        seq: 1,
+        data: providerMessage('user', { Single: { type: 'text', text: 'hello' } }),
+      },
       {
         type: 'warning',
         seq: 2,
@@ -361,11 +375,11 @@ describe('projectRows', () => {
       {
         type: 'assistant_message',
         seq: 1,
-        data: {
-          content: [
+        data: providerMessage('assistant', {
+          Multi: [
             { type: 'tool_use', id: 'call_1', name: 'shell', input: { command: 'rm -rf /' } },
           ],
-        },
+        }),
       },
       {
         type: 'hook_block',
@@ -381,13 +395,18 @@ describe('projectRows', () => {
         type: 'tool_result',
         seq: 3,
         is_error: true,
-        data: {
-          tool_call_id: 'call_1',
-          tool_name: 'shell',
-          content: [
-            { type: 'text', text: '[blocked by guard `shell-deny` (high)] rm -rf is not allowed' },
-          ],
-        },
+        data: providerMessage(
+          'tool',
+          {
+            Multi: [
+              {
+                type: 'text',
+                text: '[blocked by guard `shell-deny` (high)] rm -rf is not allowed',
+              },
+            ],
+          },
+          { tool_call_id: 'call_1', name: 'shell' },
+        ),
       },
     ]);
 
@@ -408,7 +427,7 @@ describe('projectRows', () => {
     const prompt: SessionTurn = {
       type: 'user_message',
       seq: 1,
-      data: { role: 'user', content: [{ type: 'text', text: 'run it' }] },
+      data: providerMessage('user', { Multi: [{ type: 'text', text: 'run it' }] }),
     };
     const row: SessionTurn = {
       type: 'hook_block',
@@ -442,21 +461,21 @@ describe('projectRows', () => {
       {
         type: 'assistant_message',
         seq: 1,
-        data: {
-          content: [
+        data: providerMessage('assistant', {
+          Multi: [
             { type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'a' } },
             { type: 'tool_use', id: 'call_2', name: 'grep', input: { pattern: 'x' } },
           ],
-        },
+        }),
       },
       {
         type: 'tool_result',
         seq: 2,
-        data: {
-          tool_call_id: 'call_1',
-          tool_name: 'read',
-          content: [{ type: 'text', text: 'file body' }],
-        },
+        data: providerMessage(
+          'tool',
+          { Multi: [{ type: 'text', text: 'file body' }] },
+          { tool_call_id: 'call_1', name: 'read' },
+        ),
       },
     ]);
 
@@ -475,7 +494,9 @@ describe('projectRows', () => {
       {
         type: 'assistant_message',
         seq: 1,
-        data: { content: [{ type: 'tool_use', id: 'call_1', name: 'read', input: {} }] },
+        data: providerMessage('assistant', {
+          Multi: [{ type: 'tool_use', id: 'call_1', name: 'read', input: {} }],
+        }),
       },
       {
         type: 'tool_result',
@@ -495,17 +516,19 @@ describe('projectRows', () => {
       {
         type: 'assistant_message',
         seq: 1,
-        data: { content: [{ type: 'tool_use', id: 'call_1', name: 'read', input: {} }] },
+        data: providerMessage('assistant', {
+          Multi: [{ type: 'tool_use', id: 'call_1', name: 'read', input: {} }],
+        }),
       },
       {
         type: 'tool_result',
         seq: 2,
         is_error: true,
-        data: {
-          tool_call_id: 'call_1',
-          tool_name: 'read',
-          content: [{ type: 'text', text: 'no such file' }],
-        },
+        data: providerMessage(
+          'tool',
+          { Multi: [{ type: 'text', text: 'no such file' }] },
+          { tool_call_id: 'call_1', name: 'read' },
+        ),
       },
     ]);
 
@@ -515,8 +538,16 @@ describe('projectRows', () => {
 
   it('coalesces the text of one assistant turn into one segment', () => {
     const state = fold([
-      { type: 'Model', seq: 1, data: { type: 'text', text: 'first ' } },
-      { type: 'Model', seq: 2, data: { type: 'text', text: 'second' } },
+      {
+        type: 'assistant_message',
+        seq: 1,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'first ' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 2,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'second' } }),
+      },
     ]);
 
     expect(outline(state.messages)).toEqual([
@@ -527,10 +558,26 @@ describe('projectRows', () => {
 
   it('starts a new assistant turn after every prompt', () => {
     const state = fold([
-      { type: 'UserInput', seq: 1, data: { text: 'q1' } },
-      { type: 'Model', seq: 2, data: { type: 'text', text: 'a1' } },
-      { type: 'UserInput', seq: 3, data: { text: 'q2' } },
-      { type: 'Model', seq: 4, data: { type: 'text', text: 'a2' } },
+      {
+        type: 'user_message',
+        seq: 1,
+        data: providerMessage('user', { Single: { type: 'text', text: 'q1' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 2,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'a1' } }),
+      },
+      {
+        type: 'user_message',
+        seq: 3,
+        data: providerMessage('user', { Single: { type: 'text', text: 'q2' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 4,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'a2' } }),
+      },
     ]);
 
     expect(state.messages.map((message) => message.role)).toEqual([
@@ -549,12 +596,20 @@ describe('projectRows', () => {
 
   it('drops the span a regenerate replaces', () => {
     const state = fold([
-      { type: 'UserInput', seq: 1, data: { text: 'first prompt' } },
-      { type: 'Model', seq: 2, data: { type: 'text', text: 'first answer' } },
       {
-        type: 'UserInput',
+        type: 'user_message',
+        seq: 1,
+        data: providerMessage('user', { Single: { type: 'text', text: 'first prompt' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 2,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'first answer' } }),
+      },
+      {
+        type: 'user_message',
         seq: 3,
-        data: { text: 'second prompt' },
+        data: providerMessage('user', { Single: { type: 'text', text: 'second prompt' } }),
         surface_op: { start: 0, end: 2, source_event_seqs: [1, 2] },
       },
     ]);
@@ -567,8 +622,16 @@ describe('projectRows', () => {
 
   it('reads a compaction row as a marker, not as a replace', () => {
     const state = fold([
-      { type: 'UserInput', seq: 1, data: { text: 'q' } },
-      { type: 'Model', seq: 2, data: { type: 'text', text: 'a' } },
+      {
+        type: 'user_message',
+        seq: 1,
+        data: providerMessage('user', { Single: { type: 'text', text: 'q' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 2,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'a' } }),
+      },
       {
         type: 'compaction',
         seq: 3,
@@ -592,41 +655,7 @@ describe('projectRows', () => {
     });
   });
 
-  it('leaves the parent transcript free of sub-agent content', () => {
-    const state = fold([
-      { type: 'UserInput', seq: 1, data: { text: 'delegate' } },
-      {
-        type: 'Agent',
-        seq: 2,
-        data: [
-          { child_session_id: 'child-1', parent_depth: 1 },
-          { type: 'Model', data: { type: 'text', text: 'the child answer' } },
-        ],
-      },
-    ]);
-
-    expect(state.messages.map((message) => message.role)).toEqual(['user']);
-  });
-
-  it('shows a file-only turn as a bubble with a chip', () => {
-    const state = fold([
-      {
-        type: 'UserInput',
-        seq: 1,
-        data: {
-          attachments: [
-            { kind: 'file', name: 'notes.md', mime_type: 'text/markdown', byte_len: 12 },
-          ],
-        },
-      },
-    ]);
-
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0].role).toBe('user');
-    expect(state.messages[0].segments[0].files?.map((file) => file.filename)).toEqual(['notes.md']);
-  });
-
-  it('reads a typed user_message row with its attachment references', () => {
+  it("renders a published user turn with its attachment refs at the row's top level", () => {
     // The writer every turn now uses: the text is in the provider
     // message's content parts, and the attachment refs ride the row's
     // own `attachments` field. One bubble, one chip.
@@ -634,7 +663,7 @@ describe('projectRows', () => {
       {
         type: 'user_message',
         seq: 1,
-        data: { role: 'user', content: [{ type: 'text', text: 'see attached' }] },
+        data: providerMessage('user', { Multi: [{ type: 'text', text: 'see attached' }] }),
         attachments: [{ kind: 'file', name: 'notes.md', mime_type: 'text/markdown', byte_len: 12 }],
       },
     ]);
@@ -662,7 +691,7 @@ describe('projectRows', () => {
       {
         type: 'user_message',
         seq: 1,
-        data: { role: 'user', content: [] },
+        data: providerMessage('user', { Multi: [] }),
         attachments: [{ kind: 'file', name: 'notes.md', mime_type: 'text/markdown', byte_len: 12 }],
       },
     ]);
@@ -682,18 +711,18 @@ describe('projectRows', () => {
       {
         type: 'user_message',
         seq: 1,
-        data: { role: 'user', content: [{ type: 'text', text: 'q1' }] },
+        data: providerMessage('user', { Multi: [{ type: 'text', text: 'q1' }] }),
         surface_op: 'append',
       },
       {
         type: 'assistant_message',
         seq: 2,
-        data: { role: 'assistant', content: [{ type: 'text', text: 'a1' }] },
+        data: providerMessage('assistant', { Multi: [{ type: 'text', text: 'a1' }] }),
       },
       {
         type: 'user_message',
         seq: 3,
-        data: { role: 'user', content: [{ type: 'text', text: 'q2' }] },
+        data: providerMessage('user', { Multi: [{ type: 'text', text: 'q2' }] }),
         surface_op: 'append',
       },
       {
@@ -722,9 +751,19 @@ describe('projectRows', () => {
 
   it('tracks the durable ordinal of the row each message came from', () => {
     const state = fold([
-      { type: 'UserInput', data: { text: 'a' } },
-      { type: 'Model', seq: 7, data: { type: 'text', text: 'b' } },
-      { type: 'UserInput', data: { text: 'c' } },
+      {
+        type: 'user_message',
+        data: providerMessage('user', { Single: { type: 'text', text: 'a' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 7,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'b' } }),
+      },
+      {
+        type: 'user_message',
+        data: providerMessage('user', { Single: { type: 'text', text: 'c' } }),
+      },
     ]);
 
     expect(state.sources).toEqual([1, 7, 8]);
@@ -732,12 +771,93 @@ describe('projectRows', () => {
 
   it('leaves the projection it was handed untouched', () => {
     const before = newRowProjection('sess-1');
-    const after = projectRows(before, [legacyRow({ type: 'UserInput', data: { text: 'x' } })]);
+    const after = projectRows(before, [
+      {
+        type: 'user_message',
+        data: providerMessage('user', { Single: { type: 'text', text: 'x' } }),
+      },
+    ]);
 
     expect(before.messages).toEqual([]);
     expect(before.sources).toEqual([]);
     expect(after).not.toBe(before);
     expect(after.messages).toHaveLength(1);
+  });
+
+  it('names the assistant row a published turn came from', () => {
+    // The published row's seq is the answer's identity: it is what a
+    // rating names once the turn is only a reconstructed row.
+    const state = fold([
+      {
+        type: 'user_message',
+        seq: 6,
+        data: providerMessage('user', { Single: { type: 'text', text: 'hello' } }),
+      },
+      {
+        type: 'assistant_message',
+        seq: 7,
+        data: providerMessage('assistant', { Single: { type: 'text', text: 'hi there' } }),
+      },
+    ]);
+
+    expect(feedbackTarget(state.messages[1])).toBe('7');
+  });
+
+  it('renders nothing for a row that carries no type', () => {
+    const state = fold([
+      { data: providerMessage('user', { Single: { type: 'text', text: 'hello' } }) },
+    ]);
+
+    expect(state.messages).toEqual([]);
+    expect(state.sources).toEqual([]);
+  });
+
+  it('reads a published tool outcome as a tool_result row', () => {
+    const state = fold([
+      {
+        type: 'assistant_message',
+        seq: 1,
+        data: providerMessage('assistant', {
+          Single: { type: 'tool_use', id: 'call_1', name: 'read', input: { path: 'a.txt' } },
+        }),
+      },
+      {
+        type: 'tool_result',
+        seq: 2,
+        data: providerMessage(
+          'tool',
+          {
+            Single: {
+              type: 'tool_result',
+              tool_use_id: 'call_1',
+              content: [{ type: 'text', text: 'file body' }],
+              structured_content: null,
+              is_error: false,
+            },
+          },
+          { tool_call_id: 'call_1', name: 'read' },
+        ),
+      },
+    ]);
+
+    expect(outline(state.messages)).toEqual([
+      {
+        role: 'assistant',
+        segments: [
+          {
+            type: 'tool_block',
+            content: '',
+            toolName: 'read',
+            callContent: '{\n  "path": "a.txt"\n}',
+            resultContent: 'file body',
+            toolPending: false,
+            toolError: false,
+            toolUseId: 'call_1',
+          },
+        ],
+      },
+    ]);
+    expect(state.sources).toEqual([1]);
   });
 });
 
@@ -748,11 +868,15 @@ describe('reconstructMessagesFromSession', () => {
       status: 'completed',
       context_id: 'ctx-1',
       history: [
-        legacyRow({ type: 'UserInput', seq: 1, data: { text: 'hello' } }),
+        {
+          type: 'user_message',
+          seq: 1,
+          data: providerMessage('user', { Single: { type: 'text', text: 'hello' } }),
+        },
         {
           type: 'assistant_message',
           seq: 2,
-          data: { content: [{ type: 'text', text: 'hi there' }] },
+          data: providerMessage('assistant', { Multi: [{ type: 'text', text: 'hi there' }] }),
         },
       ],
       artifacts: [],
@@ -917,7 +1041,7 @@ describe('selectLastAssistant', () => {
 
 describe('tool_output rows replay the streamed progress', () => {
   /** One streamed chunk of a running call, as the writer logs it. */
-  function chunk(seq: number, output: string, callId = 'call_1'): WireRow {
+  function chunk(seq: number, output: string, callId = 'call_1'): SessionTurn {
     return {
       type: 'tool_output',
       seq,
@@ -931,9 +1055,9 @@ describe('tool_output rows replay the streamed progress', () => {
       {
         type: 'assistant_message',
         seq: 1,
-        data: {
-          content: [{ type: 'tool_use', id: 'call_1', name: 'shell', input: { command: 'seq 1' } }],
-        },
+        data: providerMessage('assistant', {
+          Multi: [{ type: 'tool_use', id: 'call_1', name: 'shell', input: { command: 'seq 1' } }],
+        }),
       },
       chunk(2, 'first '),
       chunk(3, 'second'),
@@ -962,19 +1086,20 @@ describe('tool_output rows replay the streamed progress', () => {
       {
         type: 'assistant_message',
         seq: 1,
-        data: {
-          content: [{ type: 'tool_use', id: 'call_1', name: 'shell', input: { command: 'seq 1' } }],
-        },
+        data: providerMessage('assistant', {
+          Multi: [{ type: 'tool_use', id: 'call_1', name: 'shell', input: { command: 'seq 1' } }],
+        }),
       },
       chunk(2, 'first '),
       chunk(3, 'second'),
       {
         type: 'tool_result',
         seq: 4,
-        data: {
-          tool_call_id: 'call_1',
-          content: [{ type: 'text', text: 'first second\n\n[exit code: 0]' }],
-        },
+        data: providerMessage(
+          'tool',
+          { Multi: [{ type: 'text', text: 'first second\n\n[exit code: 0]' }] },
+          { tool_call_id: 'call_1', name: 'shell' },
+        ),
       },
     ]);
 

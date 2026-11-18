@@ -22,7 +22,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use crate::{
     config::server::{BindAddress, BindOverrides},
-    profile::{Profile, ProfileError, dump_with_manifests},
+    profile::{Profile, dump_with_manifests},
     state::AppState,
 };
 

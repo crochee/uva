@@ -142,18 +142,14 @@ pub(crate) async fn commit_tool_result(
     // fail-fast rule then surfaces the failure at the next step
     // boundary.
     let tool_result_seq = row.map(|data| {
-        this.sink
-            .append_typed(uva_session::SessionEvent::ToolResult {
-                seq: 0,
-                ts: String::new(),
-                data,
-                // The message payload carries the tool's output, not
-                // the failure; the flag rides beside it so the row
-                // says what the live event below says.
-                is_error,
-                tool_call_id: Some(call_id.clone()),
-                surface_op: None,
-            })
+        // The message payload carries the tool's output, not the
+        // failure; the flag rides beside it so the row says what
+        // the live event below says.
+        this.sink.append_typed(uva_session::tool_result(
+            data,
+            Some(call_id.clone()),
+            is_error,
+        ))
     });
     if tool_result_seq.is_some()
         && let Err(reason) = this.flush_log().await

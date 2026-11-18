@@ -50,6 +50,7 @@ use uva::{
         Context,
         MountError,
         MountHandle,
+        MountRow,
         Plugin as KernelPlugin,
         Realms,
         mount_all_with,
@@ -260,11 +261,12 @@ impl std::fmt::Debug for MountedProfile {
 /// # Missing dependencies park, they do not fail
 ///
 /// dsh semantics: a row whose injected service is missing mounts as a
-/// parked fiber instead of failing the group. After the mount the boot
-/// **audits**: every parked row is reported (its id and the service
-/// keys it still waits for), and only [`REQUIRED_ROWS`] being parked
-/// is fatal — an agent host without its model loop must never look
-/// alive.
+/// parked fiber instead of failing the group. After the mount the
+/// stanza **audits** — on every mount path, not only the boot's (see
+/// [`mount_built`]): every parked row is reported (its id and the
+/// service keys it still waits for), and only [`REQUIRED_ROWS`] being
+/// parked is fatal — an agent host without its model loop must never
+/// look alive.
 pub(crate) fn mount_profile(
     services: Arc<BootServices>,
     profile: &Profile,
@@ -272,23 +274,89 @@ pub(crate) fn mount_profile(
     extras: BootExtras,
 ) -> Result<(Context, MountedProfile), KernelBootError> {
     let context = Context::new();
-    let factories = native_factories(Arc::clone(&services));
-    let boot = BootContext::new(extras.workspace_root.clone())
-        .with_host(services)
-        .with_clock(clock)
-        .with_blocking(extras.blocking)
-        .with_compaction(extras.compaction)
-        .with_sessions_dir(extras.sessions_dir);
     let realms = Arc::new(Realms::default());
-    let rows = profile.core_rows();
-    let mounted_rows = build_plugins(profile, &factories, &boot, &realms)?;
-    let pair_rows = mounted_rows
+    let built = build_rows(&services, &realms, clock, &extras, profile)?;
+    let handle = mount_built(&context, &realms, built, profile)?;
+    Ok((
+        context,
+        MountedProfile {
+            groups: vec![handle],
+            realms,
+        },
+    ))
+}
+
+/// Rows built through the one build recipe, ready to mount.
+///
+/// Opaque on purpose: how a built row is shaped (plugin value plus the
+/// mount row it mounts under) is the stanza's implementation, not a
+/// fact callers build on. It carries its own audit inputs (the
+/// factory directory and the row manifests it built), so
+/// [`mount_built`] audits without the caller re-deriving them.
+pub(crate) struct BuiltRows {
+    pairs: Vec<(Arc<dyn KernelPlugin>, MountRow)>,
+    factories: PluginFactories,
+    units: Vec<Manifest>,
+}
+
+/// Build one group of rows through the one recipe.
+///
+/// Every build — the boot's full profile and every hot-reload subset —
+/// goes through here: the factory directory, the [`BootContext`] the
+/// rows build from, and [`build_plugins`] are one stanza with one
+/// owner. A remount therefore cannot drift from the boot's recipe: a
+/// remounted `search` keeps reading the boot's session corpus, a
+/// remounted `context-compactor` keeps the boot's compaction model.
+///
+/// Building is side-effect free on the mount: a caller that needs to
+/// unload before mounting (the hot-reload path, so a bad row cannot
+/// take a working plugin down) calls this first, unloads, then hands
+/// the result to [`mount_built`].
+pub(crate) fn build_rows(
+    services: &Arc<BootServices>,
+    realms: &Arc<Realms>,
+    clock: SharedClock,
+    extras: &BootExtras,
+    rows: &Profile,
+) -> Result<BuiltRows, KernelBootError> {
+    let factories = native_factories(Arc::clone(services));
+    let boot = BootContext::new(extras.workspace_root.clone())
+        .with_host(Arc::clone(services))
+        .with_clock(clock)
+        .with_blocking(extras.blocking.clone())
+        .with_compaction(extras.compaction.clone())
+        .with_sessions_dir(extras.sessions_dir.clone());
+    let pairs = build_plugins(rows, &factories, &boot, realms)?
         .into_iter()
-        .map(|mounted| (mounted.plugin, mounted.row))
-        .collect::<Vec<_>>();
-    let handle = mount_all_with(&context, &realms, &pair_rows)?;
-    audit_pending(&context, &handle, &rows, &factories, profile)?;
-    Ok((context, MountedProfile { groups: vec![handle], realms }))
+        .map(|built| (built.plugin, built.row))
+        .collect();
+    let units = rows.core_rows().into_iter().cloned().collect();
+    Ok(BuiltRows {
+        pairs,
+        factories,
+        units,
+    })
+}
+
+/// Mount what [`build_rows`] built, as one group, and audit it.
+///
+/// The kernel orders and validates the group; the returned handle owns
+/// its effects and fibers. After the group mounts the stanza audits
+/// against `profile` (the effective assembly the mounted tree will
+/// correspond to): every parked row is reported, and a parked
+/// [`REQUIRED_ROWS`] row fails the mount — on every mount path, not
+/// just the boot's. An agent host without its model loop must never
+/// look alive.
+pub(crate) fn mount_built(
+    scope: &Context,
+    realms: &Arc<Realms>,
+    built: BuiltRows,
+    profile: &Profile,
+) -> Result<MountHandle, KernelBootError> {
+    let handle = mount_all_with(scope, realms, &built.pairs)?;
+    let units: Vec<&Manifest> = built.units.iter().collect();
+    audit_pending(scope, &units, &built.factories, profile)?;
+    Ok(handle)
 }
 
 impl MountedProfile {
@@ -309,35 +377,91 @@ const REQUIRED_ROWS: [&str; 2] = ["agent-loop", "model-adapter"];
 /// parked required row is fatal.
 fn audit_pending(
     context: &Context,
-    handle: &MountHandle,
     rows: &[&Manifest],
     factories: &PluginFactories,
     profile: &Profile,
 ) -> Result<(), KernelBootError> {
-    // Everything the assembly itself provides.
-    let mut provided = std::collections::BTreeSet::new();
-    for row in profile.all_rows() {
-        if let Some(factory) = factories.get(&row.name) {
-            provided.extend(factory.manifest().provides);
+    // Every row of the assembly — group children included, since they
+    // mount beneath their group's fiber.
+    let assembled: Vec<&Manifest> = profile
+        .all_rows()
+        .into_iter()
+        .filter(|row| {
+            rows.iter().any(|unit| {
+                unit.id == row.id
+                    || unit.rows().iter().any(|child| child.id == row.id)
+            })
+        })
+        .collect();
+    // What each row provides, and what it waits for.
+    let provides: std::collections::BTreeMap<&str, Vec<String>> = assembled
+        .iter()
+        .map(|row| {
+            let keys = factories
+                .get(&row.name)
+                .map(|factory| factory.manifest().provides)
+                .unwrap_or_default();
+            (row.id.as_str(), keys)
+        })
+        .collect();
+    let edges: std::collections::BTreeMap<&str, Vec<String>> = assembled
+        .iter()
+        .map(|row| {
+            let keys = factories
+                .get(&row.name)
+                .map(|factory| {
+                    let manifest = factory.manifest();
+                    effective_inject(&manifest.inject, row.inject.as_deref())
+                })
+                .unwrap_or_default();
+            (row.id.as_str(), keys)
+        })
+        .collect();
+    // A row is live when every key it waits for is provided by a live
+    // row or already present in the parent scope. The fixpoint matters:
+    // a row whose provider is itself parked is parked too.
+    let mut live: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for row in &assembled {
+            if live.contains(row.id.as_str()) {
+                continue;
+            }
+            let missing = edges
+                .get(row.id.as_str())
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|key| {
+                            !live_provides(&provides, &live, key)
+                                && !parent_service_available(context, key)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if missing.is_empty() {
+                live.insert(row.id.as_str());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
-    for row in rows {
-        let Some(state) = handle.plugin_state(&row.id) else {
-            continue;
-        };
-        if state != uva::kernel::PluginState::Pending {
+    for row in &assembled {
+        if live.contains(row.id.as_str()) {
             continue;
         }
-        let missing: Vec<String> = factories
-            .get(&row.name)
-            .map(|factory| {
-                let manifest = factory.manifest();
-                effective_inject(&manifest.inject, row.inject.as_deref())
-                    .into_iter()
+        let missing: Vec<String> = edges
+            .get(row.id.as_str())
+            .map(|keys| {
+                keys.iter()
                     .filter(|key| {
-                        !provided.contains(key.as_str())
+                        !live_provides(&provides, &live, key)
                             && !parent_service_available(context, key)
                     })
+                    .cloned()
                     .collect()
             })
             .unwrap_or_default();
@@ -354,6 +478,18 @@ fn audit_pending(
         }
     }
     Ok(())
+}
+
+/// Whether a live row provides `key`.
+fn live_provides(
+    provides: &std::collections::BTreeMap<&str, Vec<String>>,
+    live: &std::collections::BTreeSet<&str>,
+    key: &str,
+) -> bool {
+    provides
+        .iter()
+        .filter(|(row, _)| live.contains(*row))
+        .any(|(_, keys)| keys.iter().any(|provided| provided == key))
 }
 
 /// The factory directory the boot registers, over already-built
@@ -730,7 +866,7 @@ impl PluginFactory for ModelAdapterFactory {
         // host catalogue.
         #[cfg(any(test, feature = "test-utils"))]
         let catalogue = std::sync::Arc::new(
-            crate::state::catalogue_for_deployment(&parsed.workspace),
+            crate::state::catalogue_for_deployment(&parsed.catalogue),
         );
         #[cfg(not(any(test, feature = "test-utils")))]
         let catalogue =

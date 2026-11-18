@@ -29,11 +29,11 @@ impl ControllerInner {
         );
         Self::record_usage(&self.usage, event);
         // The log is the authority for the paused state (`session_state`
-        // derives it); this flag only spares the list view a second read
-        // of a log it already holds. It is cleared when the next run
-        // starts.
+        // derives it); the controller state's private record only
+        // carries the fact to this run's settle. It is cleared when
+        // the next run starts.
         if matches!(event, AgentEvent::System(SystemEvent::Suspended(_))) {
-            self.suspended.store(true, Ordering::SeqCst);
+            self.state.note_suspension();
         }
         // The live projection is what a `follow` client renders until
         // the durable row for this turn lands. It is fed from the same

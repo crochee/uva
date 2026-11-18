@@ -262,30 +262,34 @@ async fn close_flushes_the_rows_it_accepted() {
 }
 
 /// The payload bound lives at the log boundary, not in a
-/// constructor: a `plugin` row assembled through the public variant
-/// literal is capped on every ingress path, because variant fields
-/// are public and a constructor-only cap is advisory.
+/// constructor: a `plugin` event assembled through the public
+/// variant literal is capped on every typed ingress path, because
+/// variant fields are public and a constructor-only cap is advisory.
 #[tokio::test]
-async fn the_writer_bounds_a_plugin_row_built_by_hand() {
+async fn the_writer_bounds_a_plugin_event_built_by_hand() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = LogWriter::new(sink.clone(), Arc::new(SystemClock));
 
     let huge = "x".repeat(MAX_PLUGIN_PAYLOAD_BYTES * 2);
     let long_kind = "k".repeat(MAX_PLUGIN_KIND_BYTES * 4);
     writer
-        .append(json!({
-            "type": "plugin",
-            "kind": long_kind,
-            "payload": {"blob": huge},
-        }))
+        .append_event(&SessionEvent::Plugin {
+            seq: 0,
+            ts: String::new(),
+            kind: long_kind,
+            payload: json!({"blob": huge}),
+            original_bytes: None,
+        })
         .await
         .unwrap();
     // The synchronous path, with the degenerate kind.
-    writer.append_nowait(json!({
-        "type": "plugin",
-        "kind": "",
-        "payload": {"ok": true},
-    }));
+    writer.append_event_nowait(&SessionEvent::Plugin {
+        seq: 0,
+        ts: String::new(),
+        kind: String::new(),
+        payload: json!({"ok": true}),
+        original_bytes: None,
+    });
     writer.flush().await.unwrap();
 
     let rows = sink.read().await.expect("read");
@@ -450,6 +454,48 @@ async fn a_typed_event_never_keeps_seq_zero() {
     assert!(
         rows[0]["ts"].as_str().is_some_and(|ts| !ts.is_empty()),
         "the writer stamps the clock's timestamp",
+    );
+}
+
+/// A row carries the «ignorable» marker exactly when the row
+/// vocabulary declares its kind ignorable.
+///
+/// The marker is the escape hatch of the fail-closed rule: a build
+/// that does not know a row's kind refuses the whole log unless that
+/// row says it may be skipped. The declaration lives on the tag —
+/// the vocabulary owns what a row is — so the writer stamps the
+/// marker from the vocabulary rather than from a call site that
+/// could forget it.
+///
+/// No tag of today's vocabulary is ignorable: every one of them is
+/// something rebuilding a session has to read. So today no row
+/// carries the marker, and this pins that the marker never appears by
+/// accident. The other half — a reader honouring the marker — is
+/// proven in the vocabulary's own suite
+/// (`events::vocab::restore::tests::an_ignorable_row_does_not_refuse_the_log`).
+#[tokio::test]
+async fn the_ignorable_marker_appears_only_where_the_vocabulary_declares_it() {
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = LogWriter::new(sink.clone(), Arc::new(SystemClock));
+
+    let seq = writer
+        .append_event(&SessionEvent::Usage {
+            seq: 0,
+            ts: String::new(),
+            data: json!({"index": 1}),
+            usage: None,
+        })
+        .await
+        .unwrap();
+    writer.flush().await.unwrap();
+
+    let rows = sink.read().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["seq"].as_u64(), Some(seq));
+    assert!(
+        rows[0].get("ignorable").is_none(),
+        "no tag of today's vocabulary is ignorable, so no row carries \
+         the marker"
     );
 }
 

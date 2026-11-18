@@ -8,12 +8,18 @@ use futures::StreamExt;
 use uva::{
     harness::AgentInput,
     provider::traits::ModelProvider,
-    session::{SessionLog, SurfaceLedger},
+    session::{
+        RowTag,
+        Rows,
+        SessionEvent,
+        SessionLog,
+        SurfaceLedger,
+        restore_row,
+    },
 };
 
 use super::{
     inner::ControllerInner,
-    ops::SessionState,
     run_log::{
         attachment_refs_of_parts,
         prompt_text_of_parts,
@@ -26,14 +32,29 @@ impl ControllerInner {
     ///
     /// The log's last request-snapshot row names the catalogue entry
     /// and the model; the resolver turns that pair back into a live
-    /// handle. `None` when the log holds no snapshot or the
+    /// handle. `Ok(None)` when the log holds no snapshot or the
     /// deployment no longer offers the pair — the run then falls back
     /// to the configured default and the resume reports the drift it
     /// cannot avoid.
-    async fn resume_provider(&self) -> Option<Arc<dyn ModelProvider>> {
-        let resolver = self.deps.lock().provider_resolver.clone()?;
-        let rows = self.writer.read().await.ok()?;
-        let (provider, model) = last_request_snapshot(&rows)?;
+    ///
+    /// The log is read through [`Rows::read`], which **refuses** a log
+    /// carrying a row this build cannot interpret. That refusal is an
+    /// error, not an absent snapshot: a resume on the configured
+    /// default would sample a different provider than the suspended
+    /// turn used, and the request envelope would drift — the very
+    /// thing the resume exists to prevent. So the error refuses the
+    /// run instead of answering "no snapshot".
+    async fn resume_provider(
+        &self,
+    ) -> anyhow::Result<Option<Arc<dyn ModelProvider>>> {
+        let Some(resolver) = self.deps.lock().provider_resolver.clone() else {
+            return Ok(None);
+        };
+        let raw = self.writer.read().await?;
+        let rows = Rows::read(&raw)?;
+        let Some((provider, model)) = last_request_snapshot(rows) else {
+            return Ok(None);
+        };
         let resolved = resolver.resolve(&provider, &model);
         tracing::debug!(
             target: "uva.session",
@@ -43,23 +64,30 @@ impl ControllerInner {
             resolved = resolved.is_some(),
             "resume: the provider the suspension recorded"
         );
-        resolved
+        Ok(resolved)
     }
 }
 
 /// The provider and model the log's last request snapshot names.
-fn last_request_snapshot(
-    rows: &[serde_json::Value],
-) -> Option<(String, String)> {
+///
+/// The read goes through the vocabulary, which compares the row's tag
+/// before decoding it: a row of any other tag costs no decode. The
+/// tail is scanned from the end, so a snapshot whose payload does not
+/// decode is skipped in favour of the one before it — a broken tail
+/// row is a defect, not a newer answer.
+fn last_request_snapshot(rows: Rows<'_>) -> Option<(String, String)> {
     rows.iter()
         .rev()
-        .find(|row| {
-            row.get("type").and_then(|t| t.as_str()) == Some("request_snapshot")
-        })
-        .and_then(|row| {
-            let provider = row.get("provider")?.as_str()?.to_string();
-            let model = row.get("model")?.as_str()?.to_string();
-            Some((provider, model))
+        .filter(|row| row.tag() == Some(RowTag::RequestSnapshot))
+        .find_map(|row| match row.event() {
+            Some(SessionEvent::RequestSnapshot {
+                provider, model, ..
+            }) => Some((provider, model)),
+            // Only the tag the filter named can arrive here, so no
+            // other variant can; answering `None` keeps the caller's
+            // fallback exact instead of panicking on a shape this
+            // function cannot produce.
+            _ => None,
         })
 }
 
@@ -99,7 +127,7 @@ const FOLD_REFUSAL_KIND: &str = "strict_fold_refused";
 /// the log's own, so the check is a scan of them.
 fn fold_refusal_recorded(events: &[serde_json::Value]) -> bool {
     events.iter().any(|row| {
-        row.get("type").and_then(serde_json::Value::as_str) == Some("warning")
+        restore_row(row).restores_to(RowTag::Warning)
             && row
                 .get("data")
                 .and_then(|data| data.get("kind"))
@@ -133,17 +161,13 @@ impl ControllerInner {
         if fold_refusal_recorded(events) {
             return;
         }
-        let event = uva::session::SessionEvent::Warning {
-            seq: 0,
-            ts: String::new(),
-            data: serde_json::json!({
-                "kind": FOLD_REFUSAL_KIND,
-                "message": format!(
-                    "the session log does not fold strictly; the run \
-                     replayed the lenient fold: {error}"
-                ),
-            }),
-        };
+        let event = uva::session::warning(
+            FOLD_REFUSAL_KIND,
+            &format!(
+                "the session log does not fold strictly; the run \
+                 replayed the lenient fold: {error}"
+            ),
+        );
         // The row goes through the session's one writer, and the
         // flush lands it: the next turn reads the log, and a row
         // still queued would not be in it.
@@ -277,7 +301,7 @@ impl ControllerInner {
         // the steer gate: a steer or a cancel during this window is
         // state-transition work the pass does not touch.
         let _pass_gate = self.compaction_pass_gate.lock().await;
-        if !self.is_startable() {
+        if !self.state.is_startable() {
             return None;
         }
 
@@ -320,6 +344,43 @@ impl ControllerInner {
             }
         }
 
+        // The provider a resume continues its suspended turn with.
+        //
+        // A resume continues a turn whose request envelope is already
+        // on the log, and that envelope names the provider and model
+        // the turn was sampled with. The resume therefore samples
+        // *that* handle, not the deployment default: a different
+        // provider would change the envelope and the resume would be
+        // refused as a configuration drift. A selection parked during
+        // the pause belongs to the next turn, so it stays parked
+        // (exactly as a parked turn does).
+        //
+        // The log is read **before** the state transition below: a log
+        // this build cannot read is a refusal, not a fallback to the
+        // deployment default — a resume on the default provider would
+        // change the very envelope the resume exists to reproduce. The
+        // parked resume stays parked, so the next op re-reads the log
+        // and says why.
+        //
+        // The read is I/O, so it stays outside the steer gate: the
+        // gate must not be held across a disk read.
+        let resume_provider = if self.pending_resume.lock().is_some() {
+            match self.resume_provider().await {
+                Ok(provider) => Some(provider),
+                Err(error) => {
+                    tracing::error!(
+                        target: "uva.session",
+                        session_id = %self.session_id,
+                        %error,
+                        "maybe_start_run: refused, the session log could not be read"
+                    );
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+
         // The state transition: the steer gate makes the take below
         // atomic against the cancel path (which drains the same queue
         // under the same gate) and against a live steer's
@@ -327,12 +388,39 @@ impl ControllerInner {
         // drained, and a run can never be marked `Running` after a
         // steer was told the session was idle. Everything before this
         // point was read-only; the gate covers only the mutation.
-        let (resume, parked_take) = {
+        let (resume, parked_take, provider) = {
             let _start_gate = self.steer_gate.lock().await;
-            if !self.is_startable() {
+            if !self.state.is_startable() {
                 return None;
             }
-            let resume = self.pending_resume.lock().take();
+            // The resume and the provider read for it are taken
+            // together: a resume whose provider was never read cannot
+            // start on this pass — the log was not read for it, so
+            // the run would sample the deployment default instead of
+            // the handle the suspended turn used. Such a resume stays
+            // parked; the op that parked it starts the run on its own
+            // pass.
+            let mut parked = self.pending_resume.lock();
+            let taken = parked.take();
+            // The provider the resume's log named: `Some` when the
+            // resume was read for one, `None` when there is no
+            // resume at all.
+            let (resume, provider) = match (taken, resume_provider) {
+                (Some(resume), Some(provider)) => {
+                    (Some(resume), Some(provider))
+                }
+                (Some(resume), None) => {
+                    *parked = Some(resume);
+                    tracing::warn!(
+                        target: "uva.session",
+                        session_id = %self.session_id,
+                        "maybe_start_run: skipped, a resume was parked after its provider was read"
+                    );
+                    return None;
+                }
+                (None, _) => (None, None),
+            };
+            drop(parked);
             // One parked turn per run, taken here: a turn queued while
             // a run was live gets its own run (and its own logged
             // prompt) instead of being folded into the running turn.
@@ -352,8 +440,19 @@ impl ControllerInner {
                 );
                 return None;
             }
+            // The run's provider: the one the resume's log named — or
+            // the deployment default, when the log names no snapshot —
+            // and the deployment's pinned selection for a fresh run.
+            let provider = match provider {
+                Some(provider) => provider,
+                None => self
+                    .pending_provider
+                    .lock()
+                    .take()
+                    .map(super::PinnedProvider::take),
+            };
             self.mark_running(parked_take.is_some());
-            (resume, parked_take)
+            (resume, parked_take, provider)
         };
 
         // If the parked turn carried an explicit agent selection,
@@ -364,27 +463,6 @@ impl ControllerInner {
         let explicit_agent_name = parked_take
             .as_ref()
             .and_then(|parked| parked.agent_name.clone());
-        // The turn's provider selection, taken here so it governs
-        // exactly this run: `None` keeps the provider on the
-        // dependencies, and a selection another op parked afterwards
-        // belongs to *its* turn, not this one.
-        //
-        // A resume continues a turn whose request envelope is already
-        // on the log, and that envelope names the provider and model
-        // the turn was sampled with. The resume therefore samples
-        // *that* handle, not the deployment default: a different
-        // provider would change the envelope and the resume would be
-        // refused as a configuration drift. A selection parked during
-        // the pause belongs to the next turn, so it stays parked
-        // (exactly as a parked turn does).
-        let provider = if resume.is_some() {
-            self.resume_provider().await
-        } else {
-            self.pending_provider
-                .lock()
-                .take()
-                .map(super::PinnedProvider::take)
-        };
         // R34: the run's durable surface ledger. It is filled by the
         // run task (it needs the log read, which happens there) and
         // the writer numbers its rows, so compaction provenance and
@@ -540,11 +618,7 @@ impl ControllerInner {
             // re-runs the turn on restart rather than losing it.
             if let Some(park_id) = take_park
                 && let Err(e) = log
-                    .append_event(&uva::session::SessionEvent::ParkConsumed {
-                        seq: 0,
-                        ts: String::new(),
-                        park_id,
-                    })
+                    .append_event(&uva::session::park_consumed(park_id))
                     .await
             {
                 tracing::error!(
@@ -601,14 +675,11 @@ impl ControllerInner {
                     current_turn_text.as_str(),
                 )) {
                     Ok(data) => {
-                        let row = uva::session::SessionEvent::UserMessage {
-                            seq: 0,
-                            ts: String::new(),
+                        let row = uva::session::turn_prompt_row(
                             data,
-                            source: None,
-                            surface_op: rerun_replace,
-                            attachments: attachment_refs,
-                        };
+                            attachment_refs,
+                            rerun_replace,
+                        );
                         if let Err(e) = log.append_event(&row).await {
                             tracing::error!(
                                 target: "uva.session",
@@ -710,22 +781,14 @@ impl ControllerInner {
             // queued turn. One decision, one row.
             {
                 let _settled = inner.steer_gate.lock().await;
-                let mut state =
-                    inner.state.lock().expect("state mutex poisoned");
-                if *state == SessionState::Running {
-                    // A suspended run leaves the session paused: the
-                    // log's open interrupts are the truth, and the
-                    // cached state mirrors them so the list view and
-                    // `is_startable` agree without a rescan.
-                    *state = if inner
-                        .suspended
-                        .swap(false, std::sync::atomic::Ordering::SeqCst)
-                    {
-                        SessionState::AwaitingApproval
-                    } else {
-                        SessionState::Idle
-                    };
-                }
+                // The settle transition consumes the controller
+                // state's private suspended record: a suspended run
+                // leaves the session paused (the log's open
+                // interrupts are the truth, and the cached state
+                // mirrors them so the list view and `is_startable`
+                // agree without a rescan); anything else — a cancel
+                // that already decided — stays where it is.
+                inner.state.settle();
             }
             tracing::info!(
                 target: "uva.session",
@@ -750,17 +813,95 @@ impl ControllerInner {
                 event_count,
                 "Agent run task: factory stream ended"
             );
-            // R11: publish the Completing snapshot.
-            let _seq = inner.snapshot_bus.publish(
-                uva::session::OperationSnapshot::new(
-                    inner.session_id.clone(),
-                    "default".to_string(),
-                    uva::session::OperationState::Completing,
-                    0,
-                    inner.deps.lock().default_max_iterations,
-                    uva::provider::TokenUsage::default(),
-                ),
-            );
+            // R11: publish the Completing snapshot. The transition
+            // table owns the frame; the run task only picks the
+            // moment — after the flush, so subscribers see durable
+            // rows before the run's outcome.
+            inner
+                .state
+                .settle_flushed(inner.deps.lock().default_max_iterations);
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One request snapshot row, shaped as the writer emits it.
+    fn snapshot(seq: u64, provider: &str, model: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "request_snapshot",
+            "seq": seq,
+            "ts": "2026-01-01T00:00:00+00:00",
+            "provider": provider,
+            "model": model,
+            "params_hash": "p",
+            "tools_hash": "t",
+            "system_hash": "s",
+            "sections": [],
+            "policy_hash": "h",
+        })
+    }
+
+    /// A snapshot row whose required `model` never reached the log —
+    /// a broken tail row.
+    fn broken_snapshot(seq: u64) -> serde_json::Value {
+        let mut row = snapshot(seq, "openai", "gpt");
+        row.as_object_mut()
+            .expect("a row is an object")
+            .remove("model");
+        row
+    }
+
+    /// The resume pair is the *last row that decodes*. A tail row
+    /// whose payload is broken is a defect, so the earlier snapshot
+    /// answers instead of the resume falling back to the default
+    /// provider — the read compares tags before decoding, and a
+    /// snapshot it cannot decode was never a newer answer.
+    #[test]
+    fn the_last_decodable_snapshot_names_the_resume_pair() {
+        let rows = vec![
+            snapshot(1, "anthropic", "old-model"),
+            snapshot(2, "openai", "gpt"),
+            broken_snapshot(3),
+        ];
+        let log = Rows::read(&rows).expect("the log is readable");
+        assert_eq!(
+            last_request_snapshot(log),
+            Some(("openai".to_string(), "gpt".to_string())),
+        );
+    }
+
+    /// No snapshot, no answer: the run falls back to the configured
+    /// default rather than inventing a pair.
+    #[test]
+    fn a_log_without_a_snapshot_names_no_pair() {
+        let rows = vec![serde_json::json!({
+            "type": "user_message",
+            "seq": 1,
+            "ts": "2026-01-01T00:00:00+00:00",
+            "data": {},
+        })];
+        let log = Rows::read(&rows).expect("the log is readable");
+        assert_eq!(last_request_snapshot(log), None);
+    }
+
+    /// A log carrying a row this build does not know is **refused**,
+    /// not read. The resume cannot say which provider the suspended
+    /// turn was sampled with, and "no snapshot" would resume the turn
+    /// on the deployment default — a different request envelope, which
+    /// is the drift the resume exists to prevent. So the log does not
+    /// come into existence: there is no answer to collapse.
+    #[test]
+    fn an_unreadable_log_is_refused_rather_than_answered() {
+        let rows = vec![
+            snapshot(1, "openai", "gpt"),
+            serde_json::json!({"type": "row_from_the_future", "seq": 2}),
+        ];
+        let error = Rows::read(&rows)
+            .expect_err("the log carries a row this build cannot read");
+        assert_eq!(error.index, 1);
+        assert_eq!(error.tag, "row_from_the_future");
     }
 }

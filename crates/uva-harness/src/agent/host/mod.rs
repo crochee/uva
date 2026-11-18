@@ -63,7 +63,7 @@ use parking_lot::{Mutex, RwLock};
 // both re-export it from there.
 pub use uva_agent::PromptSection;
 use uva_context::AgentState;
-use uva_hook::HookPayload;
+use uva_events::WarningKind;
 // The interception contract lives one layer down (ADR 0004): the
 // traits and the dispatch context are `uva-hook`'s, re-exported here
 // so neither the crate-root facade nor this deep path moves.
@@ -75,6 +75,10 @@ pub use uva_hook::{
     RequestTransformer,
     ResultTransformer,
 };
+use uva_hook::{
+    HookPayload,
+    arbitration::{Fact, PanicPolicy, Refusal, Ruling, refusal, rule},
+};
 use uva_steering::{
     Guard,
     GuardOutcome,
@@ -84,7 +88,6 @@ use uva_steering::{
     HookEvent,
     InjectionPoint,
     OutputTransformer,
-    event_name,
     guards::{
         LoopDetectionGuard,
         PromptInjectionGuard,
@@ -166,6 +169,40 @@ pub(crate) fn veto_row(
         call_id: call_id.clone(),
     })
 }
+
+// Apply one decision at one point.
+//
+// The point's own table decides — the owner's rule — and the host's
+// answer to "the point does not accept this" is the same everywhere:
+// the decision does not apply, and the fact travels with the pass so
+// the operator can see it.
+fn accept(
+    event: &HookEvent,
+    decision: HookDecision,
+    source: &str,
+) -> (HookDecision, Option<Fact>) {
+    match rule(event, decision, source) {
+        Ruling::Stands(decision) => (decision, None),
+        Ruling::Unsupported { fact, .. } => (HookDecision::Allow, Some(fact)),
+    }
+}
+
+// Report one fact in the run's durable record.
+//
+// The fact is what the arbitration learned about a registration; the
+// warning row is where an operator reads it. The registry's path
+// reports the same facts the same way — one channel, two surfaces.
+fn report_fact(sink: &EventSink, fact: &Fact) {
+    sink.warn(WarningKind::Hook, None, fact.message().to_owned());
+}
+
+// The host's panic policy: an in-process registration that panics is
+// broken, so it is withdrawn and the fact says so.
+//
+// The registry keeps an external plugin registered instead — the
+// policies are named in one place (`PanicPolicy`), so the two
+// surfaces cannot drift into a third.
+const PANIC_POLICY: PanicPolicy = PanicPolicy::Withdraw;
 
 /// A plugin: a bundle of registrations installed into one host.
 pub trait Plugin: Send + Sync {
@@ -336,7 +373,7 @@ struct HostState {
 pub(crate) struct HostSnapshot {
     pub(crate) hooks: Vec<Entry<Arc<dyn Hook>>>,
     pub(crate) guards: Vec<Arc<dyn Guard>>,
-    pub(crate) hints: Vec<Arc<dyn Hint>>,
+    pub(crate) hints: Vec<Entry<Arc<dyn Hint>>>,
     pub(crate) trackers: Vec<Arc<dyn Tracker>>,
     pub(crate) output_transformers: Vec<Arc<dyn OutputTransformer>>,
     pub(crate) result_transformers: Vec<Entry<Arc<dyn ResultTransformer>>>,
@@ -373,7 +410,7 @@ impl HostSnapshot {
                 .hints
                 .iter()
                 .filter(|entry| !entry.disabled)
-                .map(|entry| Arc::clone(&entry.value))
+                .cloned()
                 .collect(),
             trackers: state
                 .trackers
@@ -438,13 +475,8 @@ where
 /// What went wrong with one registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiagnosticKind {
-    // The registration returned a decision the point does not
-    // accept; the decision was ignored.
-    UnsupportedDecision,
     // The registration panicked; it was disabled.
     Disabled,
-    // The gate could not answer; its call was blocked.
-    GateFailed,
     // The transformer reported a failure; its change was skipped.
     TransformerFailed,
     // A tool's name is already owned by a core tool; the host's
@@ -592,17 +624,14 @@ impl Host {
     pub fn gate(&mut self, gate: Arc<dyn Gate>) -> Registration {
         let name = gate.name().to_string();
         let id = self.next_id();
-        let weak = Arc::downgrade(&self.inner);
         let mut handles = Vec::new();
         for key in crate::seams::pass_chain_keys() {
             let Some(chain) = self.inner.seams.get(key) else {
                 continue;
             };
-            if let Ok(handle) = chain.register(gate_adapter(
-                std::sync::Weak::clone(&weak),
-                name.clone(),
-                Arc::clone(&gate),
-            )) {
+            if let Ok(handle) =
+                chain.register(gate_adapter(name.clone(), Arc::clone(&gate)))
+            {
                 handles.push(handle);
             }
         }
@@ -854,21 +883,30 @@ impl Host {
                 {
                     Ok(decision) => decision,
                     Err(_) => {
+                        // The host's panic policy: an in-process
+                        // registration that panics is broken, so it is
+                        // withdrawn and the fact says so.
+                        let fact = PANIC_POLICY
+                            .fact(entry.value.name(), "the observer panicked");
                         self.disable(
                             RegistrationKind::Hook,
                             entry.id,
                             entry.value.name(),
                         );
+                        report_fact(sink, &fact);
                         continue;
                     }
                 };
-            let decision = self.accept(event, decision, entry.value.name());
+            let (decision, fact) = accept(event, decision, entry.value.name());
+            if let Some(fact) = fact {
+                report_fact(sink, &fact);
+            }
             match decision {
                 HookDecision::Allow => {}
                 HookDecision::Ask { reason } => arbitration.asks.push(reason),
                 other => {
                     record_hook_block(sink, entry.value.name(), &other, event);
-                    arbitration.decision = other;
+                    arbitration.absorb(other);
                     break;
                 }
             }
@@ -904,24 +942,22 @@ impl Host {
             InjectionPoint,
             uva_steering::HintMessage,
         )> = Vec::new();
-        for hint in &snapshot.hints {
+        for entry in &snapshot.hints {
+            let hint = &entry.value;
             let point = hint.injection_point();
             // The tool-result point is evaluated at commit time.
             if matches!(point, InjectionPoint::AppendToToolResult { .. }) {
                 continue;
             }
-            // Consumer-supplied: a panicking hint is skipped, not
-            // fatal.
+            // Consumer-supplied, but the host's panic policy holds
+            // here too: a hint that panics is broken, so it is
+            // withdrawn rather than asked again every step.
             let Ok(triggered) =
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
                     hint.should_trigger(state)
                 }))
             else {
-                self.record(
-                    DiagnosticKind::Disabled,
-                    hint.name(),
-                    "the hint panicked in `should_trigger`; it was skipped",
-                );
+                self.disable(RegistrationKind::Hint, entry.id, &entry.name);
                 continue;
             };
             if !triggered {
@@ -932,11 +968,7 @@ impl Host {
                     hint.generate(state)
                 }))
             else {
-                self.record(
-                    DiagnosticKind::Disabled,
-                    hint.name(),
-                    "the hint panicked in `generate`; it was skipped",
-                );
+                self.disable(RegistrationKind::Hint, entry.id, &entry.name);
                 continue;
             };
             if message.priority == HintPriority::Low && crowded {
@@ -978,7 +1010,8 @@ impl Host {
     ) -> Vec<String> {
         let snapshot = self.snapshot();
         let mut out = Vec::new();
-        for hint in &snapshot.hints {
+        for entry in &snapshot.hints {
+            let hint = &entry.value;
             match hint.injection_point() {
                 InjectionPoint::AppendToToolResult {
                     tool_name: hint_tool,
@@ -988,11 +1021,9 @@ impl Host {
             match triggered_hint(hint.as_ref(), state) {
                 Ok(Some(message)) => out.push(message.content),
                 Ok(None) => {}
-                Err(()) => self.record(
-                    DiagnosticKind::Disabled,
-                    hint.name(),
-                    "the hint panicked; it was skipped",
-                ),
+                Err(()) => {
+                    self.disable(RegistrationKind::Hint, entry.id, &entry.name)
+                }
             }
         }
         out
@@ -1041,16 +1072,6 @@ impl Host {
             return Vec::new();
         }
         ran
-    }
-
-    /// Apply one decision at one point.
-    pub fn accept(
-        &self,
-        event: &HookEvent,
-        decision: HookDecision,
-        source: &str,
-    ) -> HookDecision {
-        self.inner.accept(event, decision, source)
     }
 
     /// The prompt sections, in registration order.
@@ -1175,6 +1196,13 @@ impl Host {
         }
     }
 
+    // Withdraw a registration that broke, and say so.
+    //
+    // The host's panic policy: an in-process registration that panics
+    // is broken, so it stops being called. Where the run's sink is
+    // reachable, the fact also lands in the run's durable record; the
+    // paths without a sink (hints, result transformers) keep the
+    // host's own diagnostic.
     fn disable(&self, kind: RegistrationKind, id: u64, name: &str) {
         self.inner.withdraw(kind, id);
         self.record(
@@ -1231,28 +1259,6 @@ impl HostInner {
         });
         let overflow = state.diagnostics.len().saturating_sub(DIAGNOSTIC_LIMIT);
         state.diagnostics.drain(..overflow);
-    }
-
-    // Apply one decision at one point.
-    fn accept(
-        &self,
-        event: &HookEvent,
-        decision: HookDecision,
-        source: &str,
-    ) -> HookDecision {
-        if event.accepts(&decision) {
-            return decision;
-        }
-        self.record(
-            DiagnosticKind::UnsupportedDecision,
-            source,
-            format!(
-                "`{}` does not accept {}",
-                event_name(event),
-                describe(&decision)
-            ),
-        );
-        HookDecision::Allow
     }
 
     // Withdraw one registration and publish the new tables. Chain
@@ -1343,32 +1349,6 @@ fn triggered_hint(
     .map_err(|_| ())
 }
 
-// Record a gate that could not answer: the pass fails closed, the
-// diagnostic says why.
-fn gate_failed(host: &std::sync::Weak<HostInner>, name: &str, why: String) {
-    if let Some(host) = host.upgrade() {
-        host.record(DiagnosticKind::GateFailed, name, why);
-    }
-}
-
-// The block a failing gate produces.
-fn blocked(name: &str, cause: &str) -> HookDecision {
-    HookDecision::Block {
-        reason: format!("gate `{name}` could not answer: {cause}"),
-    }
-}
-
-// A readable name for a decision, for the diagnostics.
-fn describe(decision: &HookDecision) -> String {
-    match decision {
-        HookDecision::Allow => "allow".to_string(),
-        HookDecision::Block { reason } => format!("block ({reason})"),
-        HookDecision::Ask { reason } => format!("ask ({reason})"),
-        HookDecision::ReplaceParams(_) => "replace params".to_string(),
-        HookDecision::Terminate { reason } => format!("terminate ({reason})"),
-    }
-}
-
 // -- seam-chain adapters -------------------------------------------------
 //
 // The typed registrations the seam chains dispatch. Each layer
@@ -1429,26 +1409,22 @@ async fn hook_layer(
                 &name,
                 ctx,
                 &next,
+                pass.as_ref(),
             )
             .await;
         }
     };
-    let decision = match host.upgrade() {
-        Some(host) => host.accept(&event, decision, &name),
-        None => decision,
-    };
+    let (decision, fact) = accept(&event, decision, &name);
+    if let Some(fact) = fact {
+        pass.record_fact(fact);
+    }
     let veto = veto_row(&name, &decision, &event);
-    rule(ctx, next, pass, decision, veto).await
+    apply_decision(ctx, next, pass, decision, veto).await
 }
 
-fn gate_adapter(
-    host: std::sync::Weak<HostInner>,
-    name: String,
-    gate: Arc<dyn Gate>,
-) -> uva_kernel::Middleware {
+fn gate_adapter(name: String, gate: Arc<dyn Gate>) -> uva_kernel::Middleware {
     Arc::new(move |ctx, next| {
         Box::pin(gate_layer(
-            std::sync::Weak::clone(&host),
             name.clone(),
             Arc::clone(&gate),
             ctx,
@@ -1458,7 +1434,6 @@ fn gate_adapter(
 }
 
 async fn gate_layer(
-    host: std::sync::Weak<HostInner>,
     name: String,
     gate: Arc<dyn Gate>,
     ctx: ChainCtx,
@@ -1472,23 +1447,26 @@ async fn gate_layer(
         HostAdapterUnwindSafe(gate.check(&event, &pass.hook_context()))
             .catch_unwind()
             .await;
-    let decision = match checked {
-        Ok(Ok(decision)) => decision,
-        Ok(Err(reason)) => {
-            gate_failed(&host, &name, format!("the gate failed: {reason}"));
-            blocked(&name, "the gate failed")
-        }
-        Err(_) => {
-            gate_failed(&host, &name, "the gate panicked".to_owned());
-            blocked(&name, "the gate panicked")
-        }
+    let outcome = match checked {
+        Ok(Ok(decision)) => Ok(decision),
+        Ok(Err(reason)) => Err(format!("the gate failed: {reason}")),
+        Err(_) => Err("the gate panicked".to_owned()),
     };
-    let decision = match host.upgrade() {
-        Some(host) => host.accept(&event, decision, &name),
-        None => decision,
+    let (decision, fact) = match outcome {
+        Ok(decision) => accept(&event, decision, &name),
+        // The gate could not answer: the pass fails closed where the
+        // point can refuse, and the failure is reported where it
+        // cannot.
+        Err(why) => match refusal(&event, &name, &why) {
+            Refusal::Decided(decision) => (decision, None),
+            Refusal::Reported(fact) => (HookDecision::Allow, Some(fact)),
+        },
     };
+    if let Some(fact) = fact {
+        pass.record_fact(fact);
+    }
     let veto = veto_row(&name, &decision, &event);
-    rule(ctx, next, pass, decision, veto).await
+    apply_decision(ctx, next, pass, decision, veto).await
 }
 
 fn request_transformer_adapter(
@@ -1545,6 +1523,7 @@ async fn request_transformer_layer(
                 &name,
                 ctx,
                 &next,
+                pass.as_ref(),
             )
             .await;
         }
@@ -1565,7 +1544,7 @@ async fn request_transformer_layer(
 // A deciding ruling travels as a `Decided` value — the ruling plus
 // the veto row it owes — so the seam layer can record the veto
 // where the run's sink lives.
-async fn rule(
+async fn apply_decision(
     ctx: ChainCtx,
     next: ChainNext,
     pass: Arc<HookPayload>,
@@ -1609,14 +1588,11 @@ async fn panicked(
     name: &str,
     ctx: ChainCtx,
     next: &ChainNext,
+    pass: &HookPayload,
 ) -> ChainResult {
     if let Some(host) = host.upgrade() {
         host.withdraw(kind, id);
-        host.record(
-            DiagnosticKind::Disabled,
-            name,
-            "the registration panicked; it is disabled",
-        );
     }
+    pass.record_fact(PANIC_POLICY.fact(name, "the registration panicked"));
     next(ctx).await
 }

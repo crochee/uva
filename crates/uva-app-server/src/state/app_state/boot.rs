@@ -295,7 +295,7 @@ impl AppState {
             workspace_config.clone(),
         );
         let default_model =
-            model_adapter_config.workspace.default_model.clone();
+            model_adapter_config.catalogue.default_model.clone();
         // The factory builds from the row config only; an empty row
         // means "the deployment's workspace configuration".
         let model_adapter_config = serde_json::to_value(&model_adapter_config)
@@ -448,19 +448,24 @@ impl AppState {
             usage: Arc::clone(&usage_metrics),
             plugin_host: input.plugin_host.clone(),
         });
+        // The one build recipe: the boot's mount and every hot reload
+        // the assembly later performs build rows from these same
+        // extras, so a remounted row is built the way the boot built
+        // it.
+        let extras = crate::composition::kernel::BootExtras {
+            workspace_root: input.workspace_root.clone(),
+            blocking: Some(crate::spawner::server_blocking()),
+            compaction: Some(uva::session::CompactionPluginConfig {
+                model: input.default_model.clone(),
+                settings: input.default_compaction.unwrap_or_default(),
+            }),
+            sessions_dir: input.sessions_dir.clone(),
+        };
         let (kernel, mounted) = mount_profile(
             Arc::clone(&boot_services),
             &input.profile,
             clock.clone(),
-            crate::composition::kernel::BootExtras {
-                workspace_root: input.workspace_root.clone(),
-                blocking: Some(crate::spawner::server_blocking()),
-                compaction: Some(uva::session::CompactionPluginConfig {
-                    model: input.default_model.clone(),
-                    settings: input.default_compaction.unwrap_or_default(),
-                }),
-                sessions_dir: input.sessions_dir.clone(),
-            },
+            extras.clone(),
         )
         .map_err(|error| error.to_string())?;
 
@@ -682,6 +687,10 @@ impl AppState {
             .await;
         }
 
+        // The label registry is shared with HMR remounts; it must be
+        // taken before the mounted handle is consumed.
+        let mounted_realms = mounted.realms();
+        let mounted_groups = mounted.into_groups();
         Ok(Self {
             clock,
             cluster: input.cluster,
@@ -707,10 +716,13 @@ impl AppState {
             tool_defs_cache: parking_lot::RwLock::new(None),
             mcp,
             assembly: Assembly::new(
-                kernel,
-                boot_services,
-                mounted.realms(),
-                mounted.into_groups(),
+                crate::state::app_state::assembly::BootedAssembly {
+                    kernel,
+                    boot_services,
+                    mount: mounted_groups,
+                    realms: mounted_realms,
+                    extras,
+                },
                 input.profile,
                 assembly,
                 input.profile_store,
@@ -906,14 +918,14 @@ pub(crate) fn model_adapter_row_config(
     let Some(row) = profile.core.iter().find(|e| e.id == "model-adapter")
     else {
         return uva::runtime::ModelAdapterConfig {
-            workspace,
+            catalogue: workspace,
             ..Default::default()
         };
     };
     let empty = row.config.as_object().is_none_or(serde_json::Map::is_empty);
     if empty {
         return uva::runtime::ModelAdapterConfig {
-            workspace,
+            catalogue: workspace,
             ..Default::default()
         };
     }
@@ -923,7 +935,7 @@ pub(crate) fn model_adapter_row_config(
             "model-adapter row config is malformed; the mount reports it"
         );
         uva::runtime::ModelAdapterConfig {
-            workspace,
+            catalogue: workspace,
             ..Default::default()
         }
     })

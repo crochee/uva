@@ -75,7 +75,7 @@ export function ModelsSection({ reloadToken }: SettingsSectionProps) {
             <RowCard
               icon="◈"
               label="model-adapter"
-              description={`${adapterRow.runtime} · ${adapterRow.status}`}
+              description={`${adapterRow.name} · ${adapterRow.status}`}
               actions={
                 <ProfileToggle
                   surface={surface}

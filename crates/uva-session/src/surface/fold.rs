@@ -27,12 +27,10 @@ use crate::{
 /// still unanswered.
 ///
 /// `None` for a log-only row: it contributes nothing to the
-/// model-visible surface, so the fold has no kind to give it.
-///
-/// The match is exhaustive over the variants: a new variant does
-/// not compile until it says which kind it is, so a row cannot
-/// reach the model — or be kept from it — by accident. The kind
-/// and the variant's declared
+/// model-visible surface, so the fold has no kind to give it. The
+/// kind is declared once, on the event's row tag
+/// ([`crate::events::RowTag`], exhaustive over the vocabulary), and
+/// read back here; the declaration and the variant's declared
 /// [`crate::events::SurfaceRole`] are held together by the
 /// cross-check in `log_surface`'s tests: a surface-eligible row
 /// carries a kind, a log-only row carries none.
@@ -40,47 +38,7 @@ pub(crate) fn row_view(
     event: &crate::events::SessionEvent,
     data: &Value,
 ) -> Option<(RowKind, Vec<String>)> {
-    use crate::events::SessionEvent;
-
-    let kind = match event {
-        SessionEvent::UserMessage { .. } => Some(RowKind::User),
-        SessionEvent::AssistantMessage { .. } => Some(RowKind::Assistant),
-        SessionEvent::ToolResult { .. } => Some(RowKind::Tool),
-        SessionEvent::Compaction { .. } => Some(RowKind::Compaction),
-        // The log-only rows: they are written to the log and read
-        // back as records of what happened. They never reach the
-        // model-visible surface, so the fold has no kind for them.
-        SessionEvent::AssistantChunk { .. }
-        | SessionEvent::CompactionStart { .. }
-        | SessionEvent::CompactionSummary { .. }
-        | SessionEvent::CompactionEnd { .. }
-        | SessionEvent::ToolCall { .. }
-        | SessionEvent::ToolOutput { .. }
-        | SessionEvent::Step { .. }
-        | SessionEvent::Turn { .. }
-        | SessionEvent::Iteration { .. }
-        | SessionEvent::Warning { .. }
-        | SessionEvent::SteeringGuard { .. }
-        | SessionEvent::SteeringHint { .. }
-        | SessionEvent::HookBlock { .. }
-        | SessionEvent::SubagentEnter { .. }
-        | SessionEvent::SubagentExit { .. }
-        | SessionEvent::RequestHeader { .. }
-        | SessionEvent::ApprovalAsked { .. }
-        | SessionEvent::ApprovalDecided { .. }
-        | SessionEvent::ApprovalGranted { .. }
-        | SessionEvent::ToolDispatch { .. }
-        | SessionEvent::RequestSnapshot { .. }
-        | SessionEvent::Usage { .. }
-        | SessionEvent::SandboxMode { .. }
-        | SessionEvent::SessionShutdown { .. }
-        | SessionEvent::ToolResultTransformed { .. }
-        | SessionEvent::ParkedPrompt { .. }
-        | SessionEvent::ParkConsumed { .. }
-        | SessionEvent::Feedback { .. }
-        | SessionEvent::Plugin { .. } => None,
-    };
-    let kind = kind?;
+    let kind = event.tag().row_kind()?;
     let calls = calls_of(kind, data);
     Some((kind, calls))
 }
@@ -103,10 +61,11 @@ pub(crate) fn calls_of(kind: RowKind, payload: &Value) -> Vec<String> {
 /// The blocks are read straight off the JSON, the way
 /// [`crate::tool_pairing::collect_tool_use_ids`] reads them: the
 /// payload's wire shape is the fold's contract, not the provider
-/// type's.
+/// type's. The one reader that knows that shape is
+/// [`crate::content_blocks`].
 pub(crate) fn tool_use_ids(payload: &Value) -> Vec<String> {
     let mut ids = Vec::new();
-    crate::tool_pairing::collect_tool_use_ids(payload, &mut ids);
+    crate::content_blocks::collect_tool_use_ids(payload, &mut ids);
     ids
 }
 
@@ -120,34 +79,8 @@ pub(crate) fn tool_result_ids(payload: &Value) -> Vec<String> {
     if let Some(id) = payload.get("tool_call_id").and_then(Value::as_str) {
         ids.push(id.to_string());
     }
-    collect_tool_result_ids(payload, &mut ids);
+    crate::content_blocks::collect_tool_result_ids(payload, &mut ids);
     ids
-}
-
-/// Collect every tool-result block's call id, in the order the
-/// blocks appear.
-fn collect_tool_result_ids(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            if matches!(
-                map.get("type").and_then(Value::as_str),
-                Some("tool_result")
-            ) && let Some(id) =
-                map.get("tool_use_id").and_then(Value::as_str)
-            {
-                out.push(id.to_string());
-            }
-            for nested in map.values() {
-                collect_tool_result_ids(nested, out);
-            }
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_tool_result_ids(item, out);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// What a surface row is.

@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 
 #[cfg(test)]
 use ahash::AHasher;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Cache TTL class.
@@ -17,7 +18,16 @@ use serde::{Deserialize, Serialize};
 /// hints. `Extended` and `Long` request longer TTLs and require explicit
 /// opt-in.
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    JsonSchema,
 )]
 pub enum CacheTtl {
     #[default]
@@ -30,7 +40,9 @@ pub enum CacheTtl {
 ///
 /// The wrapped `String` is formatted as `u={user_id};s={session_id}` so that
 /// different users can never collide on a cache key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema,
+)]
 pub struct CacheScope(pub String);
 
 impl CacheScope {
@@ -51,7 +63,15 @@ impl Default for CacheScope {
 /// All fields participate in the mark's hash, so a change to any of
 /// them is distinguishable from a change to the system prompt content.
 #[derive(
-    Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    Default,
+    JsonSchema,
 )]
 pub struct CacheControlMark {
     pub ttl: CacheTtl,

@@ -384,8 +384,8 @@ $DIR/real/sessions/dev/<session-id>/events.jsonl
 - 运行中的 turn 继续：`Thinking…` 恢复，最终回答追加到同一个 turn；
   已结算部分不重复播放。
 - 在 DevTools 的 EventStream/Network 里，`baseline` 之后是 `row` / `live`
-  帧；`live` 帧的 `live_seq` 单调递增，durable 行到达后同 turn 的 live
-  投影被替换。
+  帧；`live` 帧带 `start_seq`（该步在日志里的起点）与单调递增的 `live_seq`；
+  durable 行到达后，序号越过 `start_seq` 的内容行取代那一步的 live 投影。
 
 ### F. 长会话压缩
 
@@ -809,17 +809,20 @@ factories
 profile 文件（工作区配置层的 `.agents/profile.toml`，与 §2 同一个部署目录）写一行：
 
 ```toml
-[core]
-entries = [
-  { id = "lookup", runtime = "native", config = {} },
-]
+[[core.entries]]
+id = "lookup"
+name = "lookup"
 ```
 
-- `runtime` 只有 `native` 与 `ui-bundle` 两种，工具插件是 `native`；
+- `id` 是行身份，`name` 是它装的插件（工厂目录的键）；`[core]` 段装核心
+  插件，`[ui]` 段装界面插件；
 - 行里的 `config` 是这个插件自己的配置对象，schema 由工厂的 manifest 声明，
   解析期就被校验；
+- 行可以声明 `inject`（这一行额外依赖的服务键）与 `disabled = true`
+  （这一行不进装配）；
 - boot 走 `build_plugins` → `mount_all`：按依赖序挂载这些行，工厂的
-  `manifest()` 决定它提供什么、注入什么。
+  `manifest()` 决定它提供什么、注入什么；文档声明的 `inject` 与工厂的
+  `inject` 取并集，缺依赖的行挂起（开机审计报出），不整机报错。
 
 装了之后能观察到：插件的工具出现在 `rpc tools/list`，模型可以调用。
 

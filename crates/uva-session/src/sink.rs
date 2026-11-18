@@ -251,6 +251,27 @@ pub trait SessionSink: Send + Sync {
         Ok(self.read().await?.into_iter().next())
     }
 
+    /// The **first** `window` events, oldest first.
+    ///
+    /// [`read_head`](Self::read_head) answers one whole-log fact; a
+    /// reader that needs the first few rows (a delegation header may
+    /// sit behind the log's metadata row) reads a window the same way
+    /// the tail readers read theirs. The default reads the log and
+    /// slices it, so every backend is correct without the
+    /// optimisation — `JsonlSessionSink` overrides it with a bounded
+    /// read from the start of the file.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`read`](Self::read) returns.
+    async fn read_head_rows(
+        &self,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
+        let rows = self.read().await?;
+        Ok(rows.into_iter().take(window).collect())
+    }
+
     /// Force a stable checkpoint (flush buffers, rotate logs,
     /// push to remote). Called when the session enters a stable
     /// state (idle, completed). Returns the snapshot metadata.

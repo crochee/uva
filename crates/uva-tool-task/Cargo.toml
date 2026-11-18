@@ -38,5 +38,8 @@ ulid.workspace = true
 uva-harness.workspace = true
 uva-test-support.workspace = true
 futures.workspace = true
+# The vocabulary's own published schema is how the artefact set's
+# test enumerates every tag — the set keeps no list of its own.
+schemars.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 tempfile.workspace = true

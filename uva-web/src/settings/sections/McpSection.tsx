@@ -42,7 +42,7 @@ export function McpSection({ reloadToken }: SettingsSectionProps) {
               badge={row.status === 'mounted' ? undefined : '未装配'}
               description={
                 <>
-                  {row.runtime} · {row.status}
+                  {row.name} · {row.status}
                   {row.config ? (
                     <details className="nt-settings__config">
                       <summary>已解析的 config</summary>

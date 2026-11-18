@@ -8,7 +8,7 @@
  * disk's truth on the next read.
  */
 import type { ProfileRow } from '../api/settings-profile';
-import { rowDelegated, rowEnabled } from '../api/settings-profile';
+import { rowEnabled } from '../api/settings-profile';
 import { EnableToggle } from './EnableToggle';
 import type { ProfileSurface } from './useProfileSurface';
 
@@ -31,7 +31,6 @@ export function ProfileToggle({
   label,
   testId,
 }: ProfileToggleProps) {
-  const delegated = rowDelegated(row);
   const feedback = surface.feedback[row.id];
   return (
     <>
@@ -47,12 +46,8 @@ export function ProfileToggle({
       <EnableToggle
         checked={rowEnabled(row)}
         busy={surface.pendingRow === row.id}
-        locked={locked || delegated}
-        lockedReason={
-          delegated && typeof row.enabled === 'object'
-            ? `启用位由插件判定（${row.enabled.service}.${row.enabled.check}）`
-            : lockedReason
-        }
+        locked={locked}
+        lockedReason={lockedReason}
         onChange={(next) => void surface.toggle(row.id, next)}
         label={label ?? `启用 ${row.id}`}
         testId={testId}

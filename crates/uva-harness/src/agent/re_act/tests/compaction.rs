@@ -32,7 +32,9 @@ use uva_session::{
     CompactionPlan,
     Compactor,
     LogWriter,
+    SessionEvent,
     SummaryCompactor,
+    SurfaceOp,
     TokenBudget,
     derive_history,
     in_memory::InMemorySessionSink,
@@ -143,16 +145,15 @@ async fn seeded_writer_with(chars: usize) -> Arc<LogWriter> {
     let sink = Arc::new(InMemorySessionSink::new("compaction"));
     let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
     for turn in 0..4 {
-        writer
-            .append(json!({
-                "type": "user_message",
-                "data": uva_provider::Message::user(format!(
-                    "turn {turn}: {}",
-                    "x".repeat(chars)
-                )),
-            }))
-            .await
-            .expect("seed the turn");
+        let row = uva_session::user_message(
+            serde_json::to_value(Message::user(format!(
+                "turn {turn}: {}",
+                "x".repeat(chars)
+            )))
+            .expect("a user message serialises"),
+            None,
+        );
+        writer.append_event(&row).await.expect("seed the turn");
     }
     writer.flush().await.expect("flush the seeded rows");
     writer
@@ -570,15 +571,16 @@ async fn the_next_request_carries_the_summary_and_not_the_shadowed_turns() {
 async fn a_replace_citing_a_later_seq_does_not_fold() {
     let writer = seeded_writer().await;
     writer
-        .append(json!({
-            "type": "compaction",
-            "data": {"summary": "bad"},
-            "surface_op": {
-                "start": 0,
-                "end": 1,
-                "source_event_seqs": [9_999],
+        .append_event(&SessionEvent::Compaction {
+            seq: 0,
+            ts: String::new(),
+            data: json!({"summary": "bad"}),
+            surface_op: SurfaceOp::Replace {
+                start: 0,
+                end: 1,
+                source_event_seqs: vec![9_999],
             },
-        }))
+        })
         .await
         .expect("append the bad replace");
     writer.flush().await.expect("flush");

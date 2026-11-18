@@ -43,7 +43,13 @@ function assistantRow(seq: number | undefined, text: string): SessionTurn {
   return {
     type: 'assistant_message',
     ...(seq === undefined ? {} : { seq }),
-    data: { role: 'assistant', content: [{ type: 'text', text }] },
+    data: {
+      role: 'assistant',
+      content: { Multi: [{ type: 'text', text }] },
+      tool_call_id: null,
+      name: null,
+      tool_result_cleared_at: null,
+    },
   };
 }
 
@@ -52,7 +58,13 @@ function userRow(seq: number, text: string): SessionTurn {
   return {
     type: 'user_message',
     seq,
-    data: { role: 'user', content: [{ type: 'text', text }] },
+    data: {
+      role: 'user',
+      content: { Multi: [{ type: 'text', text }] },
+      tool_call_id: null,
+      name: null,
+      tool_result_cleared_at: null,
+    },
   };
 }
 
@@ -62,7 +74,13 @@ function reasoningRow(seq: number | undefined, text: string): SessionTurn {
   return {
     type: 'assistant_message',
     ...(seq === undefined ? {} : { seq }),
-    data: { role: 'assistant', content: [{ type: 'reasoning', text }] },
+    data: {
+      role: 'assistant',
+      content: { Multi: [{ type: 'reasoning', text }] },
+      tool_call_id: null,
+      name: null,
+      tool_result_cleared_at: null,
+    },
   };
 }
 

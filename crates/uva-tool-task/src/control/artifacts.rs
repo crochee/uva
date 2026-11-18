@@ -26,7 +26,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::Deserialize;
 use serde_json::Value;
+use uva_session::{CurrentRow, RowTag, SessionEvent, restore_row};
 
 /// The directory the artefact set lives in, inside a session
 /// directory.
@@ -131,97 +133,211 @@ fn render(record: &RoundRecord<'_>, raw: &str) -> String {
     out
 }
 
-/// One transcript row, as markdown. Rows the model never saw (partial
-/// chunks, usage counters, request headers) are left out: the set is a
-/// transcript, not a dump.
+/// One transcript row, as markdown.
+///
+/// The row's **restored** tag decides what the set does with it: the
+/// tags the transcript is made of are rendered, the rest are left out
+/// on purpose (rows the model never saw — the streamed chunks, the
+/// usage counters, the request headers — and rows another row already
+/// says). The match is exhaustive over the vocabulary, so a new tag
+/// does not compile until the set says what it does with it; see
+/// `docs/adr/0006-row-vocabulary-owns-the-row.md`.
+///
+/// A row written in an old dialect is restored into the current
+/// vocabulary first, so it is rendered in current shape: the set
+/// shows what the round did, not which spelling the log happened to
+/// use. A row the current vocabulary does not cover — a tag this
+/// build does not know, or no tag at all — is left out: the set is a
+/// projection of the typed log, and those rows have no typed reading.
+///
+/// The values come from the row's typed event: a field the event
+/// declares is read from there, never spelled out here.
 fn render_row(out: &mut String, row: &Value) {
-    let kind = row.get("type").and_then(Value::as_str).unwrap_or_default();
-    match kind {
-        "user_message" => {
-            let source = row.get("source").and_then(Value::as_str);
-            let heading = match source {
-                Some("steer") => "User (steer)",
-                _ => "User",
-            };
-            section(out, heading, &message_text(row));
-        }
-        "assistant_message" => {
-            section(out, "Assistant", &message_text(row));
-        }
-        "tool_call" => {
-            let name = row.get("name").and_then(Value::as_str).unwrap_or("");
-            let _ = writeln!(out, "\n### Tool call `{name}`\n");
-            fenced(out, "json", &pretty(row.get("data")));
-        }
-        "tool_result" => {
-            let failed = row.get("is_error").and_then(Value::as_bool);
-            let heading = if failed == Some(true) {
-                "### Tool result (failed)\n"
-            } else {
-                "### Tool result\n"
-            };
-            let _ = writeln!(out, "\n{heading}");
-            let text = message_text(row);
-            let text = if text.trim().is_empty() {
-                pretty(row.get("data"))
-            } else {
-                text
-            };
-            fenced(out, "text", &text);
-        }
-        "subagent_enter" => {
-            let child = string(row, "child_session_id");
-            let parent = string(row, "parent_session_id");
-            let agent = string(row, "agent_name");
-            let depth = row.get("depth").and_then(Value::as_u64).unwrap_or(0);
-            let _ = writeln!(
-                out,
-                "\n> sub-agent `{child}` opened: agent `{agent}`, \
-                 parent `{parent}`, depth {depth}"
-            );
-        }
-        "subagent_exit" => {
-            let child = string(row, "child_session_id");
-            let status = string(row, "status");
-            let _ = writeln!(out, "\n> sub-agent `{child}` closed: {status}");
-        }
-        "turn" => {
-            let kind = row
-                .pointer("/data/kind")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let reason = row
-                .pointer("/data/reason")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if reason.is_empty() {
-                let _ = writeln!(out, "\n> turn {kind}");
-            } else {
-                let _ = writeln!(out, "\n> turn {kind}: {reason}");
-            }
-        }
-        "warning" => {
-            let message = row
-                .pointer("/data/message")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let warning = row
-                .pointer("/data/kind")
-                .and_then(Value::as_str)
-                .unwrap_or("warning");
-            let _ = writeln!(out, "\n> **{warning}**: {message}");
-        }
-        "hook_block" => {
-            let hook = string(row, "hook");
-            let reason = string(row, "reason");
-            let tool = string(row, "tool");
-            let _ = writeln!(
-                out,
-                "\n> **blocked** by `{hook}`: `{tool}` — {reason}"
-            );
-        }
-        _ => {}
+    let restored = restore_row(row);
+    let Some(tag) = restored.tag() else {
+        return;
+    };
+    match tag {
+        RowTag::UserMessage => render_user_message(out, &restored),
+        RowTag::AssistantMessage => render_assistant_message(out, &restored),
+        RowTag::ToolCall => render_tool_call(out, &restored),
+        RowTag::ToolResult => render_tool_result(out, &restored),
+        RowTag::SubagentEnter => render_subagent_enter(out, &restored),
+        RowTag::SubagentExit => render_subagent_exit(out, &restored),
+        RowTag::Turn => render_turn(out, &restored),
+        RowTag::Warning => render_warning(out, &restored),
+        RowTag::HookBlock => render_hook_block(out, &restored),
+        // The rest of the vocabulary: rows the model never saw and
+        // rows the transcript already carries in another row.
+        //
+        // The streamed chunks of a running turn are the sharpest
+        // case: the settled `assistant_message` row is the model's
+        // copy, and the artefact set is the transcript, not a dump of
+        // the log.
+        RowTag::AssistantChunk
+        | RowTag::Compaction
+        | RowTag::CompactionStart
+        | RowTag::CompactionSummary
+        | RowTag::CompactionEnd
+        | RowTag::ToolOutput
+        | RowTag::Step
+        | RowTag::Iteration
+        | RowTag::SteeringGuard
+        | RowTag::SteeringHint
+        | RowTag::RequestHeader
+        | RowTag::ApprovalAsked
+        | RowTag::ApprovalDecided
+        | RowTag::ApprovalGranted
+        | RowTag::ToolDispatch
+        | RowTag::RequestSnapshot
+        | RowTag::Usage
+        | RowTag::SandboxMode
+        | RowTag::SessionShutdown
+        | RowTag::ToolResultTransformed
+        | RowTag::ParkedPrompt
+        | RowTag::ParkConsumed
+        | RowTag::Feedback
+        | RowTag::Plugin => {}
     }
+}
+
+/// A user turn: the prompt the round started from. A prompt steered
+/// into a live run says so.
+fn render_user_message(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::UserMessage { data, source, .. }) = row.event()
+    else {
+        return;
+    };
+    let heading = match source.as_deref() {
+        Some("steer") => "User (steer)",
+        _ => "User",
+    };
+    section(out, heading, &message_text(&data));
+}
+
+/// An assistant turn: the answer the model gave.
+fn render_assistant_message(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::AssistantMessage { data, .. }) = row.event() else {
+        return;
+    };
+    section(out, "Assistant", &message_text(&data));
+}
+
+/// A tool call: which tool the model asked for, and with which
+/// arguments.
+fn render_tool_call(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::ToolCall { data, name, .. }) = row.event() else {
+        return;
+    };
+    let name = name.as_deref().unwrap_or_default();
+    let _ = writeln!(out, "\n### Tool call `{name}`\n");
+    fenced(out, "json", &pretty(Some(&data)));
+}
+
+/// A tool result: what the tool said, or that it failed.
+fn render_tool_result(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::ToolResult { data, is_error, .. }) = row.event()
+    else {
+        return;
+    };
+    let heading = if is_error {
+        "### Tool result (failed)\n"
+    } else {
+        "### Tool result\n"
+    };
+    let _ = writeln!(out, "\n{heading}");
+    let text = message_text(&data);
+    let text = if text.trim().is_empty() {
+        pretty(Some(&data))
+    } else {
+        text
+    };
+    fenced(out, "text", &text);
+}
+
+/// A delegation: the child session that was opened, and who ran it.
+fn render_subagent_enter(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::SubagentEnter {
+        child_session_id,
+        parent_session_id,
+        agent_name,
+        depth,
+        ..
+    }) = row.event()
+    else {
+        return;
+    };
+    let child = child_session_id.as_deref().unwrap_or_default();
+    let parent = parent_session_id.as_deref().unwrap_or_default();
+    let agent = agent_name.as_deref().unwrap_or_default();
+    let depth = depth.unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "\n> sub-agent `{child}` opened: agent `{agent}`, \
+         parent `{parent}`, depth {depth}"
+    );
+}
+
+/// The delegation's end: the child session closed, and how it ended.
+fn render_subagent_exit(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::SubagentExit {
+        child_session_id,
+        status,
+        ..
+    }) = row.event()
+    else {
+        return;
+    };
+    let child = child_session_id.as_deref().unwrap_or_default();
+    let status = status.as_deref().unwrap_or_default();
+    let _ = writeln!(out, "\n> sub-agent `{child}` closed: {status}");
+}
+
+/// A turn boundary: which turn the run was in, and why it ended.
+fn render_turn(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::Turn { data, kind, .. }) = row.event() else {
+        return;
+    };
+    let kind = kind.as_deref().unwrap_or_default();
+    let reason = data
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if reason.is_empty() {
+        let _ = writeln!(out, "\n> turn {kind}");
+    } else {
+        let _ = writeln!(out, "\n> turn {kind}: {reason}");
+    }
+}
+
+/// A warning: a fact the runtime could not report any other way.
+fn render_warning(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::Warning { data, .. }) = row.event() else {
+        return;
+    };
+    let message = data
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let warning = data
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("warning");
+    let _ = writeln!(out, "\n> **{warning}**: {message}");
+}
+
+/// A veto: which policy refused the call, and why.
+fn render_hook_block(out: &mut String, row: &CurrentRow<'_>) {
+    let Some(SessionEvent::HookBlock { data, .. }) = row.event() else {
+        return;
+    };
+    let hook = data.get("hook").and_then(Value::as_str).unwrap_or_default();
+    let reason = data
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tool = data.get("tool").and_then(Value::as_str).unwrap_or_default();
+    let _ = writeln!(out, "\n> **blocked** by `{hook}`: `{tool}` — {reason}");
 }
 
 /// A `### heading` plus its body.
@@ -243,26 +359,11 @@ fn fenced(out: &mut String, language: &str, body: &str) {
 
 /// The text of a message row's payload, when it is a provider
 /// message; the raw payload otherwise.
-fn message_text(row: &Value) -> String {
-    let Some(data) = row.get("data") else {
-        return String::new();
-    };
-    match serde_json::from_value::<uva_provider::Message>(data.clone()) {
+fn message_text(data: &Value) -> String {
+    match uva_provider::Message::deserialize(data) {
         Ok(message) => message.content.extract_text().unwrap_or_default(),
         Err(_) => pretty(Some(data)),
     }
-}
-
-/// A row field that is either a top-level string or a string inside
-/// `data`.
-fn string(row: &Value, key: &str) -> String {
-    row.get(key)
-        .and_then(Value::as_str)
-        .or_else(|| {
-            row.pointer(&format!("/data/{key}")).and_then(Value::as_str)
-        })
-        .unwrap_or_default()
-        .to_string()
 }
 
 /// A JSON value, pretty-printed.

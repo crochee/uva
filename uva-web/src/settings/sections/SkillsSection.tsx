@@ -92,7 +92,7 @@ export function SkillsSection({ reloadToken }: SettingsSectionProps) {
               icon="⌘"
               label="skills"
               badge={skillsRow.status === 'mounted' ? undefined : '未装配'}
-              description={`${skillsRow.runtime} · ${skillsRow.status}`}
+              description={`${skillsRow.name} · ${skillsRow.status}`}
               actions={
                 <ProfileToggle
                   surface={surface}

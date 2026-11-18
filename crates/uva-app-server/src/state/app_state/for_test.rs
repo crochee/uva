@@ -117,17 +117,15 @@ impl AppState {
         // deployment catalogue would otherwise inject under `cfg(test)`;
         // the factory builds it from the row like a real deployment.
         let value = serde_json::json!({
-            "workspace": {
-                "providers": {
-                    "demo": {
-                        "type": "demo",
-                        "api_key_env": "NONE",
-                        "default_model": default_model.clone(),
-                    }
-                },
-                "default_provider": "demo",
-                "default_model": default_model.clone(),
-            }
+            "providers": {
+                "demo": {
+                    "type": "demo",
+                    "api_key_env": "NONE",
+                    "default_model": default_model.clone(),
+                }
+            },
+            "default_provider": "demo",
+            "default_model": default_model.clone(),
         });
         if let Some(row) = profile
             .core

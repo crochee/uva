@@ -662,7 +662,7 @@ fn feedback_target(rows: &[Value], target: &str) -> Result<u64, String> {
     // The row is decoded through the session crate's own decoder, so
     // the answer follows the vocabulary instead of a copy of it.
     let is_assistant = matches!(
-        uva::session::SessionEvent::from_value(row),
+        uva::session::restore_row(row).event(),
         Some(uva::session::SessionEvent::AssistantMessage { .. })
     );
     if !is_assistant {

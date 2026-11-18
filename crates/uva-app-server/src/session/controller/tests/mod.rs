@@ -12,6 +12,7 @@
 //! | [`truncate`]     | The `truncate` helper — char-counted, ellipsis-on-truncation contract |
 //! | [`lifecycle`]    | State transitions — concurrent prompt dedup, idle shutdown, post-shutdown error, snapshot bus, idempotent `close` |
 //! | [`cancel`]       | `Cancel` op — terminates run, idempotent, safe before run starts |
+//! | [`compaction_gate`] | The compaction gate as the handle offers it — a promise about run starts, and the remote handle's ungated work |
 //! | [`event_emission`] | Persist + broadcast of agent events, durable/ephemeral split, `request_header` epoch marker |
 //! | [`history`]      | Multi-turn memory: second prompt seeds `history` from sink, user-role reconstruction, compaction-checkpoint fold |
 //! | [`live_projection`] | The live projection and the durable log agree about an answered call |
@@ -21,6 +22,7 @@
 //! | [`usage`]        | Process-wide usage counters: `SystemEvent::Usage` token totals and one turn per `SystemEvent::SessionEnded` (any reason) |
 //! | [`writer`]       | One writer per session: feedback interleaves cleanly, a durable row is on disk before broadcast, a fork re-stamps, the ledger takes the sink's ordinals |
 mod cancel;
+mod compaction_gate;
 mod event_emission;
 mod history;
 mod lifecycle;

@@ -32,7 +32,6 @@ export type FollowEvent =
   | {
       type: 'row';
       seq: number;
-      turnId?: string;
       row: SessionTurn;
       /** The request envelope hash, when this row is a snapshot. */
       hash?: string;
@@ -49,10 +48,6 @@ export function readRowFrame(data: unknown): FollowEvent | null {
   if (!data || typeof data !== 'object' || !('seq' in data) || !('row' in data)) return null;
   const { seq, row } = data;
   if (typeof seq !== 'number' || !row || typeof row !== 'object' || Array.isArray(row)) return null;
-  const turnId =
-    'turn_id' in data && typeof data.turn_id === 'string' && data.turn_id.length > 0
-      ? data.turn_id
-      : null;
   const hash =
     'request_snapshot_hash' in data &&
     typeof data.request_snapshot_hash === 'string' &&
@@ -63,7 +58,6 @@ export function readRowFrame(data: unknown): FollowEvent | null {
     type: 'row',
     seq,
     row: row as SessionTurn,
-    ...(turnId ? { turnId } : {}),
     ...(hash ? { hash } : {}),
   };
 }
@@ -152,8 +146,8 @@ export function readBaseline(data: unknown): FollowSnapshot | null {
  */
 export function readLiveTurn(data: unknown): LiveTurn | null {
   if (!data || typeof data !== 'object') return null;
-  if (!('turn_id' in data) || !('live_seq' in data)) return null;
-  if (typeof data.turn_id !== 'string' || typeof data.live_seq !== 'number') return null;
+  if (!('start_seq' in data) || !('live_seq' in data)) return null;
+  if (typeof data.start_seq !== 'number' || typeof data.live_seq !== 'number') return null;
   const text = 'text' in data && typeof data.text === 'string' ? data.text : '';
   const reasoning = 'reasoning' in data && typeof data.reasoning === 'string' ? data.reasoning : '';
   const running = 'running' in data ? data.running === true : false;
@@ -178,7 +172,7 @@ export function readLiveTurn(data: unknown): LiveTurn | null {
     }
   }
   return {
-    turn_id: data.turn_id,
+    start_seq: data.start_seq,
     live_seq: data.live_seq,
     running,
     text,

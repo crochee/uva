@@ -359,7 +359,7 @@ async fn a_gate_failure_fails_closed_at_every_point_that_can_refuse() {
         assert!(reason.contains("could not decide"), "`{key}`: {reason}");
         assert_eq!(pass.denied_by.as_deref(), Some("failing"));
         assert!(
-            pass.failures.is_empty(),
+            pass.facts.is_empty(),
             "`{key}`: a carried denial is not a dispatch failure"
         );
     }
@@ -397,7 +397,8 @@ async fn a_panicking_gate_terminates_the_step_pass() {
     assert_eq!(
         pass.arbitration.decision,
         HookDecision::Terminate {
-            reason: "the gate panicked".to_owned()
+            reason: "gate `panicking` could not answer: the gate panicked"
+                .to_owned()
         }
     );
     assert_eq!(pass.denied_by.as_deref(), Some("panicking"));
@@ -426,12 +427,11 @@ async fn a_gate_failure_at_an_observational_point_is_reported() {
             "`{key}`: the point carries no denial"
         );
         assert!(pass.event.is_some(), "`{key}`: the pass continues");
-        assert_eq!(pass.failures.len(), 1, "`{key}`: {:?}", pass.failures);
+        assert_eq!(pass.facts.len(), 1, "`{key}`: {:?}", pass.facts);
+        let detail = pass.facts[0].message();
         assert!(
-            pass.failures[0].contains("failing")
-                && pass.failures[0].contains("could not decide"),
-            "`{key}`: {:?}",
-            pass.failures
+            detail.contains("failing") && detail.contains("could not decide"),
+            "`{key}`: {detail}"
         );
     }
 }

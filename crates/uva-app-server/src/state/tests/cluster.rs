@@ -25,11 +25,12 @@ use crate::{
 /// True for a row that records a user turn: the typed
 /// `user_message` this build writes, or the legacy `UserInput`
 /// envelope an older log holds.
+///
+/// The question is asked of the restored row, so the test does not
+/// care which spelling the log carries.
 fn is_prompt_row(row: &serde_json::Value) -> bool {
-    matches!(
-        row.get("type").and_then(serde_json::Value::as_str),
-        Some("user_message" | "UserInput")
-    )
+    uva::session::restore_row(row)
+        .restores_to(uva::session::RowTag::UserMessage)
 }
 
 /// The user text of a prompt row, in either dialect.
@@ -38,15 +39,13 @@ fn is_prompt_row(row: &serde_json::Value) -> bool {
 /// `user_message` row whose `data` is the provider message; a log
 /// written before the typed writer kept `{"text": …}` in the payload
 /// of a `UserInput` row. Both are prompt records, so a test that asks
-/// "did this turn run?" must not care which dialect it is reading.
+/// "did this turn run?" must not care which dialect it is reading —
+/// the restored row projects the model message either way, and its
+/// text is the turn's.
 fn prompt_text_of(row: &serde_json::Value) -> Option<String> {
-    let data = row.get("data")?;
-    if let Some(text) = data.get("text").and_then(serde_json::Value::as_str) {
-        return Some(text.to_string());
-    }
-    let message: uva::provider::Message =
-        serde_json::from_value(data.clone()).ok()?;
-    message.content.extract_text()
+    uva::session::restore_row(row)
+        .message()
+        .and_then(|message| message.content.extract_text())
 }
 
 fn scripted_provider() -> Arc<dyn ModelProvider> {
@@ -230,13 +229,13 @@ async fn a_takeover_rebuilds_the_state_from_the_log() {
     assert!(!adopted.is_remote(), "node b takes the lease over");
     assert_eq!(
         adopted.state(),
-        crate::session::controller::SessionState::AwaitingApproval,
+        crate::session::status::SessionState::AwaitingApproval,
         "the rebuilt controller reports the log's pause, not its own \
          fresh-process Idle"
     );
     assert_eq!(
         adopted.session_state().await,
-        crate::session::controller::SessionState::AwaitingApproval
+        crate::session::status::SessionState::AwaitingApproval
     );
 }
 
@@ -503,12 +502,14 @@ async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
         .unwrap();
     // A log written before the typed writer: the spent park's turn is
     // the legacy `UserInput` envelope, and the takeover must still read
-    // it (and must not treat it as a second consumption).
+    // it (and must not treat it as a second consumption). No typed
+    // constructor produces a legacy envelope, so the test copies the
+    // row into the log as it stands.
     writer
-        .append(serde_json::json!({
+        .append_copied(vec![serde_json::json!({
             "type": "UserInput",
             "data": { "text": "first turn" },
-        }))
+        })])
         .await
         .unwrap();
     writer.flush().await.unwrap();

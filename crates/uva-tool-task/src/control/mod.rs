@@ -69,7 +69,15 @@ pub use registry::{
     MessageTarget,
     SteerTarget,
 };
-pub use scan::SessionIndex;
+pub use scan::{
+    ChildRecord,
+    HEAD_ROWS,
+    RecordSource,
+    Scope,
+    SessionIndex,
+    discover,
+    head_records,
+};
 pub use state::{
     ChildState,
     ChildStatus,
@@ -307,7 +315,18 @@ impl ControlSurface {
             .into_iter()
             .map(|row| row.id)
             .collect();
-        for record in scan::discover(index.as_ref(), parent).await {
+        // Only an own-log child is adoptable: adoption needs the
+        // child's own session to continue, and a mirror record exists
+        // precisely because that log could not be read.
+        for record in scan::discover(
+            index.as_ref(),
+            scan::Scope::Parent(parent.to_string()),
+        )
+        .await
+        {
+            if record.source != scan::RecordSource::OwnLog {
+                continue;
+            }
             if held.iter().any(|id| id == &record.id) {
                 continue;
             }

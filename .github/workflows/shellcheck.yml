@@ -54,10 +54,12 @@ jobs:
             ./scripts/check-hook-external.sh
             ./scripts/check-kernel-deps.sh
             ./scripts/check-plugin-shape.sh
+            ./scripts/check-profile-document.sh
             ./scripts/check-pub-surface-strict.sh
             ./scripts/check-public-api-runtime.sh
             ./scripts/check-public-docs.sh
             ./scripts/check-publishable.sh
+            ./scripts/check-row-vocabulary.sh
             ./scripts/check-single-writer.sh
             ./scripts/check-stdout.sh
             ./scripts/check-web-contract.sh

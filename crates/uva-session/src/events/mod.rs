@@ -9,11 +9,16 @@
 //!
 //! See [`SessionEvent`] for the typed-event enum,
 //! [`SurfaceOp`] for the append / replace discriminator, and
-//! [`SurfaceRole`] for what a row does on the model-visible surface.
+//! [`SurfaceRole`] for what a row does on the model-visible
+//! surface. What a raw row *is* — its tag, its dialect history,
+//! its current form — is declared once by the row vocabulary
+//! ([`RowTag`], [`restore_row`]); this module's accessors read
+//! that declaration instead of restating it.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uva_provider::Message;
 
 use crate::token_meter::UsageBuckets;
 
@@ -170,15 +175,13 @@ impl Default for SurfaceOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 /// What a row of the durable log does on the model-visible surface.
 ///
-/// The role is the *one* declaration of a row's surface treatment.
-/// The fold reads it ([`SessionEvent::surface_role`]), the raw-log
-/// classifier answers the same question about the same rows, and
-/// every variant's doc marker states it in the same words — a test
-/// holds the three together, because three hand-written lists of the
-/// same fact drift apart silently.
+/// Which role a tag has is declared once, with the row vocabulary
+/// ([`RowTag`]): the fold reads it through
+/// [`SessionEvent::surface_role`], and the raw-log classifier reads
+/// the same declaration, so the two cannot drift.
 ///
-/// A variant that does not declare a role does not compile: the
-/// method's match is exhaustive over the variants, so adding one
+/// A tag that does not declare a role does not compile: the
+/// vocabulary's match is exhaustive over the tags, so adding one
 /// forces the decision at build time instead of leaving it to a
 /// reader's memory.
 pub enum SurfaceRole {
@@ -200,6 +203,17 @@ pub enum SurfaceRole {
     LogOnly,
 }
 
+impl SurfaceRole {
+    /// 这一角色进模型可见的表面吗。
+    ///
+    /// 表面成员资格由角色声明，所以这个判据只有一个出处：折叠、读点
+    /// 与词汇读的是同一句话。
+    #[must_use]
+    pub const fn is_surface(self) -> bool {
+        !matches!(self, SurfaceRole::LogOnly)
+    }
+}
+
 /// One entry in the durable session event log.
 ///
 /// `seq` is the monotonic ordinal assigned by the sink at append
@@ -214,7 +228,7 @@ pub enum SurfaceRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    /// User-role message — surface message.
+    /// User-role message.
     UserMessage {
         /// Sequence ordinal stamped by the sink.
         seq: u64,
@@ -251,7 +265,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<AttachmentRefRow>,
     },
-    /// Assistant-role message — surface message.
+    /// Assistant-role message.
     AssistantMessage {
         /// Sequence ordinal.
         seq: u64,
@@ -263,7 +277,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_op: Option<SurfaceOp>,
     },
-    /// One streamed provider delta — log-only.
+    /// One streamed provider delta.
     ///
     /// Preserved verbatim for replay fidelity. The agent loop emits
     /// one of these per wire delta alongside the
@@ -283,7 +297,7 @@ pub enum SessionEvent {
         /// Chunk payload (`{"delta": "<text>"}`).
         data: Value,
     },
-    /// Tool-result message — surface message.
+    /// Tool-result message.
     ToolResult {
         /// Sequence ordinal.
         seq: u64,
@@ -307,7 +321,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_op: Option<SurfaceOp>,
     },
-    /// Summary replacing a span of older tool-results — surface op only.
+    /// Summary replacing a span of older tool-results.
     ///
     /// Used by the `SummarizingContextManager` to swap a tail of
     /// noisy tool results for one compact assistant message while
@@ -322,7 +336,7 @@ pub enum SessionEvent {
         /// Surface op (replace with cited source seqs).
         surface_op: SurfaceOp,
     },
-    /// Compaction began — log-only.
+    /// Compaction began.
     ///
     /// An unmatched `CompactionStart` (no matching
     /// `CompactionEnd`) is the crash marker the loader detects;
@@ -337,7 +351,7 @@ pub enum SessionEvent {
         /// Compaction metadata (reason, budget, ...).
         data: Value,
     },
-    /// Compaction produced a summary — log-only.
+    /// Compaction produced a summary.
     CompactionSummary {
         /// Sequence ordinal.
         seq: u64,
@@ -348,7 +362,7 @@ pub enum SessionEvent {
         /// Summary payload (`{"summary": "<text>"}`).
         data: Value,
     },
-    /// Compaction finished (success or failure) — log-only.
+    /// Compaction finished (success or failure).
     CompactionEnd {
         /// Sequence ordinal.
         seq: u64,
@@ -362,7 +376,7 @@ pub enum SessionEvent {
         /// Terminal-state payload.
         data: Value,
     },
-    /// A tool call the model emitted — log-only.
+    /// A tool call the model emitted.
     ToolCall {
         /// Sequence ordinal.
         seq: u64,
@@ -377,7 +391,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    /// One partial-output chunk of a running tool call — log-only.
+    /// One partial-output chunk of a running tool call.
     ///
     /// A tool that streams (today `shell`) yields its output in
     /// chunks; the live projection renders them while the call runs,
@@ -408,7 +422,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool: Option<String>,
     },
-    /// Step boundary (`start` | `end`) — log-only.
+    /// Step boundary (`start` | `end`).
     Step {
         /// Sequence ordinal.
         seq: u64,
@@ -426,7 +440,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<u64>,
     },
-    /// Turn boundary (`start` | `end`) — log-only.
+    /// Turn boundary (`start` | `end`).
     Turn {
         /// Sequence ordinal.
         seq: u64,
@@ -446,7 +460,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn: Option<u64>,
     },
-    /// Iteration boundary (`start` | `end`) — log-only.
+    /// Iteration boundary (`start` | `end`).
     Iteration {
         /// Sequence ordinal.
         seq: u64,
@@ -455,7 +469,7 @@ pub enum SessionEvent {
         /// `start` or `end`, plus iteration index.
         data: Value,
     },
-    /// Lifecycle warning — log-only.
+    /// Lifecycle warning.
     Warning {
         /// Sequence ordinal.
         seq: u64,
@@ -464,7 +478,7 @@ pub enum SessionEvent {
         /// Warning kind + message + iteration.
         data: Value,
     },
-    /// Steering guard decision — log-only.
+    /// Steering guard decision.
     SteeringGuard {
         /// Sequence ordinal.
         seq: u64,
@@ -473,7 +487,7 @@ pub enum SessionEvent {
         /// Guard name + action + reason.
         data: Value,
     },
-    /// Steering hint injection — log-only.
+    /// Steering hint injection.
     SteeringHint {
         /// Sequence ordinal.
         seq: u64,
@@ -482,7 +496,7 @@ pub enum SessionEvent {
         /// Hint name + content + injection point.
         data: Value,
     },
-    /// Hook veto — log-only.
+    /// Hook veto.
     HookBlock {
         /// Sequence ordinal.
         seq: u64,
@@ -493,7 +507,7 @@ pub enum SessionEvent {
         /// `reason`, `tool` and `call_id`.
         data: Value,
     },
-    /// Sub-agent delegation entry — log-only.
+    /// Sub-agent delegation entry.
     SubagentEnter {
         /// Sequence ordinal.
         seq: u64,
@@ -514,7 +528,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         depth: Option<u64>,
     },
-    /// Sub-agent delegation exit — log-only.
+    /// Sub-agent delegation exit.
     SubagentExit {
         /// Sequence ordinal.
         seq: u64,
@@ -532,7 +546,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         status: Option<String>,
     },
-    /// Per-call request config snapshot — log-only.
+    /// Per-call request config snapshot.
     RequestHeader {
         /// Sequence ordinal.
         seq: u64,
@@ -547,7 +561,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
     },
-    /// A high-risk call held for approval — log-only.
+    /// A high-risk call held for approval.
     ApprovalAsked {
         /// Sequence ordinal.
         seq: u64,
@@ -566,7 +580,7 @@ pub enum SessionEvent {
         /// Agent the call belongs to.
         agent: String,
     },
-    /// An operator's decision on a held call — log-only.
+    /// An operator's decision on a held call.
     ApprovalDecided {
         /// Sequence ordinal.
         seq: u64,
@@ -584,7 +598,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<Value>,
     },
-    /// A durable approval grant — log-only.
+    /// A durable approval grant.
     ApprovalGranted {
         /// Sequence ordinal.
         seq: u64,
@@ -599,7 +613,7 @@ pub enum SessionEvent {
         /// Workspace the grant is bound to.
         workspace_hash: String,
     },
-    /// The intent record written before a tool runs — log-only.
+    /// The intent record written before a tool runs.
     ///
     /// The row is the crash marker: a dispatch with no matching
     /// `tool_result` means the side effect may have happened, so
@@ -617,7 +631,7 @@ pub enum SessionEvent {
         /// Digest of the call's arguments.
         arguments_hash: String,
     },
-    /// The request envelope a model call ran under — log-only.
+    /// The request envelope a model call ran under.
     ///
     /// Written before the request; a resume compares the current
     /// fingerprint with this row and ends as `ConfigDrift` when
@@ -642,7 +656,7 @@ pub enum SessionEvent {
         /// Hash of the approval policy.
         policy_hash: String,
     },
-    /// Per-call usage attribution — log-only.
+    /// Per-call usage attribution.
     ///
     /// R30: the provider report is carried in two shapes. The
     /// typed `usage` field is the current wire form (serde
@@ -663,7 +677,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<UsageBuckets>,
     },
-    /// Session sandbox-mode override — log-only.
+    /// Session sandbox-mode override.
     ///
     /// A policy switch (a UI control, a delegation seed, a test
     /// fixture) is recorded as one of these on the session it
@@ -685,7 +699,7 @@ pub enum SessionEvent {
         /// build does not know is ignored by the policy fold.
         mode: String,
     },
-    /// Session shutdown lifecycle — log-only.
+    /// Session shutdown lifecycle.
     ///
     /// Emitted by the server's `SessionController::close` after
     /// all child sessions have been signalled, so the log ends
@@ -698,7 +712,7 @@ pub enum SessionEvent {
         /// Shutdown metadata (reason, child count, ...).
         data: Value,
     },
-    /// A tool result a registered transformer altered — log-only.
+    /// A tool result a registered transformer altered.
     ///
     /// Provenance, not reconciliation: transformers run *before* the
     /// loop commits the result, so the `tool_result` row already holds
@@ -722,7 +736,7 @@ pub enum SessionEvent {
         /// Digest of the result the model reads.
         after: String,
     },
-    /// A prompt parked for the next run — log-only.
+    /// A prompt parked for the next run.
     ///
     /// Every queued turn parks its lossless parts on the controller
     /// — a plain text or a multimodal payload alike — and that queue
@@ -785,7 +799,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "is_false")]
         rerun: bool,
     },
-    /// A parked prompt left the queue — log-only.
+    /// A parked prompt left the queue.
     ///
     /// The durable half of the park/consumer link. The run started
     /// from a park writes it before that run's own prompt row, and a
@@ -797,8 +811,8 @@ pub enum SessionEvent {
     /// because some *other* turn consumed a row by position, and a
     /// consumer always spends exactly the park it names.
     ///
-    /// Log-only: the model history, the folded surface and `fold`
-    /// ignore it, and it carries no `surface_op`.
+    /// The model history, the folded surface and `fold` ignore it,
+    /// and it carries no `surface_op`.
     ParkConsumed {
         /// Sequence ordinal.
         seq: u64,
@@ -808,7 +822,7 @@ pub enum SessionEvent {
         /// consumer took.
         park_id: String,
     },
-    /// A user's rating of one message — log-only.
+    /// A user's rating of one message.
     ///
     /// The controller appends this row when the client sends
     /// feedback on an assistant message (thumbs up / down). Nothing
@@ -824,8 +838,8 @@ pub enum SessionEvent {
     /// before the row is written, so a rating that names no assistant
     /// message never reaches the log.
     ///
-    /// Log-only: the model history, the folded surface and `fold`
-    /// ignore it, and it carries no `surface_op`.
+    /// The model history, the folded surface and `fold` ignore it,
+    /// and it carries no `surface_op`.
     Feedback {
         /// Sequence ordinal.
         seq: u64,
@@ -844,14 +858,14 @@ pub enum SessionEvent {
         /// `true` for a thumbs-up, `false` for a thumbs-down.
         thumbs_up: bool,
     },
-    /// A plugin's own domain event — log-only.
+    /// A plugin's own domain event.
     ///
     /// The escape hatch for a plugin that publishes a fact the
     /// harness has no typed variant for: the sink appends it to the
     /// durable log, so it survives a crash and replays with the rest
-    /// of the row stream. It is **log-only** — a plugin payload is
-    /// opaque to the loop, so the row never enters the model
-    /// history, the folded surface, or `fold`. The live-only
+    /// of the row stream. A plugin payload is opaque to the loop,
+    /// so the row never enters the model history, the folded
+    /// surface, or `fold`. The live-only
     /// counterpart is `uva_harness::SystemEvent::Plugin`: a
     /// notification that may be dropped under backpressure. This
     /// row is the record; that one is the ping.
@@ -899,11 +913,11 @@ pub const MAX_PLUGIN_PAYLOAD_BYTES: usize = 64 * 1024;
 ///
 /// A streaming tool yields its output as it arrives, and nothing
 /// upstream bounds one yield: a single pipe read can be megabytes when
-/// the process on the other end dumps a buffer. The row is log-only,
-/// so compaction never shields it — an unbounded chunk is permanent
-/// bytes in the file. The cap keeps the **tail** window: a reload
-/// wants the newest output, and a head-truncated row would replay the
-/// least interesting bytes of a captured stream.
+/// the process on the other end dumps a buffer. The row never reaches
+/// the surface, so compaction never shields it — an unbounded chunk
+/// is permanent bytes in the file. The cap keeps the **tail** window:
+/// a reload wants the newest output, and a head-truncated row would
+/// replay the least interesting bytes of a captured stream.
 ///
 /// Measured like the plugin cap, on the escaped form, because that is
 /// what the row stores.
@@ -1004,66 +1018,72 @@ fn bound_plugin_kind(kind: String) -> String {
     }
 }
 
-/// Bound a durable `plugin` row at the log boundary.
+/// Bound one durable event at the log boundary.
 ///
-/// The writer runs this on every ingress path, so the cap holds for
-/// a row built through the variant literal as well as through
-/// [`SessionEvent::plugin`]: variant fields are public, and a bound
-/// that only a constructor enforces is advisory. Idempotent — a row
-/// this has already bounded is left alone (its payload is a string
-/// whose literal fits, so the size check passes).
-pub(crate) fn bound_plugin_row(mut row: Value) -> Value {
-    let Some(object) = row.as_object_mut() else {
-        return row;
-    };
-    if object.get("type").and_then(Value::as_str) != Some("plugin") {
-        return row;
+/// The writer runs this on every typed ingress, before the one
+/// serialization, so the cap holds for a row built through the
+/// variant literal as well as through [`SessionEvent::plugin`]:
+/// variant fields are public, and a bound that only a constructor
+/// enforces is advisory.
+///
+/// Returns `None` for a row that needs no bounding — the common row
+/// serialises as the caller's own reference, and only the two capped
+/// rows pay a copy. Both caps are idempotent — a row this has
+/// already bounded comes back unchanged, so a bound that runs over
+/// its own output never cuts twice or moves `original_bytes`.
+pub(crate) fn bounded_event(event: &SessionEvent) -> Option<SessionEvent> {
+    match event {
+        SessionEvent::Plugin { .. } | SessionEvent::ToolOutput { .. } => {
+            let mut bounded = event.clone();
+            bound_plugin_event(&mut bounded);
+            bound_tool_output_event(&mut bounded);
+            Some(bounded)
+        }
+        _ => None,
     }
-    let payload = object.remove("payload").unwrap_or(Value::Null);
-    let (payload, original_bytes) = bound_plugin_payload(payload);
-    object.insert("payload".to_string(), payload);
-    if let Some(original) = original_bytes {
-        object.insert("original_bytes".to_string(), Value::from(original));
-    }
-    let kind = match object.remove("kind") {
-        Some(Value::String(kind)) => kind,
-        // A row with no kind is a row a consumer cannot filter: give
-        // it the degenerate name rather than leaving the slot open.
-        _ => String::new(),
-    };
-    object.insert("kind".to_string(), Value::String(bound_plugin_kind(kind)));
-    row
 }
 
-/// Bound a `tool_output` row's chunk at the log boundary.
-///
-/// Same shape as [`bound_plugin_row`]: an over-long chunk keeps its
-/// **tail** window and `data.original_bytes` records how many bytes of
-/// output the row summarized. Idempotent — a row that already fits is
-/// left alone (its literal now fits), so a bound that runs over its
-/// own output never cuts twice or moves `original_bytes`.
-pub(crate) fn bound_tool_output_row(mut row: Value) -> Value {
-    let Some(object) = row.as_object_mut() else {
-        return row;
-    };
-    if object.get("type").and_then(Value::as_str) != Some("tool_output") {
-        return row;
-    }
-    let Some(data) = object.get_mut("data").and_then(Value::as_object_mut)
+/// Bound a plugin event's payload and kind on the typed fields.
+fn bound_plugin_event(event: &mut SessionEvent) {
+    let SessionEvent::Plugin {
+        kind,
+        payload,
+        original_bytes,
+        ..
+    } = event
     else {
-        return row;
+        return;
+    };
+    let (bounded_payload, bounded_original) =
+        bound_plugin_payload(std::mem::take(payload));
+    *payload = bounded_payload;
+    if let Some(original) = bounded_original {
+        *original_bytes = Some(original);
+    }
+    *kind = bound_plugin_kind(std::mem::take(kind));
+}
+
+/// Bound a tool-output event's chunk.
+///
+/// The cap reaches into the payload bag by hand: `output` is
+/// free-form inside `data`, with no typed field to ask — the same
+/// judgment [`merge_tool_output_row`] keeps.
+fn bound_tool_output_event(event: &mut SessionEvent) {
+    let SessionEvent::ToolOutput { data, .. } = event else {
+        return;
     };
     let Some(output) = data.get("output").and_then(Value::as_str) else {
-        return row;
+        return;
     };
     let kept = cap_json_string_tail(output, MAX_TOOL_OUTPUT_BYTES);
     if kept.len() == output.len() {
-        return row;
+        return;
     }
     let original = output.len() as u64;
-    data.insert("output".to_string(), Value::String(kept));
-    data.insert("original_bytes".to_string(), Value::from(original));
-    row
+    if let Some(bag) = data.as_object_mut() {
+        bag.insert("output".to_string(), Value::String(kept));
+        bag.insert("original_bytes".to_string(), Value::from(original));
+    }
 }
 
 /// Append one `tool_output` chunk to a row that has not been written
@@ -1258,6 +1278,31 @@ fn normalize(mut event: SessionEvent) -> SessionEvent {
 
 impl SessionEvent {
     #[must_use]
+    /// The model message this row carries.
+    ///
+    /// The row's payload read the way the vocabulary reads it: the
+    /// provider's own encoding first, the hand-written
+    /// `{"role": …, "content": […]}` shape second, and a payload that
+    /// carries text or a call id last. The same decoding the row
+    /// vocabulary uses for a current row — one implementation, so a
+    /// reader of a typed event and a reader of a raw row cannot
+    /// disagree about what a row carries.
+    pub fn message(&self) -> Option<Message> {
+        match self {
+            Self::UserMessage { data, .. }
+            | Self::AssistantMessage { data, .. }
+            | Self::ToolResult { data, .. } => {
+                crate::events::vocab::restore::decode_message(data)
+            }
+            Self::Compaction { data, .. } => data
+                .get("summary")
+                .and_then(Value::as_str)
+                .map(Message::assistant),
+            _ => None,
+        }
+    }
+
+    #[must_use]
     /// Which boundary this row is — `start` or `end`.
     ///
     /// The loop writes `kind`; a suspension's rows write `phase`. Both
@@ -1300,6 +1345,18 @@ impl SessionEvent {
         match self {
             Self::ToolCall { call_id, .. } => call_id.as_deref(),
             Self::ToolResult { tool_call_id, .. } => tool_call_id.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The provider call this streamed chunk belongs to — only a
+    /// `tool_output` row has one. A `tool_call`'s own id is a
+    /// different fact ([`Self::tool_call_id`]) and never routes a
+    /// row into the writer's merge.
+    #[must_use]
+    pub(crate) fn tool_output_call(&self) -> Option<&str> {
+        match self {
+            Self::ToolOutput { call_id, .. } => call_id.as_deref(),
             _ => None,
         }
     }
@@ -1449,47 +1506,61 @@ impl SessionEvent {
     }
 
     #[must_use]
+    /// The row-vocabulary tag of this event.
+    ///
+    /// The event side of the correspondence with [`RowTag`]:
+    /// exhaustive over the variants (a new variant does not compile
+    /// until it names its tag), with the tag side —
+    /// [`RowTag::empty_event`] — tied to it by a test that chains
+    /// the two, so neither match can drift a pairing.
+    pub const fn tag(&self) -> RowTag {
+        match self {
+            Self::UserMessage { .. } => RowTag::UserMessage,
+            Self::AssistantMessage { .. } => RowTag::AssistantMessage,
+            Self::AssistantChunk { .. } => RowTag::AssistantChunk,
+            Self::ToolResult { .. } => RowTag::ToolResult,
+            Self::Compaction { .. } => RowTag::Compaction,
+            Self::CompactionStart { .. } => RowTag::CompactionStart,
+            Self::CompactionSummary { .. } => RowTag::CompactionSummary,
+            Self::CompactionEnd { .. } => RowTag::CompactionEnd,
+            Self::ToolCall { .. } => RowTag::ToolCall,
+            Self::ToolOutput { .. } => RowTag::ToolOutput,
+            Self::Step { .. } => RowTag::Step,
+            Self::Turn { .. } => RowTag::Turn,
+            Self::Iteration { .. } => RowTag::Iteration,
+            Self::Warning { .. } => RowTag::Warning,
+            Self::SteeringGuard { .. } => RowTag::SteeringGuard,
+            Self::SteeringHint { .. } => RowTag::SteeringHint,
+            Self::HookBlock { .. } => RowTag::HookBlock,
+            Self::SubagentEnter { .. } => RowTag::SubagentEnter,
+            Self::SubagentExit { .. } => RowTag::SubagentExit,
+            Self::RequestHeader { .. } => RowTag::RequestHeader,
+            Self::ApprovalAsked { .. } => RowTag::ApprovalAsked,
+            Self::ApprovalDecided { .. } => RowTag::ApprovalDecided,
+            Self::ApprovalGranted { .. } => RowTag::ApprovalGranted,
+            Self::ToolDispatch { .. } => RowTag::ToolDispatch,
+            Self::RequestSnapshot { .. } => RowTag::RequestSnapshot,
+            Self::Usage { .. } => RowTag::Usage,
+            Self::SandboxMode { .. } => RowTag::SandboxMode,
+            Self::SessionShutdown { .. } => RowTag::SessionShutdown,
+            Self::ToolResultTransformed { .. } => RowTag::ToolResultTransformed,
+            Self::ParkedPrompt { .. } => RowTag::ParkedPrompt,
+            Self::ParkConsumed { .. } => RowTag::ParkConsumed,
+            Self::Feedback { .. } => RowTag::Feedback,
+            Self::Plugin { .. } => RowTag::Plugin,
+        }
+    }
+
+    #[must_use]
     /// The role this row plays on the model-visible surface.
     ///
-    /// The match is exhaustive over the variants: a new variant does
-    /// not compile until its role is declared, so a row can neither
-    /// join nor stay out of the model-visible surface by accident.
+    /// Declared once, on the event's [`RowTag`]; read back here.
+    /// The declaration's match is exhaustive over the vocabulary, so
+    /// a new variant does not compile until its role is declared —
+    /// a row can neither join nor stay out of the model-visible
+    /// surface by accident.
     pub const fn surface_role(&self) -> SurfaceRole {
-        match self {
-            Self::UserMessage { .. }
-            | Self::AssistantMessage { .. }
-            | Self::ToolResult { .. } => SurfaceRole::Message,
-            Self::Compaction { .. } => SurfaceRole::OpOnly,
-            Self::AssistantChunk { .. }
-            | Self::CompactionStart { .. }
-            | Self::CompactionSummary { .. }
-            | Self::CompactionEnd { .. }
-            | Self::ToolCall { .. }
-            | Self::ToolOutput { .. }
-            | Self::Step { .. }
-            | Self::Turn { .. }
-            | Self::Iteration { .. }
-            | Self::Warning { .. }
-            | Self::SteeringGuard { .. }
-            | Self::SteeringHint { .. }
-            | Self::HookBlock { .. }
-            | Self::SubagentEnter { .. }
-            | Self::SubagentExit { .. }
-            | Self::RequestHeader { .. }
-            | Self::ApprovalAsked { .. }
-            | Self::ApprovalDecided { .. }
-            | Self::ApprovalGranted { .. }
-            | Self::ToolDispatch { .. }
-            | Self::RequestSnapshot { .. }
-            | Self::Usage { .. }
-            | Self::SandboxMode { .. }
-            | Self::SessionShutdown { .. }
-            | Self::ToolResultTransformed { .. }
-            | Self::ParkedPrompt { .. }
-            | Self::ParkConsumed { .. }
-            | Self::Feedback { .. }
-            | Self::Plugin { .. } => SurfaceRole::LogOnly,
-        }
+        self.tag().surface_role()
     }
 
     /// True when the event can carry a `surface_op` and enter the
@@ -1501,7 +1572,7 @@ impl SessionEvent {
     /// this fact, so the fold and this predicate cannot disagree.
     #[must_use]
     pub const fn is_surface_eligible(&self) -> bool {
-        !matches!(self.surface_role(), SurfaceRole::LogOnly)
+        self.surface_role().is_surface()
     }
 
     /// The payload and the surface op this row carries.
@@ -1528,9 +1599,9 @@ impl SessionEvent {
             Self::Compaction {
                 data, surface_op, ..
             } => (Some(data), Some(surface_op)),
-            // The log-only rows: they carry neither a payload nor an
-            // op. They are written to the log and read back as
-            // records of what happened; they never reach the
+            // Rows the vocabulary declares log-only: neither a
+            // payload nor an op. They are written to the log and read
+            // back as records of what happened; they never reach the
             // model-visible surface.
             Self::AssistantChunk { .. }
             | Self::CompactionStart { .. }
@@ -1621,92 +1692,23 @@ impl SessionEvent {
     /// Parse a [`SessionEvent`] from the opaque `serde_json::Value`
     /// produced by `SessionSink::read`. Returns `None` for legacy
     /// shapes that pre-date the typed layer (a bare `{"role": ...}`
-    /// message, the `UserInput` envelope, etc.) — callers handle those
-    /// via the existing `events_to_messages` projection.
+    /// message, the `UserInput` envelope, etc.) — the row vocabulary's
+    /// restore turns those into current rows, and this decoder is the
+    /// typed path it restores *from*.
+    ///
+    /// An unknown `type` is not refused by the persistence layer: the
+    /// writer stores the row verbatim, and the read side reports it as
+    /// version skew. This decoder returns `None` for it rather than
+    /// inventing an event.
     #[must_use]
     pub fn from_value(v: &Value) -> Option<Self> {
         let obj = v.as_object()?;
         let tag = obj.get("type")?.as_str()?;
-        let known = matches!(
-            tag,
-            "user_message"
-                | "assistant_message"
-                | "assistant_chunk"
-                | "tool_result"
-                | "compaction"
-                | "compaction_start"
-                | "compaction_summary"
-                | "compaction_end"
-                | "tool_call"
-                | "tool_output"
-                | "step"
-                | "turn"
-                | "iteration"
-                | "warning"
-                | "steering_guard"
-                | "steering_hint"
-                | "hook_block"
-                | "subagent_enter"
-                | "subagent_exit"
-                | "request_header"
-                | "approval_asked"
-                | "approval_decided"
-                | "approval_granted"
-                | "tool_dispatch"
-                | "request_snapshot"
-                | "usage"
-                | "sandbox_mode"
-                | "session_shutdown"
-                | "tool_result_transformed"
-                | "parked_prompt"
-                | "park_consumed"
-                | "feedback"
-                | "plugin"
-        );
+        let known = RowTag::from_wire(tag).is_some();
         if !known {
             return None;
         }
         serde_json::from_value(v.clone()).ok().map(normalize)
-    }
-
-    /// Stable wire-tag string (snake_case).
-    #[must_use]
-    pub const fn type_tag(&self) -> &'static str {
-        match self {
-            Self::UserMessage { .. } => "user_message",
-            Self::AssistantMessage { .. } => "assistant_message",
-            Self::AssistantChunk { .. } => "assistant_chunk",
-            Self::ToolResult { .. } => "tool_result",
-            Self::Compaction { .. } => "compaction",
-            Self::CompactionStart { .. } => "compaction_start",
-            Self::CompactionSummary { .. } => "compaction_summary",
-            Self::CompactionEnd { .. } => "compaction_end",
-            Self::ToolCall { .. } => "tool_call",
-            Self::ToolOutput { .. } => "tool_output",
-            Self::Step { .. } => "step",
-            Self::Turn { .. } => "turn",
-            Self::Iteration { .. } => "iteration",
-            Self::Warning { .. } => "warning",
-            Self::SteeringGuard { .. } => "steering_guard",
-            Self::SteeringHint { .. } => "steering_hint",
-            Self::HookBlock { .. } => "hook_block",
-            Self::SubagentEnter { .. } => "subagent_enter",
-            Self::SubagentExit { .. } => "subagent_exit",
-            Self::RequestHeader { .. } => "request_header",
-            Self::ApprovalAsked { .. } => "approval_asked",
-            Self::ApprovalDecided { .. } => "approval_decided",
-            Self::ApprovalGranted { .. } => "approval_granted",
-            Self::ToolDispatch { .. } => "tool_dispatch",
-            Self::RequestSnapshot { .. } => "request_snapshot",
-            Self::Usage { .. } => "usage",
-            Self::SandboxMode { .. } => "sandbox_mode",
-            Self::SessionShutdown { .. } => "session_shutdown",
-            Self::ToolResultTransformed { .. } => "tool_result_transformed",
-            Self::ParkedPrompt { .. } => "parked_prompt",
-            Self::ParkConsumed { .. } => "park_consumed",
-            Self::Feedback { .. } => "feedback",
-            Self::Plugin { .. } => "plugin",
-        }
     }
 }
 
@@ -1805,294 +1807,23 @@ impl CompactionLifecycleOutcome {
     }
 }
 
-/// Every typed row tag the session vocabulary defines. The app-server
-/// contract catalog derives its `SessionEventType` union from this
-/// list (`uva-web`'s `generate:types` emits it onto `SessionTurn.type`),
-/// and both human surfaces account for every tag against that union;
-/// the persistence layer still refuses a log whose row carries a type
-/// outside this set unless it bears the legacy envelope marker.
-pub const KNOWN_SESSION_EVENT_TYPES: &[&str] = &[
-    "user_message",
-    "assistant_message",
-    "assistant_chunk",
-    "tool_result",
-    "compaction",
-    "compaction_start",
-    "compaction_summary",
-    "compaction_end",
-    "tool_call",
-    "tool_output",
-    "step",
-    "turn",
-    "iteration",
-    "warning",
-    "steering_guard",
-    "steering_hint",
-    "hook_block",
-    "subagent_enter",
-    "subagent_exit",
-    "request_header",
-    "approval_asked",
-    "approval_decided",
-    "approval_granted",
-    "tool_dispatch",
-    "request_snapshot",
-    "usage",
-    "sandbox_mode",
-    "session_shutdown",
-    "tool_result_transformed",
-    "parked_prompt",
-    "park_consumed",
-    "feedback",
-    "plugin",
-];
+mod vocab;
 
-/// Build an empty event skeleton for one of the typed `type_tag`
-/// strings. Returns `None` for any string outside
-/// [`KNOWN_SESSION_EVENT_TYPES`]. The skeleton has zeroed `seq`,
-/// an empty `ts`, a `Value::Null` `data` (an empty `mode` on the
-/// `data`-less `sandbox_mode` variant), and (for
-/// surface-eligible variants) the `append` `surface_op` so the
-/// caller can recognise the discriminant before populating the
-/// payload.
-#[must_use]
-pub fn empty_event_of(tag: &str) -> Option<SessionEvent> {
-    let event = match tag {
-        "user_message" => SessionEvent::UserMessage {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            source: None,
-            surface_op: Some(SurfaceOp::AppendString("append".to_string())),
-            attachments: Vec::new(),
-        },
-        "assistant_message" => SessionEvent::AssistantMessage {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            surface_op: Some(SurfaceOp::AppendString("append".to_string())),
-        },
-        "assistant_chunk" => SessionEvent::AssistantChunk {
-            seq: 0,
-            ts: String::new(),
-            chunk_seq: 0,
-            finish_reason: None,
-            data: Value::Null,
-        },
-        "tool_result" => SessionEvent::ToolResult {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            is_error: false,
-            tool_call_id: None,
-            surface_op: Some(SurfaceOp::AppendString("append".to_string())),
-        },
-        "compaction" => SessionEvent::Compaction {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            surface_op: SurfaceOp::AppendString("append".to_string()),
-        },
-        "compaction_start" => SessionEvent::CompactionStart {
-            seq: 0,
-            ts: String::new(),
-            token: String::new(),
-            data: Value::Null,
-        },
-        "compaction_summary" => SessionEvent::CompactionSummary {
-            seq: 0,
-            ts: String::new(),
-            token: String::new(),
-            data: Value::Null,
-        },
-        "compaction_end" => SessionEvent::CompactionEnd {
-            seq: 0,
-            ts: String::new(),
-            token: String::new(),
-            outcome: String::new(),
-            data: Value::Null,
-        },
-        "tool_call" => SessionEvent::ToolCall {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            call_id: None,
-            name: None,
-        },
-        "tool_output" => SessionEvent::ToolOutput {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            call_id: None,
-            tool: None,
-        },
-        "step" => SessionEvent::Step {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            kind: None,
-            turn: None,
-            step: None,
-        },
-        "turn" => SessionEvent::Turn {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            kind: None,
-            turn: None,
-        },
-        "iteration" => SessionEvent::Iteration {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-        },
-        "warning" => SessionEvent::Warning {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-        },
-        "steering_guard" => SessionEvent::SteeringGuard {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-        },
-        "steering_hint" => SessionEvent::SteeringHint {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-        },
-        "hook_block" => SessionEvent::HookBlock {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-        },
-        "subagent_enter" => SessionEvent::SubagentEnter {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            child_session_id: None,
-            parent_session_id: None,
-            agent_name: None,
-            depth: None,
-        },
-        "subagent_exit" => SessionEvent::SubagentExit {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            child_session_id: None,
-            depth: None,
-            status: None,
-        },
-        "request_header" => SessionEvent::RequestHeader {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            provider: None,
-            model: None,
-        },
-        "approval_asked" => SessionEvent::ApprovalAsked {
-            seq: 0,
-            ts: String::new(),
-            id: String::new(),
-            call_id: String::new(),
-            tool: String::new(),
-            arguments_hash: String::new(),
-            risk: String::new(),
-            agent: String::new(),
-        },
-        "approval_decided" => SessionEvent::ApprovalDecided {
-            seq: 0,
-            ts: String::new(),
-            id: String::new(),
-            call_id: String::new(),
-            status: String::new(),
-            by: String::new(),
-            payload: None,
-        },
-        "approval_granted" => SessionEvent::ApprovalGranted {
-            seq: 0,
-            ts: String::new(),
-            id: String::new(),
-            tool: String::new(),
-            scope: String::new(),
-            workspace_hash: String::new(),
-        },
-        "tool_dispatch" => SessionEvent::ToolDispatch {
-            seq: 0,
-            ts: String::new(),
-            call_id: String::new(),
-            tool: String::new(),
-            arguments_hash: String::new(),
-        },
-        "request_snapshot" => SessionEvent::RequestSnapshot {
-            seq: 0,
-            ts: String::new(),
-            provider: String::new(),
-            model: String::new(),
-            params_hash: String::new(),
-            tools_hash: String::new(),
-            system_hash: String::new(),
-            sections: Vec::new(),
-            policy_hash: String::new(),
-        },
-        "usage" => SessionEvent::Usage {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-            usage: None,
-        },
-        "sandbox_mode" => SessionEvent::SandboxMode {
-            seq: 0,
-            ts: String::new(),
-            mode: String::new(),
-        },
-        "session_shutdown" => SessionEvent::SessionShutdown {
-            seq: 0,
-            ts: String::new(),
-            data: Value::Null,
-        },
-        "tool_result_transformed" => SessionEvent::ToolResultTransformed {
-            seq: 0,
-            ts: String::new(),
-            transformers: Vec::new(),
-            tool_name: String::new(),
-            call_id: String::new(),
-            before: String::new(),
-            after: String::new(),
-        },
-        "parked_prompt" => SessionEvent::ParkedPrompt {
-            seq: 0,
-            ts: String::new(),
-            park_id: String::new(),
-            text: String::new(),
-            attachments: Vec::new(),
-            agent_name: None,
-            provider: None,
-            model: None,
-            rerun: false,
-        },
-        "park_consumed" => SessionEvent::ParkConsumed {
-            seq: 0,
-            ts: String::new(),
-            park_id: String::new(),
-        },
-        "feedback" => SessionEvent::Feedback {
-            seq: 0,
-            ts: String::new(),
-            message_id: String::new(),
-            thumbs_up: false,
-        },
-        "plugin" => SessionEvent::Plugin {
-            seq: 0,
-            ts: String::new(),
-            kind: String::new(),
-            payload: Value::Null,
-            original_bytes: None,
-        },
-        _ => return None,
-    };
-    Some(event)
-}
+/// 折叠后的表面载荷解成的模型消息——行词汇对折叠载荷的唯一解码。
+///
+/// 历史投影（[`crate::history`]）问它，而不是自己再写一套。
+pub(crate) use vocab::restore::decode_folded_payload;
+pub use vocab::{
+    CurrentRow,
+    RowDefect,
+    RowDialect,
+    RowTag,
+    Rows,
+    UnreadableLog,
+    publish_row,
+    publish_rows,
+    restore_row,
+};
 
 #[cfg(test)]
 mod tests;

@@ -322,20 +322,16 @@ mod tests {
             .collect()
     }
 
-    /// The text of one user row. The typed `user_message` carries a
-    /// provider `Message`, so decode it back and ask for its text; a
-    /// log written before the typed writer kept `{"text": …}` in the
-    /// payload instead.
+    /// The text of one user row.
+    ///
+    /// The restored row projects the model message it carries, so the
+    /// text is read off that message: the typed `user_message` this
+    /// build writes and the legacy envelope a log from before the
+    /// typed writer holds both answer with the turn's text.
     fn uva_session_row_text(row: &serde_json::Value) -> Option<String> {
-        if row.get("type").and_then(|t| t.as_str()) == Some("user_message") {
-            let message = row.get("data").cloned().and_then(|data| {
-                serde_json::from_value::<uva::provider::Message>(data).ok()
-            })?;
-            return message.content.extract_text();
-        }
-        row.pointer("/data/text")
-            .and_then(|t| t.as_str())
-            .map(str::to_string)
+        uva::session::restore_row(row)
+            .message()
+            .and_then(|message| message.content.extract_text())
     }
 
     /// The contract the opener hangs on: a delegated child's own
@@ -356,13 +352,17 @@ mod tests {
             "scout",
             Some("map the repo"),
         );
-        child_writer.append_nowait(serde_json::json!({
-            "type": "assistant_message",
-            "data": {"role": "assistant",
-                     "content": {"Multi": [
-                         {"type": "text", "text": "step one"}
-                     ]}},
-        }));
+        // The child's own harness writes its model facts through the
+        // typed constructor — the row's tag comes from the row
+        // vocabulary, not from a hand-written string.
+        child_writer.append_event_nowait(&uva::session::assistant_message(
+            serde_json::json!({
+                "role": "assistant",
+                "content": {"Multi": [
+                    {"type": "text", "text": "step one"}
+                ]},
+            }),
+        ));
         registry
             .writer("u1", "child-1")
             .flush()

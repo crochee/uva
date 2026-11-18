@@ -738,6 +738,13 @@ impl SessionSink for JsonlSessionSink {
         JsonlSessionSink::read_head(self).await
     }
 
+    async fn read_head_rows(
+        &self,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
+        JsonlSessionSink::read_head_rows(self, window).await
+    }
+
     async fn snapshot(&self) -> Result<SessionSnapshot, SessionError> {
         // A snapshot over a log this sink never appended to still
         // reports the log's own numbering, not a fresh counter.
@@ -932,22 +939,27 @@ impl JsonlSessionSink {
         }
     }
 
-    /// The log's first event row.
+    /// The log's first `window` event rows, oldest first.
     ///
     /// A tail read cannot answer a whole-log fact — a session's
     /// creation time, the agent a delegated session runs as — so the
-    /// few callers that need one read the head, bounded the same way
-    /// the tail is. Each growth pass parses only the lines it has not
-    /// examined yet.
+    /// few callers that need the head read it bounded the same way
+    /// the tail is. Each growth pass parses only the lines it has
+    /// not examined yet; the window counts event rows, so the
+    /// metadata header never spends one.
     ///
     /// # Errors
     ///
     /// [`SessionError::ReadFailed`] on an unreadable or unparsable
     /// head.
-    pub async fn read_head(&self) -> Result<Option<Value>, SessionError> {
+    pub async fn read_head_rows(
+        &self,
+        window: usize,
+    ) -> Result<Vec<Value>, SessionError> {
         let path = self.events_path();
         let mut budget = TAIL_READ_CHUNK;
         let mut scanned = 0usize;
+        let mut rows: Vec<Value> = Vec::new();
         loop {
             let bytes = self
                 .fs
@@ -966,15 +978,28 @@ impl JsonlSessionSink {
             let complete = pieces.len().saturating_sub(1);
             for line in pieces.iter().take(complete).skip(scanned) {
                 if let Some(row) = Self::parse_row(line)? {
-                    return Ok(Some(row));
+                    rows.push(row);
+                    if rows.len() >= window {
+                        return Ok(rows);
+                    }
                 }
             }
             scanned = complete;
             if reached_end {
-                return Ok(None);
+                return Ok(rows);
             }
             budget = budget.saturating_mul(4);
         }
+    }
+
+    /// The log's first event row.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::ReadFailed`] on an unreadable or unparsable
+    /// head.
+    pub async fn read_head(&self) -> Result<Option<Value>, SessionError> {
+        Ok(self.read_head_rows(1).await?.into_iter().next())
     }
 
     /// Parse one line into an event row.

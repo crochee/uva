@@ -69,10 +69,12 @@ impl Tool for SteerTool {
 }
 
 fn logged_turn(writer: &Arc<LogWriter>, text: &str) {
-    writer.append_nowait(json!({
-        "type": "UserInput",
-        "data": { "text": text },
-    }));
+    let row = user_message(
+        serde_json::to_value(Message::user(text))
+            .expect("a user message serialises"),
+        None,
+    );
+    writer.append_event_nowait(&row);
 }
 
 // The tool calls a request offered the model.

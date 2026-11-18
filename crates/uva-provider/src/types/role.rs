@@ -1,9 +1,12 @@
 //! The [`Role`] enum — the 4 canonical message roles that
 //! flow through every provider.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, JsonSchema,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,

@@ -14,6 +14,8 @@
 //!   pass;
 //! - [`HookRegistry`], the revocable registration table keyed by
 //!   mount point, and its deny-only [`Arbitration`];
+//! - [`arbitration`], the one rule every pass runs under: what a
+//!   registration's decision means at a mount point;
 //! - [`HookPlugin`], the kernel plugin that publishes the registry as
 //!   the `hooks` service the agent loop injects.
 //!
@@ -35,12 +37,21 @@
 //! `docs/adr/0004-hook-contract-sinks-below-harness.md` in the
 //! repository.
 
+pub mod arbitration;
 mod context;
 mod plugin;
 pub mod registry;
 pub mod seam;
 mod traits;
 
+pub use arbitration::{
+    Arbitration,
+    Fact,
+    FactKind,
+    PanicPolicy,
+    Refusal,
+    Ruling,
+};
 /// The attribute macro the interception traits are declared with.
 ///
 /// A third-party plugin that implements [`Hook`], [`Gate`] or either
@@ -51,7 +62,6 @@ pub use async_trait::async_trait;
 pub use context::HookContext;
 pub use plugin::{HookPlugin, KEY_HOOKS};
 pub use registry::{
-    Arbitration,
     HookRegistration,
     HookRegistry,
     RegistryError,

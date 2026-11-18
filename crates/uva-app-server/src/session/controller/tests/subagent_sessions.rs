@@ -17,18 +17,14 @@ use uva::{
 };
 
 use super::{
-    super::{
-        AgentRunStreamFactory,
-        SessionController,
-        SessionOp,
-        SessionState,
-    },
+    super::{AgentRunStreamFactory, SessionController, SessionOp},
     support::{
         ScriptedStreamProvider,
         find_all_events_jsonl,
         wait_for_log_row,
     },
 };
+use crate::session::status::SessionState;
 
 fn text_chunks(text: &str) -> Vec<StreamChunk> {
     vec![

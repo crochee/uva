@@ -26,13 +26,6 @@
 //! registry has no record of the id — so the frontend's
 //! `SessionDetailPage` can render the full JSONL transcript.
 
-// Allow `result_large_err`: `parse_status_filter` returns the
-// un-boxed `uva::core::Error` (≥128 bytes once the RFC-0977
-// common fields are counted) — same accepted trade-off as
-// `api/v1/cursor.rs` and `api/v1/validation.rs`; boxing would
-// force `.map_err(|e| *e)` at every call site.
-#![allow(clippy::result_large_err)]
-
 use std::{
     collections::HashSet,
     io::{BufRead as _, BufReader},
@@ -49,7 +42,8 @@ use serde_json::Value;
 use uuid::Uuid;
 use uva::{
     core::Error,
-    session::{SessionEvent, is_metadata_header_row},
+    session::{RowDefect, is_metadata_header_row, publish_rows, restore_row},
+    tool_task::{HEAD_ROWS, RecordSource, head_records},
 };
 
 use super::helpers::paginate;
@@ -65,7 +59,8 @@ use crate::{
     rpc::RpcError,
     session::{
         EPHEMERAL_SESSION_PREFIX,
-        controller::{SessionController, SessionState},
+        controller::SessionController,
+        status::{self, SessionState, SessionStatus, StatusFacts},
     },
     state::AppState,
 };
@@ -89,8 +84,10 @@ pub const SESSION_LIST_TAIL_WINDOW: usize = 512;
 #[derive(Serialize, JsonSchema)]
 pub struct SessionSummary {
     pub id: String,
-    /// Static string slice — the closed set of 9 status labels.
-    pub status: &'static str,
+    /// The session status — one of the five the status module
+    /// produces. The wire spells it `unspecified`, `working`,
+    /// `input_required`, `canceled` or `completed`.
+    pub status: SessionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_id: Option<String>,
     /// When the session **started**: the log's first event's
@@ -120,7 +117,8 @@ pub struct SessionSummary {
 #[derive(Serialize, JsonSchema)]
 pub struct SessionDetail {
     pub id: String,
-    pub status: &'static str,
+    /// The session status — the same closed set the summary carries.
+    pub status: SessionStatus,
     pub context_id: String,
     /// When the session **started**: the log's first event's
     /// timestamp — the same value [`SessionSummary::created_at`]
@@ -146,22 +144,6 @@ pub struct SessionDetail {
     pub agent_name: Option<String>,
 }
 
-/// Validated status filter labels. Rejects unknown labels so a
-/// typo doesn't silently return every session.
-fn parse_status_filter(status: &str) -> Result<&'static str, Error> {
-    match status {
-        "unspecified" => Ok("unspecified"),
-        "submitted" => Ok("submitted"),
-        "working" => Ok("working"),
-        "completed" => Ok("completed"),
-        "failed" => Ok("failed"),
-        "canceled" => Ok("canceled"),
-        "input_required" => Ok("input_required"),
-        "rejected" => Ok("rejected"),
-        "auth_required" => Ok("auth_required"),
-        _ => Err(Error::invalid_item(format!("status filter '{status}'"))),
-    }
-}
 /// `true` when a row survives the caller's `status` / `context_id`
 /// filters. Both filters apply to every row regardless of whether the
 /// session came from the registry or only from disk, so the two listing
@@ -173,12 +155,12 @@ fn parse_status_filter(status: &str) -> Result<&'static str, Error> {
 /// would expect.
 fn selected(
     id: &str,
-    status: &str,
+    status: SessionStatus,
     status_filter: Option<&str>,
     context_id_filter: Option<&str>,
 ) -> bool {
     if let Some(filter) = status_filter
-        && filter != status
+        && filter != status.as_wire()
     {
         return false;
     }
@@ -210,9 +192,10 @@ pub(crate) fn is_ephemeral_session(id: &str) -> bool {
     id.starts_with(EPHEMERAL_SESSION_PREFIX)
 }
 
-/// Extracted separately from [`infer_status_from_parts`] so the
-/// inference itself stays unit-testable without spawning a real
-/// controller.
+/// The controller's in-memory state, looked up by id.
+///
+/// Kept beside the status surfaces because it is a lookup, not a rule:
+/// what the session *reports* is the status module's answer.
 fn live_session_state(
     active_sessions: &DashMap<(String, String), Arc<SessionController>>,
     user_id: &str,
@@ -221,61 +204,6 @@ fn live_session_state(
     active_sessions
         .get(&(user_id.to_string(), session_id.to_string()))
         .map(|ctrl| ctrl.state())
-}
-
-/// The live state a status surface should report, given the rows it
-/// already read.
-///
-/// A controller's in-memory state can say `idle` for a session whose
-/// log holds an undecided interrupt — the pause is a log fact. The
-/// status surface therefore lets the rows win, using the same
-/// derivation the follow baseline and the resume validator use.
-fn derived_live_state(
-    live: Option<SessionState>,
-    rows: &[Value],
-) -> Option<SessionState> {
-    if uva::harness::open_requests(rows).is_empty() {
-        live
-    } else {
-        Some(SessionState::AwaitingApproval)
-    }
-}
-
-/// Inferred session status.
-///
-/// A session is "working" iff a live controller exists for it and
-/// is mid-run. The durable sink alone cannot answer this:
-/// `SessionEnded` / `SessionCanceled` / `SessionFailed` are
-/// ephemeral broadcast-only events (per the
-/// `event-durability-classification` spec) and are never persisted
-/// to the JSONL, so a sink-tail scan can never observe a finished
-/// run — it would report every non-empty session as "working"
-/// forever.
-///
-/// With no live run: an empty sink is "unspecified"; a non-empty
-/// sink has finished at least one run, so "completed" (or
-/// "canceled" when the controller's last run was cancelled).
-///
-/// The rules are stated over the facts a caller has already
-/// established — the live state and whether the log holds rows — so
-/// a session known only from its durable transcript (which has no
-/// sink to read through) is classified by the same rules rather than
-/// re-deriving them.
-fn infer_status_from_parts(
-    live_state: Option<SessionState>,
-    has_events: bool,
-) -> &'static str {
-    if matches!(live_state, Some(SessionState::Running)) {
-        return "working";
-    }
-    if !has_events {
-        return "unspecified";
-    }
-    match live_state {
-        Some(SessionState::AwaitingApproval) => "input_required",
-        Some(SessionState::Cancelled) => "canceled",
-        _ => "completed",
-    }
 }
 
 fn parse_rfc3339(raw: Option<&str>) -> Option<DateTime<Utc>> {
@@ -288,22 +216,23 @@ fn parse_rfc3339(raw: Option<&str>) -> Option<DateTime<Utc>> {
 
 /// `(parent_session_id, agent_name)` when a session's log opens
 /// with the sub-agent router's `subagent_enter` header row — the
-/// marker that this session is a delegated child. Reading only the
-/// first event keeps both callers (the listing's two loops and the
-/// detail view) cheap on long logs.
-fn subagent_attribution(events: &[Value]) -> (Option<String>, Option<String>) {
-    let Some(first) = events.first() else {
-        return (None, None);
-    };
-    let Some(event) = SessionEvent::from_value(first) else {
-        return (None, None);
-    };
-    if !matches!(event, SessionEvent::SubagentEnter { .. }) {
-        return (None, None);
+/// marker that this session is a delegated child. The parse is the
+/// discovery module's own head rule, so the listing, the detail
+/// view and the roster can never disagree about what a header is.
+fn subagent_attribution(
+    events: &[Value],
+    session_id: &str,
+) -> (Option<String>, Option<String>) {
+    let window = &events[..events.len().min(HEAD_ROWS)];
+    let own = head_records(window, session_id)
+        .into_iter()
+        .find(|record| record.source == RecordSource::OwnLog);
+    match own {
+        Some(record) => {
+            (Some(record.parent_session_id), Some(record.agent_name))
+        }
+        None => (None, None),
     }
-    let parent = event.delegation_parent().map(str::to_string);
-    let agent = event.delegation_agent().map(str::to_string);
-    (parent, agent)
 }
 /// `<sessions_root>/<user_id>/<session_id>/events.jsonl`.
 ///
@@ -331,7 +260,7 @@ pub(crate) fn transcript_path(
 
 /// Whether `name` can only ever address one directory entry:
 /// non-empty, neither `.` nor `..`, and free of separators and NUL.
-fn is_path_component(name: &str) -> bool {
+pub(crate) fn is_path_component(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -481,16 +410,19 @@ async fn scan_unregistered_transcripts(
             Some(window) => window,
             None => continue,
         };
-        let Some(head) = head else {
+        if head.is_empty() {
             continue;
-        };
-        // The head row is the whole-log fact: the first event's
+        }
+        // The head window is the whole-log fact: the first event's
         // timestamp, never `now()` — a legacy log that carries no
         // timestamp reports an unknown creation time — and the
         // sub-agent router's `subagent_enter` attribution.
-        let created_at = parse_rfc3339(head.get("ts").and_then(Value::as_str));
+        let created_at = parse_rfc3339(
+            head.first()
+                .and_then(|row| row.get("ts").and_then(Value::as_str)),
+        );
         let (parent_session_id, agent_name) =
-            subagent_attribution(std::slice::from_ref(&head));
+            subagent_attribution(&head, &session_id);
         // Judging approval from a bounded tail window is exact, not
         // an approximation: a pending approval suspends its run, and
         // nothing is appended after it, so an unmatched
@@ -517,8 +449,8 @@ async fn scan_unregistered_transcripts(
 async fn scan_window(
     sink: &dyn uva::session::SessionSink,
     path: &std::path::Path,
-) -> Option<(Option<Value>, Vec<Value>)> {
-    let head = match sink.read_head().await {
+) -> Option<(Vec<Value>, Vec<Value>)> {
+    let head = match sink.read_head_rows(HEAD_ROWS).await {
         Ok(head) => head,
         Err(uva::session::SessionError::UnsupportedSchemaVersion {
             ..
@@ -546,17 +478,17 @@ async fn scan_window(
 /// the async runtime, so the read rides `spawn_blocking` — the
 /// legacy path is rare, not hot, but it still must not stall a
 /// worker.
-async fn legacy_window(path: &std::path::Path) -> (Option<Value>, Vec<Value>) {
+async fn legacy_window(path: &std::path::Path) -> (Vec<Value>, Vec<Value>) {
     let path = path.to_path_buf();
     let mut rows = tokio::task::spawn_blocking(move || {
         transcript_events(&path).collect::<Vec<Value>>()
     })
     .await
     .unwrap_or_default();
-    // The head is the whole log's first row, so capture it before
+    // The head window is the log's own start, so capture it before
     // the tail split — a log shorter than the window keeps every row
     // in the tail.
-    let head = rows.first().cloned();
+    let head: Vec<Value> = rows.iter().take(HEAD_ROWS).cloned().collect();
     let split = rows.len().saturating_sub(SESSION_LIST_TAIL_WINDOW);
     let tail = rows.split_off(split);
     (head, tail)
@@ -575,7 +507,7 @@ pub async fn list_sessions(
 
     let status_filter = match query.status.as_deref() {
         None | Some("") => None,
-        Some(s) => Some(parse_status_filter(s)?),
+        Some(s) => Some(status::parse_status_filter(s)?),
     };
     let context_id_filter = query
         .context_id
@@ -630,7 +562,7 @@ pub async fn list_sessions(
         // paginates, so the read cost grows linearly with the
         // session count and the page's limit does not bound it.
         let read_started = std::time::Instant::now();
-        let head = sink.read_head().await.ok().flatten();
+        let head = sink.read_head_rows(HEAD_ROWS).await.unwrap_or_default();
         let tail = sink
             .read_tail(SESSION_LIST_TAIL_WINDOW)
             .await
@@ -646,18 +578,20 @@ pub async fn list_sessions(
         // nothing is appended after it, so an unmatched
         // `approval_asked` is always the log's tail — the window
         // hits it precisely when it exists.
-        let live = derived_live_state(
-            live_session_state(&state.active_sessions, &user_id, &session.id),
-            &tail,
-        );
-        let status = infer_status_from_parts(live, head.is_some());
-        let created_at = head.as_ref().and_then(|row| {
+        let facts = StatusFacts {
+            controller: live_session_state(
+                &state.active_sessions,
+                &user_id,
+                &session.id,
+            ),
+            awaiting: !uva::harness::open_requests(&tail).is_empty(),
+        };
+        let status = status::session_status(facts, !head.is_empty());
+        let created_at = head.first().and_then(|row| {
             parse_rfc3339(row.get("ts").and_then(Value::as_str))
         });
-        let (parent_session_id, agent_name) = match &head {
-            Some(row) => subagent_attribution(std::slice::from_ref(row)),
-            None => (None, None),
-        };
+        let (parent_session_id, agent_name) =
+            subagent_attribution(&head, &session.id);
         if !selected(&session.id, status, status_filter, context_id_filter) {
             continue;
         }
@@ -679,12 +613,17 @@ pub async fn list_sessions(
     // that the in-memory state cannot after a restart, so the scan
     // reports it and this loop trusts it.
     for scanned in durable {
-        let live = if scanned.awaiting_approval {
-            Some(SessionState::AwaitingApproval)
-        } else {
-            live_session_state(&state.active_sessions, &user_id, &scanned.id)
+        // The scan already folded the log's open approvals, so the
+        // module is handed the verdict instead of re-reading the log.
+        let facts = StatusFacts {
+            controller: live_session_state(
+                &state.active_sessions,
+                &user_id,
+                &scanned.id,
+            ),
+            awaiting: scanned.awaiting_approval,
         };
-        let status = infer_status_from_parts(live, true);
+        let status = status::session_status(facts, true);
         if !selected(&scanned.id, status, status_filter, context_id_filter) {
             continue;
         }
@@ -705,8 +644,15 @@ pub async fn list_sessions(
             // across requests: without it a page of equally-labelled
             // sessions (usually every row) has no defined order, and
             // the cursor could repeat or skip entries.
+            //
+            // The order is the **wire spelling's**, not the enum's:
+            // the listing has always sorted by the label the client
+            // reads, and the labels are not in the enum's order.
             rows.sort_by(|a, b| {
-                a.status.cmp(b.status).then_with(|| a.id.cmp(&b.id))
+                a.status
+                    .as_wire()
+                    .cmp(b.status.as_wire())
+                    .then_with(|| a.id.cmp(&b.id))
             });
             if resolved.descending {
                 rows.reverse();
@@ -749,8 +695,11 @@ pub async fn get_session(
         // The status surface answers from the transcript it is about
         // to serve, so a suspended session reads as `input_required`
         // even when the controller no longer remembers the pause.
-        let live = derived_live_state(live, &history);
-        let status = infer_status_from_parts(live, !history.is_empty());
+        let facts = StatusFacts {
+            controller: live,
+            awaiting: !uva::harness::open_requests(&history).is_empty(),
+        };
+        let status = status::session_status(facts, !history.is_empty());
         // The creation time is the log's **head** row — the first
         // event — exactly as the listing's `read_head` reports it and
         // exactly as the disk-only detail view below reports it. The
@@ -765,7 +714,12 @@ pub async fn get_session(
             .iter()
             .rev()
             .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
-        let (parent_session_id, agent_name) = subagent_attribution(&history);
+        let (parent_session_id, agent_name) =
+            subagent_attribution(&history, &id);
+        // Every fact above reads the raw log rows; publishing is the
+        // last step so no fold sees the rewritten shapes (a dropped
+        // row would otherwise move `updated_at`).
+        let history = publish_rows(history);
         return Ok(SessionDetail {
             id: id.clone(),
             status,
@@ -809,15 +763,18 @@ pub async fn get_session(
         .iter()
         .rev()
         .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
-    let (parent_session_id, agent_name) = subagent_attribution(&history);
+    let (parent_session_id, agent_name) = subagent_attribution(&history, &id);
     // Disk-only means no controller and no in-memory state: the
     // transcript is the only place the paused state can come from, and
     // it is exactly the post-restart case.
-    let live = derived_live_state(
-        live_session_state(&state.active_sessions, &user_id, &id),
-        &history,
-    );
-    let status = infer_status_from_parts(live, !history.is_empty());
+    let facts = StatusFacts {
+        controller: live_session_state(&state.active_sessions, &user_id, &id),
+        awaiting: !uva::harness::open_requests(&history).is_empty(),
+    };
+    let status = status::session_status(facts, !history.is_empty());
+    // Publishing is the last step: every derived fact above was
+    // computed from the raw log rows.
+    let history = publish_rows(history);
     Ok(SessionDetail {
         id: id.clone(),
         status,
@@ -834,22 +791,130 @@ pub async fn get_session(
 }
 
 /// Response envelope for `GET /api/v1/sessions/{id}/events`.
+///
+/// The rows are split by what the row vocabulary says they are:
+/// `typed` (a current row — written in today's vocabulary or
+/// restored from an old one — whose payload decodes), `legacy` (an
+/// old-dialect row the current vocabulary has no counterpart for:
+/// history this build still reads), `unknown` (a tag this build
+/// does not know — version skew, not history), and `broken` (a row
+/// this build cannot read: a current row whose payload does not
+/// decode, or no usable tag at all). Each bucket carries its count.
 #[derive(Serialize)]
 pub struct TypedEventResponse {
     pub id: String,
     pub typed_count: usize,
     pub legacy_count: usize,
+    pub unknown_count: usize,
+    pub broken_count: usize,
     pub typed: Vec<uva::session::SessionEvent>,
     pub legacy: Vec<Value>,
+    pub unknown: Vec<Value>,
+    pub broken: Vec<Value>,
 }
+
+/// Which bucket one row lands in — decided from the vocabulary's read
+/// of the row, before the rows themselves move.
+#[derive(Clone, Copy)]
+enum Bucket {
+    /// A current row whose payload decodes.
+    Typed,
+    /// An old-dialect row the current vocabulary has no counterpart
+    /// for: history this build still reads.
+    Legacy,
+    /// A tag this build does not know: version skew, not history.
+    Unknown,
+    /// A row this build cannot read.
+    Broken,
+}
+
+/// The four buckets one session's rows fall into.
+#[derive(Default)]
+struct ClassifiedRows {
+    /// The rows that are current rows and decode.
+    typed: Vec<uva::session::SessionEvent>,
+    /// The old-dialect rows the current vocabulary has no
+    /// counterpart for: history this build still reads.
+    legacy: Vec<Value>,
+    /// The rows whose tag this build does not know: version skew.
+    unknown: Vec<Value>,
+    /// The rows this build cannot read.
+    broken: Vec<Value>,
+}
+
+/// The session's rows, split by what the row vocabulary says they are.
 ///
+/// Four buckets, one per answer the row vocabulary gives: the rows
+/// that are **current** rows and decode (`typed`), the old-dialect
+/// rows the current vocabulary has no counterpart for (`legacy` —
+/// history this build still reads), the rows whose tag this build
+/// does not know (`unknown` — version skew, not history), and the
+/// rows this build cannot read (`broken`).
+///
+/// The read is one restore per row: the vocabulary turns any row
+/// into a current row, and the row's own answer — its tag, or why
+/// it is not one — picks the bucket. A row written in the old
+/// dialect is a **current** row after the restore, so it lands in
+/// `typed` with its restored event; the split no longer says
+/// "history" about a row the current vocabulary can read.
+///
+/// The split used to be two buckets: the typed rows and everything
+/// else, all of it called `legacy`. That name said "history" about a
+/// row a newer build wrote.
+///
+/// The route **reports** rows, so it does not apply the fail-closed
+/// check a reader that rebuilds a session from the log applies
+/// ([`uva::session::Rows::read`]): a row this build does not know
+/// is exactly what the `unknown` bucket exists to show.
+fn classify_rows(raw: Vec<Value>) -> ClassifiedRows {
+    // The vocabulary reads the borrowed rows: each row's bucket and,
+    // for a current row, its decoded event. The rows move into their
+    // buckets afterwards, because the read borrows the slice.
+    let mut buckets = Vec::with_capacity(raw.len());
+    let mut events: Vec<Option<uva::session::SessionEvent>> =
+        Vec::with_capacity(raw.len());
+    for value in &raw {
+        let row = restore_row(value);
+        let (bucket, event) = match row.defect() {
+            // A tag this build does not know: version skew, not
+            // history. The row is reported as it was written.
+            Some(RowDefect::UnknownTag(_)) => (Bucket::Unknown, None),
+            // An old dialect with no counterpart in the current
+            // vocabulary: history, reported as it was written.
+            Some(RowDefect::NoCounterpart) => (Bucket::Legacy, None),
+            // No usable type at all: this build cannot read the row.
+            Some(RowDefect::NoTag) => (Bucket::Broken, None),
+            // A current row. It decodes into an event, or it is a
+            // defect: the payload does not hold up.
+            None => match row.event() {
+                Some(event) => (Bucket::Typed, Some(event)),
+                None => (Bucket::Broken, None),
+            },
+        };
+        buckets.push(bucket);
+        events.push(event);
+    }
+    let mut rows = ClassifiedRows::default();
+    for ((value, bucket), event) in raw.into_iter().zip(buckets).zip(events) {
+        match bucket {
+            Bucket::Typed => rows.typed.extend(event),
+            Bucket::Legacy => rows.legacy.push(value),
+            Bucket::Unknown => rows.unknown.push(value),
+            Bucket::Broken => rows.broken.push(value),
+        }
+    }
+    rows
+}
+
 /// Returns the session's typed event stream (`SessionEvent`) as a
 /// JSON array. Unlike `GET /sessions/{id}` which returns the
 /// opaque `history` (mixed legacy + typed), this endpoint
-/// exclusively returns events that the typed-event layer can
-/// recognise (`uva::session::SessionEvent::from_value`). Legacy
-/// rows are filtered out and reported in a separate `legacy`
-/// field so the frontend can still surface them in the UI.
+/// exclusively returns the rows the row vocabulary reads as current
+/// events — a row written in the old dialect is restored to one
+/// first, so it answers here too. Every other row is reported in
+/// its own bucket, so the frontend can still surface them in the UI
+/// and can tell an old dialect the current vocabulary cannot read
+/// (`legacy`) from a tag this build does not know (`unknown`).
 pub async fn list_session_events(
     state: Arc<AppState>,
     id: String,
@@ -866,21 +931,17 @@ pub async fn list_session_events(
         .read()
         .await
         .map_err(|e| Error::session(format!("{e}")))?;
-    let mut typed: Vec<uva::session::SessionEvent> = Vec::new();
-    let mut legacy: Vec<Value> = Vec::new();
-    for value in raw {
-        if let Some(ev) = uva::session::SessionEvent::from_value(&value) {
-            typed.push(ev);
-        } else {
-            legacy.push(value);
-        }
-    }
+    let rows = classify_rows(raw);
     Ok(TypedEventResponse {
         id,
-        typed_count: typed.len(),
-        legacy_count: legacy.len(),
-        typed,
-        legacy,
+        typed_count: rows.typed.len(),
+        legacy_count: rows.legacy.len(),
+        unknown_count: rows.unknown.len(),
+        broken_count: rows.broken.len(),
+        typed: rows.typed,
+        legacy: rows.legacy,
+        unknown: rows.unknown,
+        broken: rows.broken,
     })
 }
 /// `GET /api/v1/sessions/{id}/status` — live operation status
