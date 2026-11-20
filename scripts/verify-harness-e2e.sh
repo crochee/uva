@@ -170,13 +170,24 @@ async def main():
                 results.append((row.get("is_error", False), text))
             elif kind == "assistant_message":
                 content = data.get("content", {})
+                # The answer arrives in either shape: a `Single` text
+                # part, or a `Multi` list of parts. Which one depends
+                # on the provider's response, so read both — reading
+                # only `Multi` made this script fail on the runs where
+                # the model answered with a single part.
+                single = content.get("Single") if isinstance(content, dict) else None
                 multi = content.get("Multi") if isinstance(content, dict) else None
-                if isinstance(multi, list):
+                if isinstance(single, dict) and single.get("type") == "text":
+                    answer = single.get("text", "")
+                elif isinstance(multi, list):
                     answer = "".join(
                         part.get("text", "") for part in multi
                         if isinstance(part, dict) and part.get("type") == "text"
                     )
-            if kind == "turn" and data.get("phase") == "end":
+            # The turn's end row carries `kind`; `phase` was never
+            # part of it, so the loop used to idle until the read
+            # timed out.
+            if kind == "turn" and (data.get("kind") == "end" or data.get("phase") == "end"):
                 break
 
         if steps < 2:

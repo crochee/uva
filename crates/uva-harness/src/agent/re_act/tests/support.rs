@@ -104,31 +104,16 @@ impl ModelProvider for ScriptedStreamProvider {
         _request: uva_provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let chunks = self.take_next().await;
-        let mut final_sampling: Option<SamplingResult> = None;
+        let mut assembler = uva_provider::BlockAssembler::new();
         for chunk in chunks {
-            if let StreamChunk::IsDone { result } = &chunk {
-                final_sampling = Some((**result).clone());
-            }
+            assembler.push(chunk.clone());
             on_delta(chunk);
         }
-        let sampling = final_sampling.unwrap_or_default();
-        Ok(CompletionResponse {
-            id: format!("resp-{}", self.call_count.load(Ordering::SeqCst)),
-            model: "fake".to_string(),
-            content: uva_provider::Content::Single(ContentPart::Text(
-                TextContent {
-                    text: sampling.text.clone(),
-                    cache_control: None,
-                },
-            )),
-            usage: sampling.usage.clone(),
-            cached: false,
-            replay_state: None,
-            stop_reason: sampling.stop_reason.clone(),
-        })
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 
@@ -191,24 +176,11 @@ impl ModelProvider for CancellingStreamProvider {
         _request: uva_provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn CancelToken>>,
         _on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         if !self.fired.swap(true, Ordering::SeqCst) {
             self.token.cancel();
         }
-        Ok(CompletionResponse {
-            id: "cancelled".to_string(),
-            model: "fake".to_string(),
-            content: uva_provider::Content::Single(ContentPart::Text(
-                TextContent {
-                    text: String::new(),
-                    cache_control: None,
-                },
-            )),
-            usage: TokenUsage::default(),
-            cached: false,
-            replay_state: None,
-            stop_reason: None,
-        })
+        Ok(SamplingResult::default())
     }
 }
 
@@ -288,7 +260,7 @@ impl ModelProvider for CapturingProvider {
         request: uva_provider::types::CompletionRequest,
         _cancel: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         self.captured.lock().await.push(request.messages.clone());
         self.captured_tools.lock().await.push(request.tools.clone());
         self.captured_models
@@ -306,28 +278,13 @@ impl ModelProvider for CapturingProvider {
                 g.remove(0)
             }
         };
-        let mut sampling: Option<SamplingResult> = None;
+        let mut assembler = uva_provider::BlockAssembler::new();
         for c in chunks {
-            if let StreamChunk::IsDone { result } = &c {
-                sampling = Some((**result).clone());
-            }
+            assembler.push(c.clone());
             on_delta(c);
         }
-        let s = sampling.unwrap_or_default();
-        Ok(CompletionResponse {
-            id: "cap".into(),
-            model: "capturing".into(),
-            content: uva_provider::Content::Single(ContentPart::Text(
-                uva_provider::TextContent {
-                    text: s.text.clone(),
-                    cache_control: None,
-                },
-            )),
-            usage: s.usage.clone(),
-            cached: false,
-            replay_state: None,
-            stop_reason: s.stop_reason.clone(),
-        })
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 

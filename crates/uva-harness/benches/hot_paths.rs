@@ -458,7 +458,7 @@ fn check_ratios() -> bool {
     let mut plain_registrations = Vec::new();
     let plain = hooked_agent(0, &mut plain_registrations);
     ok &= ratio(
-        "ReActAgent turn: 8 host hooks vs none",
+        "ReActAgent turn: 8 registry hooks vs none",
         2_000,
         || {
             let input = history_input(Vec::new());
@@ -945,14 +945,14 @@ fn main() {
         black_box(run_turn(&parallel_agent, history_input(Vec::new())));
     });
 
-    // ---- : real harness — R3: a turn with eight host hooks ----
+    // ---- : real harness — R3: a turn with eight registry hooks ----
     // The observer itself does nothing; the row measures the
     // dispatch around it. The hook-free baseline lives in the
     // `--check` gate, not in the table.
     let mut hook_registrations = Vec::new();
     let hooked = hooked_agent(8, &mut hook_registrations);
     Bench {
-        label: "ReActAgent turn (8 host hooks)",
+        label: "ReActAgent turn (8 registry hooks)",
         iters: 2_000,
     }
     .run("one turn", || {
@@ -1513,18 +1513,23 @@ fn batch_agent(
         .with_name("bench-batch")
 }
 
-/// The agent the R3 row drives, with `hooks` observers installed.
+/// The agent the R3 row drives, with `hooks` registry observers
+/// installed at one pass point.
 fn hooked_agent(
     hooks: usize,
-    registrations: &mut Vec<uva_harness::Registration>,
+    registrations: &mut Vec<uva_hook::HookRegistration>,
 ) -> uva_harness::ReActAgent {
     let provider: Arc<dyn uva_provider::ModelProvider> =
         Arc::new(ScriptedProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
         });
-    let mut host = uva_harness::Host::new();
+    let host = uva_harness::Host::new();
     for _ in 0..hooks {
-        registrations.push(host.hook(Arc::new(EmptyHook)));
+        registrations.push(host.hook_registry().register_hook_at(
+            uva_hook::MountPoint::ToolPre,
+            Arc::new(EmptyHook),
+            uva_hook::RegistrationOrigin::InProcess,
+        ));
     }
     uva_harness::ReActAgent::new(provider, Arc::new(tool_registry(40)))
         .with_workspace(".")

@@ -83,7 +83,11 @@ use crate::{
         controller::{LiveTurn, SessionController, SessionOp},
         status::{self, SessionState, SessionStatus, StatusFacts},
     },
-    state::AppState,
+    state::{
+        AppState,
+        MustExistError,
+        session_resolution::{transcript_events, transcript_path},
+    },
 };
 
 /// How many durable rows the baseline carries. The window is fixed:
@@ -114,7 +118,7 @@ const FOLLOW_POLL_MAX: Duration = Duration::from_millis(500);
 pub(crate) const COMPACTION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The session-level facts a client needs before its first row.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionHeader {
     /// The session id.
     pub session_id: String,
@@ -140,7 +144,7 @@ pub struct SessionHeader {
 }
 
 /// How much of the model's window the next request would occupy.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ContextMeter {
     /// Tokens the next request is projected to carry.
     pub used: u64,
@@ -150,7 +154,11 @@ pub struct ContextMeter {
 }
 
 /// The complete first frame of a `follow` stream.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+///
+/// The type is the wire contract's owner: a client decodes the
+/// baseline into this very type, so the shape the server publishes
+/// and the shape a client reads cannot drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FollowSnapshot {
     /// Session-level facts.
     pub header: SessionHeader,
@@ -180,7 +188,13 @@ pub struct FollowQuery {
 }
 
 /// The projection events a follow subscriber receives.
-#[derive(Debug, Clone)]
+///
+/// The enum is the frame's envelope: the `kind` tag is the frame's
+/// discriminator, and the variant's members are the frame's payload.
+/// A client decodes a frame into this very type, so the shape the
+/// server publishes and the shape a client reads cannot drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FollowEvent {
     /// A durable row landed in the log.
     Row {
@@ -207,30 +221,18 @@ impl FollowEvent {
     /// The notification payload for the event.
     ///
     /// The shape is the one the SSE frames carried: a `row` frame's
-    /// members are flat, the other two wrap their payload.
-    #[must_use]
-    pub fn payload(&self) -> Value {
-        match self {
-            Self::Row {
-                seq,
-                row,
-                request_snapshot_hash,
-            } => serde_json::json!({
-                "kind": "row",
-                "seq": seq,
-                "row": row,
-                "request_snapshot_hash": request_snapshot_hash,
-            }),
-            Self::Live { live } => {
-                serde_json::json!({ "kind": "live", "live": live })
-            }
-            Self::Interrupts { pending_interrupts } => {
-                serde_json::json!({
-                    "kind": "interrupts",
-                    "pending_interrupts": pending_interrupts,
-                })
-            }
-        }
+    /// members are flat, the other two wrap their payload. The
+    /// payload is the frame's own serialization — the envelope has
+    /// one definition, the one a client decodes back.
+    ///
+    /// # Errors
+    ///
+    /// Returns the serialization error when the frame cannot be
+    /// written as JSON. The frame's own members cannot fail to
+    /// serialize, so this is the envelope's escape hatch rather than
+    /// a path a caller should meet.
+    pub fn payload(&self) -> Result<Value, serde_json::Error> {
+        serde_json::to_value(self)
     }
 }
 
@@ -247,8 +249,9 @@ pub async fn follow(
     // discard anything the baseline already covers.
     // A read stream never mints a session: following an id that has
     // no log is a 404, not an empty session.
-    let controller =
-        registered_controller(&state, &user_id, &session_id).await?;
+    let controller = state
+        .must_exist_session_controller(&user_id, &session_id)
+        .await?;
     let rx = controller.subscribe();
     let sink = state.session_manager.sink(&user_id, &session_id);
     let rows =
@@ -300,7 +303,21 @@ pub async fn follow(
         let outbound_session = notification_session;
         async move {
             follow_stream(controller, sink, rx, baseline, move |event| {
-                registry.emit_session_event(&outbound_session, event.payload());
+                match event.payload() {
+                    Ok(payload) => {
+                        registry.emit_session_event(&outbound_session, payload);
+                    }
+                    Err(error) => {
+                        // The frame's members cannot fail to serialize;
+                        // a frame that does is a bug, and dropping it
+                        // with a trace beats emitting a `null` frame
+                        // every subscriber would have to guess at.
+                        tracing::error!(
+                            %error,
+                            "the follow frame does not serialize"
+                        );
+                    }
+                }
                 // The interrupt set is also projected call by call as
                 // `approval/request`, so a transport that speaks
                 // approvals does not have to read the session
@@ -969,8 +986,9 @@ pub async fn resume(
 ) -> Result<(), RpcError> {
     validate_resource_name(&session_id)?;
     let user_id = resolve_user_id(&state);
-    let controller =
-        registered_controller(&state, &user_id, &session_id).await?;
+    let controller = state
+        .must_exist_session_controller(&user_id, &session_id)
+        .await?;
     // The validation below reads the shared log, so it answers the
     // same on any node; only the run itself must happen on the owner.
     // A remote handle's submit forwards the resume verbatim.
@@ -1195,8 +1213,9 @@ pub async fn compact(
 ) -> Result<CompactResponse, RpcError> {
     validate_resource_name(&session_id)?;
     let user_id = resolve_user_id(&state);
-    let controller =
-        registered_controller(&state, &user_id, &session_id).await?;
+    let controller = state
+        .must_exist_session_controller(&user_id, &session_id)
+        .await?;
     if controller.is_remote() {
         // A pass rewrites the surface, so it runs on the owner. The
         // frame carries no answer: the caller is told the pass was
@@ -1600,43 +1619,24 @@ fn session_read_error(error: uva::session::SessionError) -> RpcError {
         .with_code("session_log_read")
 }
 
-/// Resolve a controller for a session that must already exist.
-async fn registered_controller(
-    state: &Arc<AppState>,
-    user_id: &str,
-    session_id: &str,
-) -> Result<Arc<SessionController>, RpcError> {
-    if state.session_manager.get(session_id).await.is_none() {
-        // A process that restarted has no registry entry; the durable
-        // transcript is the proof the session exists. `get_or_create`
-        // restores it (and repairs a crashed tail) without minting a
-        // directory for a typo.
-        // A session created a moment ago owns its directory but may
-        // not have written a row yet; the directory is the durable
-        // proof it exists, and a typo still has neither.
-        let exists = crate::routes::sessions::transcript_path(
-            state.session_manager.sessions_root(),
-            user_id,
-            session_id,
-        )
-        .and_then(|path| path.parent().map(|dir| dir.is_dir()))
-        .unwrap_or(false);
-        if !exists {
-            return Err(RpcError::from(uva::core::Error::not_found(format!(
-                "session '{session_id}'"
-            )))
-            .with_code("not_found"));
+/// The wire answer for a refused `must_exist` resolution: an absent
+/// session is the session-shaped not-found, and anything else is a
+/// session that exists failing to open.
+impl From<MustExistError> for RpcError {
+    fn from(error: MustExistError) -> Self {
+        match error {
+            MustExistError::Absent { session_id } => RpcError::from(
+                uva::core::Error::not_found(format!("session '{session_id}'")),
+            )
+            .with_code("not_found"),
+            MustExistError::Open(error) => {
+                RpcError::from(uva::core::Error::session(format!(
+                    "resolve session controller: {error}"
+                )))
+                .with_code("session_controller")
+            }
         }
     }
-    state
-        .get_or_create_session_controller(user_id, session_id)
-        .await
-        .map_err(|error| {
-            RpcError::from(uva::core::Error::session(format!(
-                "resolve session controller: {error}"
-            )))
-            .with_code("session_controller")
-        })
 }
 
 /// The session's durable rows, from the live sink when the session is
@@ -1654,7 +1654,7 @@ async fn session_rows(
             .await
             .map_err(session_read_error);
     }
-    let Some(path) = crate::routes::sessions::transcript_path(
+    let Some(path) = transcript_path(
         state.session_manager.sessions_root(),
         user_id,
         session_id,
@@ -1665,7 +1665,7 @@ async fn session_rows(
         .with_code("not_found"));
     };
     let rows = tokio::task::spawn_blocking(move || {
-        crate::routes::sessions::transcript_events(&path).collect::<Vec<_>>()
+        transcript_events(&path).collect::<Vec<_>>()
     })
     .await
     .map_err(|error| {

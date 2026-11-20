@@ -160,7 +160,7 @@ pub(super) async fn every_step_start_has_a_matching_end() {
                 _request: uva_provider::CompletionRequest,
                 _cancel: Option<Arc<dyn CancelToken>>,
                 _on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-            ) -> Result<uva_provider::CompletionResponse, uva_core::Error>
+            ) -> Result<uva_provider::SamplingResult, uva_core::Error>
             {
                 panic!("provider blew up");
             }
@@ -221,10 +221,14 @@ pub(super) async fn every_step_start_has_a_matching_end() {
                 }],
             )]));
         let (registry, _calls) = echo_registry();
-        let mut host = Host::new();
-        let _hook = host.hook(Arc::new(CancelAfterProvider {
-            cancel: cancel.clone(),
-        }));
+        let host = Host::new();
+        let _hook = host.hook_registry().register_hook_at(
+            uva_hook::MountPoint::LlmResult,
+            Arc::new(CancelAfterProvider {
+                cancel: cancel.clone(),
+            }),
+            uva_hook::RegistrationOrigin::InProcess,
+        );
         let sink = Arc::new(InMemorySessionSink::new("s"));
         let writer =
             Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));

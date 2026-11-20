@@ -1,6 +1,6 @@
 # Uva .dockerignore — exhaustive list, mirrors the build
 # context's actual needs (Cargo + Cargo.lock + crates/ +
-# config.yaml + nginx.conf + uva-web/) and nothing else.
+# nginx/ + uva-web/) and nothing else.
 #
 # Anything not listed here gets shipped to the daemon when a
 # `docker build` starts, which inflates the build context to many

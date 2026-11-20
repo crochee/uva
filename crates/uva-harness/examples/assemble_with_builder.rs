@@ -14,7 +14,7 @@
 //! | Brick | Round | API |
 //! |---|---|---|
 //! | `ReActAgent` (the builder is the harness) | R12 / R110 | `ReActAgent::new(provider, registry)` chain |
-//! | The production policy | 0.2 | `uva_harness::Host::default_policy(root)` |
+//! | The production policy | 0.2 | `uva_harness::Host::default_policy(root, registry)` |
 //! | Structured output | R12+R13 | `.with_output_schema(schema)` → auto tool |
 //! | LLM compaction | R13 | `uva-app-server::agent_run_config::context_manager_for_compaction_with_emitters` |
 //! | Session log writer | R6 | `.with_log_writer(writer)` |
@@ -61,10 +61,13 @@ async fn main() {
     println!("[1/6] provider      : {}", provider.name());
 
     // 2. The production policy (0.2): one `Host` carries every
-    //    guard / hint / tracker registration the deployment wants.
-    //    The base library installs none of them by default.
+    //    guard / hint / tracker registration the deployment wants,
+    //    plus the registry its interception rows live in. The base
+    //    library installs none of them by default.
     let workspace = std::path::PathBuf::from(".");
-    let host = Host::default_policy(&workspace);
+    // The deployment's one interception table: an empty one here, so
+    // the example owns no out-of-tree registrations.
+    let host = Host::default_policy(&workspace, uva_hook::HookRegistry::new());
     println!(
         "[2/6] host policy   : {} registrations",
         host.registration_count()

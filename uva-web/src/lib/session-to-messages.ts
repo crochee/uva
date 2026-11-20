@@ -939,8 +939,18 @@ function applyCompactionRow(entry: SessionTurn, sessionId: string, out: ChatMess
  *  provenance, not a model turn. */
 function applyPluginRow(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {
   const obj = toRecord(entry.data);
-  const kind = obj && typeof obj.kind === 'string' && obj.kind ? obj.kind : 'unnamed';
-  const payload = obj && obj.payload !== undefined ? JSON.stringify(obj.payload) : '';
+  // The plugin row's own fields ride the **top level**: `kind` is the
+  // plugin's event name and `payload` its body. The payload bag is
+  // the older spelling, tolerated for a row written before the row
+  // grew its own fields.
+  const kind =
+    typeof entry.kind === 'string' && entry.kind
+      ? entry.kind
+      : obj && typeof obj.kind === 'string' && obj.kind
+        ? obj.kind
+        : 'unnamed';
+  const body = entry.payload !== undefined && entry.payload !== null ? entry.payload : obj?.payload;
+  const payload = body !== undefined ? JSON.stringify(body) : '';
   out.push({
     id: crypto.randomUUID(),
     role: 'assistant',
@@ -964,9 +974,23 @@ function applyPluginRow(entry: SessionTurn, sessionId: string, out: ChatMessageL
  *  own session; the parent keeps the link, not the trace. */
 function applySubagentEnterRow(out: ChatMessageLike[], entry: SessionTurn): void {
   const obj = toRecord(entry.data);
-  const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
-  const agent = typeof obj?.agent_name === 'string' ? obj.agent_name : 'unknown';
-  const depth = typeof obj?.depth === 'number' ? obj.depth : 1;
+  // The typed members ride the row's top level; the payload bag's
+  // copies are the older spelling, tolerated for a row written before
+  // the fields were typed.
+  const childId =
+    typeof entry.child_session_id === 'string' && entry.child_session_id
+      ? entry.child_session_id
+      : typeof obj?.child_session_id === 'string'
+        ? obj.child_session_id
+        : null;
+  const agent =
+    typeof entry.agent_name === 'string' && entry.agent_name
+      ? entry.agent_name
+      : typeof obj?.agent_name === 'string'
+        ? obj.agent_name
+        : 'unknown';
+  const depth =
+    typeof entry.depth === 'number' ? entry.depth : typeof obj?.depth === 'number' ? obj.depth : 1;
   const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
   out.push({
     id: crypto.randomUUID(),
@@ -987,8 +1011,21 @@ function applySubagentEnterRow(out: ChatMessageLike[], entry: SessionTurn): void
  *  child's terminal status. */
 function applySubagentExitRow(out: ChatMessageLike[], entry: SessionTurn): void {
   const obj = toRecord(entry.data);
-  const childId = typeof obj?.child_session_id === 'string' ? obj.child_session_id : null;
-  const status = typeof obj?.status === 'string' ? obj.status : 'completed';
+  // The typed members ride the row's top level; the payload bag's
+  // copies are the older spelling, tolerated for a row written before
+  // the fields were typed.
+  const childId =
+    typeof entry.child_session_id === 'string' && entry.child_session_id
+      ? entry.child_session_id
+      : typeof obj?.child_session_id === 'string'
+        ? obj.child_session_id
+        : null;
+  const status =
+    typeof entry.status === 'string' && entry.status
+      ? entry.status
+      : typeof obj?.status === 'string'
+        ? obj.status
+        : 'completed';
   const label = status === 'completed' ? '已完成' : status === 'cancelled' ? '已取消' : '未完成';
   const link = childId ? ` [查看子会话 →](/chat/${childId})` : '';
   out.push({
@@ -1174,17 +1211,27 @@ function toRecord(data: unknown): Record<string, unknown> | null {
 }
 
 /**
- * The boundary discriminator a `turn` or `step` row's payload carries.
+ * The boundary discriminator a `turn` or `step` row carries.
  *
- * Today's writer stamps `kind`; `phase` is the older spelling, still
- * tolerated so a log written before the rename reads the same. The rule
- * lives here once — the page's turn-open, turn-close and step-start
- * readers call it instead of repeating the fallback.
+ * The row's **typed** member is the fact: the writer stamps `kind`
+ * on the row's top level, and the contract declares it there. The
+ * payload bag's copy is the older spelling — tolerated so a log
+ * written before the rename reads the same — and `phase` is the
+ * spelling before that. The rule lives here once — the page's
+ * turn-open, turn-close and step-start readers call it instead of
+ * repeating the fallback.
  *
- * Returns `''` when the payload is not a keyed object or names no
- * discriminator — neither a turn open nor a turn close.
+ * Returns `''` when the row names no discriminator — neither a turn
+ * open nor a turn close.
  */
-export function boundaryKind(data: Record<string, unknown> | null): string {
+export function boundaryKind(row: SessionTurn): string {
+  // Only a boundary row's top-level `kind` is a boundary fact: on a
+  // `plugin` row the same name carries the plugin's own event kind.
+  if (row.type === 'turn' || row.type === 'step') {
+    const typed = row.kind;
+    if (typeof typed === 'string' && typed) return typed;
+  }
+  const data = toRecord(row.data);
   if (!data) return '';
   const kind = data.kind;
   if (typeof kind === 'string') return kind;

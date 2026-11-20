@@ -35,7 +35,7 @@
 //! same delegation would answer to a different id on the next
 //! request, and a cursor naming it would no longer find it.
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
@@ -46,21 +46,12 @@ use uva::{
     tool_task::{ChildRecord, RecordSource, Scope, discover},
 };
 
-use super::helpers::paginate;
+use super::list::{Direction, SortKey};
 use crate::{
-    api::{
-        List,
-        PageQuery,
-        resolve_page,
-        validate_resource_name,
-        validate_sort,
-    },
+    api::{List, PageQuery, validate_resource_name},
     rpc::RpcError,
     state::AppState,
 };
-
-/// Sortable fields for the tasks list endpoint.
-const TASK_SORT_WHITELIST: &[&str] = &["started_at"];
 
 /// `TaskDelegation` — one delegation, flattened for the frontend.
 /// Wire shape mirrors `uva-web/src/api/types.ts::TaskDelegation`.
@@ -91,29 +82,13 @@ pub struct TaskDelegation {
 /// lands between two rows that share a timestamp.
 pub async fn list_tasks(
     state: Arc<AppState>,
-    mut page: PageQuery,
+    page: PageQuery,
 ) -> Result<List<TaskDelegation>, RpcError> {
-    // The default sort is applied to the query itself, so the
-    // resolved page carries it: a request that names no sort gets
-    // the same newest-first order the cursor resumes in. Leaving it
-    // to the resolved page's "no sort" case would order the list
-    // ascending while the cursor still resumed from the end.
-    if page.sort.is_none() {
-        page.sort = Some("-started_at".to_string());
-    }
-    validate_sort(
-        page.sort.as_deref().unwrap_or("-started_at"),
-        TASK_SORT_WHITELIST,
-    )?;
-    let resolved = resolve_page(&page)?;
     let user_id = state.default_user_id().to_string();
-    let mut delegations = delegations_of_user(&state, &user_id).await;
-    sort_delegations(&mut delegations, &resolved);
-    Ok(paginate(
-        delegations,
-        &resolved,
-        |delegation: &TaskDelegation| delegation.id.as_str(),
-    ))
+    let delegations = delegations_of_user(&state, &user_id).await;
+    Ok(TaskSort::sort_and_page(delegations, &page, |delegation| {
+        delegation.id.as_str()
+    })?)
 }
 
 /// `GET /api/v1/tasks/{id}` — fetch one delegation by synthetic id.
@@ -279,25 +254,40 @@ fn delegation_id(parent_id: &str, child_id: &str) -> String {
     format!("{parent_id}:{child_id}")
 }
 
-/// Order the delegations by the requested field, with the id as the
-/// tiebreaker.
+/// The delegation list's sort vocabulary: one key, declared once.
 ///
-/// The tiebreaker is what makes the order **total**: two
-/// delegations that started in the same millisecond would otherwise
-/// have no defined order between them, and the page boundary could
-/// fall between them — repeating one on the next page and losing
-/// the other.
-fn sort_delegations(
-    delegations: &mut [TaskDelegation],
-    resolved: &crate::api::ResolvedPage,
-) {
-    delegations.sort_by(|a, b| {
-        started_at(a)
-            .cmp(&started_at(b))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    if resolved.descending {
-        delegations.reverse();
+/// The list reads newest-first, which is a fact about the route — it
+/// used to be expressed by writing `-started_at` back into the query
+/// before resolving it, a workaround that only worked because nothing
+/// else read the default. The default direction lives on the key now.
+///
+/// The id is the cursor key and the tiebreaker (the recipe applies it),
+/// which is what makes the order **total**: two delegations that
+/// started in the same millisecond would otherwise have no defined
+/// order between them, and the page boundary could fall between them —
+/// repeating one on the next page and losing the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskSort {
+    StartedAt,
+}
+
+impl SortKey<TaskDelegation> for TaskSort {
+    const ALL: &'static [Self] = &[Self::StartedAt];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::StartedAt => "started_at",
+        }
+    }
+
+    fn compare(self, a: &TaskDelegation, b: &TaskDelegation) -> Ordering {
+        match self {
+            Self::StartedAt => started_at(a).cmp(&started_at(b)),
+        }
+    }
+
+    fn default_sort() -> (Self, Direction) {
+        (Self::StartedAt, Direction::Descending)
     }
 }
 

@@ -60,7 +60,7 @@ pub use search::{
     SEARCH_TOOL_NAME,
     SearchTool,
     register_search_tool,
-    register_search_tool_with_token,
+    search_tool_entry,
 };
 #[cfg(feature = "shell")]
 pub use shell::{

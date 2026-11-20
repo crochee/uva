@@ -21,6 +21,7 @@ use uva_kernel::{
 use uva_tool::{
     Tool,
     ToolEntry,
+    ToolProvenance,
     ToolRegistry,
     plugin::{KEY_TOOLS, ToolRegistryPlugin},
 };
@@ -53,6 +54,19 @@ fn registers_the_tool_and_unload_removes_it() {
     );
     assert!(service.contains(&name), "the brick's tool is dispatchable");
     assert_eq!(service.tool_count(), 1);
+    // A shipped tool is `Core`: once it is registered, no later
+    // registration may take the name.
+    let record = service
+        .snapshot_with_provenance()
+        .into_iter()
+        .find(|record| record.metadata.name == name)
+        .expect("the brick's tool is registered");
+    assert_eq!(
+        record.provenance,
+        ToolProvenance::Core,
+        "the `read` tool owns its name"
+    );
+
     assert!(
         service.descriptors().iter().any(|tool| tool.name == name),
         "the brick's tool is advertised to the model"
@@ -108,15 +122,13 @@ fn mount_fails_loudly_when_a_core_tool_owns_the_name() {
     )
     .expect_err("the mount must fail, not silently skip `read`");
 
-    let MountError::ApplyFailed { plugin_id, source } = error else {
+    // The refusal's wording is the helper's contract (see `uva-tool`'s
+    // brick test); what is this brick's is that the mount fails
+    // loudly instead of mounting a brick whose tool never appeared.
+    let MountError::ApplyFailed { plugin_id, .. } = error else {
         panic!("expected ApplyFailed, got {error:?}");
     };
     assert_eq!(plugin_id, "tool-read");
-    let message = source.to_string();
-    assert!(
-        message.contains(&name) && message.contains("core"),
-        "the error must name the tool and the core owner: {message}"
-    );
     assert_eq!(
         registry.tool_count(),
         1,

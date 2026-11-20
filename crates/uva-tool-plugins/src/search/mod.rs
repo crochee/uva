@@ -252,6 +252,19 @@ impl Tool for SearchTool {
     }
 }
 
+/// The `search` tool as a registry entry.
+///
+/// The tool is **deferred**: the model sees its name without its
+/// schema until it calls it, so the entry carries
+/// [`ToolExposure::Deferred`]. A brick that registers it goes through
+/// this one builder, so the exposure shape lives here and nowhere
+/// else.
+#[must_use]
+pub fn search_tool_entry(search_registry: Arc<Registry>) -> ToolEntry {
+    ToolEntry::new(Arc::new(SearchTool::new(search_registry)))
+        .with_exposure(ToolExposure::Deferred)
+}
+
 /// Register the `search` tool with [`ToolExposure::Deferred`].
 ///
 /// Returns the underlying
@@ -262,26 +275,7 @@ pub fn register_search_tool(
     tool_registry: &uva_tool::ToolRegistry,
     search_registry: Arc<Registry>,
 ) -> bool {
-    tool_registry.register_entry(
-        ToolEntry::new(Arc::new(SearchTool::new(search_registry)))
-            .with_exposure(ToolExposure::Deferred),
-    )
-}
-
-/// Register the `search` tool and return the withdrawal token.
-///
-/// The plugin-shaped registration: the caller keeps the token and
-/// unregisters with it when its effect revokes, so the tool's
-/// lifetime is the row's. `None` means a `Core`-provenance tool
-/// already owns the name.
-pub fn register_search_tool_with_token(
-    tool_registry: &uva_tool::ToolRegistry,
-    search_registry: Arc<Registry>,
-) -> Option<uva_tool::RegistrationToken> {
-    tool_registry.register_entry_with_token(
-        ToolEntry::new(Arc::new(SearchTool::new(search_registry)))
-            .with_exposure(ToolExposure::Deferred),
-    )
+    tool_registry.register_entry(search_tool_entry(search_registry))
 }
 
 #[cfg(test)]

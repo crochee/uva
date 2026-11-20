@@ -52,10 +52,10 @@ const DEPS_KEYS: &[&str] = &["direct dep", "直接依赖"];
 /// (rustdoc JSON format 57): the entries whose `crate_id` is the
 /// crate's own (0) and whose path is `uva_harness::agent::…` or
 /// `uva_harness::events::…` with at least one module segment
-/// below `agent` / `events` number **36** (modules, items and enum
-/// variants). Of those, **22** are the path of one of the crate's
-/// 64 facade names — the same name set
-/// `scripts/check-frozen-api.sh --print` lists — so **14** names
+/// below `agent` / `events` number **28** (modules, items and enum
+/// variants). Of those, **17** are the path of one of the crate's
+/// 59 facade names — the same name set
+/// `scripts/check-frozen-api.sh --print` lists — so **11** names
 /// live only behind a deep path.
 ///
 /// Three vocabularies used to live behind those deep paths and moved
@@ -72,28 +72,26 @@ const DEPS_KEYS: &[&str] = &["direct dep", "直接依赖"];
 /// now reaches the harness facade through the crate-root use tree. The
 /// agent vocabulary contributed four `agent`-level names (`Agent`,
 /// `AgentRegistry`, `AgentEntry`, `PromptSection`): it moved to
-/// `uva-agent`, and the `agent` module's re-exports carry them.
+/// `uva-agent`, and the `agent` module's re-exports carry them. The
+/// two-path host surface went away with the same cutover: `Plugin`,
+/// `PluginHandle`, `Arbitration` at its old `agent::host` path, the
+/// three `DiagnosticKind` variants (`GateFailed`, `TransformerFailed`,
+/// `UnsupportedDecision`) and the delegation vocabulary
+/// (`DelegatingTool`, `DelegationCall`) no longer have a path inside
+/// the harness — eight names, with no replacement.
 ///
-/// The seven mount-point keys are the one sanctioned cross-crate
-/// deep-only set: they are `uva-hook`'s, and `uva_harness::seams`
-/// re-exports them inside the module so the deep paths
-/// `uva_harness::seams::<KEY>` keep working while no new crate-root
-/// name appears (ADR 0004). The count carries those seven on top of
-/// the 14 `agent` names.
-const DEEP_PATH_NAMES: u64 = 21;
+/// The seven mount-point keys used to be the one sanctioned
+/// cross-crate deep-only set: `uva_harness::seams` re-exported
+/// `uva-hook`'s keys. ADR 0028 folded every interception registration
+/// into `uva-hook`'s `MountPoint` enum, the keys went away, and the
+/// count dropped to the 11 names that live under `agent` alone.
+const DEEP_PATH_NAMES: u64 = 11;
 
-/// The cross-crate deep-only names the docs count on purpose: the
-/// mount-point keys re-exported from `uva-hook`. Any other such name
-/// is a regression.
-const SANCTIONED_DEEP_CROSS_CRATE: &[&str] = &[
-    "LLM_REQUEST",
-    "LLM_RESULT",
-    "PROMPT_SECTIONS",
-    "STEP_POST",
-    "STEP_PRE",
-    "TOOL_POST",
-    "TOOL_PRE",
-];
+/// The cross-crate deep-only names the docs count on purpose. The
+/// mount-point keys that used to sit here are gone with the string
+/// keys they spelled (ADR 0028); any cross-crate deep-only name is a
+/// regression.
+const SANCTIONED_DEEP_CROSS_CRATE: &[&str] = &[];
 
 /// The manifest spelling that keeps a crate's default feature set
 /// (and the runtime it carries) out of a consumer's tree.
@@ -517,18 +515,16 @@ fn every_doc_states_the_true_deep_path_count() {
 }
 
 /// No public name the harness re-exports from another crate is
-/// reachable only by a deep path, except the sanctioned mount-point
-/// keys the deep-path count carries.
+/// reachable only by a deep path.
 ///
 /// A cross-crate re-export has no path of its own inside the
 /// harness: rustdoc records it in the crate that defines it. The
 /// approval vocabulary (`agent::approval` and `Risk`) moved to
-/// `uva-approval`; the seven seam keys are the one deliberate
-/// exception — `uva-hook` owns them and `uva_harness::seams`
-/// re-exports them inside the module, because promoting them to the
-/// crate root would add seven curated names the frozen surface never
-/// promised (ADR 0004). Should any other deep-only cross-crate name
-/// appear, it is a regression.
+/// `uva-approval`, and the seven mount-point keys that used to be
+/// re-exported inside `uva_harness::seams` are gone with ADR 0028 —
+/// `uva-hook`'s `MountPoint` replaces them, so no cross-crate name is
+/// sanctioned as deep-only any more. Should any such name appear, it
+/// is a regression.
 #[test]
 fn no_cross_crate_name_is_reachable_only_by_a_deep_path() {
     let Some(root) = repo_root() else {

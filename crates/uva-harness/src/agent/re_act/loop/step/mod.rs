@@ -120,20 +120,21 @@ impl TurnState {
         if !self.open || matches!(end_reason, SessionEndReason::Suspended) {
             return;
         }
-        let mut event =
-            uva_session::turn_end(TURN_ORDINAL, end_reason.as_str());
         // A failed turn's message is part of the outcome. Without
         // it the log says only "error", and every reader — the
         // page's banner, an operator reading the log — has to
-        // guess why the run stopped.
-        if let (
-            SessionEndReason::Error(message),
-            uva_session::SessionEvent::Turn { data, .. },
-        ) = (end_reason, &mut event)
-        {
-            data["message"] = serde_json::Value::String(message.clone());
-        }
-        sink.emit_typed(event);
+        // guess why the run stopped. The row's own constructor
+        // carries the message, so the harness asks for the row it
+        // wants instead of patching a row it already has.
+        let message = match end_reason {
+            SessionEndReason::Error(message) => Some(message.as_str()),
+            _ => None,
+        };
+        sink.emit_typed(uva_session::turn_end(
+            TURN_ORDINAL,
+            end_reason.as_str(),
+            message,
+        ));
     }
 }
 

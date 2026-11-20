@@ -1,14 +1,16 @@
 //! Tests for plugin-contributed prompt sections.
 //!
-//! A plugin registers a `PromptSection` on its `Host`; the run's
-//! manifest picks the registrations up once at run start, and
-//! `assemble` renders them right after the identity block. The tests
-//! below pin the three halves of that link: the host's registrations
-//! reach the run's manifest, the manifest's sections reach the
+//! A plugin registers a `PromptSection` on its deployment registry;
+//! the run's manifest picks the registrations up once at run start,
+//! and `assemble` renders them right after the identity block. The
+//! tests below pin the three halves of that link: the registry's
+//! sections reach the run's manifest, the manifest's sections reach the
 //! assembled prompt, and with no sections the prompt is what it always
 //! was.
 
 use std::sync::Arc;
+
+use uva_hook::{HookRegistration, MountPoint, RegistrationOrigin};
 
 use super::{
     super::PromptContext,
@@ -27,6 +29,17 @@ fn section(title: &str, body: &str) -> PromptSection {
     }
 }
 
+// Register one section on the run's deployment table.
+fn register(host: &Host, section: PromptSection) -> HookRegistration {
+    host.hook_registry()
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            section,
+            RegistrationOrigin::InProcess,
+        )
+        .expect("the collection point carries a section")
+}
+
 // An `AgentCaps` whose seam layer wraps `host`'s registrations: the
 // shape the loop's constructor sees when it snapshots the run's
 // manifest.
@@ -39,10 +52,10 @@ fn caps_with_host(host: Host) -> AgentCaps {
 }
 
 #[test]
-fn host_sections_reach_the_assembled_prompt() {
-    let mut host = Host::new();
+fn registry_sections_reach_the_assembled_prompt() {
+    let host = Host::new();
     let _registration =
-        host.prompt_section(section("Audit", "Always cite the source."));
+        register(&host, section("Audit", "Always cite the source."));
     let caps = caps_with_host(host);
 
     let prompt = caps
@@ -62,10 +75,10 @@ fn host_sections_reach_the_assembled_prompt() {
 
 #[test]
 fn sections_render_in_registration_order() {
-    let mut host = Host::new();
-    let _first = host.prompt_section(section("First heading", "alpha marker"));
-    let _second = host.prompt_section(section("Second heading", "beta marker"));
-    let _third = host.prompt_section(section("Third heading", "gamma marker"));
+    let host = Host::new();
+    let _first = register(&host, section("First heading", "alpha marker"));
+    let _second = register(&host, section("Second heading", "beta marker"));
+    let _third = register(&host, section("Third heading", "gamma marker"));
     let caps = caps_with_host(host);
 
     let prompt = caps
@@ -95,9 +108,9 @@ fn sections_render_in_registration_order() {
 fn sections_render_after_the_identity_block() {
     let mut descriptor = descriptor_with_instructions("BASE");
     descriptor.output_schema = Some(r#"{"type":"object"}"#.to_string());
-    let mut host = Host::new();
+    let host = Host::new();
     let _registration =
-        host.prompt_section(section("Audit", "Always cite the source."));
+        register(&host, section("Audit", "Always cite the source."));
     let caps = caps_with_host(host);
 
     let prompt = caps.run_prompt_context(None).assemble(&descriptor);
@@ -198,10 +211,10 @@ fn no_sections_leave_the_prompt_byte_identical() {
 }
 
 #[test]
-fn the_run_manifest_carries_the_host_registrations() {
-    let mut host = Host::new();
+fn the_run_manifest_carries_the_registry_sections() {
+    let host = Host::new();
     let _registration =
-        host.prompt_section(section("Audit", "Always cite the source."));
+        register(&host, section("Audit", "Always cite the source."));
     let caps = caps_with_host(host);
 
     let ctx = caps.run_prompt_context(None);
@@ -209,24 +222,24 @@ fn the_run_manifest_carries_the_host_registrations() {
     assert_eq!(
         ctx.sections().len(),
         1,
-        "the run manifest must carry the host's section"
+        "the run manifest must carry the registry's section"
     );
     assert_eq!(ctx.sections()[0].title, "Audit");
 }
 
 #[test]
 fn a_section_registered_between_runs_appears_on_the_next_run() {
-    let mut host = Host::new();
-    let _first = host.prompt_section(section("First", "one"));
+    let host = Host::new();
+    let _first = register(&host, section("First", "one"));
     let caps = caps_with_host(host.clone());
 
     let run_one = caps.run_prompt_context(None);
     assert_eq!(run_one.sections().len(), 1);
 
     // Registered while the first run's manifest is already snapshotted.
-    // The host clone shares the seam layer's table, so the registration
-    // is visible to the next snapshot without touching the run in flight.
-    let _second = host.prompt_section(section("Second", "two"));
+    // The host clone shares the table, so the registration is visible
+    // to the next snapshot without touching the run in flight.
+    let _second = register(&host, section("Second", "two"));
     let run_two = caps.run_prompt_context(None);
 
     assert_eq!(
@@ -242,10 +255,10 @@ fn a_section_registered_between_runs_appears_on_the_next_run() {
 }
 
 #[test]
-fn a_dispatch_manifest_keeps_the_host_sections() {
-    let mut host = Host::new();
+fn a_dispatch_manifest_keeps_the_registry_sections() {
+    let host = Host::new();
     let _registration =
-        host.prompt_section(section("Audit", "Always cite the source."));
+        register(&host, section("Audit", "Always cite the source."));
     let caps = caps_with_host(host);
     let dispatch = Arc::new(
         PromptContext::default().with_skill("transcribe", "Transcribe."),
@@ -260,7 +273,7 @@ fn a_dispatch_manifest_keeps_the_host_sections() {
     );
     assert!(
         prompt.contains("Always cite the source."),
-        "a per-dispatch manifest must not drop the host's sections; \
+        "a per-dispatch manifest must not drop the registry's sections; \
          got:\n{prompt}"
     );
 }

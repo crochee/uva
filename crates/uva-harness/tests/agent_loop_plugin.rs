@@ -47,8 +47,9 @@ use uva_harness::{
         ReActAgentFactory,
         RunConfig,
     },
-    seams::{self, Seams},
+    seams::Seams,
 };
+use uva_hook::{MountPoint, RegistrationOrigin};
 use uva_kernel::{
     Context,
     EffectHandle,
@@ -650,8 +651,12 @@ fn unload_cascades_consumer_to_pending() {
 #[tokio::test]
 async fn step_pre_short_circuit_skips_provider() {
     let provider = Arc::new(ScriptedProvider::tool_then_text());
-    let mut host = Host::new();
-    let _gate = host.gate(Arc::new(BlockStep));
+    let host = Host::new();
+    let _gate = host.hook_registry().register_gate_at(
+        MountPoint::StepPre,
+        Arc::new(BlockStep),
+        RegistrationOrigin::InProcess,
+    );
 
     let agent = agent_with_seams(
         provider.clone(),
@@ -686,8 +691,12 @@ async fn step_post_observes_result() {
     let provider = Arc::new(ScriptedProvider::tool_then_text());
     let (registry, echo) = registry_with_echo();
     let observations = Arc::new(AtomicUsize::new(0));
-    let mut host = Host::new();
-    let _hook = host.hook(Arc::new(AfterStepProbe(Arc::clone(&observations))));
+    let host = Host::new();
+    let _hook = host.hook_registry().register_hook_at(
+        MountPoint::StepPost,
+        Arc::new(AfterStepProbe(Arc::clone(&observations))),
+        RegistrationOrigin::InProcess,
+    );
 
     let agent = agent_with_seams(provider, registry, Seams::new(host));
     let events = run_agent(agent).await;
@@ -715,8 +724,12 @@ async fn step_post_observes_result() {
 async fn tool_pre_denial_writes_tool_result() {
     let provider = Arc::new(ScriptedProvider::tool_then_text());
     let (registry, echo) = registry_with_echo();
-    let mut host = Host::new();
-    let _gate = host.gate(Arc::new(BlockEcho));
+    let host = Host::new();
+    let _gate = host.hook_registry().register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(BlockEcho),
+        RegistrationOrigin::InProcess,
+    );
 
     let agent = agent_with_seams(provider.clone(), registry, Seams::new(host));
     let _events = run_agent(agent).await;
@@ -739,8 +752,15 @@ async fn tool_pre_denial_writes_tool_result() {
 async fn tool_post_rewrite_reaches_model() {
     let provider = Arc::new(ScriptedProvider::tool_then_text());
     let (registry, echo) = registry_with_echo();
-    let mut host = Host::new();
-    let _rewrite = host.result_transformer(Arc::new(RewriteEcho));
+    let host = Host::new();
+    let _rewrite = host
+        .hook_registry()
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            Arc::new(RewriteEcho),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a result transformer belongs on `tool/post-execute`");
 
     let agent = agent_with_seams(provider.clone(), registry, Seams::new(host));
     let _events = run_agent(agent).await;
@@ -759,15 +779,26 @@ async fn tool_post_rewrite_reaches_model() {
 
 #[test]
 fn prompt_sections_withdraw_with_their_registrations() {
-    assert_eq!(seams::PROMPT_SECTIONS, "prompt/sections");
+    assert_eq!(MountPoint::PromptSections.as_str(), "prompt/sections");
 
     let drops = Arc::new(AtomicUsize::new(0));
-    let mut host = Host::new();
-    let hook = host.hook(Arc::new(DropProbe(Arc::clone(&drops))));
-    let section = host.prompt_section(PromptSection {
-        title: "Test".to_string(),
-        body: "section body".to_string(),
-    });
+    let host = Host::new();
+    let hook = host.hook_registry().register_hook_at(
+        MountPoint::StepPre,
+        Arc::new(DropProbe(Arc::clone(&drops))),
+        RegistrationOrigin::InProcess,
+    );
+    let section = host
+        .hook_registry()
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            PromptSection {
+                title: "Test".to_string(),
+                body: "section body".to_string(),
+            },
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a prompt section belongs on `prompt/sections`");
     let seams = Seams::new(host.clone());
     assert_eq!(seams.prompt_sections().len(), 1);
     assert_eq!(
@@ -793,9 +824,23 @@ fn prompt_sections_withdraw_with_their_registrations() {
 
 #[tokio::test]
 async fn llm_request_and_result_transformers() {
-    let mut host = Host::new();
-    let _request = host.request_transformer(Arc::new(SetTemperature));
-    let _result = host.result_transformer(Arc::new(RewriteResult));
+    let host = Host::new();
+    let _request = host
+        .hook_registry()
+        .register_request_transformer_at(
+            MountPoint::LlmRequest,
+            Arc::new(SetTemperature),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a request transformer belongs on `llm/request`");
+    let _result = host
+        .hook_registry()
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            Arc::new(RewriteResult),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a result transformer belongs on `tool/post-execute`");
     let seams = Seams::new(host);
 
     let state = AgentState::with_window(4_096);
@@ -860,10 +905,17 @@ fn unload_removes_the_agent_loop_service() {
 #[test]
 fn seams_empty_when_the_last_registration_drops() {
     let mut host = Host::new();
-    let section = host.prompt_section(PromptSection {
-        title: "Audit".to_string(),
-        body: "cite sources".to_string(),
-    });
+    let section = host
+        .hook_registry()
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            PromptSection {
+                title: "Audit".to_string(),
+                body: "cite sources".to_string(),
+            },
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a prompt section belongs on `prompt/sections`");
     let tool = host.tool(Arc::new(FakeTool::new("seam-tool", "x")));
     let probe = Seams::new(host.clone());
     assert_eq!(probe.prompt_sections().len(), 1);
@@ -889,17 +941,34 @@ fn seams_empty_when_the_last_registration_drops() {
 async fn registrations_run_in_order_and_short_circuit_stops_later() {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let later = Arc::new(AtomicUsize::new(0));
-    let mut host = Host::new();
-    let _first = host.hook(Arc::new(OrderHook {
-        label: "first",
-        seen: Arc::clone(&seen),
-    }));
-    let _second = host.hook(Arc::new(OrderHook {
-        label: "second",
-        seen: Arc::clone(&seen),
-    }));
-    let _deny = host.gate(Arc::new(DenyGate));
-    let _later = host.gate(Arc::new(LaterGate(Arc::clone(&later))));
+    let host = Host::new();
+    let registry = host.hook_registry();
+    let _first = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(OrderHook {
+            label: "first",
+            seen: Arc::clone(&seen),
+        }),
+        RegistrationOrigin::InProcess,
+    );
+    let _second = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(OrderHook {
+            label: "second",
+            seen: Arc::clone(&seen),
+        }),
+        RegistrationOrigin::InProcess,
+    );
+    let _deny = registry.register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(DenyGate),
+        RegistrationOrigin::InProcess,
+    );
+    let _later = registry.register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(LaterGate(Arc::clone(&later))),
+        RegistrationOrigin::InProcess,
+    );
     let seams = Seams::new(host);
 
     let state = AgentState::with_window(4_096);

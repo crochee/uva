@@ -8,7 +8,10 @@
 //! and the reaping. What is left here is the TUI's own domain:
 //!
 //! - **method mapping** — [`RequestKind`] names the wire methods the
-//!   reducer's actions serialize to;
+//!   reducer's actions serialize to; the names are the server's own
+//!   constants ([`uva_app_server::rpc::methods::names`]), so the
+//!   terminal keeps no copy of the registry and cannot misspell a
+//!   method it calls;
 //! - **id correlation** — every [`Transport::send`] allocates an id
 //!   and spawns one task that awaits the gateway client's answer and
 //!   delivers it as a [`TransportEvent::Response`] carrying the
@@ -56,6 +59,7 @@ use futures::{
 };
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, task::JoinHandle};
+use uva_app_server::rpc::methods::names;
 use uva_gateway::{
     ClientError,
     Gateway,
@@ -103,8 +107,6 @@ pub enum RequestKind {
     Cancel,
     /// `session/unfollow`.
     Unfollow,
-    /// `sessions/events`.
-    Events,
     /// `sessions/list`.
     ListSessions,
     /// `sessions/delete`.
@@ -121,19 +123,23 @@ pub enum RequestKind {
 
 impl RequestKind {
     /// The wire method this request kind names.
+    ///
+    /// The names are the server's own constants
+    /// ([`uva_app_server::rpc::methods::names`]): the terminal keeps
+    /// no copy of the registry, so a method it calls cannot be
+    /// misspelled and a method the server adds needs nothing here.
     #[must_use]
     pub fn method(self) -> &'static str {
         match self {
-            Self::CreateSession => "chat/session/create",
-            Self::Follow => "sessions/follow",
-            Self::SendMessage => "chat/message/send",
-            Self::ApprovalRespond => "approval/respond",
-            Self::Cancel => "chat/cancel",
-            Self::Unfollow => "session/unfollow",
-            Self::Events => "sessions/events",
-            Self::ListSessions => "sessions/list",
-            Self::DeleteSession => "sessions/delete",
-            Self::UiSchema => "ui/schema",
+            Self::CreateSession => names::CHAT_SESSION_CREATE,
+            Self::Follow => names::SESSIONS_FOLLOW,
+            Self::SendMessage => names::CHAT_MESSAGE_SEND,
+            Self::ApprovalRespond => names::APPROVAL_RESPOND,
+            Self::Cancel => names::CHAT_CANCEL,
+            Self::Unfollow => names::SESSION_UNFOLLOW,
+            Self::ListSessions => names::SESSIONS_LIST,
+            Self::DeleteSession => names::SESSIONS_DELETE,
+            Self::UiSchema => names::UI_SCHEMA,
             Self::Catalog(method) => method,
         }
     }
@@ -230,22 +236,16 @@ impl Request {
         }
     }
 
-    /// `sessions/events` for one session.
-    #[must_use]
-    pub fn events(session_id: impl Into<String>) -> Self {
-        Self {
-            kind: RequestKind::Events,
-            params: json!({ "id": session_id.into() }),
-        }
-    }
-
     /// `sessions/list` — the sidebar's workspace tree, one page of
-    /// summaries.
+    /// summaries at the server's own default page size: the number
+    /// is the server's, referenced rather than copied.
     #[must_use]
     pub fn list_sessions() -> Self {
         Self {
             kind: RequestKind::ListSessions,
-            params: json!({ "limit": 50 }),
+            params: json!({
+                "limit": uva_app_server::api::v1::DEFAULT_LIMIT
+            }),
         }
     }
 
@@ -269,9 +269,10 @@ impl Request {
 
     /// Any directory method with its params passed through verbatim.
     ///
-    /// The method name must be one the server registered
-    /// (`crates/uva-app-server/src/rpc/methods/**`); an unknown
-    /// name comes back as a JSON-RPC error, which the directory view
+    /// The method name is one the server registered — the terminal
+    /// names it with the server's own constants
+    /// ([`uva_app_server::rpc::methods::names`]); an unknown name
+    /// comes back as a JSON-RPC error, which the directory view
     /// renders as its status line.
     #[must_use]
     pub fn catalog(method: &'static str, params: Value) -> Self {
@@ -835,7 +836,7 @@ fn spawn_probe(state: Arc<TransportState>) {
             state.announce_down("the gateway is unreachable");
             return;
         }
-        let outcome = client.request("health/ping", json!({})).await;
+        let outcome = client.request(names::HEALTH_PING, json!({})).await;
         state.probing.store(false, Ordering::Relaxed);
         match outcome {
             Ok(value) => {

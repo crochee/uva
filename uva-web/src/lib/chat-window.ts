@@ -56,7 +56,7 @@ function rowData(row: SessionTurn): Record<string, unknown> | null {
 export function turnEndReason(row: SessionTurn): string | null {
   if (row.type !== 'turn') return null;
   const data = rowData(row);
-  if (boundaryKind(data) !== 'end') return null;
+  if (boundaryKind(row) !== 'end') return null;
   return data && typeof data.reason === 'string' ? data.reason : 'completed';
 }
 
@@ -68,7 +68,11 @@ export function turnEndReason(row: SessionTurn): string | null {
 function stepStartIndex(row: SessionTurn): number | null {
   if (row.type !== 'step') return null;
   const data = rowData(row);
-  if (boundaryKind(data) !== 'start') return null;
+  if (boundaryKind(row) !== 'start') return null;
+  // The typed member rides the row's top level; the payload bag's copy
+  // is the older spelling, tolerated for a row written before the field
+  // was typed.
+  if (typeof row.step === 'number') return row.step;
   return data && typeof data.step === 'number' ? data.step : -1;
 }
 
@@ -232,7 +236,7 @@ export interface TurnDurable {
 /** True for the `turn { start }` row that opens a run's turn. */
 function isTurnStart(row: SessionTurn): boolean {
   if (row.type !== 'turn') return false;
-  return boundaryKind(rowData(row)) === 'start';
+  return boundaryKind(row) === 'start';
 }
 
 /**

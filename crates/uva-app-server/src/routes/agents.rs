@@ -16,7 +16,7 @@
 //! and a writable descriptor. They run the same loop as the
 //! canonical agent.
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use parking_lot::RwLock;
 use schemars::JsonSchema;
@@ -26,21 +26,12 @@ use uva::{
     core::{Error, agent::AgentDescriptor, registry::Registry},
 };
 
-use super::helpers::paginate;
+use super::list::{Direction, SortKey};
 use crate::{
-    api::{
-        List,
-        PageQuery,
-        resolve_page,
-        validate_resource_name,
-        validate_sort,
-    },
+    api::{List, PageQuery, validate_resource_name},
     rpc::RpcError,
     state::AppState,
 };
-
-/// Sortable fields for the agents list endpoint.
-const AGENT_SORT_WHITELIST: &[&str] = &["name", "kind"];
 
 /// Names of agents that ship with the binary and cannot be
 /// removed through the v1 API. The single canonical agent is
@@ -200,17 +191,43 @@ pub(crate) async fn build_react_agent(
         spawner: None,
     }))
 }
+
+/// The agent list's sort vocabulary: one key, declared once.
+///
+/// `kind` used to sit in this route's whitelist while the ordering
+/// only ever compared names — a key the route accepted and never
+/// honoured. It is gone: the set of accepted keys and the set of
+/// ordered keys are one declaration now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSort {
+    Name,
+}
+
+impl SortKey<AgentDetail> for AgentSort {
+    const ALL: &'static [Self] = &[Self::Name];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+        }
+    }
+
+    fn compare(self, a: &AgentDetail, b: &AgentDetail) -> Ordering {
+        match self {
+            Self::Name => a.name.cmp(&b.name),
+        }
+    }
+
+    fn default_sort() -> (Self, Direction) {
+        (Self::Name, Direction::Ascending)
+    }
+}
+
 /// GET /api/v1/agents — list registered agents (cursor paginated).
 pub async fn list_agents(
     state: Arc<AppState>,
     page: PageQuery,
 ) -> Result<List<AgentDetail>, RpcError> {
-    validate_sort(
-        page.sort.as_deref().unwrap_or("name"),
-        AGENT_SORT_WHITELIST,
-    )?;
-    let resolved = resolve_page(&page)?;
-
     // Cache fast path: key on registry version. Hit: clone the
     // `Arc<Vec<Arc<AgentEntry>>>` (8-byte refcount bump) without
     // touching the registry. Miss: acquire the registry read
@@ -236,16 +253,13 @@ pub async fn list_agents(
         None => rebuild_entries_cache(&state, version).await?,
     };
 
-    let mut details: Vec<AgentDetail> = entries_arc
+    let details: Vec<AgentDetail> = entries_arc
         .iter()
         .map(|e| detail_from(e.descriptor()))
         .collect();
-    details.sort_by(|a, b| a.name.cmp(&b.name));
-    if resolved.descending {
-        details.reverse();
-    }
-    let list = paginate(details, &resolved, |d: &AgentDetail| d.name.as_str());
-    Ok(list)
+    Ok(AgentSort::sort_and_page(details, &page, |d| {
+        d.name.as_str()
+    })?)
 }
 
 /// Build the entries cache for `LIST_CACHE`. Acquires the
@@ -581,5 +595,57 @@ mod tests {
             source: "first-registered",
         };
         assert_eq!(resp.source, "first-registered");
+    }
+
+    async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let sessions = uva::session::manager::SessionRegistry::new(
+            dir.path().join("sessions"),
+        );
+        let state =
+            AppState::for_test(sessions, dir.path().to_path_buf()).await;
+        (Arc::new(state), dir)
+    }
+
+    /// The route accepts exactly the keys it declares.
+    ///
+    /// `kind` used to sit in the accepted set while the ordering only
+    /// compared names, so `?sort=kind` answered 200 in name order. The
+    /// refusal is the observable half of that fix, and it is what keeps
+    /// the accepted set and the ordered set from drifting apart again.
+    #[tokio::test]
+    async fn the_agent_list_accepts_only_the_declared_sort_keys() {
+        let (state, _dir) = test_state().await;
+
+        let defaulted = list_agents(Arc::clone(&state), PageQuery::new()).await;
+        assert!(
+            defaulted.is_ok(),
+            "a sortless list uses the declared default"
+        );
+
+        for accepted in ["name", "-name"] {
+            let listed = list_agents(
+                Arc::clone(&state),
+                PageQuery::new().with_sort(accepted),
+            )
+            .await;
+            assert!(listed.is_ok(), "`{accepted}` should be accepted");
+        }
+
+        for refused in ["kind", "-kind", "nope", ""] {
+            let err = list_agents(
+                Arc::clone(&state),
+                PageQuery::new().with_sort(refused),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("`{refused}` should be refused"));
+            let expected = if refused.is_empty() {
+                "validation"
+            } else {
+                "invalid_item"
+            };
+            assert_eq!(err.code, expected, "`{refused}` answered {err:?}");
+        }
     }
 }

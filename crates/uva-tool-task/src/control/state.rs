@@ -72,6 +72,28 @@ pub enum RoundOutcome {
     Failed,
 }
 
+impl RoundOutcome {
+    /// The name the round's ending is written down in.
+    ///
+    /// One vocabulary for one fact: the roster's activity line, the
+    /// progress line the parent's tool block carries and the child's
+    /// `subagent_exit` footer all say the word this method returns.
+    ///
+    /// The words are the runtime's own end-reason words — the first
+    /// three of them: `completed`, `cancelled` and `error`. The three
+    /// finer reasons the runtime also knows (`max_iterations`,
+    /// `suspended`, `config_drift`) are not outcome words: they say
+    /// *why* a round ended, and the failure text keeps them.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "error",
+        }
+    }
+}
+
 /// What a `message` did, decided by the target's state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageOutcome {
@@ -161,12 +183,7 @@ impl ChildState {
     ) -> Result<(), TransitionError> {
         self.require_running("finish")?;
         self.status = ChildStatus::Idle;
-        self.activity = match outcome {
-            RoundOutcome::Completed => "finished",
-            RoundOutcome::Cancelled => "cancelled",
-            RoundOutcome::Failed => "failed",
-        }
-        .to_string();
+        self.activity = outcome.as_str().to_string();
         self.idle_for = Duration::ZERO;
         Ok(())
     }

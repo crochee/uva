@@ -115,6 +115,7 @@ lint-sh: ## Lint the bash gate scripts (shellcheck)
 	  scripts/check-harness-docs.sh \
 	  scripts/check-single-writer.sh \
 	  scripts/check-row-vocabulary.sh \
+	  scripts/check-list-recipe.sh \
 	  scripts/check-frozen-api.sh \
 	  scripts/check-publishable.sh \
 	  scripts/check-public-docs.sh \
@@ -495,7 +496,7 @@ CRATES := $(shell cargo metadata --no-deps --format-version 1 2>/dev/null \
 fmt-check: ## Verify Rust formatting (no writes)
 	cargo +nightly fmt --all --check
 
-ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-hook-external check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-row-vocabulary check-plugin-shape check-host-capabilities check-profile-document check-test-layout check-deny check-web check-web-contract check-web-methods test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + frontend type/lint/contract/method gates + every …
+ci: fmt-check lint-rust doc-check test-guides check-mvp-deps check-kernel-deps check-hook-external check-stdout check-cli-surface check-no-runtime check-harness-features check-public-api-runtime check-pub-surface check-pub-surface-strict check-frozen-api check-publishable check-public-docs check-claim-language check-clock check-harness-shape check-harness-docs check-single-writer check-row-vocabulary check-list-recipe check-plugin-shape check-host-capabilities check-profile-document check-test-layout check-deny check-web check-web-contract check-web-methods test-crates ## The fast gate: fmt, clippy, rustdoc, compiled guides, dependency + layout + shape + comment-budget + public-docs + stdout-discipline + CLI-surface + clock + single-writer + publishability + license/ban invariants + frontend type/lint/contract/method gates + every …
 
 test-crates: ## Run every member's test suite in turn (never --workspace)
 	@set -e; for c in $(CRATES); do \
@@ -828,6 +829,17 @@ check-single-writer: ## Fail when a session's rows are written outside the sessi
 check-row-vocabulary: ## Fail when production code spells a session row tag itself
 	@bash scripts/check-row-vocabulary.sh --self-test
 	@bash scripts/check-row-vocabulary.sh
+
+# ---- List recipe (one place builds a page envelope) ----
+# Every cursor-paginated list route answers the same six questions —
+# which sort keys, how they order, which default, which way `-` turns
+# it, which row a page resumes after, what the envelope holds. Six
+# per-route copies drifted silently until `routes/list/` became the one
+# implementation (ADR 0027); this gate is what keeps it the one. A
+# `List { … }` literal outside the recipe is a second construction
+# path — `List::new` / `List::map` are not, because they carry no page.
+check-list-recipe: ## Fail when a list envelope is built outside the list recipe
+	@bash scripts/check-list-recipe.sh
 
 # ---- Plugin shape (R-G) ----
 # Plugin tool roots (`crates/uva-tool-plugins`, `crates/uva-tool-task`

@@ -8,6 +8,11 @@
 //! This module owns the wire types and the error vocabulary; the
 //! loader that assembles them lives in [`super::tree`].
 //!
+//! The wire types are the contract's owner: a client decodes the
+//! `ui/schema` answer into [`UiSchema`] and [`UiComponent`]
+//! themselves, so the shape the server publishes and the shape a
+//! client reads cannot drift apart.
+//!
 //! # Namespace
 //!
 //! UI ids carry the kernel's [`UI_PREFIX`] (`ui.`). The core loader
@@ -19,12 +24,12 @@
 //! [`load_ui_tree`]: super::tree::load_ui_tree
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uva::kernel::UI_PREFIX;
 
 /// One UI row's rendered description.
-#[derive(Debug, Clone, JsonSchema, PartialEq, Serialize)]
+#[derive(Debug, Clone, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct UiSchema {
     /// The schema version the front-end renders. v1 is the current one.
     pub version: u32,
@@ -33,7 +38,7 @@ pub struct UiSchema {
 }
 
 /// One component a UI row places in a slot.
-#[derive(Debug, Clone, JsonSchema, PartialEq, Serialize)]
+#[derive(Debug, Clone, JsonSchema, PartialEq, Serialize, Deserialize)]
 pub struct UiComponent {
     /// Which slot renders it, e.g. `chat.sidebar`.
     pub slot: String,

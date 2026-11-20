@@ -10,12 +10,17 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //!
+//! use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 //! use uva_hook_plugins::redact::RedactTransformer;
 //!
-//! let mut host = uva_harness::Host::new();
-//! let _registration = host.result_transformer(Arc::new(
-//!     RedactTransformer::default(),
-//! ));
+//! let registry = HookRegistry::new();
+//! let _registration = registry
+//!     .register_result_transformer_at(
+//!         MountPoint::ToolPost,
+//!         Arc::new(RedactTransformer::default()),
+//!         RegistrationOrigin::InProcess,
+//!     )
+//!     .expect("a result transformer belongs on `tool/post-execute`");
 //! ```
 //!
 //! ## Default rules

@@ -26,7 +26,7 @@ use uva::{
 };
 
 use super::EPHEMERAL_SESSION_PREFIX;
-use crate::routes::sessions::is_path_component;
+use crate::state::session_resolution::user_sessions_dir;
 
 /// The server's session index: the sessions this deployment can read.
 pub struct ServerSessionIndex {
@@ -135,11 +135,13 @@ impl SessionIndex for ServerSessionIndex {
         // directory holds what any process ever wrote — a delegated
         // child is exactly the kind of session only the directory
         // knows. A hand-built `user_id` must not climb out of the
-        // sessions root, so it is held to one path component.
-        if !is_path_component(user_id) {
+        // sessions root, so the directory the resolution module
+        // hands back is the only one scanned.
+        let Some(dir) =
+            user_sessions_dir(self.registry.sessions_root(), user_id)
+        else {
             return ids;
-        }
-        let dir = self.registry.sessions_root().join(user_id);
+        };
         let scanned =
             tokio::task::spawn_blocking(move || session_dir_ids(&dir))
                 .await

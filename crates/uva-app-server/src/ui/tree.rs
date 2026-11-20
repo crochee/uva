@@ -103,7 +103,7 @@ pub struct SlotDecl {
 }
 
 /// The wire projection of one declared slot (`ui/schema`'s `slots`).
-#[derive(Debug, Clone, JsonSchema, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, JsonSchema, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotInfo {
     /// The host-agnostic slot id.
     pub id: String,

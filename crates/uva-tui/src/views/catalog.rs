@@ -27,9 +27,10 @@ use ratatui::{
     widgets::{Block, Clear, Paragraph},
 };
 use serde_json::{Value, json};
+use uva_app_server::rpc::methods::names;
 
 use crate::{
-    domains::{DOMAINS, DomainSpec, EnterOp, KNOWN_METHODS, Op, decode_list},
+    domains::{DOMAINS, DomainSpec, EnterOp, Op, decode_list},
     render::centered,
     transport::{Request, RpcFailure},
     views::{
@@ -183,7 +184,7 @@ impl Catalog {
     /// entry). Nothing is sent until the operator types the query and
     /// presses `Enter`.
     pub fn open_search(&mut self) -> Vec<Request> {
-        match DomainSpec::by_list_method("search/all") {
+        match DomainSpec::by_list_method(names::SEARCH_ALL) {
             Some(spec) => self.open(spec),
             None => Vec::new(),
         }
@@ -192,7 +193,7 @@ impl Catalog {
     /// Open the search domain with a query (the palette's
     /// `search <词>`).
     pub fn search(&mut self, query: &str) -> Vec<Request> {
-        let Some(spec) = DomainSpec::by_list_method("search/all") else {
+        let Some(spec) = DomainSpec::by_list_method(names::SEARCH_ALL) else {
             return Vec::new();
         };
         let _ = self.open(spec);
@@ -273,13 +274,28 @@ impl Catalog {
         };
         if method == spec.list_method {
             match result {
-                Ok(value) => {
-                    let page = decode_list(value, spec);
-                    let append = self.last_cursor.take().is_some();
-                    self.list.set_page(page, append);
-                    self.status =
-                        format!("{} · {} 行", spec.label, self.list.rows.len());
-                }
+                Ok(value) => match decode_list(value, spec) {
+                    Ok(page) => {
+                        let append = self.last_cursor.take().is_some();
+                        self.list.set_page(page, append);
+                        self.status = format!(
+                            "{} · {} 行",
+                            spec.label,
+                            self.list.rows.len()
+                        );
+                    }
+                    Err(error) => {
+                        // The answer is not the envelope the domain
+                        // answers: the shape drifted. Say so — an
+                        // empty table would read as "this domain
+                        // holds no rows".
+                        self.last_cursor = None;
+                        let message =
+                            format!("{} 解析失败: {error}", spec.label);
+                        self.list.set_error(message.clone());
+                        self.status = message;
+                    }
+                },
                 Err(error) => {
                     self.last_cursor = None;
                     self.list.set_error(error.to_string());
@@ -458,7 +474,7 @@ impl Catalog {
                 self.status = "没有选中的行".to_string();
                 return Vec::new();
             }
-            if op.method == "sessions/resume" {
+            if op.method == names::SESSIONS_RESUME {
                 match resume {
                     Some(material)
                         if material.session_id == target
@@ -609,7 +625,7 @@ impl Catalog {
             "regenerate" => {
                 self.status = "regenerate".to_string();
                 vec![Request::catalog(
-                    "chat/regenerate",
+                    names::CHAT_REGENERATE,
                     json!({ "session_id": material.session_id }),
                 )]
             }
@@ -621,7 +637,7 @@ impl Catalog {
                 let thumbs_up = command == "feedback-up";
                 self.status = format!("{command} · {message_id}");
                 vec![Request::catalog(
-                    "chat/feedback",
+                    names::CHAT_FEEDBACK,
                     json!({
                         "message_id": message_id,
                         "thumbs_up": thumbs_up,
@@ -658,10 +674,8 @@ impl Catalog {
                 }
             }
         };
-        let Some(method) = KNOWN_METHODS
-            .iter()
-            .copied()
-            .find(|name| *name == method_name)
+        let Some(method) =
+            names::ALL.iter().copied().find(|name| *name == method_name)
         else {
             self.status =
                 format!("未知方法 {method_name}，未发送（注册表里没有）");

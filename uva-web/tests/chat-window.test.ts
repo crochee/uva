@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   emptyWindow,
+  turnEndReason,
   windowReducer,
   type ChatWindow,
   type WindowAction,
@@ -258,5 +259,39 @@ describe('the window reducer', () => {
     });
     state = apply(state, { kind: 'row', seq: 1, row: turnRow(1, 'end', 'completed') });
     expect(state.steers).toHaveLength(0);
+  });
+});
+
+describe("a turn boundary is read from the row's typed member", () => {
+  it('reads the typed `kind` the row declares', () => {
+    // The row's typed member is the fact: the writer stamps `kind` on
+    // the row's top level and the contract declares it there. The
+    // payload bag's copy is the older spelling.
+    const row: SessionTurn = {
+      type: 'turn',
+      seq: 1,
+      kind: 'end',
+      data: { reason: 'completed' },
+    };
+    expect(turnEndReason(row)).toBe('completed');
+  });
+
+  it('still reads a row written before the member was typed', () => {
+    const row: SessionTurn = {
+      type: 'turn',
+      seq: 1,
+      data: { kind: 'end', reason: 'completed' },
+    };
+    expect(turnEndReason(row)).toBe('completed');
+  });
+
+  it("prefers the typed member over the payload bag's copy", () => {
+    const row: SessionTurn = {
+      type: 'turn',
+      seq: 1,
+      kind: 'end',
+      data: { kind: 'start' },
+    };
+    expect(turnEndReason(row)).toBe('completed');
   });
 });

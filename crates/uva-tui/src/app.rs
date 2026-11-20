@@ -27,6 +27,22 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
+use uva_app_server::{
+    api::List,
+    routes::{
+        chat::{CreateSessionResponse, SendMessageResponse},
+        follow::{FollowEvent, FollowSnapshot},
+        sessions::SessionSummary,
+        ui::UiSchemaResponse,
+    },
+    rpc::notify::{
+        APPROVAL_REQUEST,
+        ApprovalRequestNotification,
+        SESSION_EVENT,
+    },
+    session::{controller::LiveTurn, status::SessionStatus},
+};
+use uva_approval::ApprovalRequest;
 use uva_provider::{ContentPart, Message};
 use uva_session::{CurrentRow, RowTag, SessionEvent, restore_row};
 
@@ -70,7 +86,8 @@ pub enum Role {
     User,
     /// The model's answer.
     Assistant,
-    /// A tool result.
+    /// A tool line: a call the projection shows while it runs, or
+    /// the result it produced.
     Tool,
     /// A projection-level notice.
     System,
@@ -89,6 +106,9 @@ pub struct TranscriptLine {
     /// `None` for a line that did not come from a stamped row: an
     /// old log's rows carry no ordinal, so the line has none to
     /// offer.
+    /// The live projection's tool calls are not rows at all; their
+    /// line carries none until the durable row lands and retires
+    /// them.
     pub seq: Option<u64>,
 }
 
@@ -121,6 +141,13 @@ pub enum TurnState {
 }
 
 /// A held call waiting for the operator.
+///
+/// The prompt is the terminal's **view** of a held call: what the
+/// overlay shows and what the answer correlates with. Every value in
+/// it is read from the server's own approval vocabulary — the
+/// notification's type or the row's typed event — so a change there
+/// breaks this crate's build instead of quietly changing what the
+/// operator sees.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalPrompt {
     /// The session the suspension belongs to.
@@ -135,6 +162,26 @@ pub struct ApprovalPrompt {
     pub risk: String,
     /// The agent the call belongs to.
     pub agent: String,
+}
+
+impl ApprovalPrompt {
+    /// The prompt for one held call, read from the approval
+    /// vocabulary's request.
+    ///
+    /// The request is the server's type: the values below are its
+    /// own fields, and the risk is the spelling the tool vocabulary
+    /// publishes.
+    #[must_use]
+    fn from_request(session_id: String, request: &ApprovalRequest) -> Self {
+        Self {
+            session_id,
+            approval_id: request.id.clone(),
+            call_id: request.call_id.clone(),
+            tool: request.tool.clone(),
+            risk: request.risk.as_str().to_string(),
+            agent: request.agent.clone(),
+        }
+    }
 }
 
 /// The operator's answer to an [`ApprovalPrompt`].
@@ -346,11 +393,6 @@ pub enum Action {
         /// The session to stop following.
         session_id: String,
     },
-    /// `sessions/events`.
-    LoadEvents {
-        /// The session whose durable rows should be read.
-        session_id: String,
-    },
     /// `sessions/list` — refresh the sidebar's workspace tree.
     ListSessions,
     /// Copy one id to the terminal's clipboard (OSC 52). Local only —
@@ -393,9 +435,6 @@ impl Action {
             Self::Unfollow { session_id } => {
                 Some(Request::unfollow(session_id))
             }
-            Self::LoadEvents { session_id } => {
-                Some(Request::events(session_id))
-            }
             Self::ListSessions => Some(Request::list_sessions()),
             Self::CopyId { .. } => None,
             Self::DeleteSession { id } => Some(Request::delete_session(id)),
@@ -413,6 +452,12 @@ pub struct App {
     messages: Vec<TranscriptLine>,
     live_text: String,
     reasoning: String,
+    /// The live projection's tool calls, as the lines the
+    /// conversation draws while the turn runs: the tool's name, the
+    /// state the server published, and what it printed so far. Like
+    /// the live text they are transient — the durable row that
+    /// carries the step's content retires them.
+    live_tool_lines: Vec<TranscriptLine>,
     /// The live projection's start position: the log ordinal where its
     /// step began. A durable content row past this position retires
     /// the projection.
@@ -454,7 +499,11 @@ pub struct App {
     follow_request_hash: String,
     /// The deployment's UI tree (empty until the first `ui/schema`
     /// answers).
-    ui: crate::ui_schema::UiSchemaResponse,
+    ///
+    /// The tree is the server's own type: the answer is decoded in
+    /// place, so the slots and the components the terminal reads are
+    /// the server's fields.
+    ui: UiSchemaResponse,
     /// The tool each call id names: the assistant row's `tool_use`
     /// part fills it, the `tool_result` row reads it back by the id
     /// the result answers.
@@ -470,6 +519,7 @@ impl Default for App {
             messages: Vec::new(),
             live_text: String::new(),
             reasoning: String::new(),
+            live_tool_lines: Vec::new(),
             live_start_seq: 0,
             live_seq: 0,
             superseded_start: 0,
@@ -494,7 +544,7 @@ impl Default for App {
             follow_cursor: 0,
             follow_pending: Vec::new(),
             follow_request_hash: String::new(),
-            ui: crate::ui_schema::UiSchemaResponse::default(),
+            ui: UiSchemaResponse::default(),
             tool_names: HashMap::new(),
         }
     }
@@ -528,7 +578,7 @@ impl App {
     /// The terminal host's UI tree (empty until the first `ui/schema`
     /// answers).
     #[must_use]
-    pub fn ui(&self) -> &crate::ui_schema::UiSchemaResponse {
+    pub fn ui(&self) -> &UiSchemaResponse {
         &self.ui
     }
 
@@ -542,6 +592,14 @@ impl App {
     #[must_use]
     pub fn live_text(&self) -> &str {
         &self.live_text
+    }
+
+    /// The live projection's tool calls, one line per call, in call
+    /// order — drawn while the turn runs, retired by the durable row
+    /// that carries the step's content.
+    #[must_use]
+    pub fn live_tool_lines(&self) -> &[TranscriptLine] {
+        &self.live_tool_lines
     }
 
     /// The composer's current text.
@@ -1286,7 +1344,7 @@ impl App {
                 request, result, ..
             } => self.apply_response(request, result),
             TransportEvent::Notification { method, params } => {
-                self.apply_notification(&method, &params);
+                self.apply_notification(&method, params);
                 Vec::new()
             }
             TransportEvent::Disconnected { reason } => {
@@ -1353,6 +1411,7 @@ impl App {
         self.creating = false;
         self.turn = TurnState::Idle;
         self.live_text.clear();
+        self.live_tool_lines.clear();
         self.reasoning.clear();
         self.approval = None;
         self.approval_answered = false;
@@ -1394,7 +1453,6 @@ impl App {
             }
             RequestKind::Follow
             | RequestKind::Unfollow
-            | RequestKind::Events
             | RequestKind::ListSessions
             | RequestKind::UiSchema => {}
             RequestKind::DeleteSession => {
@@ -1416,26 +1474,39 @@ impl App {
         match kind {
             RequestKind::CreateSession => {
                 self.creating = false;
-                let Some(session_id) = value
-                    .get("session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                else {
-                    self.status =
-                        "the core answered create without a session id"
-                            .to_string();
-                    return Vec::new();
-                };
+                // The answer is the server's own type: a reply that
+                // drifted is a status line, not a half-created
+                // session.
+                let answer: CreateSessionResponse =
+                    match serde_json::from_value(value) {
+                        Ok(answer) => answer,
+                        Err(error) => {
+                            self.status = format!(
+                                "the create answer was unreadable: {error}"
+                            );
+                            return Vec::new();
+                        }
+                    };
+                let session_id = answer.session_id;
                 self.session_id = Some(session_id.clone());
-                self.agent_name = value
-                    .get("agent_name")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
+                self.agent_name = answer.agent_name;
                 self.status = "session created".to_string();
                 vec![Action::Follow { session_id }]
             }
             RequestKind::Follow => {
-                self.apply_follow(&value);
+                // The baseline is the server's own type: a frame that
+                // drifted is a status line, not a half-applied state.
+                let snapshot =
+                    match serde_json::from_value::<FollowSnapshot>(value) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            self.status = format!(
+                                "the follow baseline was unreadable: {error}"
+                            );
+                            return Vec::new();
+                        }
+                    };
+                self.apply_follow(&snapshot);
                 let mut actions = self.take_pending_prompt();
                 // The first baseline without a parked prompt is also
                 // the moment the sidebar can list what exists. When a
@@ -1449,7 +1520,16 @@ impl App {
             }
             RequestKind::SendMessage => {
                 self.turn = TurnState::Running;
-                self.status = send_status(&value);
+                // The answer is the server's own type: the delivery it
+                // names is the delivery vocabulary's, not a string the
+                // terminal guesses at.
+                match serde_json::from_value::<SendMessageResponse>(value) {
+                    Ok(answer) => self.status = send_status(&answer),
+                    Err(error) => {
+                        self.status =
+                            format!("the send answer was unreadable: {error}");
+                    }
+                }
                 Vec::new()
             }
             RequestKind::ApprovalRespond => {
@@ -1462,6 +1542,7 @@ impl App {
             RequestKind::Cancel => {
                 self.turn = TurnState::Idle;
                 self.live_text.clear();
+                self.live_tool_lines.clear();
                 self.status = "cancelled".to_string();
                 Vec::new()
             }
@@ -1469,16 +1550,8 @@ impl App {
                 self.status = "session unfollowed".to_string();
                 Vec::new()
             }
-            RequestKind::Events => {
-                if let Some(rows) = value.as_array() {
-                    for row in rows {
-                        self.apply_row(row);
-                    }
-                }
-                Vec::new()
-            }
             RequestKind::ListSessions => {
-                self.apply_sessions_list(&value);
+                self.apply_sessions_list(value);
                 Vec::new()
             }
             RequestKind::DeleteSession => {
@@ -1488,9 +1561,7 @@ impl App {
             RequestKind::UiSchema => {
                 // The tree is data the terminal may not understand:
                 // an unreadable answer is a status line, not a crash.
-                match serde_json::from_value::<crate::ui_schema::UiSchemaResponse>(
-                    value,
-                ) {
+                match serde_json::from_value::<UiSchemaResponse>(value) {
                     Ok(tree) => self.ui = tree,
                     Err(error) => {
                         self.status =
@@ -1509,7 +1580,20 @@ impl App {
     /// Fold a `sessions/list` response into the sidebar's tree. One
     /// gateway serves one workspace, so the listing lands as a single
     /// group named after the workspace root the connection resolved.
-    fn apply_sessions_list(&mut self, value: &Value) {
+    ///
+    /// The listing is the server's own envelope: the rows are its
+    /// summary type and the status is the status vocabulary's, so a
+    /// row that drifted is refused instead of half-read.
+    fn apply_sessions_list(&mut self, value: Value) {
+        let listing: List<SessionSummary> = match serde_json::from_value(value)
+        {
+            Ok(listing) => listing,
+            Err(error) => {
+                self.status =
+                    format!("the session listing was unreadable: {error}");
+                return;
+            }
+        };
         let name = match &self.connection {
             ConnectionState::Ready { workspace_root, .. } => {
                 let base = workspace_root
@@ -1524,21 +1608,14 @@ impl App {
             }
             _ => "workspace".to_string(),
         };
-        let mut sessions = Vec::new();
-        if let Some(rows) = value.get("data").and_then(Value::as_array) {
-            for row in rows {
-                if let Some(id) = row.get("id").and_then(Value::as_str) {
-                    sessions.push(SessionEntry {
-                        id: id.to_string(),
-                        status: row
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                    });
-                }
-            }
-        }
+        let sessions = listing
+            .data
+            .iter()
+            .map(|summary| SessionEntry {
+                id: summary.id.clone(),
+                status: summary.status.as_wire().to_string(),
+            })
+            .collect();
         self.set_workspaces(vec![WorkspaceNode { name, sessions }]);
         self.prune_deleted_session();
     }
@@ -1561,6 +1638,7 @@ impl App {
             self.session_id = None;
             self.messages.clear();
             self.live_text.clear();
+            self.live_tool_lines.clear();
             self.reasoning.clear();
             self.approval = None;
             self.approval_answered = false;
@@ -1584,45 +1662,38 @@ impl App {
         vec![Action::SendMessage { session_id, text }]
     }
 
-    fn apply_notification(&mut self, method: &str, params: &Value) {
+    fn apply_notification(&mut self, method: &str, params: Value) {
         match method {
-            "session/event" => self.apply_session_event(params),
-            "approval/request" => {
-                if let Some(prompt) =
-                    approval_from(params, self.session_id.as_deref())
-                {
-                    self.approval = Some(prompt);
-                    self.approval_answered = false;
-                    self.turn = TurnState::AwaitingApproval;
-                    self.status = "awaiting approval".to_string();
-                }
-            }
+            SESSION_EVENT => self.apply_session_event(params),
+            APPROVAL_REQUEST => self.apply_approval_request(params),
             _ => {}
         }
     }
 
-    fn apply_session_event(&mut self, params: &Value) {
-        match params.get("kind").and_then(Value::as_str) {
-            Some("row") => {
-                if let Some(row) = params.get("row") {
-                    self.apply_row(row);
-                }
+    /// Fold one `session/event` frame into the projection.
+    ///
+    /// The frame is the server's own envelope: its `kind` is the
+    /// server's discriminator, and the payload of each kind is the
+    /// server's type. A frame that drifted is a status line, not a
+    /// half-applied state.
+    fn apply_session_event(&mut self, params: Value) {
+        let event = match serde_json::from_value::<FollowEvent>(params) {
+            Ok(event) => event,
+            Err(error) => {
+                self.status =
+                    format!("the session frame was unreadable: {error}");
+                return;
             }
-            Some("live") => self.apply_live(params.get("live")),
-            Some("interrupts") => {
-                let first = params
-                    .get("pending_interrupts")
-                    .and_then(Value::as_array)
-                    .and_then(|interrupts| interrupts.first());
-                if let Some(first) = first {
-                    if let Some(prompt) =
-                        approval_from(first, self.session_id.as_deref())
-                    {
-                        self.approval = Some(prompt);
-                        self.approval_answered = false;
-                        self.turn = TurnState::AwaitingApproval;
-                        self.status = "awaiting approval".to_string();
-                    }
+        };
+        match event {
+            FollowEvent::Row { row, .. } => self.apply_row(&row),
+            FollowEvent::Live { live } => self.accept_live_frame(&live),
+            FollowEvent::Interrupts { pending_interrupts } => {
+                if let Some(request) = pending_interrupts.first() {
+                    self.open_approval(
+                        request,
+                        self.session_id.clone().unwrap_or_default(),
+                    );
                 } else {
                     self.approval = None;
                     self.approval_answered = false;
@@ -1631,23 +1702,48 @@ impl App {
                     }
                 }
             }
-            _ => {}
         }
     }
 
-    fn apply_follow(&mut self, snapshot: &Value) {
-        if let Some(session_id) = snapshot
-            .pointer("/header/session_id")
-            .and_then(Value::as_str)
-        {
-            self.session_id = Some(session_id.to_string());
-        }
-        self.agent_name = snapshot
-            .pointer("/header/agent_name")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+    /// Fold one `approval/request` notification into the projection.
+    ///
+    /// The notification is the server's own type: the held call it
+    /// carries is the approval vocabulary's request, and the risk it
+    /// names is the tool vocabulary's.
+    fn apply_approval_request(&mut self, params: Value) {
+        let notification =
+            match serde_json::from_value::<ApprovalRequestNotification>(params)
+            {
+                Ok(notification) => notification,
+                Err(error) => {
+                    self.status =
+                        format!("the approval request was unreadable: {error}");
+                    return;
+                }
+            };
+        let session_id = notification.session_id.clone();
+        self.open_approval(&notification.request(), session_id);
+    }
+
+    /// Open the prompt for one held call.
+    fn open_approval(&mut self, request: &ApprovalRequest, session_id: String) {
+        self.approval = Some(ApprovalPrompt::from_request(session_id, request));
+        self.approval_answered = false;
+        self.turn = TurnState::AwaitingApproval;
+        self.status = "awaiting approval".to_string();
+    }
+
+    /// Fold a `sessions/follow` baseline into the projection.
+    ///
+    /// The snapshot is the server's own type, so the fields read here
+    /// are the server's fields: a shape that drifts fails the decode
+    /// instead of quietly losing a field.
+    fn apply_follow(&mut self, snapshot: &FollowSnapshot) {
+        self.session_id = Some(snapshot.header.session_id.clone());
+        self.agent_name = snapshot.header.agent_name.clone();
         self.messages.clear();
         self.live_text.clear();
+        self.live_tool_lines.clear();
         self.reasoning.clear();
         self.live_start_seq = 0;
         self.live_seq = 0;
@@ -1660,54 +1756,27 @@ impl App {
         // The live projection comes before the rows: a row that already
         // carries the projection's content retires it, exactly as an
         // incremental row would.
-        self.apply_live(snapshot.get("live"));
-        if let Some(rows) = snapshot.get("rows").and_then(Value::as_array) {
-            for row in rows {
-                self.apply_row(row);
-            }
+        self.accept_live_frame(&snapshot.live);
+        for row in &snapshot.rows {
+            self.apply_row(row);
         }
-        if let Some(state) =
-            snapshot.pointer("/header/state").and_then(Value::as_str)
-        {
-            self.turn = turn_from_state(state);
-        }
-        if let Some(prompt) = snapshot
-            .get("pending_interrupts")
-            .and_then(Value::as_array)
-            .and_then(|interrupts| interrupts.first())
-            .and_then(|request| {
-                approval_from(request, self.session_id.as_deref())
-            })
-        {
-            self.approval = Some(prompt);
-            self.approval_answered = false;
-            self.turn = TurnState::AwaitingApproval;
+        self.turn = turn_from_state(snapshot.header.state);
+        if let Some(request) = snapshot.pending_interrupts.first() {
+            self.open_approval(
+                request,
+                self.session_id.clone().unwrap_or_default(),
+            );
         }
         // The resume token's three parts, straight off the baseline
         // (`Review Focus #4`). Added fields only; the projection
         // above is untouched.
-        self.follow_cursor =
-            snapshot.get("cursor").and_then(Value::as_u64).unwrap_or(0);
+        self.follow_cursor = snapshot.cursor;
         self.follow_pending = snapshot
-            .get("pending_interrupts")
-            .and_then(Value::as_array)
-            .map(|interrupts| {
-                interrupts
-                    .iter()
-                    .filter_map(|request| {
-                        request
-                            .get("call_id")
-                            .and_then(Value::as_str)
-                            .map(str::to_string)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.follow_request_hash = snapshot
-            .get("request_snapshot_hash")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+            .pending_interrupts
+            .iter()
+            .map(|request| request.call_id.clone())
+            .collect();
+        self.follow_request_hash = snapshot.request_snapshot_hash.clone();
         self.status = match self.turn {
             TurnState::Idle => "idle".to_string(),
             TurnState::Running => "running".to_string(),
@@ -1715,34 +1784,50 @@ impl App {
         };
     }
 
-    fn apply_live(&mut self, live: Option<&Value>) {
-        let Some(live) = live else {
-            return;
-        };
-        let start_seq =
-            live.get("start_seq").and_then(Value::as_u64).unwrap_or(0);
-        let frame_seq =
-            live.get("live_seq").and_then(Value::as_u64).unwrap_or(0);
+    /// Fold one live frame into the projection.
+    ///
+    /// The admission rules are the frame's own: a frame older than
+    /// the last accepted one predates the window the client accepted,
+    /// and a frame for a projection the durable rows already
+    /// superseded must not come back. The projection is the server's
+    /// own type, so its text, its reasoning and its tool calls are the
+    /// server's fields.
+    fn accept_live_frame(&mut self, live: &LiveTurn) {
         // A frame older than the last accepted one predates the window the
         // client accepted.
-        if frame_seq < self.live_seq {
+        if live.live_seq < self.live_seq {
             return;
         }
         // A frame for a projection the durable rows already superseded
         // must not come back.
-        if !supersession::live_frame_admitted(start_seq, self.superseded_start)
-        {
+        if !supersession::live_frame_admitted(
+            live.start_seq,
+            self.superseded_start,
+        ) {
             return;
         }
-        self.live_seq = frame_seq;
-        self.live_start_seq = start_seq;
-        if let Some(text) = live.get("text").and_then(Value::as_str) {
-            self.live_text = text.to_string();
-        }
-        if let Some(text) = live.get("reasoning").and_then(Value::as_str) {
-            self.reasoning = text.to_string();
-        }
-        if live.get("running").and_then(Value::as_bool) == Some(true) {
+        self.live_seq = live.live_seq;
+        self.live_start_seq = live.start_seq;
+        self.live_text = live.text.clone();
+        self.reasoning = live.reasoning.clone();
+        // The calls are drawn, not dropped: each becomes the line
+        // the conversation shows while it runs, in the transcript's
+        // own tool wording. The state word is the projection's own —
+        // the terminal does not translate it.
+        self.live_tool_lines = live
+            .tool_calls
+            .iter()
+            .map(|call| TranscriptLine {
+                role: Role::Tool,
+                text: tool_line_text(
+                    &call.name,
+                    &call.status,
+                    call.output.as_deref().unwrap_or_default(),
+                ),
+                seq: None,
+            })
+            .collect();
+        if live.running {
             self.turn = TurnState::Running;
         }
     }
@@ -1759,6 +1844,7 @@ impl App {
         }
         self.live_start_seq = 0;
         self.live_text.clear();
+        self.live_tool_lines.clear();
     }
 
     /// Fold one durable row into the transcript.
@@ -1950,11 +2036,7 @@ impl App {
         } else {
             tool_output_text(message.as_ref())
         };
-        let text = if output.is_empty() {
-            format!("{name}: {status}")
-        } else {
-            format!("{name}: {status} {}", one_line(&output))
-        };
+        let text = tool_line_text(&name, &status, &output);
         self.push_distinct_line(Role::Tool, text, seq);
     }
 
@@ -2085,6 +2167,9 @@ impl App {
         else {
             return;
         };
+        // The row's own event is the vocabulary's type: the prompt's
+        // values are its fields, and the risk is the spelling the row
+        // vocabulary publishes.
         self.approval = Some(ApprovalPrompt {
             session_id: self.session_id.clone().unwrap_or_default(),
             approval_id: id,
@@ -2104,71 +2189,28 @@ impl App {
 /// does: `working` is a run in flight, `input_required` is a turn
 /// waiting for an approval decision, and the rest — `unspecified`,
 /// `canceled`, `completed` — is a session with no live run here.
-fn turn_from_state(state: &str) -> TurnState {
+fn turn_from_state(state: SessionStatus) -> TurnState {
     match state {
-        "working" => TurnState::Running,
-        "input_required" => TurnState::AwaitingApproval,
-        _ => TurnState::Idle,
+        SessionStatus::Working => TurnState::Running,
+        SessionStatus::InputRequired => TurnState::AwaitingApproval,
+        SessionStatus::Unspecified
+        | SessionStatus::Canceled
+        | SessionStatus::Completed => TurnState::Idle,
     }
 }
 
-/// Render the `chat/message/send` result as a status line.
-fn send_status(value: &Value) -> String {
-    let queued = value
-        .get("queued")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let delivery = value
-        .get("delivery")
-        .and_then(Value::as_str)
-        .unwrap_or("queue");
-    if queued {
+/// Render the `chat/message/send` answer as a status line.
+///
+/// The answer is the server's own type: the delivery it names is the
+/// delivery vocabulary's spelling, not a string the terminal guesses
+/// at.
+fn send_status(answer: &SendMessageResponse) -> String {
+    let delivery = answer.delivery.as_wire();
+    if answer.queued {
         format!("message queued ({delivery})")
     } else {
         format!("message accepted ({delivery})")
     }
-}
-
-/// Build a prompt from an `approval/request` notification or a pending
-/// interrupt entry.
-fn approval_from(
-    value: &Value,
-    session_hint: Option<&str>,
-) -> Option<ApprovalPrompt> {
-    let approval_id = value
-        .get("approval_id")
-        .or_else(|| value.get("id"))
-        .and_then(Value::as_str)?
-        .to_string();
-    Some(ApprovalPrompt {
-        session_id: value
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| session_hint.map(str::to_string))
-            .unwrap_or_default(),
-        approval_id,
-        call_id: value
-            .get("call_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        tool: value
-            .get("tool")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string(),
-        risk: value
-            .get("risk")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string(),
-        agent: value
-            .get("agent")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-    })
 }
 
 /// The text of one message, its parts joined with a space: the
@@ -2343,6 +2385,17 @@ fn one_line(text: &str) -> String {
         format!("{kept}…")
     } else {
         kept
+    }
+}
+
+/// One tool line's text: the tool's name, the state word, and what
+/// it printed — the wording a settled result and a running call
+/// share, so the transcript reads one language.
+fn tool_line_text(name: &str, status: &str, output: &str) -> String {
+    if output.is_empty() {
+        format!("{name}: {status}")
+    } else {
+        format!("{name}: {status} {}", one_line(output))
     }
 }
 

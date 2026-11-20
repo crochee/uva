@@ -264,12 +264,18 @@ impl AppState {
         // `ReActAgent::with_*` builder chain, plus a
         // `try_read()` snapshot and four `if let Some` chains)
         // lives in its own private fn.
+        // The deployment's one interception table: built before the
+        // host, written by the default policy, and published by the
+        // `hooks` row (ADR 0028).
+        let hook_registry = uva::hook::HookRegistry::new();
         // The deployment's one host: the production policy
         // (guards / hints / tracker / logging hook). Every agent this
         // server builds gets a clone, so the policy applies to chat
-        // runs too.
-        let plugin_host =
-            uva::harness::Host::default_policy(workspace_root.clone());
+        // runs too, and every clone dispatches this same table.
+        let plugin_host = uva::harness::Host::default_policy(
+            workspace_root.clone(),
+            hook_registry.clone(),
+        );
         // The peer registry exists before the mount: the `tool-task`
         // row's `task` tool resolves names through it, and the default
         // member is registered into it after the tool surface has
@@ -446,6 +452,7 @@ impl AppState {
             subagent_writers: Arc::clone(&subagent_writer_slot),
             session_index: Arc::clone(&session_index_slot),
             usage: Arc::clone(&usage_metrics),
+            hook_registry: input.plugin_host.hook_registry().clone(),
             plugin_host: input.plugin_host.clone(),
         });
         // The one build recipe: the boot's mount and every hot reload

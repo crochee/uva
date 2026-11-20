@@ -51,7 +51,7 @@
 #![allow(clippy::result_large_err)]
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uva::core::Error;
 
 /// The controller state — the lifecycle a session controller keeps in
@@ -83,7 +83,9 @@ pub enum SessionState {
 /// [`SessionStatus::as_wire`] is the hand-written mirror of that
 /// derivation — the pattern the vocabulary uses for `RowTag::as_wire`
 /// — and a test pins the two together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
     /// The log holds no row: this session never ran.

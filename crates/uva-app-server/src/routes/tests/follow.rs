@@ -6,15 +6,18 @@ use std::{sync::Arc, time::Duration};
 
 use serde_json::{Value, json};
 use uva::{
-    harness::AgentEvent,
+    harness::{AgentEvent, ApprovalRequest},
     provider::{ContentPart, Message, ToolUse},
     session::{SessionEvent, manager::SessionRegistry},
 };
 
 use crate::{
-    routes::follow::{FollowQuery, FollowSnapshot, follow},
+    routes::follow::{FollowEvent, FollowQuery, FollowSnapshot, follow},
     rpc::RpcError,
-    session::status::{SessionState, SessionStatus},
+    session::{
+        controller::{LiveToolCall, LiveTurn},
+        status::{SessionState, SessionStatus},
+    },
     state::AppState,
 };
 
@@ -236,6 +239,106 @@ async fn follow_first_frame_is_a_complete_baseline() {
     );
 }
 
+/// The baseline has one owner: the server's own type. A client that
+/// decodes the frame the server published gets the same shape back,
+/// so the wire shape cannot drift between the two.
+#[tokio::test]
+async fn a_baseline_decodes_back_into_the_servers_own_type() {
+    let fixture = fixture().await;
+    fixture.append(&user_row("hello")).await;
+    let wire = serde_json::to_value(
+        fixture.open(None).await.expect("a baseline frame"),
+    )
+    .expect("the baseline serializes");
+
+    let decoded: FollowSnapshot =
+        serde_json::from_value(wire.clone()).expect("the baseline decodes");
+    assert_eq!(decoded.header.session_id, SESSION);
+    assert_eq!(decoded.cursor, 1, "the cursor is the last durable ordinal");
+    assert_eq!(
+        serde_json::to_value(&decoded).expect("the baseline serializes"),
+        wire,
+        "the decoded baseline publishes the same wire shape"
+    );
+}
+
+/// The three live frames, pinned byte for byte.
+///
+/// The frame's production changed from a hand-written `json!` to a
+/// derived serde enum, and the frame has **two** readers: the
+/// terminal decodes it into the server's own type, the browser
+/// parses it by hand. Nothing between them keeps the two in step —
+/// the frame is not in the contract catalog, so the web contract
+/// gate does not cover it either. These three literals are the pin:
+/// the `kind` tag, the member names and their order are what a
+/// client reads, and a change to any of them breaks a reader that
+/// this gate would not have caught.
+#[test]
+fn the_live_frames_serialize_to_their_pinned_bytes() {
+    let row = FollowEvent::Row {
+        seq: 7,
+        row: json!({ "type": "assistant" }),
+        request_snapshot_hash: Some("sha256:abc".to_string()),
+    };
+    assert_eq!(
+        row.payload().expect("the row frame serializes").to_string(),
+        r#"{"kind":"row","seq":7,"row":{"type":"assistant"},"request_snapshot_hash":"sha256:abc"}"#,
+        "the row frame's bytes are pinned",
+    );
+
+    let row = FollowEvent::Row {
+        seq: 8,
+        row: json!({ "type": "user" }),
+        request_snapshot_hash: None,
+    };
+    assert_eq!(
+        row.payload().expect("the row frame serializes").to_string(),
+        r#"{"kind":"row","seq":8,"row":{"type":"user"},"request_snapshot_hash":null}"#,
+        "a row frame without an envelope hash still carries the member",
+    );
+
+    let mut live = LiveTurn::default();
+    live.start_seq = 3;
+    live.live_seq = 9;
+    live.running = true;
+    live.text = "hello".to_string();
+    live.tool_calls = vec![LiveToolCall {
+        call_id: "c1".to_string(),
+        name: "read".to_string(),
+        arguments: json!({ "path": "a.txt" }),
+        status: "running".to_string(),
+        output: None,
+        streamed_bytes: 0,
+    }];
+    let live = FollowEvent::Live { live };
+    assert_eq!(
+        live.payload()
+            .expect("the live frame serializes")
+            .to_string(),
+        r#"{"kind":"live","live":{"start_seq":3,"live_seq":9,"running":true,"text":"hello","reasoning":"","tool_calls":[{"call_id":"c1","name":"read","arguments":{"path":"a.txt"},"status":"running"}]}}"#,
+        "the live frame's bytes are pinned",
+    );
+
+    let interrupts = FollowEvent::Interrupts {
+        pending_interrupts: vec![ApprovalRequest::new(
+            "approval-c1",
+            "c1",
+            "shell",
+            "sha256:args",
+            uva::tool::Risk::High,
+            "default",
+        )],
+    };
+    assert_eq!(
+        interrupts
+            .payload()
+            .expect("the interrupts frame serializes")
+            .to_string(),
+        r#"{"kind":"interrupts","pending_interrupts":[{"id":"approval-c1","call_id":"c1","tool":"shell","arguments_hash":"sha256:args","risk":"high","agent":"default"}]}"#,
+        "the interrupts frame's bytes are pinned",
+    );
+}
+
 /// The baseline publishes its rows in the current vocabulary, but
 /// the cursor answers the raw log: a row with no current
 /// counterpart (an `Agent` delegation) advances the ordinal even
@@ -301,6 +404,64 @@ async fn follow_on_a_session_the_server_does_not_know_is_not_found() {
     .await
     .expect_err("an unknown session is refused");
     assert_eq!(error.code, "not_found");
+    assert_eq!(
+        error.message, "not found: session 'no-such-session'",
+        "the wire answer names the session verbatim"
+    );
+    assert!(
+        !fixture
+            .state
+            .session_manager
+            .sessions_root()
+            .join(&fixture.user)
+            .join("no-such-session")
+            .exists(),
+        "a refused follow must not mint the session directory"
+    );
+}
+
+#[tokio::test]
+async fn resume_on_a_session_the_server_does_not_know_is_not_found() {
+    // The resume answer for an unknown session is the same 404 a
+    // follow gets: the must-exist policy is asked before any token
+    // is read, so an unknown id cannot drift into a resume-shaped
+    // error.
+    let fixture = fixture().await;
+    let error = crate::routes::follow::resume(
+        Arc::clone(&fixture.state),
+        "no-such-session".to_string(),
+        crate::routes::follow::ResumeRequest {
+            resume_token: uva::harness::ResumeToken::new(0, vec![], ""),
+            interrupts: vec![],
+            allow_drift: false,
+        },
+    )
+    .await
+    .expect_err("an unknown session is refused before any token is read");
+    assert_eq!(error.code, "not_found");
+    assert_eq!(
+        error.message, "not found: session 'no-such-session'",
+        "the wire answer matches the follow refusal verbatim"
+    );
+}
+
+#[tokio::test]
+async fn compact_on_a_session_the_server_does_not_know_is_not_found() {
+    // Compaction asks the same must-exist policy first: an unknown
+    // id is the session-shaped 404, never a compaction-shaped
+    // failure.
+    let fixture = fixture().await;
+    let error = crate::routes::follow::compact(
+        Arc::clone(&fixture.state),
+        "no-such-session".to_string(),
+    )
+    .await
+    .expect_err("an unknown session is refused before any compaction");
+    assert_eq!(error.code, "not_found");
+    assert_eq!(
+        error.message, "not found: session 'no-such-session'",
+        "the wire answer matches the follow refusal verbatim"
+    );
 }
 
 #[tokio::test]
@@ -1311,7 +1472,7 @@ async fn session_usage_is_scoped_to_the_session() {
         .append(&uva::session::usage(100, 10, 110, None, None, None))
         .await;
     fixture
-        .append(&uva::session::turn_end(0, "completed"))
+        .append(&uva::session::turn_end(0, "completed", None))
         .await;
     let other = "other-session";
     fixture
@@ -2411,7 +2572,7 @@ async fn a_window_without_a_usage_anchor_never_reads_the_whole_log() {
         .await;
     fixture.append(&user_row("first answer")).await;
     fixture
-        .append(&uva::session::turn_end(0, "completed"))
+        .append(&uva::session::turn_end(0, "completed", None))
         .await;
     // … then a second turn that has run past its header with no usage
     // report of its own yet: the header reset the anchor, so the window
@@ -2524,7 +2685,7 @@ fn the_window_folds_the_harnesss_suspended_segment() {
     );
     let rows = vec![
         row(&uva::session::turn_start(0)),
-        row(&uva::session::turn_end(0, "complete")),
+        row(&uva::session::turn_end(0, "complete", None)),
         row(&uva::session::turn_start(1)),
         row(&asked),
         row(&uva::session::turn_suspended(vec!["c1".into()])),
@@ -2579,7 +2740,7 @@ fn a_step_boundary_is_not_a_turn_boundary() {
     );
     assert_eq!(
         crate::routes::follow::turn_boundary(&row(&uva::session::turn_end(
-            0, "complete"
+            0, "complete", None
         ))),
         Some(false)
     );
@@ -2610,7 +2771,7 @@ fn a_step_boundary_is_not_a_turn_boundary() {
         )),
         row(&uva::session::usage(400, 100, 500, None, None, None)),
         row(&uva::session::step_end(0, 0, "tool_call")),
-        row(&uva::session::turn_end(0, "complete")),
+        row(&uva::session::turn_end(0, "complete", None)),
     ];
     assert!(
         !crate::routes::follow::window_holds_last_turn(&clipped),
@@ -2667,7 +2828,7 @@ impl uva::provider::traits::ModelProvider for NeverAnsweringProvider {
         _request: uva::provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn uva::core::CancelToken>>,
         _on_delta: Box<dyn FnMut(uva::provider::StreamChunk) + Send>,
-    ) -> Result<uva::provider::CompletionResponse, uva::core::Error> {
+    ) -> Result<uva::provider::SamplingResult, uva::core::Error> {
         std::future::pending().await
     }
 }
@@ -2791,7 +2952,8 @@ async fn a_follow_connection_reads_only_the_rows_that_arrived() {
         rx,
         baseline,
         move |event| {
-            let _ = events_tx.send(event.payload());
+            let _ =
+                events_tx.send(event.payload().expect("the frame serializes"));
         },
     ));
 

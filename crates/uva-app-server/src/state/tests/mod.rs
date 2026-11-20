@@ -23,6 +23,12 @@
 //!   application.
 //! - [`self_mcp`] — the self-management MCP server the
 //!   boot publishes (`mcp__self__*`).
+//! - [`session_resolution`] — the named
+//!   policies: `must_exist` (registry, transcript
+//!   directory, or refusal without minting) and
+//!   `create_on_demand` (an unknown id is minted),
+//!   plus the one-owner scan for the
+//!   transcript-location knowledge.
 //! - [`sessions`] — the cold-open gate: evicted with its
 //!   controller, and bounded so a wedged open fails.
 //! - [`support`] — the shared fixtures (`StubAgent`,
@@ -43,6 +49,7 @@ mod reload;
 mod resolve_agent_name;
 mod resolve_server;
 mod self_mcp;
+mod session_resolution;
 mod sessions;
 pub(crate) mod support;
 mod unapplied_keys;

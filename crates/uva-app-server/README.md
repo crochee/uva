@@ -93,7 +93,7 @@ follow 重建。
 | `GET /rpc` | WebSocket，JSON-RPC 帧的通道（一条文本消息一帧） |
 | `GET /livez` / `GET /readyz` | 探针（`readyz` 还要求 core 已发 `ready`） |
 | `GET /version` | 构建身份 |
-| `GET /metrics` | Prometheus 文本 exposition |
+| `GET /metrics` | Prometheus 文本 exposition（网关的 HTTP 计数 + 内核的工具计数，后者经 `metrics/gather` 合流） |
 | 其余一切 | Web 前端的静态文件（fallback） |
 
 静态前端两个来源：`--web-dir <path>` 指向已构建的 `dist`（优先），或
@@ -109,8 +109,11 @@ follow 重建。
 `sessions/resume` + `ResumeToken`）、`chat/*`、`agents/*`、`skills/*`、
 `tools/*`、`schedules/*`、`tasks/*`、`evals/*`、
 `attachments/*`、`search/all`（六域统一检索）、`health/*`、
-`models/list` 与 Anthropic 兼容的 `anthropic/messages`。方法表见
-[`src/rpc/methods/`](src/rpc/methods/)。
+`models/list`、`metrics/gather`（本进程的 Prometheus exposition，供网关
+合流）与 Anthropic 兼容的 `anthropic/messages`。方法表见
+[`src/rpc/methods/`](src/rpc/methods/)；每个方法名在
+[`src/rpc/methods/names.rs`](src/rpc/methods/names.rs) 里只写一次，
+路由按那些常量注册，客户端（终端、浏览器门禁）读同一张表。
 
 ## `~/.agents/` 布局
 

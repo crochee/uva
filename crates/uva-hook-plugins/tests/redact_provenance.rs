@@ -12,6 +12,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use uva_core::{AtomicCancelToken, SystemClock};
 use uva_harness::{Agent, AgentInput, Host, ReActAgent};
+use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 use uva_hook_plugins::redact::RedactTransformer;
 use uva_provider::{
     ContentPart,
@@ -76,11 +77,16 @@ async fn a_redacted_result_leaves_one_provenance_row() {
         tool_call_script("echo"),
         final_script("done"),
     ])) as Arc<dyn ModelProvider>;
-    let mut host = Host::new();
-    let _registration =
-        host.result_transformer(Arc::new(RedactTransformer::default()));
+    let registry = HookRegistry::new();
+    let _registration = registry
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            Arc::new(RedactTransformer::default()),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a result transformer belongs on `tool/post-execute`");
     let agent = ReActAgent::new(provider, tools)
-        .with_host(host)
+        .with_host(Host::new_with_registry(registry))
         .expect("bind the host")
         .with_log_writer(writer);
 

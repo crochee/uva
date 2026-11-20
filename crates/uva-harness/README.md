@@ -1,9 +1,10 @@
 # uva-harness
 
 The agent runtime: the ReAct loop, the `Agent` / `ReasoningStrategy`
-seams, the one `Host` registry every interception point reads, and
-`AgentRegistry`. One crate turns a model + a tool set
-into a streaming `AgentEvent` flow; nothing here names a runtime.
+seams, the `Host` whose typed tables and interception registry every
+policy point reads, and `AgentRegistry`. One crate turns a model + a
+tool set into a streaming `AgentEvent` flow; nothing here names a
+runtime.
 
 公开 API 与 seam 规则见 [`src/lib.rs`](src/lib.rs)；可替换点见
 [`SEAMS.md`](../../SEAMS.md)。
@@ -14,11 +15,15 @@ into a streaming `AgentEvent` flow; nothing here names a runtime.
   once at setup, then reads and writes an in-memory transcript; every
   committed message carries the ordinal of the row it was written
   under, so a compaction can cite provenance without a re-read.
-- **One interception registry.** `Host` holds hooks, gates, guards,
-  hints, trackers, transformers, prompt sections and tools. Each
-  registration is reversible: dropping its handle withdraws it.
-  `Host::new()` is neutral; `Host::default_policy(root)` installs the
-  defensive set.
+- **One interception table.** The four interception traits and prompt
+  sections register on `uva_hook::HookRegistry` — the deployment's one
+  table, held by `Host` (`hook_registry()`) and published as the
+  `hooks` service (ADR 0028). `Host` itself keeps the typed tables the
+  registry cannot express: guards, hints, trackers, output
+  transformers and tool bindings. Each registration is reversible:
+  dropping its handle withdraws it. `Host::new()` is neutral;
+  `Host::default_policy(root, registry)` installs the defensive set
+  over `registry`.
 - **One compaction engine.** The `Compactor` seam in `uva-session`
   is the only writer of a `compaction` row; a `ContextManager` only
   projects or trims the request it is handed.
@@ -43,7 +48,7 @@ use uva_tool::ToolRegistry;
 let registry = Arc::new(ToolRegistry::new());
 let agent = ReActAgent::new(provider, registry)
     .with_workspace(".")
-    .with_host(Host::default_policy("."))?;
+    .with_host(Host::default_policy(".", Default::default()))?;
 
 let mut stream = agent
     .run(
@@ -68,13 +73,21 @@ tool owns, is reported instead of silently dropped.
 use std::sync::Arc;
 
 use uva_harness::{Host, agent::host::PromptSection};
+use uva_hook::{MountPoint, RegistrationOrigin};
 
-let mut host = Host::new();
+let host = Host::new();
 // The handle is the registration: dropping it withdraws the policy.
-let _section = host.prompt_section(PromptSection {
-    title: "Audit".to_string(),
-    body: "Always cite the file you read.".to_string(),
-});
+let _section = host
+    .hook_registry()
+    .register_prompt_section(
+        MountPoint::PromptSections,
+        PromptSection {
+            title: "Audit".to_string(),
+            body: "Always cite the file you read.".to_string(),
+        },
+        RegistrationOrigin::InProcess,
+    )
+    .expect("a prompt section belongs on `prompt/sections`");
 ```
 
 ### 3. Steer a live run
@@ -121,23 +134,23 @@ uva-provider = { version = "0.1", default-features = false }
 
 ## The two public layers
 
-The crate root re-exports a curated facade of 61 names. That facade is
+The crate root re-exports a curated facade of 59 names. That facade is
 the promised surface: depend on it, and a release will not move your
 names. The crate is public further down, under `uva_harness::agent::…`,
 `uva_harness::events::…` (a re-export of the vocabulary that lives in
-`uva-events`) and `uva_harness::seams::…` (the mount-point keys
-re-exported from `uva-hook`). Only a deep path reaches 21 names:
-rustdoc records 36 public paths under the `agent` module, 22 of them
-being facade names at their defining path, which leaves 14 names the
-facade does not carry; the seven mount-point keys re-exported from
-`uva-hook` into `uva_harness::seams` are the one cross-crate deep-only
-set, which brings the total to 21. The approval vocabulary (the old
-`agent::approval` module and `Risk` re-exported from `uva-tool`) moved
-to `uva-approval`; the event vocabulary moved to `uva-events`; the
-agent vocabulary (`Agent`, `AgentInput`, the steer inboxes, the peer
-registry, the child-session writer source and the prompt manifest)
-moved to `uva-agent`; all three reach this crate through the facade.
-None of those 21 is promised.
+`uva-events`) and `uva_harness::seams::…` (the loop's seam layer).
+Only a deep path reaches 11 names: rustdoc records 28 public paths
+under the `agent` module, 17 of them being facade names at their
+defining path, which leaves 11 names the facade does not carry. The
+seven mount-point keys that used to be the one cross-crate deep-only
+set are gone: ADR 0028 replaced them with `uva-hook`'s `MountPoint`
+enum, and the interception table now lives in `uva-hook`. The approval
+vocabulary (the old `agent::approval` module and `Risk` re-exported
+from `uva-tool`) moved to `uva-approval`; the event vocabulary moved to
+`uva-events`; the agent vocabulary (`Agent`, `AgentInput`, the steer
+inboxes, the peer registry, the child-session writer source and the
+prompt manifest) moved to `uva-agent`; all three reach this crate
+through the facade. None of those 14 is promised.
 
 ## Seams
 
@@ -147,7 +160,7 @@ None of those 21 is promised.
 | the tools | `Tool` + `ToolRegistry` (from `uva-tool`) | `registry.register_entry(..)`, or `Host::tool` |
 | the context window | `ContextManager` (from `uva-context`) | `with_context_manager` |
 | compression | `Compactor` (from `uva-session`) | `with_compactor` |
-| policy | `Host` (this crate) | `with_host` |
+| policy | `Host` (this crate); interception rows on `uva_hook::HookRegistry` | `with_host`, `HookRegistry::{register_hook_at, register_gate_at, …}` |
 | live input | `RunInbox` / `ChannelInbox` | `AgentInput::with_inbox` |
 | the durable log | `SessionLog` (from `uva-session`) | `with_log_writer` |
 | cancellation | `CancelToken` (from `uva-core`) | `agent.run(input, cancel)` |

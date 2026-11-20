@@ -8,6 +8,7 @@ use uva_provider::{
     ModelConfig,
     ModelProvider,
     ProviderConfig,
+    SamplingResult,
     StreamChunk,
 };
 
@@ -123,7 +124,7 @@ impl ModelProvider for BudgetProvider {
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn uva_core::CancelToken>>,
         on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, uva_core::Error> {
+    ) -> Result<SamplingResult, uva_core::Error> {
         // Streaming path is policy-free.
         self.inner
             .complete_with_stream(request, cancel_token, on_delta)

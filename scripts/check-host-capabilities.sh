@@ -31,7 +31,8 @@ cd "$(dirname "$0")/.."
 
 MATRIX="${MATRIX:-docs/host-capabilities.md}"
 BASELINE_FILE="scripts/host-capabilities/baseline"
-METHODS_GLOB="crates/uva-app-server/src/rpc/methods/*.rs"
+METHOD_NAMES="crates/uva-app-server/src/rpc/methods/names.rs"
+METHODS_DIR="crates/uva-app-server/src/rpc/methods"
 
 if [[ ! -f "$MATRIX" ]]; then
   echo "the capability matrix is missing: $MATRIX" >&2
@@ -87,9 +88,36 @@ evidence_column() {
 }
 
 # Every method name the server registers.
+#
+# The **registrations** are the truth: the router's `register` call
+# sites are the methods the process answers, and the names table is
+# where their spellings live. A constant the router never registers
+# is a spelling with no method behind it — the gate must not report
+# it as one. A registration the names table cannot spell is a defect
+# the gate names rather than drops.
 registered_methods() {
-  grep -ho 'router\.register("[^"]*"' $METHODS_GLOB \
-    | sed 's/router\.register("//; s/"$//' \
+  local registered
+  registered="$(grep -rho 'router\.register(names::[A-Z_]*' "$METHODS_DIR" \
+    | sed 's/.*names:://' \
+    | sort -u \
+    | tr '\n' ' ' || true)"
+  grep -ho 'pub const [A-Z_]*: &str = "[^"]*"' "$METHOD_NAMES" \
+    | sed -E 's/pub const ([A-Z_]+): &str = "([^"]*)"/\1 \2/' \
+    | awk -v wanted="$registered" '
+        BEGIN {
+          n = split(wanted, names, " ")
+          for (i = 1; i <= n; i++) if (names[i] != "") want[names[i]] = 1
+        }
+        $1 in want { print $2; seen[$1] = 1 }
+        END {
+          missing = 0
+          for (name in want) if (!(name in seen)) {
+            printf "the router registers %s but the names table does not spell it\n", name > "/dev/stderr"
+            missing = 1
+          }
+          if (missing) exit 1
+        }
+      ' \
     | sort -u
 }
 

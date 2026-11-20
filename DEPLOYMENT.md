@@ -104,14 +104,22 @@ dependencies — it keeps working with `playwright` uninstalled.
 ## Production deployment (separate)
 
 The recommended deployment is **split**: Nginx serves the
-compiled React app and reverse-proxies `/api/*` and `/v1/*` to
-`uva-app-server`. This lets the two parts scale and ship
+compiled React app and reverse-proxies the server's HTTP surface
+to `uva-app-server`. This lets the two parts scale and ship
 independently.
 
-`/v1/*` is the Anthropic Messages surface (`POST /v1/messages`).
-An Anthropic-protocol client points its base URL at the
-**deployment root** — scheme and host, no path — and appends
-`/v1/messages` itself, exactly as it would for `api.anthropic.com`.
+The server's HTTP surface is the gateway's — five paths:
+
+| Path       | What it is                                            |
+|------------|-------------------------------------------------------|
+| `/rpc`     | the JSON-RPC **websocket** (the SPA's one channel)     |
+| `/livez`   | liveness probe                                        |
+| `/readyz`  | readiness probe                                       |
+| `/version` | the build identity                                    |
+| `/metrics` | the Prometheus exposition                             |
+
+Everything else a client asks for is the front-end's own
+territory (the SPA's routes resolve to `index.html`).
 
 ### 1. Build the artifacts
 
@@ -126,41 +134,56 @@ This produces:
 ### 2. Containerize (recommended)
 
 ```bash
-make docker         # builds both images
+make image-build   # builds the three images (server, web, mcp)
 make docker-prod-up # starts the production compose stack
 ```
 
 The container topology:
 - `uva-app-server` listens on internal port 8080 (no host port)
-- `uva-web` (Nginx) listens on host port 80 and proxies
-  `/api/*` and `/v1/*` to the server over the docker network
+- `uva-web` (Nginx) serves the static bundle and proxies the
+  server's surface — `/rpc` (websocket), `/livez`, `/readyz`,
+  `/version`, `/metrics` — to the server over the docker network
+
+The web image runs as a non-root user (65532) with a read-only root
+filesystem and listens on 8080, so the container needs no
+capabilities and no privileged port. Everything nginx writes lands
+under `/tmp`; the compose file and `k8s/web.yaml` both mount a
+writable `/tmp`.
 
 ### 3. Bare-metal deployment
 
 If you prefer to run on a single host without Docker, give Nginx a server
-block like this one — it serves the React bundle and proxies both API
-surfaces to the server. `root` points at the directory holding the built
-bundle (`uva-web/dist/`).
+block like this one — it serves the React bundle and proxies the
+server's surface. `root` points at the directory holding the built
+bundle (`uva-web/dist/`). The image ships the same block, rendered
+from [`nginx/default.conf.template`](nginx/default.conf.template).
 
 ```nginx
 server {
     listen 80;
     root /srv/uva-web;
 
+    # The JSON-RPC websocket. The upgrade headers are the whole
+    # point: without them the connection never leaves the HTTP
+    # handshake, and the SPA's one channel to the server is dead.
+    location = /rpc {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_buffering off;      # the answer streams as it arrives
+        proxy_read_timeout 3600s;
+    }
+
+    # The probes and the Prometheus exposition.
+    location ~ ^/(livez|readyz|version|metrics)$ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+    }
+
     location / {
         try_files $uri $uri/ /index.html;
-    }
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_buffering off;      # SSE: stream the answer as it arrives
-        proxy_read_timeout 3600s;
-    }
-
-    location /v1/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_buffering off;      # the Messages surface answers SSE too
-        proxy_read_timeout 3600s;
     }
 }
 ```
@@ -174,8 +197,11 @@ nginx -g "daemon off;"
 
 ### Anthropic-protocol clients
 
-Because the Messages surface is mounted at the server root, the base
-URL a client is given is the deployment root — no path component:
+The Anthropic-compatible surface is the `anthropic/messages` **RPC
+method** — it answers with the Messages wire shape, and it is served
+on the same `/rpc` channel every other method rides. A client that
+speaks Anthropic's own HTTP protocol needs an adapter in front of it:
+the server does not mount `POST /v1/messages` as an HTTP route.
 
 ```bash
 # through Nginx (compose prod, or a bare-metal nginx on :80)
@@ -189,12 +215,11 @@ export ANTHROPIC_BASE_URL=http://localhost:8080
 export ANTHROPIC_API_KEY=<a key the server accepts>
 ```
 
-The client posts to `<base URL>/v1/messages`, which Nginx forwards
-through its `location /v1/` block to the same upstream as `/api/`.
-Auth is the protocol's own — the `x-api-key` header, or the
-`Authorization: Bearer` token the web UI sends. The `/v1/` path only
-matches that prefix, so it does not steal any client-side route from
-the SPA fallback.
+Nginx forwards the `/rpc` channel to the server unchanged, so the
+adapter's websocket and the SPA's websocket share one path — and the
+`/v1/` prefix claim of the old deployment is gone: a path Nginx does
+not proxy would fall through to the SPA fallback and answer `200`
+with `index.html`.
 
 ## Docker Compose
 
@@ -204,6 +229,10 @@ Two Compose files ship with the repo:
 |------------------------|--------------------------|
 | `docker-compose.yml`     | dev (HMR, source mounts) |
 | `docker-compose.prod.yml` | prod (separate, Nginx)   |
+
+The prod stack is two services: `app-server` (the server image) and
+`web` (the Nginx image that serves the bundle and proxies the
+server's surface).
 
 Common operations:
 
@@ -235,9 +264,14 @@ unreachable through a published port.
 
 | Var                    | Default               | Meaning                |
 |------------------------|-----------------------|------------------------|
-| `VITE_API_URL`         | `/api` (proxied)      | REST base URL          |
-| `VITE_CHAT_URL`        | `/api/v1/chat`        | Chat surface URL       |
-| `VITE_STREAM_URL`      | `/api/v1` (proxied)   | Session follow stream  |
+| `VITE_UVA_VERSION`     | —                     | the build's version    |
+| `VITE_UVA_GIT_SHA`     | —                     | the build's commit     |
+| `VITE_UVA_BUILD_TIME`  | —                     | the build's timestamp  |
+
+The front-end talks to the server on **its own origin**: the RPC
+channel is `/rpc` (a websocket) and the health badge polls
+`/readyz`. In development Vite proxies those three paths to the
+backend; in production Nginx proxies the same paths.
 
 Both services can also be configured through their
 respective `config.toml` files in the workspace root.

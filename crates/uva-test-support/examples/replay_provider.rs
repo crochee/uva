@@ -123,10 +123,8 @@ async fn main() {
             .await
             .expect("scripted call replays");
         println!(
-            "  response: id={} text={:?} stop_reason={:?}",
-            response.id,
-            response_text(&response),
-            response.stop_reason
+            "  response: text={:?} stop_reason={:?}",
+            response.text, response.stop_reason
         );
     }
 

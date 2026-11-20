@@ -83,7 +83,12 @@ impl Registry for MockRegistry {
         let items = self.items.read().clone();
         // Sort is intentionally ignored — tests rely on
         // insertion order for stable assertions.
-        paginate_registry_list(items, cursor.as_deref(), limit)
+        paginate_registry_list(
+            items,
+            cursor.as_deref(),
+            limit,
+            |item: &MockItem| item.name.as_str(),
+        )
     }
 }
 

@@ -18,9 +18,27 @@ use axum::{
     extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     routing::get,
 };
+use crossterm::event::{KeyCode, KeyModifiers};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use uva_app_server::{
+    api::List,
+    routes::{
+        chat::{CreateSessionResponse, Delivery, SendMessageResponse},
+        follow::{ContextMeter, FollowEvent, FollowSnapshot, SessionHeader},
+        sessions::SessionSummary,
+    },
+    rpc::{
+        RpcRouter,
+        methods::{names, register_all},
+        notify::ApprovalRequestNotification,
+    },
+    session::{
+        controller::{AgentEvent, LiveTurn},
+        status::SessionStatus,
+    },
+};
 use uva_provider::{
     Content,
     ContentPart,
@@ -31,10 +49,13 @@ use uva_provider::{
     ToolUse,
 };
 use uva_session::RowTag;
+use uva_tool::Risk;
 
 use crate::{
     app::{Action, App, ConnectionState, Decision, TurnState},
-    transport::{Driver, Transport, TransportEvent},
+    domains::DOMAINS,
+    transport::{Driver, Request, RequestKind, Transport, TransportEvent},
+    views::catalog::{Catalog, ResumeMaterial},
 };
 
 /// What the fake gateway answers one request with: `None` stays
@@ -237,28 +258,57 @@ pub(crate) async fn next_event(driver: &mut Driver) -> TransportEvent {
         .expect("the event channel is open")
 }
 
-fn baseline(session_id: &str, state: &str, rows: Vec<Value>) -> Value {
-    json!({
-        "header": {
-            "session_id": session_id,
-            "user_id": "u1",
-            "agent_name": "default",
-            "state": state,
+/// The follow baseline the fake gateway publishes, built as the
+/// server's own type.
+///
+/// The fixture used to spell the envelope out as JSON — a second copy
+/// of the shape, and the copy is what this crate is leaving behind.
+/// The server's [`FollowSnapshot`] *is* the shape, so the fixture
+/// builds that.
+pub(crate) fn follow_snapshot(
+    session_id: &str,
+    state: SessionStatus,
+    rows: Vec<Value>,
+) -> FollowSnapshot {
+    let cursor = cursor_of(&rows);
+    FollowSnapshot {
+        header: SessionHeader {
+            session_id: session_id.to_string(),
+            user_id: "u1".to_string(),
+            agent_name: Some("default".to_string()),
+            state,
+            created_at: None,
+            updated_at: None,
         },
-        "rows": rows,
-        "cursor": 0,
-        "live": {
-            "start_seq": 0,
-            "live_seq": 0,
-            "running": false,
-            "text": "",
-            "reasoning": "",
-            "tool_calls": [],
+        rows,
+        cursor,
+        live: LiveTurn::default(),
+        context: ContextMeter {
+            used: 0,
+            window: None,
         },
-        "context": { "used": 0 },
-        "pending_interrupts": [],
-        "request_snapshot_hash": "",
-    })
+        pending_interrupts: Vec::new(),
+        request_snapshot_hash: String::new(),
+    }
+}
+
+/// The baseline's cursor: the ordinal of the last durable row it
+/// carries.
+fn cursor_of(rows: &[Value]) -> u64 {
+    rows.last()
+        .and_then(|row| row.get("seq"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+}
+
+/// The baseline on the wire.
+pub(crate) fn baseline(
+    session_id: &str,
+    state: SessionStatus,
+    rows: Vec<Value>,
+) -> Value {
+    serde_json::to_value(follow_snapshot(session_id, state, rows))
+        .expect("the baseline serializes")
 }
 
 /// The timestamp every fixture row carries: the writer stamps one on
@@ -314,28 +364,92 @@ fn turn_end(reason: &str) -> Value {
     })
 }
 
+/// One `session/event` notification, built as the server's own frame
+/// envelope.
+///
+/// The frame is the server's `FollowEvent`, and the `session_id` the
+/// registry adds beside it rides along: a fixture that spells the
+/// frame out as JSON is a second copy of the shape.
+fn event_frame(event: FollowEvent) -> Value {
+    let mut params = serde_json::to_value(event).expect("the frame serializes");
+    params
+        .as_object_mut()
+        .expect("a frame is an object")
+        .insert("session_id".to_string(), json!("s1"));
+    params
+}
+
+/// A live frame, built from the server's projection type.
+fn live_frame(start_seq: u64, live_seq: u64, text: &str) -> Value {
+    let mut live = LiveTurn::default();
+    live.start_seq = start_seq;
+    live.live_seq = live_seq;
+    live.running = true;
+    live.text = text.to_string();
+    event_frame(FollowEvent::Live { live })
+}
+
+/// A durable row frame, built from the server's frame type.
+fn row_frame(seq: u64, row: Value) -> Value {
+    event_frame(FollowEvent::Row {
+        seq,
+        row,
+        request_snapshot_hash: None,
+    })
+}
+
 /// A responder with the conversation vocabulary: probe, create,
 /// follow, send. Everything else goes unanswered.
+/// The answers the fake gateway serves, built as the server's own
+/// types.
+///
+/// The fixture used to spell each answer out as JSON — a second copy
+/// of every shape. The server's types *are* the shapes, so the
+/// fixture builds those.
 fn conversation_responder() -> Responder {
     Arc::new(|frame: &Value| match frame["method"].as_str() {
         Some("health/ping") => {
             Some(Ok(json!({ "ok": true, "version": "0.1.0" })))
         }
         Some("chat/session/create") => {
-            Some(Ok(json!({ "session_id": "s1", "agent_name": null })))
+            Some(Ok(serde_json::to_value(CreateSessionResponse {
+                session_id: "s1".to_string(),
+                agent_name: None,
+            })
+            .expect("the answer serializes")))
         }
-        Some("sessions/follow") => Some(Ok(baseline("s1", "idle", Vec::new()))),
-        Some("sessions/list") => Some(Ok(json!({
-            "data": [
-                { "id": "s0", "status": "completed" },
-                { "id": "s1", "status": "working" },
-            ],
-        }))),
-        Some("chat/message/send") => Some(Ok(json!({
-            "message_id": "m1", "queued": true, "delivery": "queue",
-        }))),
+        Some("sessions/follow") => {
+            Some(Ok(baseline("s1", SessionStatus::Unspecified, Vec::new())))
+        }
+        Some("sessions/list") => {
+            Some(Ok(serde_json::to_value(List::new(vec![
+                session_summary("s0", SessionStatus::Completed),
+                session_summary("s1", SessionStatus::Working),
+            ]))
+            .expect("the listing serializes")))
+        }
+        Some("chat/message/send") => {
+            Some(Ok(serde_json::to_value(SendMessageResponse {
+                message_id: "m1".to_string(),
+                queued: true,
+                delivery: Delivery::Queue,
+            })
+            .expect("the answer serializes")))
+        }
         _ => None,
     })
+}
+
+/// One row of the session listing, as the server's summary type.
+fn session_summary(id: &str, status: SessionStatus) -> SessionSummary {
+    SessionSummary {
+        id: id.to_string(),
+        status,
+        context_id: None,
+        created_at: None,
+        parent_session_id: None,
+        agent_name: None,
+    }
 }
 
 /// Send every wire action the reducer produced.
@@ -398,32 +512,13 @@ async fn one_conversation_turn_ends_idle_with_the_assistant_text() {
     gateway
         .notify(
             "session/event",
-            json!({
-                "session_id": "s1",
-                "kind": "row",
-                "seq": 1,
-                "row": text_row("user_message", 1, "what is the weather?"),
-            }),
+            row_frame(1, text_row("user_message", 1, "what is the weather?")),
         )
         .await;
     app.apply(next_event(&mut driver).await);
 
     gateway
-        .notify(
-            "session/event",
-            json!({
-                "session_id": "s1",
-                "kind": "live",
-            "live": {
-                "start_seq": 1,
-                "live_seq": 1,
-                "running": true,
-                "text": "Sunny with",
-                "reasoning": "",
-                "tool_calls": [],
-            },
-            }),
-        )
+        .notify("session/event", live_frame(1, 1, "Sunny with"))
         .await;
     app.apply(next_event(&mut driver).await);
     assert_eq!(app.live_text(), "Sunny with");
@@ -431,30 +526,16 @@ async fn one_conversation_turn_ends_idle_with_the_assistant_text() {
     gateway
         .notify(
             "session/event",
-            json!({
-                "session_id": "s1",
-                "kind": "row",
-                "seq": 2,
-                "row": text_row(
-                    "assistant_message",
-                    2,
-                    "Sunny with a light breeze.",
-                ),
-            }),
+            row_frame(
+                2,
+                text_row("assistant_message", 2, "Sunny with a light breeze."),
+            ),
         )
         .await;
     app.apply(next_event(&mut driver).await);
 
     gateway
-        .notify(
-            "session/event",
-            json!({
-                "session_id": "s1",
-                "kind": "row",
-                "seq": 3,
-                "row": turn_end("completed"),
-            }),
-        )
+        .notify("session/event", row_frame(3, turn_end("completed")))
         .await;
     app.apply(next_event(&mut driver).await);
 
@@ -463,6 +544,59 @@ async fn one_conversation_turn_ends_idle_with_the_assistant_text() {
     let last = app.messages().last().expect("the assistant row");
     assert_eq!(last.role, crate::app::Role::Assistant);
     assert_eq!(last.text, "Sunny with a light breeze.");
+}
+
+/// The live projection's tool calls are drawn, not dropped: while
+/// the step still runs the terminal shows the tool it is calling,
+/// and the durable row that carries the step retires the live line
+/// in favour of the transcript's own telling.
+#[tokio::test]
+async fn the_live_projection_s_tool_call_is_drawn_until_its_row_lands() {
+    let gateway = FakeGateway::spawn().await;
+    gateway.set_responder(conversation_responder());
+    let mut driver = Driver::attach(&gateway.url);
+    let sender = driver.sender();
+    let mut app = App::new();
+    establish(&gateway, &mut driver, &sender, &mut app).await;
+
+    // The projection is built the way the server builds it: the
+    // server's own reducer fed the provider's own event.
+    let mut live = LiveTurn::default();
+    live.apply(&AgentEvent::Model(ContentPart::ToolUse(ToolUse {
+        id: "call_1".to_string(),
+        name: "shell".to_string(),
+        input: json!({ "command": "ls" }),
+    })));
+    live.start_seq = 3;
+    live.live_seq = 2;
+    live.running = true;
+    gateway
+        .notify("session/event", event_frame(FollowEvent::Live { live }))
+        .await;
+    app.apply(next_event(&mut driver).await);
+    let lines = app.live_tool_lines();
+    assert_eq!(lines.len(), 1, "the live tool call is kept");
+    assert_eq!(lines[0].text, "shell: running");
+    assert_eq!(lines[0].role, crate::app::Role::Tool);
+    assert_eq!(lines[0].seq, None);
+
+    // The assistant row that carries the call retires the live
+    // line: the transcript tells the call's story durably from
+    // there.
+    notify_row(
+        &gateway,
+        &mut driver,
+        &mut app,
+        4,
+        tool_call_row(4, "call_1", "shell"),
+    )
+    .await;
+    assert!(app.live_tool_lines().is_empty());
+    assert!(
+        app.messages()
+            .iter()
+            .any(|line| line.text.contains("tool call: shell"))
+    );
 }
 
 #[tokio::test]
@@ -477,7 +611,7 @@ async fn an_approval_answer_carries_the_exact_id_and_decision() {
                 Some(Ok(json!({ "session_id": "s1", "agent_name": null })))
             }
             Some("sessions/follow") => {
-                Some(Ok(baseline("s1", "idle", Vec::new())))
+                Some(Ok(baseline("s1", SessionStatus::Unspecified, Vec::new())))
             }
             Some("approval/respond") => Some(Ok(Value::Null)),
             _ => None,
@@ -491,15 +625,16 @@ async fn an_approval_answer_carries_the_exact_id_and_decision() {
     gateway
         .notify(
             "approval/request",
-            json!({
-                "session_id": "s1",
-                "approval_id": "a1",
-                "call_id": "c1",
-                "tool": "shell",
-                "risk": "high",
-                "arguments_hash": "sha256:args",
-                "agent": "default",
-            }),
+            serde_json::to_value(ApprovalRequestNotification {
+                session_id: "s1".to_string(),
+                approval_id: "a1".to_string(),
+                call_id: "c1".to_string(),
+                tool: "shell".to_string(),
+                arguments_hash: "sha256:args".to_string(),
+                risk: Risk::High,
+                agent: "default".to_string(),
+            })
+            .expect("the notification serializes"),
         )
         .await;
     app.apply(next_event(&mut driver).await);
@@ -530,25 +665,12 @@ async fn an_approval_answer_carries_the_exact_id_and_decision() {
     gateway
         .notify(
             "session/event",
-            json!({
-                "session_id": "s1",
-                "kind": "row",
-                "seq": 4,
-                "row": text_row("assistant_message", 4, "done"),
-            }),
+            row_frame(4, text_row("assistant_message", 4, "done")),
         )
         .await;
     app.apply(next_event(&mut driver).await);
     gateway
-        .notify(
-            "session/event",
-            json!({
-                "session_id": "s1",
-                "kind": "row",
-                "seq": 5,
-                "row": turn_end("completed"),
-            }),
-        )
+        .notify("session/event", row_frame(5, turn_end("completed")))
         .await;
     app.apply(next_event(&mut driver).await);
     assert_eq!(app.turn(), TurnState::Idle);
@@ -601,7 +723,7 @@ async fn a_dropped_gateway_is_reported_and_the_reconnect_refollows() {
             }
             Some("sessions/follow") => Some(Ok(baseline(
                 "s1",
-                "idle",
+                SessionStatus::Completed,
                 vec![text_row("user_message", 1, "before the crash")],
             ))),
             _ => None,
@@ -972,7 +1094,7 @@ async fn a_warning_row_becomes_a_one_line_transcript_notice() {
 /// The assistant row the model wrote when it called a tool: the
 /// turn's text and its `tool_use` part travel in one row, the way
 /// the harness's `write_assistant_turn` persists them.
-fn tool_call_row(seq: u64, call_id: &str, name: &str) -> Value {
+pub(crate) fn tool_call_row(seq: u64, call_id: &str, name: &str) -> Value {
     assistant_tool_call_row(seq, call_id, name, json!({ "command": "ls" }))
 }
 
@@ -1615,4 +1737,164 @@ async fn a_multi_part_tool_output_keeps_a_space_between_the_parts() {
 
     let result = app.messages().last().expect("the result line");
     assert_eq!(result.text, "shell: ok part one part two");
+}
+
+// ---- the terminal's wire vocabulary --------------------------------
+//
+// The terminal names its requests with the server's own constants
+// (`uva_app_server::rpc::methods::names`), so it keeps no copy of the
+// registry. The guard below reads the terminal's vocabulary off its
+// own surfaces and asks the server's router — the thing that turns a
+// name into a handler — whether it serves every one of them.
+
+/// The reducer's request kinds.
+///
+/// The list is the terminal's own vocabulary: a new kind joins it
+/// here, and the guard below then checks the method it names.
+const REDUCER_KINDS: [RequestKind; 9] = [
+    RequestKind::CreateSession,
+    RequestKind::Follow,
+    RequestKind::SendMessage,
+    RequestKind::ApprovalRespond,
+    RequestKind::Cancel,
+    RequestKind::Unfollow,
+    RequestKind::ListSessions,
+    RequestKind::DeleteSession,
+    RequestKind::UiSchema,
+];
+
+/// The methods the palette's chat operations call.
+///
+/// The palette is read off its own item list: every command it
+/// offers is typed in and run, and the requests it produces name the
+/// methods.
+fn palette_methods() -> Vec<&'static str> {
+    let material = ResumeMaterial {
+        session_id: "s1".to_string(),
+        last_seq: 3,
+        pending: Vec::new(),
+        request_snapshot_hash: String::new(),
+        last_message_id: Some("7".to_string()),
+    };
+    let mut methods = Vec::new();
+    for item in Catalog::new().palette_items() {
+        // The placeholder items (`search <词>`, `json <method>
+        // <params>`) name a shape, not a command.
+        if item.contains(' ') {
+            continue;
+        }
+        let mut catalog = Catalog::new();
+        catalog.open_palette();
+        if let Some(palette) = catalog.palette.as_mut() {
+            palette.input = item;
+        }
+        let requests = catalog.key(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            10,
+            Some(&material),
+        );
+        methods.extend(requests.iter().map(Request::method));
+    }
+    assert!(
+        !methods.is_empty(),
+        "the palette produced no request — its chat operations are no longer covered"
+    );
+    methods
+}
+
+/// Every method the terminal can put on the wire.
+///
+/// The list is read off the terminal's own surfaces — the reducer's
+/// request kinds, the directory domains' tables, the palette's chat
+/// operations and the liveness probe — so a new call site is
+/// covered without touching this test.
+fn terminal_methods() -> Vec<&'static str> {
+    let mut methods: Vec<&'static str> = Vec::new();
+    methods.extend(REDUCER_KINDS.iter().map(|kind| kind.method()));
+    for spec in DOMAINS {
+        methods.push(spec.list_method);
+        methods.extend(spec.get_method);
+        methods.extend(spec.ops.iter().map(|op| op.method));
+    }
+    methods.extend(palette_methods());
+    methods.push(names::HEALTH_PING);
+    methods
+}
+
+/// The terminal calls only methods the server serves.
+///
+/// A name the router does not know is a JSON-RPC "method not found":
+/// the operator sees a failed command and a status line, not a
+/// directory, a transcript or a probe.
+#[test]
+fn every_method_the_terminal_sends_is_served_by_the_server() {
+    let mut router = RpcRouter::new();
+    register_all(&mut router);
+    let served = router.method_names();
+    for method in terminal_methods() {
+        assert!(
+            served.contains(&method),
+            "the terminal sends `{method}`, the server does not serve it"
+        );
+    }
+}
+
+/// The terminal asks for no method whose answer it cannot read.
+///
+/// `sessions/events` answers an object, and the terminal's one
+/// reading of it treated the whole answer as an array — the read
+/// could only ever produce nothing, and nothing constructed the
+/// request either. The path was doubly dead and is gone; the scan
+/// keeps it from growing back.
+#[test]
+fn the_terminal_asks_for_no_method_whose_answer_it_cannot_read() {
+    let src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut scanned = 0usize;
+    let mut offenders = Vec::new();
+    scan_production_sources(&src, &mut |path| {
+        scanned += 1;
+        let text = std::fs::read_to_string(path).expect("readable source");
+        for token in [
+            "RequestKind::Events",
+            "Request::events",
+            "LoadEvents",
+            "SESSIONS_EVENTS",
+            "\"sessions/events\"",
+        ] {
+            if text.contains(token) {
+                offenders.push(format!(
+                    "{} still carries the dead sessions/events path \
+                     (`{token}`)",
+                    path.display()
+                ));
+            }
+        }
+    });
+    assert!(scanned > 0, "the scan must reach the source tree");
+    assert!(
+        offenders.is_empty(),
+        "the sessions/events path reads a shape the server never \
+         sends: {offenders:#?}"
+    );
+}
+
+/// Every production source file under `dir`, skipping the test
+/// suites (`tests/` directories and `tests.rs` files).
+fn scan_production_sources(
+    dir: &std::path::Path,
+    visit: &mut impl FnMut(&std::path::Path),
+) {
+    let entries = std::fs::read_dir(dir).expect("a readable source tree");
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            if name != "tests" {
+                scan_production_sources(&path, visit);
+            }
+        } else if name.ends_with(".rs") && !name.ends_with("tests.rs") {
+            visit(&path);
+        }
+    }
 }

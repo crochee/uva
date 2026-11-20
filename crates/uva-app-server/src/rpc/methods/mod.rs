@@ -10,6 +10,12 @@
 //! is the surface the method belongs to (`chat`, `sessions`,
 //! `agents`, …); the verb is what it does.
 //!
+//! Every name is spelled once, in [`names`]: the registrations below
+//! name the constants, and the clients (the terminal, the front-end
+//! method gate) read the same table. A method therefore has one
+//! spelling in the workspace, and a client that calls one cannot
+//! misspell it.
+//!
 //! # Parameters
 //!
 //! Every method takes one `params` object. The fields are the path
@@ -22,11 +28,12 @@
 //!
 //! A result is the payload the REST surface returned, unchanged: the
 //! same serde structures, the same camelCase. A list keeps the
-//! `List<T>` envelope (`data`, `next_cursor`, `has_more`, `total`).
+//! `List<T>` envelope (`data`, `next_cursor`, `total`).
 pub mod agents;
 pub mod automation;
 pub mod chat;
 pub mod misc;
+pub mod names;
 pub mod profile;
 pub mod sessions;
 
@@ -60,3 +67,5 @@ pub fn register_all(router: &mut RpcRouter) {
     profile::register(router);
     sessions::register(router);
 }
+#[cfg(test)]
+mod tests;

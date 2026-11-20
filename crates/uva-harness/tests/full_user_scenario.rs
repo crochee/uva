@@ -468,31 +468,26 @@ impl uva_provider::traits::ModelProvider for MidStreamCancellingProvider {
         _request: uva_provider::CompletionRequest,
         _cancel: Option<Arc<dyn uva_core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(uva_provider::StreamChunk) + Send>,
-    ) -> Result<uva_provider::CompletionResponse, uva_core::Error> {
-        on_delta(uva_provider::StreamChunk::Content(ContentPart::Text(
+    ) -> Result<uva_provider::SamplingResult, uva_core::Error> {
+        let mut assembler = uva_provider::BlockAssembler::new();
+        let content = uva_provider::StreamChunk::Content(ContentPart::Text(
             TextContent {
                 text: "the story begins".to_string(),
                 cache_control: None,
             },
-        )));
+        ));
+        assembler.push(content.clone());
+        on_delta(content);
         if !self.fired.swap(true, Ordering::SeqCst) {
             self.token.cancel();
         }
-        on_delta(uva_provider::StreamChunk::IsDone {
+        let done = uva_provider::StreamChunk::IsDone {
             result: Box::new(uva_provider::SamplingResult::default()),
-        });
-        Ok(uva_provider::CompletionResponse {
-            id: "cancelled".to_string(),
-            model: "fake".to_string(),
-            content: Content::Single(ContentPart::Text(TextContent {
-                text: String::new(),
-                cache_control: None,
-            })),
-            usage: uva_provider::TokenUsage::default(),
-            cached: false,
-            replay_state: None,
-            stop_reason: None,
-        })
+        };
+        assembler.push(done.clone());
+        on_delta(done);
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 

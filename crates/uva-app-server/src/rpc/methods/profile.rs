@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{parse, parse_raw};
+use super::{names, parse, parse_raw};
 use crate::{
     api::v1::profile::ProfileChange,
     profile::{CapabilityAction, CapabilityDomain, ProfileAction, RowEdit},
@@ -22,10 +22,10 @@ use crate::{
 /// for the two reads, [`ProfileChange`] for the three writes), not
 /// bare JSON: the schema emitter derives a schema from them.
 pub fn register(router: &mut RpcRouter) {
-    router.register("profile/list", |state, _raw| async move {
+    router.register(names::PROFILE_LIST, |state, _raw| async move {
         encode(state.profile_rows())
     });
-    router.register("profile/get", |state, raw| async move {
+    router.register(names::PROFILE_GET, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         match state.profile_row(&params.id) {
             Some(row) => encode(row),
@@ -35,7 +35,7 @@ pub fn register(router: &mut RpcRouter) {
             )),
         }
     });
-    router.register("profile/set", |state, raw| async move {
+    router.register(names::PROFILE_SET, |state, raw| async move {
         let params: SetParams = parse_raw(raw)?;
         if params.disabled.is_none() && params.config.is_none() {
             return Err(RpcError::protocol(
@@ -52,7 +52,7 @@ pub fn register(router: &mut RpcRouter) {
             state.profile_apply("ui", ProfileAction::Edit(edit)).await,
         ))
     });
-    router.register("profile/create", |state, raw| async move {
+    router.register(names::PROFILE_CREATE, |state, raw| async move {
         let params: CreateParams = parse_raw(raw)?;
         encode(ProfileChange::from(
             state
@@ -66,7 +66,7 @@ pub fn register(router: &mut RpcRouter) {
                 .await,
         ))
     });
-    router.register("profile/delete", |state, raw| async move {
+    router.register(names::PROFILE_DELETE, |state, raw| async move {
         let params: DeleteParams = parse_raw(raw)?;
         encode(ProfileChange::from(
             state

@@ -34,8 +34,8 @@ pub struct List<T> {
 
 impl<T> List<T> {
     /// Build a list response with `data` and no `next_cursor` /
-    /// `total`. Caller typically upgrades `next_cursor` via
-    /// [`super::cursor::next_cursor`] when there are more pages.
+    /// `total`. A page that has more rows gets its cursor from the
+    /// list recipe, which is what cuts it.
     pub fn new(data: Vec<T>) -> Self {
         Self {
             data,
@@ -54,6 +54,20 @@ impl<T> List<T> {
     pub fn with_total(mut self, total: u64) -> Self {
         self.total = Some(total);
         self
+    }
+
+    /// Project every row, keeping the cursor and the total.
+    ///
+    /// For a route whose rows carry a sort key the wire type does not:
+    /// the page is cut over the richer row, then projected for the
+    /// wire. The cursor names a row by its id, so a projection that
+    /// keeps the id leaves the page resumable.
+    pub fn map<U>(self, project: impl FnMut(T) -> U) -> List<U> {
+        List {
+            data: self.data.into_iter().map(project).collect(),
+            next_cursor: self.next_cursor,
+            total: self.total,
+        }
     }
 }
 

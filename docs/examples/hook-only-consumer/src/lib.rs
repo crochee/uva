@@ -12,11 +12,13 @@
 //! this crate to assert the normal tree carries no `uva-harness`. The
 //! tests in `tests/interception.rs` drive a real run through that
 //! dev-only harness: they assert the handler saw the call, a block
-//! short-circuits the tool, and a dropped registration stops firing.
+//! short-circuits the tool, a dropped registration stops firing, and
+//! an out-of-tree observer receives the `before_run` point.
 //!
-//! Why this shape is the criterion — and why the keys being public was
-//! never enough — is recorded in
-//! `docs/adr/0004-hook-contract-sinks-below-harness.md`.
+//! Why this shape is the criterion — and why publishing the mount
+//! points was never enough — is recorded in
+//! `docs/adr/0004-hook-contract-sinks-below-harness.md` and
+//! `docs/adr/0028-one-interception-table.md`.
 
 use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -29,9 +31,9 @@ use uva_hook::{
     HookEvent,
     HookRegistration,
     HookRegistry,
-    RegistryError,
+    MountPoint,
+    RegistrationOrigin,
     async_trait,
-    seam::TOOL_PRE,
 };
 
 /// One tool call the plugin observed.
@@ -128,18 +130,15 @@ impl Gate for CallGate {
 
 /// Register `gate` on `tool/pre-execute`.
 ///
-/// Dropping the returned handle withdraws the registration from every
-/// pass that shares `registry`.
-///
-/// # Errors
-///
-/// [`RegistryError`] when the mount point is refused — `TOOL_PRE` is
-/// one of the seven, so this cannot fail for this call.
-pub fn install(
-    registry: &HookRegistry,
-    gate: CallGate,
-) -> Result<HookRegistration, RegistryError> {
-    registry.register_gate(TOOL_PRE, Arc::new(gate))
+/// The registration declares itself a plugin lane row, so a panic
+/// skips one pass and keeps the row. Dropping the returned handle
+/// withdraws the registration from every pass that shares `registry`.
+pub fn install(registry: &HookRegistry, gate: CallGate) -> HookRegistration {
+    registry.register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(gate),
+        RegistrationOrigin::Plugin,
+    )
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

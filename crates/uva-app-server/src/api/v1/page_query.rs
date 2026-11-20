@@ -11,7 +11,7 @@
 //! - [`DEFAULT_LIMIT`] = 20 — used when `limit` is `None`.
 //! - [`MAX_LIMIT`] = 100 — `limit > MAX_LIMIT` is silently
 //!   truncated (not an error). `limit == 0` IS an error
-//!   (handled in [`super::cursor::resolve_page`]). The
+//!   (handled in [`super::cursor::normalize_limit`]). The
 //!   server aliases this to [`uva::core::registry::MAX_LIMIT`]
 //!   so the in-memory registry pagination cap and the
 //!   wire-level cap share one source of truth — the
@@ -27,6 +27,9 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+// In scope for `#[validate(nested)]`: the derive resolves the inner
+// struct's rule through this trait.
+use validator::Validate as _;
 
 /// Default page size when the client omits `limit`.
 pub const DEFAULT_LIMIT: u64 = 20;
@@ -159,7 +162,12 @@ impl PageQuery {
     validator::Validate,
 )]
 pub struct SessionPageQuery {
+    /// `nested` so the page's own rules run when a handler validates
+    /// this struct. Without it `sessions/list` accepted an empty
+    /// cursor that every other list method refuses — the one list
+    /// route whose parameters were validated by half.
     #[serde(flatten)]
+    #[validate(nested)]
     pub page: PageQuery,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,

@@ -1,11 +1,24 @@
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 use serde_json::json;
-use uva_provider::Content;
+use uva_app_server::{
+    routes::{follow::FollowEvent, ui::UiSchemaResponse},
+    rpc::notify::ApprovalRequestNotification,
+    session::{
+        controller::{AgentEvent, LiveTurn},
+        status::SessionStatus,
+    },
+    ui::{
+        schema::{UiComponent, UiSchema},
+        tree::{Cardinality, SlotInfo},
+    },
+};
+use uva_provider::{Content, ContentPart, ToolUse};
+use uva_tool::Risk;
 
 use super::*;
 use crate::{
     app::App,
-    tests::{FIXTURE_TS, message_data, message_role},
+    tests::{FIXTURE_TS, message_data, message_role, tool_call_row},
     transport::{RequestKind, TransportEvent},
 };
 
@@ -22,30 +35,14 @@ fn followed(app: &mut App) {
     app.apply(TransportEvent::Response {
         id: json!(1),
         request: Some(RequestKind::Follow),
-        result: Ok(json!({
-            "header": {
-                "session_id": "s1",
-                "user_id": "u1",
-                "agent_name": "default",
-                "state": "idle",
-            },
-            "rows": [
+        result: Ok(crate::tests::baseline(
+            "s1",
+            SessionStatus::Completed,
+            vec![
                 text_row("user_message", 1, "what is the answer?"),
                 text_row("assistant_message", 2, "The answer is 42."),
             ],
-            "cursor": 2,
-            "live": {
-                "start_seq": 0,
-                "live_seq": 0,
-                "running": false,
-                "text": "",
-                "reasoning": "",
-                "tool_calls": [],
-            },
-            "context": { "used": 0 },
-            "pending_interrupts": [],
-            "request_snapshot_hash": "",
-        })),
+        )),
     });
 }
 
@@ -96,15 +93,16 @@ fn the_approval_prompt_is_drawn_over_the_transcript() {
     followed(&mut app);
     app.apply(TransportEvent::Notification {
         method: "approval/request".to_string(),
-        params: json!({
-            "session_id": "s1",
-            "approval_id": "a1",
-            "call_id": "c1",
-            "tool": "shell",
-            "risk": "high",
-            "arguments_hash": "sha256:args",
-            "agent": "default",
-        }),
+        params: serde_json::to_value(ApprovalRequestNotification {
+            session_id: "s1".to_string(),
+            approval_id: "a1".to_string(),
+            call_id: "c1".to_string(),
+            tool: "shell".to_string(),
+            arguments_hash: "sha256:args".to_string(),
+            risk: Risk::High,
+            agent: "default".to_string(),
+        })
+        .expect("the notification serializes"),
     });
     let screen = render_to_buffer(&app, 80, 24);
     assert!(screen.contains("Approval required"), "{screen}");
@@ -218,16 +216,13 @@ fn user_lines_render_as_right_aligned_bubbles() {
 fn thinking_expands_while_streaming_and_collapses_when_done() {
     let mut app = App::new();
     followed(&mut app);
+    let mut live = LiveTurn::default();
+    live.running = true;
+    live.reasoning = "consider the question\ncheck the weather".to_string();
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": {
-                "running": true,
-                "text": "",
-                "reasoning": "consider the question\ncheck the weather",
-            },
-        }),
+        params: serde_json::to_value(FollowEvent::Live { live })
+            .expect("the frame serializes"),
     });
     let screen = render_to_buffer(&app, 80, 24);
     assert!(squeezed(&screen).contains("思考中"), "{screen}");
@@ -249,6 +244,46 @@ fn thinking_expands_while_streaming_and_collapses_when_done() {
     let screen = render_to_buffer(&app, 80, 24);
     assert!(squeezed(&screen).contains("已思考>"), "{screen}");
     assert!(!screen.contains("consider the question"), "{screen}");
+}
+
+/// The live projection's tool calls are drawn, not dropped: while
+/// the model's step still runs, the conversation shows the tool it
+/// is calling, and the durable row that carries the step retires
+/// the live line in favour of the transcript's own telling.
+#[test]
+fn the_live_projection_s_tool_call_is_drawn_until_its_row_lands() {
+    let mut app = App::new();
+    followed(&mut app);
+    // The projection is built the way the server builds it: the
+    // server's own reducer fed the provider's own event.
+    let mut live = LiveTurn::default();
+    live.apply(&AgentEvent::Model(ContentPart::ToolUse(ToolUse {
+        id: "call_1".to_string(),
+        name: "shell".to_string(),
+        input: json!({ "command": "ls" }),
+    })));
+    live.start_seq = 3;
+    live.live_seq = 2;
+    live.running = true;
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: serde_json::to_value(FollowEvent::Live { live })
+            .expect("the frame serializes"),
+    });
+    let screen = render_to_buffer(&app, 80, 24);
+    assert!(screen.contains("shell: running"), "{screen}");
+
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "row",
+            "seq": 4,
+            "row": tool_call_row(4, "call_1", "shell"),
+        }),
+    });
+    let screen = render_to_buffer(&app, 80, 24);
+    assert!(!screen.contains("shell: running"), "{screen}");
+    assert!(screen.contains("tool call: shell"), "{screen}");
 }
 
 #[test]
@@ -307,11 +342,37 @@ fn the_settings_tab_lists_the_sections() {
 
 // -- the deployment's UI tree ----------------------------------------
 
-fn ui_tree(value: serde_json::Value) -> TransportEvent {
+/// The deployment's UI tree, built as the server's own type.
+///
+/// The answer is the server's `UiSchemaResponse`: the fixture builds
+/// that, so a renderer that drifts from the server's shape shows up
+/// here instead of in production.
+fn ui_tree(
+    slots: Vec<SlotInfo>,
+    components: Vec<UiComponent>,
+) -> TransportEvent {
+    let response = UiSchemaResponse {
+        slots,
+        schemas: vec![UiSchema {
+            version: 1,
+            components,
+        }],
+    };
     TransportEvent::Response {
         id: json!(9),
         request: Some(RequestKind::UiSchema),
-        result: Ok(value),
+        result: Ok(
+            serde_json::to_value(response).expect("the ui schema serializes")
+        ),
+    }
+}
+
+/// One declared slot, as the server's slot type.
+fn slot_info(id: &str) -> SlotInfo {
+    SlotInfo {
+        id: id.to_string(),
+        cardinality: Cardinality::Many,
+        owner: "ui.shell".to_string(),
     }
 }
 
@@ -319,8 +380,12 @@ fn slot_component(
     slot: &str,
     kind: &str,
     props: serde_json::Value,
-) -> serde_json::Value {
-    json!({ "slot": slot, "kind": kind, "props": props })
+) -> UiComponent {
+    UiComponent {
+        slot: slot.to_string(),
+        kind: kind.to_string(),
+        props,
+    }
 }
 
 #[test]
@@ -339,12 +404,14 @@ fn an_empty_ui_tree_leaves_the_layout_untouched() {
 fn a_chat_sidebar_slot_renders_a_right_column() {
     let mut app = App::new();
     followed(&mut app);
-    app.apply(ui_tree(json!({
-        "slots": [{ "id": "chat.sidebar", "cardinality": "many", "owner": "ui.shell" }],
-        "schemas": [{ "version": 1, "components": [
-            slot_component("chat.sidebar", "panel", json!({ "title": "Notes" })),
-        ] }],
-    })));
+    app.apply(ui_tree(
+        vec![slot_info("chat.sidebar")],
+        vec![slot_component(
+            "chat.sidebar",
+            "panel",
+            json!({ "title": "Notes" }),
+        )],
+    ));
 
     let buffer = render_to_cells(&app, 80, 24);
     let screen = screen_text(&buffer);
@@ -373,11 +440,14 @@ fn a_chat_sidebar_slot_renders_a_right_column() {
 fn an_unknown_kind_renders_a_placeholder_line() {
     let mut app = App::new();
     followed(&mut app);
-    app.apply(ui_tree(json!({
-        "schemas": [{ "version": 1, "components": [
-            slot_component("chat.sidebar", "weather-card", json!({ "city": "Berlin" })),
-        ] }],
-    })));
+    app.apply(ui_tree(
+        vec![slot_info("chat.sidebar")],
+        vec![slot_component(
+            "chat.sidebar",
+            "weather-card",
+            json!({ "city": "Berlin" }),
+        )],
+    ));
     let screen = render_to_buffer(&app, 80, 24);
     assert!(screen.contains("? weather-card"), "{screen}");
 }
@@ -386,8 +456,12 @@ fn an_unknown_kind_renders_a_placeholder_line() {
 fn session_extensions_render_below_the_transcript() {
     let mut app = App::new();
     followed(&mut app);
-    app.apply(ui_tree(json!({
-        "schemas": [{ "version": 1, "components": [
+    app.apply(ui_tree(
+        vec![
+            slot_info("session.detail.extensions"),
+            slot_info("debug.dump"),
+        ],
+        vec![
             slot_component(
                 "session.detail.extensions",
                 "key-value",
@@ -398,8 +472,8 @@ fn session_extensions_render_below_the_transcript() {
                 "list",
                 json!({ "title": "Dump", "items": ["one", "two"] }),
             ),
-        ] }],
-    })));
+        ],
+    ));
 
     let screen = render_to_buffer(&app, 80, 24);
     assert!(screen.contains("session.detail.extensions"), "{screen}");

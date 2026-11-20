@@ -13,7 +13,6 @@
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use uva_agent::AgentInput;
 use uva_core::CancelToken;
 use uva_provider::{Message, ToolDefinition};
 use uva_session::user_message;
@@ -30,7 +29,10 @@ use super::{
     },
     scan,
 };
-use crate::child::{ChildCancel, drain_child, outcome_of};
+use crate::{
+    child::ChildCancel,
+    round::{ChildRound, RoundInput, depth},
+};
 
 /// The tool the model calls to list this session's sub-agents.
 pub const AGENTS_LIST_TOOL_NAME: &str = "agents_list";
@@ -172,6 +174,27 @@ impl Tool for AgentsMessageTool {
         // now, so the message takes the cold-wake branch instead of
         // following up a round whose handles are gone.
         self.surface.tick();
+        // The depth rule: the session that starts the round may not
+        // sit at the cap — the same judgment the `task` tool asks
+        // before it delegates, about the same session.
+        //
+        // The rule is about **rounds**, so it is asked for the
+        // branches that start one: a follow-up and a cold wake. A
+        // steer starts none, so it is not refused — the refusal would
+        // say "cannot start another round" about a message that
+        // starts no round.
+        //
+        // The rule is asked before the roster is touched: the target
+        // is read first, and `message_target` moves the row to
+        // `running` itself. A refused message therefore leaves the
+        // child's row where it was.
+        let branch = self.surface.registry().message_branch(parent, id);
+        if branch.starts_round()
+            && let Err(refusal) =
+                depth::admit_round(&self.surface.depth_ledger(), parent)
+        {
+            return ToolOutput::error(refusal.wake());
+        }
         // The round a message starts is cancelled by the run that
         // starts it: the token the interrupted round left behind is
         // already fired.
@@ -360,6 +383,11 @@ async fn steer(target: SteerTarget, text: &str) -> ToolOutput {
 }
 
 /// Run another round of a child and report its answer.
+///
+/// The round is the same one the `task` tool drives: the wake hands
+/// it the child it already holds and reads back what it reports. What
+/// the wake does not do is the delegation's business — it opens no
+/// session, isolates nothing, runs no gate and files no child again.
 async fn run_round(
     surface: &Arc<ControlSurface>,
     parent: &str,
@@ -392,49 +420,34 @@ async fn run_round(
     }
 
     // The round runs at the depth the handle table remembers. The
-    // tool's depth table is what nested `task` calls consult, so the
-    // round records it back before the child starts.
-    if let Some(state) = surface.task_state() {
-        state.record_depth(child, target.depth);
-    }
-    let mut input = AgentInput::text(text);
-    input.thread_id = Some(child.to_string());
-    input.log_writer = target.writer.clone();
-    let input = input.with_inbox(target.inbox);
+    // depth table is what nested `task` calls consult, so the round
+    // records it back before the child starts.
+    depth::record_child(&surface.depth_ledger(), child, target.depth);
 
-    // The round's tail: settle, exit footer, artefact set. Armed
-    // before the run, so a dropped future (the parent cancelled while
-    // this round was in flight) still closes the round.
-    let mut tail = crate::tail::RoundTail::new(
-        Arc::clone(surface),
-        parent,
-        child,
-        &agent,
-        target.depth,
-        target.writer.clone(),
-        surface.spawner(),
-    );
-
-    let usage = surface.usage();
-    let (reason, answer) = drain_child(
-        target.peer,
-        input,
-        Arc::clone(&target.cancel),
-        usage.as_deref(),
-        child,
-    )
-    .await;
-
+    // The round itself: the module that assembles the child's input,
+    // drains the peer, maps the end reason into the roster's
+    // vocabulary, lands the tail and reports what the parent is told.
     // A follow-up or a wake does not run in a worktree, so it leaves
     // the set's `.patch` (if any) untouched.
-    tail.land(outcome_of(&reason), None).await;
+    let result = ChildRound::new(Arc::clone(surface))
+        .run(RoundInput {
+            peer: target.peer,
+            prompt: text.to_string(),
+            parent_id: parent.to_string(),
+            child_id: child.to_string(),
+            agent,
+            depth: target.depth,
+            writer: target.writer.clone(),
+            inbox: target.inbox,
+            cancel: target.cancel,
+            isolation: None,
+            feed: None,
+        })
+        .await;
 
-    match answer {
+    match result.answer(None) {
         Some(answer) => ToolOutput::text(answer),
-        None => ToolOutput::error(format!(
-            "the sub-agent's round ended before it answered: {}",
-            reason.as_str()
-        )),
+        None => ToolOutput::error(result.failure()),
     }
 }
 

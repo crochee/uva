@@ -81,7 +81,7 @@ impl ModelProvider for ConfigCountingProvider {
         _request: uva_provider::CompletionRequest,
         _cancel: Option<Arc<dyn uva_core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, uva_core::Error> {
+    ) -> Result<SamplingResult, uva_core::Error> {
         let n = self.iteration.fetch_add(1, Ordering::SeqCst);
         let result = if n < 2 {
             SamplingResult {
@@ -113,13 +113,7 @@ impl ModelProvider for ConfigCountingProvider {
         on_delta(StreamChunk::IsDone {
             result: Box::new(result.clone()),
         });
-        Ok(CompletionResponse {
-            id: format!("resp-{n}"),
-            model: "counting-model".to_string(),
-            content: uva_provider::Content::text(result.text),
-            stop_reason: result.stop_reason,
-            ..Default::default()
-        })
+        Ok(result)
     }
 }
 

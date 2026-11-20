@@ -14,6 +14,22 @@
 //! the registry's mechanisms. The dependency set is the vocabulary
 //! ([`uva_agent`], [`uva_events`]) plus the tool trait — never the loop.
 //!
+//! # The arguments
+//!
+//! One declaration owns the tool's arguments: the wire names, the
+//! JSON shapes, the bounds those shapes put on a value, and what each
+//! argument means. The schema the model reads and the parser that
+//! reads the tool-call payload are two projections of that table
+//! (the `args` module), so the two cannot drift apart: the model is
+//! told a shape the tool accepts, and the tool refuses with the
+//! words the declaration names.
+//!
+//! The same module owns the tool's description: the one recorded copy
+//! of the words the model reads about the `task` tool. The crate
+//! publishes no definition of its own — the mounted tool carries
+//! those words to the model, so what the model sees is what this
+//! repository records.
+//!
 //! # The child session
 //!
 //! The tool mints the child's session id **before** dispatch, asks the
@@ -33,8 +49,11 @@
 //!
 //! # Bounds
 //!
-//! - [`MAX_SUBAGENT_DEPTH`] = 3; the tool checks the parent run's depth
-//!   and refuses to dispatch past it with a model-readable error.
+//! - [`MAX_SUBAGENT_DEPTH`] = 3; the round module's depth rule decides
+//!   whether a session may start another round, and refuses past the
+//!   cap with a model-readable error. Both paths ask it: the `task`
+//!   tool before it delegates, the message tool before it wakes a
+//!   child for another round.
 //! - One `task` call starts one child run. The tool is
 //!   [`uva_tool::ExecutionMode::Sequential`], so the batch scheduler
 //!   serialises `task` calls within a batch: delegating starts a whole
@@ -89,12 +108,13 @@
 //! that keeps sessions off the filesystem returns `None` from
 //! [`SessionIndex::session_dir`] and no set is written.
 
+mod args;
 mod child;
 mod control;
 mod gate;
 mod plugin;
 mod progress;
-mod schema;
+mod round;
 mod spec;
 mod tail;
 mod tool;
@@ -140,13 +160,7 @@ pub use gate::{
     verdict_summary,
 };
 pub use plugin::{TASK_TOOL_PLUGIN_ID, TaskToolPlugin};
-pub use schema::{task_tool_definition, task_tool_definition_with_features};
-pub use spec::{
-    MAX_SUBAGENT_DEPTH,
-    TASK_TOOL_NAME,
-    TaskSpec,
-    TaskTraceContext,
-};
+pub use spec::{MAX_SUBAGENT_DEPTH, TASK_TOOL_NAME, TaskSpec};
 pub use tool::TaskTool;
 pub use worktree::{
     WorktreeCleanupResult,

@@ -196,7 +196,12 @@ async fn a_message_to_an_idle_child_runs_another_round() {
         )
         .await;
     assert!(output.is_text(), "{:?}", output.is_error);
-    assert_eq!(text_of(&output), "the answer");
+    // The result names the child session the round ran in, exactly as
+    // the `task` tool's result does.
+    assert_eq!(
+        text_of(&output),
+        "the answer\n\n[subagent session: child-1]"
+    );
 
     // The round's rows went into the child's own session: the turn
     // that asked for it and the footer that closes it. (The answer
@@ -217,7 +222,7 @@ async fn a_message_to_an_idle_child_runs_another_round() {
     // The child is idle again: the round ended.
     let roster = roster(&surface, "parent").await;
     assert_eq!(roster[0]["status"], "idle");
-    assert_eq!(roster[0]["activity"], "finished");
+    assert_eq!(roster[0]["activity"], "completed");
 }
 
 #[tokio::test]
@@ -236,7 +241,7 @@ async fn a_message_to_an_aborted_child_is_refused() {
         .with_writer(Arc::clone(&log) as Arc<dyn SessionLog>)
         .with_peer(EchoAgent::shared("scout", "the answer")),
     );
-    surface.registry().kill("parent", "child-1").expect("kill");
+    surface.kill("parent", "child-1").expect("kill");
 
     let output = surface
         .message_tool()
@@ -317,7 +322,10 @@ async fn a_follow_up_after_an_interrupt_runs_again() {
         )
         .await;
     assert!(output.is_text(), "{:?}", output.is_error);
-    assert_eq!(text_of(&output), "the answer");
+    assert_eq!(
+        text_of(&output),
+        "the answer\n\n[subagent session: child-1]"
+    );
 }
 
 #[tokio::test]
@@ -386,7 +394,10 @@ async fn a_message_to_a_finished_child_wakes_it_again() {
         )
         .await;
     assert!(output.is_text(), "{:?}", output.is_error);
-    assert_eq!(text_of(&output), "the answer");
+    assert_eq!(
+        text_of(&output),
+        "the answer\n\n[subagent session: child-1]"
+    );
 
     // The woken child is running again, and its session took the new
     // round's rows.
@@ -503,7 +514,10 @@ async fn a_message_to_a_parked_child_wakes_it_from_its_log() {
         )
         .await;
     assert!(output.is_text(), "{:?}", output.is_error);
-    assert_eq!(text_of(&output), "the answer");
+    assert_eq!(
+        text_of(&output),
+        "the answer\n\n[subagent session: child-1]"
+    );
 
     // The wake took the row over: the round ran (and is idle now that
     // it ended) with live handles attached.
@@ -573,7 +587,10 @@ async fn a_child_past_the_scan_window_is_adopted_and_wakeable() {
         )
         .await;
     assert!(output.is_text(), "{:?}", output.is_error);
-    assert_eq!(text_of(&output), "the answer");
+    assert_eq!(
+        text_of(&output),
+        format!("the answer\n\n[subagent session: {CHILD}]")
+    );
     assert_eq!(
         surface.registry().has_handles("parent", CHILD),
         Some(true),

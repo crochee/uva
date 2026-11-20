@@ -1410,3 +1410,95 @@ async fn get_session_does_not_publish_rows_without_a_current_shape() {
         "2026-09-19T08:00:02+00:00"
     );
 }
+
+/// The listing's claimed default — newest first — is the order it
+/// actually answers with.
+///
+/// The default used to be substituted into the whitelist check while
+/// the ordering read a different value, so a sortless request came back
+/// **oldest first** — while this route's own documentation and
+/// `SessionSummary` both promised the opposite. The ids are the reverse
+/// of their timestamps on purpose: an implementation that fell back to
+/// the id tiebreaker would answer in a visibly different order.
+#[tokio::test]
+async fn the_default_order_is_newest_first() {
+    let (state, dir) = durable_state().await;
+    for (id, ts) in [
+        ("zzz", "2026-09-27T08:00:00+00:00"),
+        ("mmm", "2026-09-26T08:00:00+00:00"),
+        ("aaa", "2026-09-25T08:00:00+00:00"),
+    ] {
+        write_transcript(
+            dir.path(),
+            id,
+            &[serde_json::json!({
+                "type": "UserInput",
+                "ts": ts,
+                "data": {"text": "hi"},
+            })],
+        );
+    }
+
+    let defaulted = list_sessions(Arc::clone(&state), SessionPageQuery::new())
+        .await
+        .expect("the default list");
+    let ids: Vec<&str> =
+        defaulted.data.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["zzz", "mmm", "aaa"],
+        "a sortless list is newest first"
+    );
+
+    let ascending = list_sessions(
+        Arc::clone(&state),
+        SessionPageQuery::new()
+            .with_page(crate::api::PageQuery::new().with_sort("created_at")),
+    )
+    .await
+    .expect("the named-key list");
+    let ids: Vec<&str> =
+        ascending.data.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["aaa", "mmm", "zzz"],
+        "`sort=created_at` names the same key ascending"
+    );
+
+    // Every row shares a status here, so `-status` is answered by the
+    // id tiebreaker — turned with the key, which is the declared
+    // semantic.
+    let by_status = list_sessions(
+        Arc::clone(&state),
+        SessionPageQuery::new()
+            .with_page(crate::api::PageQuery::new().with_sort("-status")),
+    )
+    .await
+    .expect("the status list");
+    let ids: Vec<&str> =
+        by_status.data.iter().map(|row| row.id.as_str()).collect();
+    assert_eq!(ids, ["zzz", "mmm", "aaa"], "`-status` turns the tiebreak");
+}
+
+/// The session listing validates its page parameters like every other
+/// list method.
+///
+/// `sessions/list` was the one list route whose inner page struct
+/// carried no `nested` validator, so `cursor: ""` passed here and was
+/// refused by the other six.
+#[test]
+fn an_empty_cursor_is_refused_like_every_other_list_method() {
+    let err = crate::rpc::params::<SessionPageQuery>(
+        serde_json::json!({ "cursor": "" }),
+    )
+    .expect_err("an empty cursor is not a page");
+    assert_eq!(err.code, "validation", "got {err:?}");
+
+    assert!(
+        crate::rpc::params::<SessionPageQuery>(
+            serde_json::json!({ "cursor": "bm90LWVtcHR5" }),
+        )
+        .is_ok(),
+        "a non-empty cursor still passes"
+    );
+}

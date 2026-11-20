@@ -253,12 +253,24 @@ fn usage_chunk_carries_token_usage_verbatim() {
     }
 }
 
-// -- into_completion_response (streaming finalize seam) ----------
-
-/// A sampling with text MUST finalize into a text response.
+/// `ReasoningSignature(String)` variant MUST carry the provider's
+/// signature verbatim; it is the fold's only in-band way to learn the
+/// signature of the reasoning block that just ended.
 #[test]
-fn finalize_text_sampling_into_response() {
-    let sampling = SamplingResult {
+fn reasoning_signature_chunk_carries_signature_verbatim() {
+    let chunk = StreamChunk::ReasoningSignature("sig-abc".to_string());
+    match chunk {
+        StreamChunk::ReasoningSignature(s) => assert_eq!(s, "sig-abc"),
+        _ => panic!("expected ReasoningSignature variant"),
+    }
+}
+
+// -- ensure_durable_content (streaming finalize seam) ------------
+
+/// A finished turn with text carries durable content.
+#[test]
+fn text_turn_carries_durable_content() {
+    let turn = SamplingResult {
         text: "hello".into(),
         tool_calls: vec![],
         reasoning: String::new(),
@@ -266,21 +278,15 @@ fn finalize_text_sampling_into_response() {
         usage: TokenUsage::default(),
         stop_reason: Some("end_turn".into()),
     };
-    let resp = sampling
-        .into_completion_response("m1".into())
-        .expect("text is content");
-    assert_eq!(resp.model, "m1");
-    assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
-    assert!(matches!(
-        resp.content,
-        Content::Single(ContentPart::Text(t)) if t.text == "hello"
-    ));
+    let turn = turn.ensure_durable_content("m1").expect("text is content");
+    assert_eq!(turn.text, "hello");
+    assert_eq!(turn.stop_reason.as_deref(), Some("end_turn"));
 }
 
-/// Tool calls MUST finalize into `Content::Multi(ToolUse)` parts.
+/// A tool-use turn carries durable content even with no text.
 #[test]
-fn finalize_tool_call_sampling_into_response() {
-    let sampling = SamplingResult {
+fn tool_call_turn_carries_durable_content() {
+    let turn = SamplingResult {
         text: String::new(),
         tool_calls: vec![
             ToolUse {
@@ -299,20 +305,17 @@ fn finalize_tool_call_sampling_into_response() {
         usage: TokenUsage::default(),
         stop_reason: Some("tool_use".into()),
     };
-    let resp = sampling
-        .into_completion_response("m1".into())
+    let turn = turn
+        .ensure_durable_content("m1")
         .expect("tool calls are content");
-    assert!(matches!(
-        resp.content,
-        Content::Multi(parts) if parts.len() == 2
-    ));
+    assert_eq!(turn.tool_calls.len(), 2);
 }
 
-/// A terminal stop with no text, reasoning, or tool calls MUST be
-/// rejected with the typed empty-completion error.
+/// A terminal stop with no text and no tool calls is rejected with the
+/// typed empty-completion error.
 #[test]
-fn finalize_empty_terminal_sampling_errors() {
-    let sampling = SamplingResult {
+fn empty_terminal_turn_is_rejected() {
+    let turn = SamplingResult {
         text: String::new(),
         tool_calls: vec![],
         reasoning: String::new(),
@@ -320,7 +323,24 @@ fn finalize_empty_terminal_sampling_errors() {
         usage: TokenUsage::default(),
         stop_reason: Some("end_turn".into()),
     };
-    let err = sampling.into_completion_response("m1".into()).unwrap_err();
+    let err = turn.ensure_durable_content("m1").unwrap_err();
+    assert!(crate::validation::is_empty_response_error(&err));
+}
+
+/// Reasoning text alone is not durable content: the deleted streaming
+/// conversion dropped it before checking, so a thinking-only turn was
+/// an empty completion then and stays one now.
+#[test]
+fn reasoning_alone_is_not_durable_content() {
+    let turn = SamplingResult {
+        text: String::new(),
+        tool_calls: vec![],
+        reasoning: "pondering".into(),
+        reasoning_signature: Some("sig".into()),
+        usage: TokenUsage::default(),
+        stop_reason: Some("end_turn".into()),
+    };
+    let err = turn.ensure_durable_content("m1").unwrap_err();
     assert!(crate::validation::is_empty_response_error(&err));
 }
 
@@ -328,8 +348,8 @@ fn finalize_empty_terminal_sampling_errors() {
 /// NOT the empty-completion case: the caller needs the length
 /// signal.
 #[test]
-fn finalize_length_stop_without_content_stays_ok() {
-    let sampling = SamplingResult {
+fn length_stop_without_content_stays_ok() {
+    let turn = SamplingResult {
         text: String::new(),
         tool_calls: vec![],
         reasoning: String::new(),
@@ -337,8 +357,8 @@ fn finalize_length_stop_without_content_stays_ok() {
         usage: TokenUsage::default(),
         stop_reason: Some("length".into()),
     };
-    let resp = sampling
-        .into_completion_response("m1".into())
+    let turn = turn
+        .ensure_durable_content("m1")
         .expect("length stop is not an empty completion");
-    assert_eq!(resp.stop_reason.as_deref(), Some("length"));
+    assert_eq!(turn.stop_reason.as_deref(), Some("length"));
 }

@@ -83,7 +83,7 @@ impl<T: ModelProvider + ?Sized> ModelProvider for Arc<T> {
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn CancelToken>>,
         on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         (**self)
             .complete_with_stream(request, cancel_token, on_delta)
             .await
@@ -138,42 +138,31 @@ impl ModelProvider for ModelProviderStub {
         _request: CompletionRequest,
         _cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
-        on_delta(StreamChunk::Content(ContentPart::Text(TextContent {
-            text: self.text.clone(),
-            cache_control: None,
-        })));
-        let usage = TokenUsage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            total_tokens: 0,
-            cached_prompt_tokens: None,
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            reasoning_tokens: None,
-        };
-        on_delta(StreamChunk::IsDone {
-            result: Box::new(SamplingResult {
-                text: self.text.clone(),
-                tool_calls: vec![],
-                reasoning: String::new(),
-                reasoning_signature: None,
-                usage: usage.clone(),
-                stop_reason: None,
-            }),
-        });
-        Ok(CompletionResponse {
-            id: "stub".into(),
-            model: "stub".into(),
-            content: Content::Single(ContentPart::Text(TextContent {
+    ) -> Result<SamplingResult, Error> {
+        let usage = TokenUsage::default();
+        let chunks = [
+            StreamChunk::Content(ContentPart::Text(TextContent {
                 text: self.text.clone(),
                 cache_control: None,
             })),
-            usage,
-            cached: false,
-            stop_reason: None,
-            replay_state: None,
-        })
+            StreamChunk::IsDone {
+                result: Box::new(SamplingResult {
+                    text: self.text.clone(),
+                    tool_calls: vec![],
+                    reasoning: String::new(),
+                    reasoning_signature: None,
+                    usage,
+                    stop_reason: None,
+                }),
+            },
+        ];
+        let mut assembler = crate::assembler::BlockAssembler::new();
+        for chunk in chunks {
+            assembler.push(chunk.clone());
+            on_delta(chunk);
+        }
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 

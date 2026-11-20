@@ -1,4 +1,4 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{cmp::Ordering, collections::HashSet, sync::Arc};
 
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -7,26 +7,48 @@ use uva::core::{
     registry::{Registry, RegistryItem},
 };
 
-use super::helpers::paginate;
+use super::list::{Direction, SortKey};
 use crate::{
-    api::{
-        List,
-        PageQuery,
-        resolve_page,
-        validate_resource_name,
-        validate_sort,
-    },
+    api::{List, PageQuery, validate_resource_name},
     rpc::RpcError,
     state::AppState,
 };
-
-/// Sortable fields for the tools list endpoint.
-const TOOL_SORT_WHITELIST: &[&str] = &["name"];
 
 #[derive(Serialize, JsonSchema)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
+}
+
+/// The tool list's sort vocabulary: one key, declared once.
+///
+/// The key's wire spelling, its comparator and the route's default all
+/// live here, so "accepts `name`" and "orders by name" are the same
+/// declaration — the arrangement the old whitelist-plus-`match` pair
+/// could not guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSort {
+    Name,
+}
+
+impl SortKey<ToolInfo> for ToolSort {
+    const ALL: &'static [Self] = &[Self::Name];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+        }
+    }
+
+    fn compare(self, a: &ToolInfo, b: &ToolInfo) -> Ordering {
+        match self {
+            Self::Name => a.name.cmp(&b.name),
+        }
+    }
+
+    fn default_sort() -> (Self, Direction) {
+        (Self::Name, Direction::Ascending)
+    }
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -107,19 +129,18 @@ async fn collect_tool_defs(
     arc
 }
 
-/// GET /api/tools - List registered tools.
+/// GET /api/v1/tools - List registered tools.
+///
+/// The catalog carries the name and the description; the schema the
+/// projection also holds is not part of the response, so the cached
+/// list is read by reference rather than copied. The order, the page
+/// and the envelope come from the route's sort key.
 pub async fn list_tools(
     state: Arc<AppState>,
     page: PageQuery,
 ) -> Result<List<ToolInfo>, RpcError> {
-    validate_sort(page.sort.as_deref().unwrap_or("name"), TOOL_SORT_WHITELIST)?;
-    let resolved = resolve_page(&page)?;
-
-    // The catalog carries the name and the description; the schema
-    // the projection also holds is not part of the response, so the
-    // cached list is read by reference rather than copied.
     let defs = collect_tool_defs(&state).await;
-    let mut tools: Vec<ToolInfo> = defs
+    let tools: Vec<ToolInfo> = defs
         .iter()
         .map(|d| ToolInfo {
             name: d.name.clone(),
@@ -127,13 +148,7 @@ pub async fn list_tools(
         })
         .collect();
 
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
-    if resolved.descending {
-        tools.reverse();
-    }
-
-    let list = paginate(tools, &resolved, |t: &ToolInfo| t.name.as_str());
-    Ok(list)
+    Ok(ToolSort::sort_and_page(tools, &page, |t| t.name.as_str())?)
 }
 
 // POST /api/tools - Register a tool.
@@ -199,7 +214,7 @@ pub struct RegisterToolRequest {
     pub input_schema: serde_json::Value,
 }
 
-/// GET /api/tools/{name} - Get a single tool.
+/// GET /api/v1/tools/{name} - Get a single tool.
 pub async fn get_tool(
     state: Arc<AppState>,
     name: String,
@@ -300,246 +315,4 @@ async fn publish_tool_mutation(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A hermetic `AppState` for route tests (same shape as the
-    /// helper in `routes::health`).
-    async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("temp workspace");
-        let sessions = uva::session::manager::SessionRegistry::new(
-            dir.path().join("sessions"),
-        );
-        let state =
-            AppState::for_test(sessions, dir.path().to_path_buf()).await;
-        (Arc::new(state), dir)
-    }
-
-    /// A tool with nothing but a name, for the route fixtures.
-    struct NamedTool {
-        name: &'static str,
-    }
-
-    #[async_trait::async_trait]
-    impl uva::tool::Tool for NamedTool {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn description(&self) -> &str {
-            "a test tool"
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        async fn call(
-            &self,
-            _input: serde_json::Value,
-            _context: &uva::tool::Context,
-        ) -> uva::tool::ToolOutput {
-            uva::tool::ToolOutput::text("ok")
-        }
-    }
-
-    fn schema(argument: &str) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": { argument: {"type": "string"} },
-            "required": [argument],
-        })
-    }
-
-    /// The tools endpoint reports the *model-facing* list — the same
-    /// projection the agent loop uses. A `Deferred` tool is advertised
-    /// with the permissive placeholder rather than its real schema,
-    /// and an `is_hidden` tool is absent entirely.
-    #[tokio::test]
-    async fn collect_tool_defs_projects_exposure_and_privacy() {
-        let (state, _dir) = test_state().await;
-        {
-            let registry = state.tool_registry.as_ref();
-            registry.register_entry(uva::tool::ToolEntry::dynamic(
-                "alpha".to_string(),
-                "a direct tool".to_string(),
-                schema("a"),
-            ));
-            registry.register_entry(
-                uva::tool::ToolEntry::dynamic(
-                    "beta".to_string(),
-                    "a deferred tool".to_string(),
-                    schema("b"),
-                )
-                .with_exposure(uva::tool::ToolExposure::Deferred),
-            );
-            registry.register_entry(
-                uva::tool::ToolEntry::dynamic(
-                    "secret".to_string(),
-                    "a private tool".to_string(),
-                    schema("s"),
-                )
-                .with_is_hidden(true),
-            );
-        }
-
-        let defs = collect_tool_defs(&state).await;
-        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"alpha"), "got {names:?}");
-        assert!(names.contains(&"beta"), "got {names:?}");
-        assert!(
-            !names.contains(&"secret"),
-            "an is_hidden tool must not be advertised; got {names:?}"
-        );
-        let alpha = defs
-            .iter()
-            .find(|d| d.name == "alpha")
-            .expect("alpha is advertised");
-        assert_eq!(
-            alpha.input_schema,
-            schema("a"),
-            "a Direct tool keeps its real schema"
-        );
-        let beta = defs
-            .iter()
-            .find(|d| d.name == "beta")
-            .expect("beta is advertised");
-        assert_eq!(
-            beta.input_schema,
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": true,
-            }),
-            "a Deferred tool is advertised with the placeholder schema"
-        );
-    }
-
-    #[test]
-    fn tool_info_serializes_name_and_description() {
-        let info = ToolInfo {
-            name: "bash".to_string(),
-            description: "Execute shell commands".to_string(),
-        };
-        let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["name"], "bash");
-        assert_eq!(json["description"], "Execute shell commands");
-    }
-
-    #[test]
-    fn tool_detail_serializes_with_input_schema() {
-        let detail = ToolDetail {
-            name: "bash".to_string(),
-            description: "Execute shell commands".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {"cmd": {"type": "string"}},
-                "required": ["cmd"],
-            }),
-            provenance: "core".to_string(),
-            output_definition: uva::tool::ToolOutputDefinition::passthrough(
-                "bash",
-            )
-            .with_kind(uva::tool::RenderKind::Shell),
-        };
-        let json = serde_json::to_value(&detail).unwrap();
-        assert_eq!(json["name"], "bash");
-        assert_eq!(json["input_schema"]["type"], "object");
-        assert_eq!(json["input_schema"]["required"][0], "cmd");
-        assert_eq!(json["provenance"], "core");
-        // R17: the render contract rides the detail envelope.
-        assert_eq!(json["output_definition"]["kind"], "shell");
-        assert_eq!(json["output_definition"]["name"], "bash");
-    }
-
-    /// A shipped tool cannot be unregistered.
-    ///
-    /// The core immutability rule says a core-owned name cannot be
-    /// taken; deleting the entry would free the name for a plugin to
-    /// claim, which is the substitution the rule exists to prevent.
-    /// The delete is refused, and the tool stays.
-    #[tokio::test]
-    async fn a_shipped_tool_cannot_be_unregistered() {
-        let (state, _dir) = test_state().await;
-        let registry = state.tool_registry.as_ref();
-        assert!(
-            registry.register_core_entry(uva::tool::ToolEntry::new(
-                std::sync::Arc::new(NamedTool { name: "shipped" }),
-            )),
-            "the fixture registers a shipped tool"
-        );
-
-        let error =
-            match unregister_tool(Arc::clone(&state), "shipped".to_string())
-                .await
-            {
-                Ok(_) => panic!("a shipped tool must not be unregistered"),
-                Err(error) => error,
-            };
-        assert_eq!(
-            error.code, "already_exists",
-            "the refusal says the name is not the caller's to free"
-        );
-        assert!(
-            registry.contains("shipped"),
-            "the shipped tool keeps its name"
-        );
-    }
-
-    /// A dynamic tool is unregisterable: the route exists for it.
-    #[tokio::test]
-    async fn a_dynamic_tool_can_be_unregistered() {
-        let (state, _dir) = test_state().await;
-        let registry = state.tool_registry.as_ref();
-        assert!(
-            registry.register_entry(uva::tool::ToolEntry::new(
-                std::sync::Arc::new(NamedTool { name: "temporary" }),
-            )),
-            "the fixture registers a dynamic tool"
-        );
-
-        let _ = unregister_tool(Arc::clone(&state), "temporary".to_string())
-            .await
-            .expect("a dynamic tool is unregistered");
-        assert!(!registry.contains("temporary"), "the dynamic tool is gone");
-    }
-
-    /// Two reads of an unchanged registry answer byte-for-byte the
-    /// same body.
-    ///
-    /// The catalog is cached on the state keyed by the registry's
-    /// version, and the handler reads the cached list by reference —
-    /// so a cache hit does not re-project the definitions, and the
-    /// same registry version cannot produce two different answers.
-    #[tokio::test]
-    async fn two_reads_of_an_unchanged_registry_answer_identically() {
-        let (state, _dir) = test_state().await;
-        {
-            let registry = state.tool_registry.as_ref();
-            registry.register_entry(uva::tool::ToolEntry::new(Arc::new(
-                NamedTool { name: "alpha" },
-            )));
-            registry.register_entry(uva::tool::ToolEntry::new(Arc::new(
-                NamedTool { name: "beta" },
-            )));
-        }
-
-        let first = list_tools(Arc::clone(&state), PageQuery::default())
-            .await
-            .expect("the first list");
-        let second = list_tools(Arc::clone(&state), PageQuery::default())
-            .await
-            .expect("the second list");
-
-        let first_body = serde_json::to_value(&first).expect("serialises");
-        let second_body = serde_json::to_value(&second).expect("serialises");
-        assert_eq!(
-            first_body, second_body,
-            "an unchanged registry must answer the same body twice"
-        );
-        assert!(first.data.len() >= 2, "the registered tools are listed");
-        let names: Vec<&str> =
-            first.data.iter().map(|tool| tool.name.as_str()).collect();
-        assert!(names.contains(&"alpha"), "alpha is listed: {names:?}");
-        assert!(names.contains(&"beta"), "beta is listed: {names:?}");
-    }
-}
+mod tests;

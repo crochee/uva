@@ -30,7 +30,7 @@ use ratatui::{
 
 use crate::{
     app::{App, ApprovalPrompt, Overlay, Pane},
-    ui_schema::{SLOT_CHAT_SIDEBAR, SLOT_SESSION_EXTENSIONS},
+    ui_schema::{SLOT_CHAT_SIDEBAR, SLOT_SESSION_EXTENSIONS, unplaced_slots},
     views,
 };
 
@@ -56,7 +56,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // the layout byte-identical to the one before the slot tree.
     let extensions = app.ui().components_in(SLOT_SESSION_EXTENSIONS);
     let extensions_visible =
-        !extensions.is_empty() || !app.ui().unplaced_slots().is_empty();
+        !extensions.is_empty() || !unplaced_slots(app.ui()).is_empty();
     let rows = if extensions_visible {
         Layout::vertical([
             Constraint::Length(1),

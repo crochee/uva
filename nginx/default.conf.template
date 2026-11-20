@@ -1,0 +1,70 @@
+# The site configuration for the uva-web image.
+#
+# Two jobs: serve the front-end's static bundle, and proxy the
+# server's HTTP surface, so the SPA and the API share one origin (no
+# CORS, first-party cookies).
+#
+# The server's surface is the gateway's
+# (`crates/uva-app-server/src/gateway.rs`):
+#
+#   /rpc      — the JSON-RPC websocket the SPA talks on
+#   /livez    — liveness probe
+#   /readyz   — readiness probe
+#   /version  — the build identity
+#   /metrics  — the Prometheus exposition
+#
+# Everything else is the front-end's own territory.
+#
+# The image's entrypoint renders this template with `envsubst`
+# before nginx starts, so the two values below are runtime values:
+# the address the server is reachable at, and the port nginx
+# listens on.
+
+server {
+    listen ${UVA_PORT};
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Hashed assets never change under their name.
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # The JSON-RPC websocket. The upgrade headers are the whole
+    # point: without them the connection never leaves the HTTP
+    # handshake, and the SPA's one channel to the server is dead.
+    location = /rpc {
+        proxy_pass ${UVA_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # A turn can run for minutes: the answer streams as it comes.
+        proxy_buffering off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # The probes and the Prometheus exposition.
+    location ~ ^/(livez|readyz|version|metrics)$ {
+        proxy_pass ${UVA_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # The SPA's own routes: an unknown path serves index.html so the
+    # client-side router can resolve it.
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache";
+    }
+}

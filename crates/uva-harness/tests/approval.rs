@@ -32,6 +32,7 @@ use uva_harness::{
     Suspension,
     seams::Seams,
 };
+use uva_hook::{MountPoint, RegistrationOrigin};
 use uva_kernel::{
     Context as KernelContext,
     PLUGIN_PROTOCOL_VERSION,
@@ -95,9 +96,12 @@ async fn approval_denies_on_timeout() {
 
     // The gate reads the provided policy; the host installs it at the
     // `tool/pre-execute` seam.
-    let mut host = Host::new();
-    let _registration =
-        host.gate(Arc::new(ApprovalGate::new(service, "ws", risk_by_tool())));
+    let host = Host::new();
+    let _registration = host.hook_registry().register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(ApprovalGate::new(service, "ws", risk_by_tool())),
+        RegistrationOrigin::InProcess,
+    );
     let seams = Seams::new(host);
     let fixture = Fixture::new();
 
@@ -194,9 +198,12 @@ async fn approval_allows_low_risk() {
         .require::<ApprovalPolicy>(KEY_APPROVAL)
         .expect("`approval` resolves");
 
-    let mut host = Host::new();
-    let _registration =
-        host.gate(Arc::new(ApprovalGate::new(service, "ws", risk_by_tool())));
+    let host = Host::new();
+    let _registration = host.hook_registry().register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(ApprovalGate::new(service, "ws", risk_by_tool())),
+        RegistrationOrigin::InProcess,
+    );
     let seams = Seams::new(host);
     let fixture = Fixture::new();
 

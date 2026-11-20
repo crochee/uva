@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use uva_context::AgentState;
 use uva_core::SystemClock;
+use uva_hook::{MountPoint, RegistrationOrigin};
 use uva_provider::{ContentPart, TokenUsage};
 use uva_session::{LogWriter, SessionSink, in_memory::InMemorySessionSink};
 use uva_steering::{GuardResult, HookDecision, HookEvent};
@@ -298,11 +299,19 @@ async fn hook_block_surfaces_as_error_result() {
         "echo", "echoed",
     ))));
     let mut host = Host::new();
-    let _blocker = host.hook(Arc::new(BlockEcho));
-    let _recorder = host.hook(Arc::new(RecordTrackerCalls {
-        tracker_calls: Arc::clone(&tracker_calls),
-        recorded: Arc::clone(&recorded),
-    }));
+    let _blocker = host.hook_registry().register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(BlockEcho),
+        RegistrationOrigin::InProcess,
+    );
+    let _recorder = host.hook_registry().register_hook_at(
+        MountPoint::ToolPost,
+        Arc::new(RecordTrackerCalls {
+            tracker_calls: Arc::clone(&tracker_calls),
+            recorded: Arc::clone(&recorded),
+        }),
+        RegistrationOrigin::InProcess,
+    );
     let _tracker = host.tracker(Arc::new(CountingTracker {
         calls: Arc::clone(&tracker_calls),
     }));

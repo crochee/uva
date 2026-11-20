@@ -22,8 +22,8 @@
 | 装配 | `uva-kernel` `uva-runtime` | 插件内核（manifest / mount / effect）与配置驱动装配 |
 | 运行时 | `uva-events` | run 事件词汇（`AgentEvent` / `SystemEvent` / `WarningKind`）；`uva-harness` 根与 `events` 深路径经 re-export 保路径 |
 | 运行时 | `uva-agent` | agent 词汇：`Agent` trait、`AgentInput`、两种收件箱（转向通道）、peer 注册表、子会话写入者来源、prompt manifest；`AgentCaps` 与 `ReActAgent` 仍住 harness，路径经 re-export 保持 |
-| 运行时 | `uva-hook` | 拦截契约：`Hook` / `Gate` / 请求与结果 transformer、七个挂载点键、解耦 `HookContext`、`HookPayload`、可撤销 `HookRegistry` 与仲裁、`hooks` 内核插件；harness 根与深路径保持 |
-| 运行时 | `uva-harness` | ReAct 循环、seam、`Host` 注册表 |
+| 运行时 | `uva-hook` | 拦截契约：`Hook` / `Gate` / 请求与结果 transformer、十二点 `MountPoint`、注册来源、解耦 `HookContext`、可撤销 `HookRegistry` 与仲裁、`hooks` 内核插件；harness 根与 `agent::host` 深路径保持 |
+| 运行时 | `uva-harness` | ReAct 循环、seam、`Host`（typed 策略表 + 部署的拦截表） |
 | 插件 | `uva-tool-task` | `task` 工具：普通 `Tool`，解析同伴 agent、开子会话、内联驱动子 run；依赖 agent/事件词汇，不依赖 harness |
 | 宿主 | `uva-app-server` `uva-tui` `uva-gateway` `uva-mcp-server` `desktop/` | 人机入口：唯一允许在公开签名里出现 tokio 的地方 |
 | 观测 | `uva-telemetry` | console / file logging、Prometheus metrics、OTel 导出；日志与指标的唯一入口 |
@@ -136,12 +136,13 @@
 | `check-host-capabilities` | 能力矩阵只许变好 |
 | `check-profile-document` | 入库的 `.agents/profile.toml` 必须复述每个插件 manifest 的依赖边（有效边 ≠ 文档声明即红） |
 | `check-single-writer` | 会话行只能由该会话的 writer 写 |
-| `check-row-vocabulary` | Rust 生产代码不得自己拼会话行的 `type`（标签与方言一律取自行词汇），也不得在 `uva-session` 之外以字面量构造 `SessionEvent` 变体（写行一律走 `typed_event_builders`；读侧 pattern 不受限，裸 match 臂进审计表）；浏览器源码（`uva-web/src`，经 TS compiler API 扫描器）不得拼写方言；审计过的例外表在脚本里，只许变短 |
+| `check-row-vocabulary` | Rust 生产代码不得自己拼会话行的 `type`（标签与方言一律取自行词汇），也不得以字面量构造 `SessionEvent` 变体（整个工作区，含 `uva-session` 内部；只有两个主人例外——构造器模块与词汇的标签↔事件对应表），更不得改写一行的载荷（写行一律走 `typed_event_builders`；豁免只有构造器模块这一个文件，`uva-session` 内部其余文件也在扫描范围；读侧 pattern 不受限，match 臂按**闭合行**判——闭合那一行带 `=>` 的才算臂，开行上的 `=>` 遮不住臂体里的构造）；浏览器源码（`uva-web/src`，经 TS compiler API 扫描器）不得拼写方言；审计过的例外表在脚本里，只许变短 |
 | `check-claim-language` | 当前状态文档不出现与代码事实矛盾的绝对化措辞 |
 | `check-publishable` / `check-deny` | 每个 crate 可 `cargo package`；许可证 / 来源 / ban 审计通过 |
 | `check-web` / `check-web-contract` | 前端类型 / lint / 格式化 / 纯函数单测；`uva-web/src/api/types.ts` 必须逐字节等于服务端 wire types 的重新生成结果 |
-| `check-web-methods` | 前端域客户端的 `METHOD` 表里的每个方法名都必须是服务端真正提供的方法（路由注册表 + 通知常量）；服务端有而前端不调的不算错；**读不懂的表也红**（每个含 `const METHOD` 的文件必须至少产出一行；表里读不出的一行——计算值、带插值的模板、计算 key、取值不在 key 那一行——也算读不懂，门禁点名文件与 key；契约清单的每一行都必须是被抽取器读到的一行） |
-| `lint-sh` | 对 18 个 `scripts/*.sh` 门禁跑 shellcheck |
+| `check-web-methods` | 前端域客户端的 `METHOD` 表里的每个方法名都必须是服务端真正提供的方法（**路由的注册点**经方法名表回查 + 通知常量）；服务端有而前端不调的不算错；**读不懂的表也红**（每个含 `const METHOD` 的文件必须至少产出一行；表里读不出的一行——计算值、带插值的模板、计算 key、取值不在 key 那一行——也算读不懂，门禁点名文件与 key；契约清单的每一行都必须是被抽取器读到的一行） |
+| `check-list-recipe` | 列表信封只能由 `routes/list/` 的配方或信封模块自己构造；其它生产文件里的 `List { … }` 字面量一律红（`List::new` / `List::map` 不算，因为它们不带页）。六份手写配方的静默漂移是这张票的来由，见 ADR-0027 |
+| `lint-sh` | 对 19 个 `scripts/*.sh` 门禁跑 shellcheck |
 
 **新增 `scripts/*.sh` 门禁必须在同一变更里同步四处**：`Makefile` 的 `check-*` 目标与 `make ci` 的聚合清单、`Makefile` 的 `lint-sh` 清单、`.github/workflows/shellcheck.yml` 的清单、本节的 `lint-sh` 行——两份脚本清单必须一致。
 
@@ -225,6 +226,26 @@ CI（[`.github/workflows/rust-quality.yml`](.github/workflows/rust-quality.yml)�
 
   或更直接地 mock `/readyz` 200 + `bringToFront`，效果一样。
 - **隐藏 tab 里 `requestAnimationFrame` 永不触发**：页面内 `await new Promise(r => requestAnimationFrame(r))` 会一路挂到 `protocolTimeout`（默认 30 s）。验证 `naturalWidth` 之类的渲染后量应改用 `setTimeout` 或 MCP 提供的 `wait(...)` 助手。
+
+**MCP 的浏览器已经在本机，不要重新下载**：`~/.cache/ms-playwright/` 里已经躺着
+`chromium-1252`（可执行文件 `chrome-linux64/chrome`，由 `@playwright/mcp@0.0.84` /
+`playwright-core 1.65.0-alpha-2026-10-30` 注册，npx 缓存
+`~/.npm/_npx/86170c4cd1c5da32`）。**不要**跑
+`npx @playwright/mcp@latest install-browser chrome-for-testing`——本机到
+Chrome for Testing 的 CDN 不通，下载必然失败（`Download failure, code=1`），
+而浏览器本来就在盘上。
+
+MCP 报的 revision 与盘上的对不上时（换过 MCP 版本就会变：`0.0.86` /
+`playwright-core 1.66.0-alpha-2026-11-18` 要的是 `chromium-1255`），把已缓存的
+revision 软链成它要的名字即可——不联网、秒成、MCP 直接用这个构建：
+
+```bash
+ls ~/.cache/ms-playwright/                       # 先看盘上有什么
+ln -sfn chromium-1252 ~/.cache/ms-playwright/chromium-1255
+```
+
+想让 MCP 与浏览器版本严格对齐时，改用与 `chromium-1252` 匹配的旧 MCP：
+`~/.npm/_npx/86170c4cd1c5da32/node_modules/.bin/playwright-mcp`。
 
 理由：前端 e2e 套件（原 44 个 spec / ~5,200 行）跑一次 13 分钟，且需 `cargo build` + Vite + Chromium 三件套，成本远高于它发现的问题；spec 与实现会同步腐化（曾出现整批 mock 停留在重构前的 wire 形状、长期红灯无人察觉）。这套理由对 e2e 成立，对纯函数单测不成立——vitest 在 node 里跑，无需浏览器，秒级完成。MCP 打在真实应用上，不引入第二份需要维护的契约；MCP 的浏览器是 harness 自带的，与 `uva-web` 的依赖无关。边界论证见 [`docs/adr/0001-frontend-test-policy.md`](docs/adr/0001-frontend-test-policy.md)。
 

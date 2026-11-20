@@ -2,7 +2,7 @@ use serde_json::json;
 use uva_provider::{Content, ContentPart, Message, Role, ToolUse};
 
 use super::*;
-use crate::CompactionLifecycleOutcome;
+use crate::{CompactionLifecycleOutcome, typed_event_builders as vocabulary};
 
 /// Captures the WARN events the reader emits, so a test can
 /// assert a deprecation was said (and said once).
@@ -603,6 +603,94 @@ fn multiple_dangling_calls_get_one_tool_result_each_in_id_order() {
         })
         .collect();
     assert_eq!(ids, vec!["c1", "c2", "c3"]);
+}
+
+/// The row as it goes on disk — the whole row, payload bag and typed
+/// fields together. Comparing rows this way says the two are the
+/// same shape, not merely that they carry the same keys.
+fn row_json(event: &SessionEvent) -> Value {
+    serde_json::to_value(event).expect("the row serialises")
+}
+
+/// The step end a crash-repair writes is the step end the vocabulary
+/// builds: the same payload bag, the same typed fields, the same
+/// action key a run's own step end carries.
+///
+/// The repair used to spell this row itself, and the row it spelled
+/// left the action key out — a reader could not tell a step that
+/// ended from a step that was cut short.
+#[test]
+fn a_repaired_step_end_is_the_row_the_vocabulary_builds() {
+    let events = vec![
+        turn_start(1, "2026-09-10T00:00:00Z"),
+        step_start(1, 1, "2026-09-10T00:00:00Z"),
+    ];
+    let closers = interrupted_turn_closers(&events);
+    // step/end + turn/end, no synthetic tool_result.
+    assert_eq!(closers.len(), 2, "got: {closers:#?}");
+    assert_eq!(
+        row_json(&closers[0]),
+        row_json(&vocabulary::step_end(1, 1, STEP_INTERRUPTED)),
+        "the repaired step end is the vocabulary's row"
+    );
+    assert_eq!(
+        row_json(&closers[0])["data"]["action"],
+        "interrupted",
+        "the step a crash cut short says so"
+    );
+}
+
+/// The turn end a crash-repair writes is the turn end the vocabulary
+/// builds: the same payload bag, the same typed fields, no key of
+/// its own.
+#[test]
+fn a_repaired_turn_end_is_the_row_the_vocabulary_builds() {
+    let events = vec![
+        turn_start(1, "2026-09-10T00:00:00Z"),
+        step_start(1, 1, "2026-09-10T00:00:00Z"),
+    ];
+    let closers = interrupted_turn_closers(&events);
+    assert_eq!(closers.len(), 2, "got: {closers:#?}");
+    assert_eq!(
+        row_json(&closers[1]),
+        row_json(&vocabulary::turn_end(1, TURN_INTERRUPTED, None)),
+        "the repaired turn end is the vocabulary's row"
+    );
+}
+
+/// The tool result a crash-repair writes for a call that never
+/// finished is the row the vocabulary builds: the same payload bag,
+/// the same typed fields, the same surface op.
+///
+/// The interrupted row is not a tool's output — there is none — so
+/// its payload says what is known instead: the call it answers, the
+/// tool that call named, the recovery code and the `interrupted`
+/// mark.
+#[test]
+fn a_repaired_tool_result_is_the_row_the_vocabulary_builds() {
+    let events = vec![
+        turn_start(1, "2026-09-10T00:00:00Z"),
+        step_start(1, 1, "2026-09-10T00:00:00Z"),
+        SessionEvent::ToolCall {
+            seq: 4,
+            ts: "2026-09-10T00:00:00Z".into(),
+            data: json!({"call_id": "c1", "name": "read", "arguments": {}}),
+            call_id: Some("c1".to_string()),
+            name: Some("read".to_string()),
+        },
+    ];
+    let closers = interrupted_turn_closers(&events);
+    // tool_result + step/end + turn/end.
+    assert_eq!(closers.len(), 3, "got: {closers:#?}");
+    assert_eq!(
+        row_json(&closers[0]),
+        row_json(&vocabulary::tool_result_interrupted(
+            "c1",
+            "read",
+            TOOL_OUTCOME_UNKNOWN
+        )),
+        "the repaired tool result is the vocabulary's row"
+    );
 }
 
 fn compaction_start(seq: u64, token: &str) -> SessionEvent {

@@ -18,10 +18,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
+use uva_app_server::ui::schema::UiComponent;
 
 use crate::{
     app::App,
-    ui_schema::{SLOT_CHAT_SIDEBAR, SLOT_SESSION_EXTENSIONS, UiComponent},
+    ui_schema::{SLOT_CHAT_SIDEBAR, SLOT_SESSION_EXTENSIONS},
 };
 
 /// Read an optional string prop.
@@ -139,7 +140,7 @@ pub(crate) fn extensions_height(components: &[&UiComponent]) -> u16 {
 pub(crate) fn draw_extensions(frame: &mut Frame, area: Rect, app: &App) {
     let components = app.ui().components_in(SLOT_SESSION_EXTENSIONS);
     let mut lines = stack(&components);
-    let unplaced = app.ui().unplaced_slots();
+    let unplaced = crate::ui_schema::unplaced_slots(app.ui());
     if !unplaced.is_empty() {
         // Declared somewhere this build does not render: say so in one
         // line instead of hiding the components entirely.

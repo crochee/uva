@@ -37,6 +37,26 @@ use crate::state::ProviderCatalogue;
 /// The boot's containers: the shared tool registry, the peer-agent
 /// registry, and the harness host.
 fn services(root: &std::path::Path) -> Arc<BootServices> {
+    services_over(root, uva::harness::Host::new())
+}
+
+/// The boot's containers with the production policy installed the way
+/// the boot installs it: one registry first, then
+/// [`Host::default_policy`] over it.
+fn policy_services(root: &std::path::Path) -> Arc<BootServices> {
+    let registry = uva::hook::HookRegistry::new();
+    services_over(root, uva::harness::Host::default_policy(root, registry))
+}
+
+/// The boot's containers over `plugin_host`.
+///
+/// The `hooks` row publishes the host's registry (ADR 0028), so the
+/// fixture takes it from the host's read accessor rather than
+/// building a second table.
+fn services_over(
+    root: &std::path::Path,
+    plugin_host: uva::harness::Host,
+) -> Arc<BootServices> {
     let provider: Arc<dyn ModelProvider> =
         Arc::new(uva::test_support::FakeProvider::new(vec![]));
     let catalogue = ProviderCatalogue::default().with_handle(
@@ -52,6 +72,7 @@ fn services(root: &std::path::Path) -> Arc<BootServices> {
     let _ = catalogue;
     let _ = sessions;
     let _ = compactor;
+    let hook_registry = plugin_host.hook_registry().clone();
     Arc::new(BootServices {
         tool_registry: Arc::clone(&tools),
         agent_registry: Arc::clone(&agents),
@@ -62,7 +83,8 @@ fn services(root: &std::path::Path) -> Arc<BootServices> {
             crate::session::session_index::SessionIndexSlot::new(),
         ),
         usage: Arc::new(crate::state::UsageMetrics::default()),
-        plugin_host: uva::harness::Host::new(),
+        hook_registry,
+        plugin_host,
     })
 }
 
@@ -70,6 +92,20 @@ fn services(root: &std::path::Path) -> Arc<BootServices> {
 fn boot_services(root: &std::path::Path) -> (Arc<BootServices>, BootExtras) {
     (
         services(root),
+        BootExtras {
+            workspace_root: root.to_path_buf(),
+            ..BootExtras::default()
+        },
+    )
+}
+
+/// The boot's containers with the production policy installed, plus
+/// the workspace they read.
+fn policy_boot_services(
+    root: &std::path::Path,
+) -> (Arc<BootServices>, BootExtras) {
+    (
+        policy_services(root),
         BootExtras {
             workspace_root: root.to_path_buf(),
             ..BootExtras::default()
@@ -250,7 +286,7 @@ async fn an_explicit_profile_mounts_only_the_rows_it_names() {
 async fn a_profile_without_the_hooks_row_still_mounts_the_loop() {
     for off in [false, true] {
         let dir = tempdir().expect("tempdir");
-        let (services, extras) = boot_services(dir.path());
+        let (services, extras) = policy_boot_services(dir.path());
         let mut profile = profile_with_catalogue();
         if off {
             let row = profile
@@ -281,6 +317,29 @@ async fn a_profile_without_the_hooks_row_still_mounts_the_loop() {
                 .expect("read hooks")
                 .is_none(),
             "no external registry when the hooks row is {shape}"
+        );
+        // The deployment's policy does not depend on the row: the host
+        // still carries its nine typed rows and the logging hook at
+        // every event mount point.
+        assert_eq!(
+            services.plugin_host.registration_count(),
+            9,
+            "the default policy's typed tables survive a {shape} hooks row"
+        );
+        let observed = uva::hook::MountPoint::ALL
+            .into_iter()
+            .filter(|mount| {
+                mount.is_event()
+                    && services
+                        .plugin_host
+                        .hook_registry()
+                        .has_entries_at(*mount)
+            })
+            .count();
+        assert_eq!(
+            observed, 11,
+            "the logging hook still runs at every event point with a \
+             {shape} hooks row"
         );
     }
 }
@@ -559,6 +618,22 @@ async fn the_search_row_mounts_with_its_own_session_index() {
         !hits.is_empty(),
         "the row's own index answers over the boot's sessions directory"
     );
+
+    // A profile-row-scoped tool is `Dynamic`: the name is the row's
+    // to give away, so a later `Core` registration may take it.
+    let tools = ctx
+        .require::<uva::tool::ToolRegistry>(uva::tool::KEY_TOOLS)
+        .expect("the tools service resolves");
+    let record = tools
+        .snapshot_with_provenance()
+        .into_iter()
+        .find(|record| record.metadata.name == "search")
+        .expect("the brick's tool is registered");
+    assert_eq!(
+        record.provenance,
+        uva::tool::ToolProvenance::Dynamic,
+        "the `search` tool is the profile row's to give away"
+    );
 }
 
 /// The `approval` row publishes the deployment's default stance: the
@@ -622,4 +697,154 @@ async fn a_subset_mount_that_parks_a_required_row_is_fatal() {
         ),
         "the audit names the stranded row: {error:?}"
     );
+}
+
+// --- the one interception table (ADR 0028) ----------------------------
+
+/// Counts the `before_run` observations it receives.
+struct CountBeforeRun(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl uva::harness::Hook for CountBeforeRun {
+    fn name(&self) -> &str {
+        "count-before-run"
+    }
+
+    async fn observe(
+        &self,
+        event: &uva::steering::HookEvent,
+        _ctx: &uva::harness::HookContext<'_>,
+    ) -> uva::steering::HookDecision {
+        if matches!(event, uva::steering::HookEvent::BeforeRun { .. }) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        uva::steering::HookDecision::Allow
+    }
+}
+
+/// Build one agent through the mounted `agentLoop` factory and run it
+/// to completion over the boot's host.
+async fn run_one_turn(
+    ctx: &uva::kernel::Context,
+    services: &BootServices,
+    workspace: &std::path::Path,
+) {
+    let factory = ctx
+        .require::<Arc<dyn uva::harness::plugin::AgentLoopFactory>>(
+            uva::harness::plugin::KEY_AGENT_LOOP,
+        )
+        .expect("agentLoop");
+    let provider: Arc<dyn ModelProvider> =
+        Arc::new(uva::test_support::FakeProvider::text("ok"));
+    let run = uva::harness::plugin::RunConfig {
+        provider,
+        tool_registry: Arc::new(ToolRegistry::new()),
+        workspace_root: workspace.to_path_buf(),
+        descriptor: uva::harness::default_descriptor(String::new()),
+        prompt_context: Arc::new(uva::harness::PromptContext::default()),
+        max_iterations: 2,
+        tool_surface: None,
+        strategy: None,
+        tool_restriction: None,
+        log_writer: None,
+        context_manager: None,
+        compactor: None,
+        host: Some(services.plugin_host.clone()),
+        spawner: None,
+    };
+    let agent = factory.create(&run);
+    let cancel: Arc<dyn uva::core::CancelToken> =
+        uva::core::AtomicCancelToken::shared();
+    let mut events = agent
+        .run(uva::harness::AgentInput::text("hi"), cancel)
+        .await;
+    while futures::StreamExt::next(&mut events).await.is_some() {}
+}
+
+/// The `hooks` row publishes the boot's own table: a registration made
+/// through the service lands on the host the run assembly receives, so
+/// the run's seam layer observes it (ADR 0028, ticket 02).
+#[tokio::test]
+async fn an_out_of_tree_registration_on_the_hooks_row_reaches_a_run() {
+    let dir = tempdir().expect("tempdir");
+    let (services, extras) = policy_boot_services(dir.path());
+    let profile = profile_with_catalogue();
+    let (ctx, _handle) = mount_profile(
+        Arc::clone(&services),
+        &profile,
+        SharedClock::system(),
+        extras,
+    )
+    .expect("the native set mounts");
+
+    let registry = ctx
+        .require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
+        .expect("the hooks row publishes its table");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let _registration = registry.register_hook_at(
+        uva::hook::MountPoint::BeforeRun,
+        Arc::new(CountBeforeRun(Arc::clone(&calls))),
+        uva::hook::RegistrationOrigin::Plugin,
+    );
+
+    // The service's table and the host's are one instance: the row
+    // publishes a clone of the registry the host carries.
+    assert!(
+        services
+            .plugin_host
+            .hook_registry()
+            .has_entries_at(uva::hook::MountPoint::BeforeRun),
+        "the host dispatches the table the hooks row published"
+    );
+
+    run_one_turn(&ctx, &services, dir.path()).await;
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "an out-of-tree before_run observer reaches a real run"
+    );
+}
+
+/// A hot remount of the `hooks` row republishes the boot's table: a
+/// registration made before the remount still reaches a run created by
+/// the remounted loop.
+#[tokio::test]
+async fn remounting_the_hooks_row_reuses_the_boots_table() {
+    let dir = tempdir().expect("tempdir");
+    let (services, extras) = policy_boot_services(dir.path());
+    let profile = profile_with_catalogue();
+    let (ctx, handle) = mount_profile(
+        Arc::clone(&services),
+        &profile,
+        SharedClock::system(),
+        extras.clone(),
+    )
+    .expect("the native set mounts");
+
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registration = ctx
+        .require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
+        .expect("the hooks row publishes its table")
+        .register_hook_at(
+            uva::hook::MountPoint::BeforeRun,
+            Arc::new(CountBeforeRun(Arc::clone(&calls))),
+            uva::hook::RegistrationOrigin::Plugin,
+        );
+    drop(handle);
+
+    let (ctx, _handle) = mount_profile(
+        Arc::clone(&services),
+        &profile,
+        SharedClock::system(),
+        extras,
+    )
+    .expect("the remount succeeds");
+
+    run_one_turn(&ctx, &services, dir.path()).await;
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the remounted row publishes the same table, not a fresh one"
+    );
+    drop(registration);
 }

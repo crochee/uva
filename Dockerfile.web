@@ -1,0 +1,91 @@
+# syntax=docker/dockerfile:1.7
+#
+# Multi-stage Dockerfile for uva-web: the React/Vite front-end,
+# served by nginx.
+#
+# The image's whole job: serve the front-end's static bundle and
+# proxy the server's HTTP surface, so the SPA and the API share one
+# origin (no CORS, first-party cookies). The surface it proxies is
+# the gateway's (`crates/uva-app-server/src/gateway.rs`):
+#
+#   /rpc      — the JSON-RPC websocket the SPA talks on
+#   /livez    — liveness probe
+#   /readyz   — readiness probe
+#   /version  — the build identity
+#   /metrics  — the Prometheus exposition
+#
+# Runtime shape: a non-root user (65532 — the `runAsUser` in
+# `k8s/web.yaml`), a read-only root filesystem, and a listen port
+# above 1024. So the deployment needs no capabilities, no
+# privileged port and no writable root: every path nginx writes to
+# lives under /tmp, and the deployment mounts an emptyDir there.
+#
+# Stage layout:
+#   0. web      — install the front-end's dependencies and build the
+#                 static bundle
+#   1. runtime  — nginx, the rendered site configuration, the
+#                 bundle
+#
+# Example build:
+#   docker build -f Dockerfile.web \
+#     --build-arg UVA_VERSION=0.1.0 \
+#     -t docker.io/crochee/uva-web:0.1.0 .
+
+ARG NODE_VERSION=20
+# The build identity, baked into the image's labels so `docker
+# inspect` says which commit the bundle was built from. The server's
+# own identity lives in its binary; this is the front-end's half.
+ARG UVA_VERSION=0.1.0
+ARG UVA_GIT_SHA=""
+ARG UVA_BUILD_TIME=""
+
+########## Stage 0: the front-end's static bundle ##########
+FROM --platform=$BUILDPLATFORM node:${NODE_VERSION}-alpine AS web
+WORKDIR /web
+COPY uva-web/package.json uva-web/package-lock.json ./
+RUN npm ci
+COPY uva-web/ ./
+RUN npm run build
+
+########## Stage 1: nginx serves the bundle and proxies the API ##########
+FROM nginx:1.29-alpine AS runtime
+
+ARG UVA_VERSION
+ARG UVA_GIT_SHA
+ARG UVA_BUILD_TIME
+LABEL org.opencontainers.image.title="uva-web" \
+      org.opencontainers.image.version="${UVA_VERSION}" \
+      org.opencontainers.image.revision="${UVA_GIT_SHA}" \
+      org.opencontainers.image.created="${UVA_BUILD_TIME}"
+
+# The address the server is reachable at, and the port nginx listens
+# on. Both are runtime values: the deployment names the server
+# Service (k8s) or the compose service.
+#
+# The upstream is resolved when nginx loads the configuration, so a
+# deployment whose server is not up yet restarts until it is — the
+# alternative (resolving per request) needs a resolver this image
+# cannot know.
+ENV UVA_UPSTREAM=http://uva-server:8080 \
+    UVA_PORT=8080 \
+    NGINX_ENVSUBST_OUTPUT_DIR=/tmp/nginx/conf
+
+# The official image's entrypoint scripts write into /etc/nginx,
+# which a read-only root filesystem forbids; the image's own entrypoint
+# writes under /tmp instead, so the stock one is replaced and the
+# stock site configuration is dropped.
+RUN rm -f /etc/nginx/conf.d/default.conf \
+    && mkdir -p /tmp/nginx/conf \
+    && chown -R 65532:65532 /tmp/nginx
+
+COPY nginx/nginx.conf /etc/nginx/nginx.conf
+COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY nginx/entrypoint.sh /docker-entrypoint-web.sh
+RUN chmod 0555 /docker-entrypoint-web.sh
+
+COPY --from=web /web/dist /usr/share/nginx/html
+
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/docker-entrypoint-web.sh"]
+CMD ["nginx", "-g", "daemon off;"]

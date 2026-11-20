@@ -1,443 +1,366 @@
+//! The decoder's contract: SSE lines in, a chunk sequence out. The
+//! fold's own suite (`crate::assembler::tests`) covers what those
+//! chunks add up to, so nothing here reaches into a turn the decoder
+//! no longer builds.
+
 use super::*;
+use crate::{
+    BlockAssembler,
+    types::{ContentPart, StreamChunk},
+};
 
-// -- new() / default() -------------------------------------------
-
-/// `OpenAIStreamProcessor::new()` MUST produce a processor
-/// that ignores input until `process_line` is called.
-#[test]
-fn new_constructs_empty_processor() {
-    let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line("");
-    assert!(chunks.is_empty());
-}
-
-/// `OpenAIStreamProcessor::default()` MUST match `new()`.
-#[test]
-fn default_matches_new() {
-    let mut p = OpenAIStreamProcessor::default();
-    // Empty input → empty chunks.
-    assert!(p.process_line("").is_empty());
-}
-
-// -- [DONE] sentinel ---------------------------------------------
-
-/// `process_line("[DONE]")` MUST emit a single `IsDone`
-/// chunk with no stop reason (no `finish_reason` was seen).
-#[test]
-fn done_sentinel_emits_is_done_with_no_stop_reason() {
-    let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line("[DONE]");
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::IsDone { result } => {
-            assert_eq!(result.stop_reason, None);
-        }
-        _ => panic!("expected IsDone"),
+fn fold(chunks: Vec<StreamChunk>) -> (crate::SamplingResult, bool) {
+    let mut assembler = BlockAssembler::new();
+    for chunk in chunks {
+        assembler.push(chunk);
     }
+    let (result, _parts, incomplete) = assembler.finalize_assistant();
+    (result, incomplete)
 }
 
-/// After `IsDone` is emitted, further `process_line` calls
-/// MUST silently return empty (the `finished` flag).
-#[test]
-fn events_after_is_done_are_ignored() {
-    let mut p = OpenAIStreamProcessor::new();
-    p.process_line("[DONE]");
-    // Any subsequent line MUST be a no-op.
-    let chunks = p.process_line(r#"{"choices":[{"delta":{"content":"x"}}]}"#);
-    assert!(chunks.is_empty());
+fn process_all(
+    p: &mut OpenAIStreamProcessor,
+    lines: &[&str],
+) -> Vec<StreamChunk> {
+    lines.iter().flat_map(|line| p.process_line(line)).collect()
 }
 
-// -- malformed JSON ----------------------------------------------
-
-/// Malformed JSON MUST silently produce no chunks (no panic,
-/// no error propagation).
 #[test]
-fn malformed_json_silently_ignored() {
-    let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line("{bad json");
-    assert!(chunks.is_empty());
+fn new_and_default_start_empty() {
+    assert!(OpenAIStreamProcessor::new().process_line("").is_empty());
+    assert!(OpenAIStreamProcessor::default().process_line("").is_empty());
 }
 
-/// Empty input MUST produce no chunks (not [DONE], not
-/// an error).
+/// Non-JSON lines are silent no-ops — empty keepalives, whitespace, SSE
+/// comments and corrupt JSON must not terminate the stream.
 #[test]
-fn empty_input_produces_no_chunks() {
+fn non_json_lines_are_silently_dropped() {
     let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line("");
-    assert!(chunks.is_empty());
+    for line in ["", "   \t  ", ": heartbeat", "{not json", "data: {choices}"] {
+        assert!(p.process_line(line).is_empty(), "line {line:?}");
+    }
+    let chunks =
+        p.process_line(r#"{"choices":[{"delta":{"content":"hello"}}]}"#);
+    assert!(matches!(
+        &chunks[0],
+        StreamChunk::Content(ContentPart::Text(t)) if t.text == "hello"
+    ));
 }
 
-/// Whitespace-only input MUST be trimmed and treated as
-/// empty (the `data.trim()` call).
+/// Content and reasoning deltas each emit their own chunk; an empty
+/// delta emits nothing.
 #[test]
-fn whitespace_only_input_produces_no_chunks() {
+fn content_and_reasoning_emit_content_chunks() {
     let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line("   \n  \t ");
-    assert!(chunks.is_empty());
-}
-
-// -- content delta ------------------------------------------------
-
-/// A `delta.content` chunk MUST emit `Content(Text)` and
-/// accumulate text.
-#[test]
-fn content_delta_emits_text_chunk() {
-    let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line(
-        r#"{"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}"#,
+    assert!(
+        p.process_line(
+            r#"{"choices":[{"delta":{"content":""},"finish_reason":null}]}"#
+        )
+        .is_empty()
     );
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::Content(ContentPart::Text(t)) => {
-            assert_eq!(t.text, "hello");
-        }
-        other => panic!("expected Content(Text), got {other:?}"),
-    }
-}
-
-/// Empty `delta.content` MUST NOT emit a chunk (the
-/// `!content.is_empty()` guard).
-#[test]
-fn empty_content_delta_emits_no_chunk() {
-    let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line(
-        r#"{"choices":[{"delta":{"content":""},"finish_reason":null}]}"#,
-    );
-    assert!(chunks.is_empty());
-}
-
-/// Multiple `delta.content` chunks MUST accumulate into the
-/// final `SamplingResult.text`.
-#[test]
-fn content_accumulates_across_lines() {
-    let mut p = OpenAIStreamProcessor::new();
-    for chunk in ["hello", " ", "world"] {
-        let json = format!(
-            r#"{{"choices":[{{"delta":{{"content":"{chunk}"}},"finish_reason":null}}]}}"#,
-        );
-        p.process_line(&json);
-    }
-    let chunks = p.process_line("[DONE]");
-    match &chunks[0] {
-        StreamChunk::IsDone { result } => {
-            assert_eq!(result.text, "hello world");
-        }
-        _ => panic!("expected IsDone"),
-    }
-}
-
-// -- reasoning_content delta -------------------------------------
-
-/// `delta.reasoning_content` MUST emit `Content(Reasoning)`
-/// chunks.
-#[test]
-fn reasoning_content_delta_emits_reasoning_chunk() {
-    let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line(
-        r#"{"choices":[{"delta":{"reasoning_content":"thinking..."},"finish_reason":null}]}"#,
-    );
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::Content(ContentPart::Reasoning(r)) => {
-            assert_eq!(r.text, "thinking...");
-            assert_eq!(r.signature, None);
-        }
-        other => panic!("expected Content(Reasoning), got {other:?}"),
-    }
-}
-
-/// `reasoning_content` and `content` in the same chunk
-/// MUST emit BOTH chunks (separately).
-#[test]
-fn reasoning_and_content_in_same_chunk() {
-    let mut p = OpenAIStreamProcessor::new();
     let chunks = p.process_line(
         r#"{"choices":[{"delta":{"reasoning_content":"think","content":"answer"},"finish_reason":null}]}"#,
     );
     assert_eq!(chunks.len(), 2);
-    let reasoning_chunk = chunks
-        .iter()
-        .find(|c| matches!(c, StreamChunk::Content(ContentPart::Reasoning(_))));
-    let text_chunk = chunks
-        .iter()
-        .find(|c| matches!(c, StreamChunk::Content(ContentPart::Text(_))));
-    assert!(reasoning_chunk.is_some(), "no reasoning chunk");
-    assert!(text_chunk.is_some(), "no text chunk");
+    assert!(matches!(
+        &chunks[0],
+        StreamChunk::Content(ContentPart::Reasoning(r)) if r.text == "think"
+    ));
+    assert!(matches!(
+        &chunks[1],
+        StreamChunk::Content(ContentPart::Text(t)) if t.text == "answer"
+    ));
 }
 
-// -- tool_calls delta ---------------------------------------------
-
-/// First `delta.tool_calls` MUST emit `ToolCallStart`.
+/// Inline `<think>…</think>` markers split into reasoning + text; a
+/// marker split across deltas is assembled from the extractor's carry.
 #[test]
-fn tool_call_first_delta_emits_tool_call_start() {
+fn inline_think_markers_split_into_reasoning_and_text() {
     let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line(
-        r#"{
-            "choices":[{
-                "delta":{"tool_calls":[{
-                    "id":"call-1",
-                    "function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"},
-                    "index":0
-                }]},
-                "finish_reason":null
-            }]
-        }"#,
+    let chunks = process_all(
+        &mut p,
+        &[
+            r#"{"choices":[{"delta":{"content":"hello <thin"}}]}"#,
+            r#"{"choices":[{"delta":{"content":"k>reason</think>done"}}]}"#,
+        ],
     );
-    // 1 ToolCallStart, no other chunks.
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::ToolCallStart {
-            id,
-            name,
-            arguments,
-        } => {
-            assert_eq!(id, "call-1");
-            assert_eq!(name, "bash");
-            assert_eq!(
-                *arguments,
-                serde_json::json!("{\"cmd\":\"ls\"}".to_string())
-            );
-        }
-        other => panic!("expected ToolCallStart, got {other:?}"),
-    }
+    let reasoning: String = chunks
+        .iter()
+        .filter_map(|c| match c {
+            StreamChunk::Content(ContentPart::Reasoning(r)) => {
+                Some(r.text.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let text: String = chunks
+        .iter()
+        .filter_map(|c| match c {
+            StreamChunk::Content(ContentPart::Text(t)) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reasoning, "reason");
+    assert_eq!(text, "hello done");
 }
 
-/// Subsequent `delta.tool_calls` deltas (with the same
-/// index) MUST emit `ToolCallDelta`, NOT a second
-/// `ToolCallStart`.
+/// The extractor's withheld tail leaves as content when the finish
+/// marker seals the turn — it used to be folded into a terminal result
+/// that the fold discarded whenever text had already streamed.
 #[test]
-fn tool_call_subsequent_delta_emits_tool_call_delta() {
+fn residual_think_text_is_emitted_as_content_at_the_seal() {
     let mut p = OpenAIStreamProcessor::new();
-    // First delta: start.
+    p.process_line(r#"{"choices":[{"delta":{"content":"answer <thin"}}]}"#);
+    let chunks =
+        p.process_line(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
+    let carry: String = chunks
+        .iter()
+        .filter_map(|c| match c {
+            StreamChunk::Content(ContentPart::Text(t)) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(carry, "<thin");
+    assert!(matches!(chunks.last(), Some(StreamChunk::Stop(r)) if r == "stop"));
+}
+
+/// First tool delta announces the call; later ones append arguments.
+#[test]
+fn tool_deltas_emit_start_then_delta() {
+    let mut p = OpenAIStreamProcessor::new();
+    let start = p.process_line(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"loc"}}]}}]}"#,
+    );
+    assert!(matches!(
+        &start[0],
+        StreamChunk::ToolCallStart { id, name, arguments }
+            if id == "call_1"
+                && name == "get_weather"
+                && arguments == &serde_json::json!("{\"loc")
+    ));
+    let delta = p.process_line(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ation\":\"Beijing\"}"}}]}}]}"#,
+    );
+    assert!(matches!(
+        &delta[0],
+        StreamChunk::ToolCallDelta { id, arguments_delta }
+            if id == "call_1" && arguments_delta == "ation\":\"Beijing\"}"
+    ));
+}
+
+/// `id` and `function.name` arrive in separate fragments; a later
+/// fragment's name is a `ToolCallName` update for the call the start
+/// chunk already announced.
+#[test]
+fn a_later_fragment_emits_a_tool_call_name_update() {
+    let mut p = OpenAIStreamProcessor::new();
+    let start = p.process_line(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"arguments":""}}]}}]}"#,
+    );
+    assert!(matches!(
+        &start[0],
+        StreamChunk::ToolCallStart { name, .. } if name == "unknown"
+    ));
+
+    let update = p.process_line(
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_file"}}]}}]}"#,
+    );
+    assert_eq!(update.len(), 1, "one chunk, the name update: {update:?}");
+    assert!(matches!(
+        &update[0],
+        StreamChunk::ToolCallName { id, name }
+            if id == "call_1" && name == "read_file"
+    ));
+}
+
+/// A first delta without an id synthesizes `call_{index}` so every
+/// consumer has a stable id to key the call by.
+#[test]
+fn tool_call_id_falls_back_to_the_index() {
+    let mut p = OpenAIStreamProcessor::new();
+    let chunks = process_all(
+        &mut p,
+        &[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":2,"type":"function","function":{"name":"get_weather"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
+        ],
+    );
+    assert!(matches!(
+        &chunks[0],
+        StreamChunk::ToolCallStart { id, .. } if id == "call_2"
+    ));
+    let (turn, _) = fold(chunks);
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(turn.tool_calls[0].id, "call_2");
+    assert_eq!(turn.tool_calls[0].name, "get_weather");
+}
+
+/// `tool_calls: []` is a heartbeat, not a termination signal.
+#[test]
+fn empty_tool_calls_array_is_a_no_op() {
+    let mut p = OpenAIStreamProcessor::new();
     p.process_line(
-        r#"{
-            "choices":[{
-                "delta":{"tool_calls":[{
-                    "id":"call-1",
-                    "function":{"name":"bash","arguments":""},
-                    "index":0
-                }]},
-                "finish_reason":null
-            }]
-        }"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"get_weather","arguments":"{\"loc\":"}}]}}]}"#,
     );
-    // Second delta: continuation.
+    assert!(
+        p.process_line(r#"{"choices":[{"delta":{"tool_calls":[]}}]}"#)
+            .is_empty()
+    );
     let chunks = p.process_line(
-        r#"{
-            "choices":[{
-                "delta":{"tool_calls":[{
-                    "id":null,
-                    "function":{"arguments":"{\"cmd\":\"l"},
-                    "index":0
-                }]},
-                "finish_reason":null
-            }]
-        }"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ation\":\"Beijing\"}"}}]}}]}"#,
     );
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::ToolCallDelta {
-            id,
-            arguments_delta,
-        } => {
-            assert_eq!(id, "call-1");
-            assert_eq!(arguments_delta, "{\"cmd\":\"l");
-        }
-        other => panic!("expected ToolCallDelta, got {other:?}"),
-    }
+    assert!(
+        matches!(&chunks[0], StreamChunk::ToolCallDelta { id, .. } if id == "call_x")
+    );
 }
 
-// -- usage block --------------------------------------------------
-
-/// The usage block MUST be read from the chunk's **top level**, where
-/// every real provider puts it. This is the shape DeepSeek sends on
-/// the `finish_reason` chunk (verified against the live endpoint) and
-/// the shape OpenAI documents for `stream_options.include_usage`.
+/// Only the first choice of a multi-choice frame is decoded.
 #[test]
-fn top_level_usage_on_the_finish_chunk_emits_usage() {
+fn multi_choice_takes_only_the_first_choice() {
     let mut p = OpenAIStreamProcessor::new();
     let chunks = p.process_line(
-        r#"{
-            "choices":[{"delta":{"content":""},"finish_reason":"stop"}],
-            "usage":{"prompt_tokens":6,"completion_tokens":1,"total_tokens":7}
-        }"#,
+        r#"{"choices":[{"delta":{"content":"first"},"index":0},{"delta":{"content":"second"},"index":1}]}"#,
     );
-    // A Usage chunk plus the terminal IsDone.
-    let usage = chunks
-        .iter()
-        .find_map(|c| match c {
-            StreamChunk::Usage(u) => Some(u.clone()),
-            _ => None,
-        })
-        .expect("top-level usage must produce a Usage chunk");
-    assert_eq!(usage.prompt_tokens, 6);
-    assert_eq!(usage.completion_tokens, 1);
-    assert_eq!(usage.total_tokens, 7);
-    let done = chunks
-        .iter()
-        .find_map(|c| match c {
-            StreamChunk::IsDone { result } => Some((**result).clone()),
-            _ => None,
-        })
-        .expect("IsDone must fire on finish_reason");
-    // The terminal result must carry the same counts, or every
-    // budget guard and the usage chip read zero.
-    assert_eq!(done.usage.prompt_tokens, 6);
-    assert_eq!(done.usage.completion_tokens, 1);
+    assert_eq!(chunks.len(), 1);
+    assert!(matches!(
+        &chunks[0],
+        StreamChunk::Content(ContentPart::Text(t)) if t.text == "first"
+    ));
 }
 
-/// OpenAI's documented final frame for `include_usage` carries an
-/// EMPTY `choices` array. The processor must still surface the usage
-/// rather than returning early.
+/// The authoritative usage is a sibling of `choices`; a usage-only
+/// final frame (empty `choices`) must still emit it.
 #[test]
-fn usage_only_chunk_with_empty_choices_still_emits_usage() {
+fn top_level_usage_emits_a_usage_chunk() {
     let mut p = OpenAIStreamProcessor::new();
     let chunks = p.process_line(
         r#"{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}"#,
     );
-    let usage = chunks
-        .iter()
-        .find_map(|c| match c {
-            StreamChunk::Usage(u) => Some(u.clone()),
-            _ => None,
-        })
-        .expect("a usage-only terminator must not be dropped");
-    assert_eq!(usage.prompt_tokens, 11);
-    // And it must survive into the terminal result.
-    let done = p.process_line("[DONE]");
-    let result = done
-        .iter()
-        .find_map(|c| match c {
-            StreamChunk::IsDone { result } => Some((**result).clone()),
-            _ => None,
-        })
-        .expect("IsDone must fire on [DONE]");
-    assert_eq!(result.usage.prompt_tokens, 11);
-    assert_eq!(result.usage.completion_tokens, 2);
+    assert_eq!(chunks.len(), 1);
+    assert!(matches!(
+        &chunks[0],
+        StreamChunk::Usage(u) if u.prompt_tokens == 11
+            && u.completion_tokens == 2
+            && u.total_tokens == 13
+    ));
 }
 
-/// A gateway that nests `usage` inside the choice is still honoured,
-/// so tolerating the non-standard shape costs nothing.
+/// A gateway that nests usage inside the choice is tolerated.
 #[test]
 fn choice_nested_usage_is_tolerated() {
     let mut p = OpenAIStreamProcessor::new();
     let chunks = p.process_line(
         r#"{"choices":[{"delta":{},"finish_reason":null,"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}]}"#,
     );
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::Usage(u) => {
-            assert_eq!(u.prompt_tokens, 100);
-            assert_eq!(u.completion_tokens, 50);
-            assert_eq!(u.total_tokens, 150);
-        }
-        other => panic!("expected Usage, got {other:?}"),
-    }
+    assert!(matches!(
+        &chunks[0],
+        StreamChunk::Usage(u) if u.prompt_tokens == 100
+            && u.completion_tokens == 50
+    ));
 }
 
-// -- finish_reason ------------------------------------------------
-
-/// `finish_reason` MUST emit `ToolCallEnd` chunks for each
-/// buffered tool call, then `IsDone` with the reason.
+/// The finish marker closes the open calls and emits the terminal
+/// `Stop`; a subsequent `[DONE]` adds nothing.
 #[test]
-fn finish_reason_drains_tool_calls_and_emits_is_done() {
+fn finish_marker_closes_tools_and_emits_stop_once() {
     let mut p = OpenAIStreamProcessor::new();
-    // First start a tool call (no finish_reason yet).
     p.process_line(
-        r#"{
-            "choices":[{
-                "delta":{"tool_calls":[{
-                    "id":"call-1",
-                    "function":{"name":"bash","arguments":"{\"cmd\":\"ls\"}"},
-                    "index":0
-                }]},
-                "finish_reason":null
-            }]
-        }"#,
+        r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"bash","arguments":"{}"}}]}}]}"#,
     );
-    // Now send finish_reason.
-    let chunks = p.process_line(
-        r#"{
-            "choices":[{"delta":{},"finish_reason":"tool_calls"}]
-        }"#,
+    let chunks = process_all(
+        &mut p,
+        &[
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
+        ],
     );
-    // ToolCallEnd + IsDone.
-    assert_eq!(chunks.len(), 2);
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::ToolCallEnd { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Stop(_)))
+            .count(),
+        1
+    );
     assert!(
-        matches!(&chunks[0], StreamChunk::ToolCallEnd { id } if id == "call-1")
+        matches!(chunks.last(), Some(StreamChunk::Stop(r)) if r == "tool_calls")
     );
-    match &chunks[1] {
-        StreamChunk::IsDone { result } => {
-            assert_eq!(result.stop_reason, Some("tool_calls".to_string()));
-            assert_eq!(result.tool_calls.len(), 1);
-            assert_eq!(result.tool_calls[0].name, "bash");
-        }
-        _ => panic!("expected IsDone as second chunk"),
-    }
+    let (turn, incomplete) = fold(chunks);
+    assert!(!incomplete, "the stop chunk completed the turn");
+    assert_eq!(turn.stop_reason.as_deref(), Some("tool_calls"));
 }
 
-// -- multi-choice handling ----------------------------------------
-
-/// Multi-choice response MUST process only the FIRST
-/// choice and silently drop the rest.
+/// Once the finish marker sealed the turn, content and a repeated
+/// finish marker add nothing, but a late usage frame is still decoded.
 #[test]
-fn multi_choice_processes_only_first() {
+fn a_late_usage_frame_is_decoded_after_the_seal() {
     let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line(
-        r#"{
-            "choices":[
-                {"delta":{"content":"first"},"finish_reason":null},
-                {"delta":{"content":"second"},"finish_reason":null}
-            ]
-        }"#,
+    let finish =
+        p.process_line(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
+    assert!(matches!(finish.last(), Some(StreamChunk::Stop(_))));
+
+    let after = p.process_line(
+        r#"{"choices":[{"delta":{"content":"!"},"finish_reason":"stop"}]}"#,
     );
-    assert_eq!(chunks.len(), 1);
-    match &chunks[0] {
-        StreamChunk::Content(ContentPart::Text(t)) => {
-            assert_eq!(t.text, "first");
-        }
-        _ => panic!("expected Content(Text)"),
-    }
+    assert!(
+        after.is_empty(),
+        "content after the seal is ignored: {after:?}"
+    );
+
+    let late = p.process_line(
+        r#"{"choices":[],"usage":{"prompt_tokens":41,"completion_tokens":7,"total_tokens":48}}"#,
+    );
+    assert!(matches!(
+        &late[0],
+        StreamChunk::Usage(u) if u.prompt_tokens == 41
+    ));
+    assert!(
+        !late.iter().any(|c| matches!(c, StreamChunk::Stop(_))),
+        "the late usage frame must not close the turn again: {late:?}"
+    );
+    assert!(
+        p.process_line("[DONE]").is_empty(),
+        "the end-of-stream marker must not close the sealed turn again"
+    );
 }
 
-/// Empty `choices` array MUST produce no chunks (no panic).
+/// A truncated stream (the sentinel, no finish marker) reports no stop
+/// reason. It emits no terminal chunk, and the fold still drains the
+/// tool buffer the stream never closed.
 #[test]
-fn empty_choices_array_produces_no_chunks() {
+fn done_without_a_finish_marker_emits_no_stop_and_the_fold_drains() {
     let mut p = OpenAIStreamProcessor::new();
-    let chunks = p.process_line(r#"{"choices":[]}"#);
-    assert!(chunks.is_empty());
-}
-
-// -- orphan tool buffers on [DONE] -------------------------------
-
-/// When `[DONE]` arrives with live `tool_buffers`
-/// (truncated stream), the `IsDone.tool_calls` MUST still
-/// include them (silent drain, no `ToolCallEnd` chunks).
-#[test]
-fn done_sentinel_drains_orphan_tool_buffers() {
-    let mut p = OpenAIStreamProcessor::new();
-    // Start a tool call but never close it.
-    p.process_line(
-        r#"{
-            "choices":[{
-                "delta":{"tool_calls":[{
-                    "id":"call-orphan",
-                    "function":{"name":"bash","arguments":"{\"cmd\":\"l"},
-                    "index":0
-                }]},
-                "finish_reason":null
-            }]
-        }"#,
+    let start = process_all(
+        &mut p,
+        &[
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"get_weather","arguments":"{\"location\":\"Beijing\"}"}}]}}]}"#,
+            "[DONE]",
+        ],
     );
-    // Stream ends via [DONE] (no finish_reason).
-    let chunks = p.process_line("[DONE]");
-    match &chunks[0] {
-        StreamChunk::IsDone { result } => {
-            // The orphan was drained into tool_calls even
-            // though no ToolCallEnd was emitted.
-            assert_eq!(result.tool_calls.len(), 1);
-            assert_eq!(result.tool_calls[0].id, "call-orphan");
-        }
-        _ => panic!("expected IsDone"),
-    }
+    assert!(
+        !start.iter().any(|c| matches!(c, StreamChunk::Stop(_))),
+        "no finish marker means no stop reason: {start:?}"
+    );
+    let (turn, incomplete) = fold(start);
+    assert!(incomplete, "a stream without a stop reason is truncated");
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(turn.tool_calls[0].id, "call_x");
+    assert_eq!(
+        turn.tool_calls[0].input,
+        serde_json::json!({"location": "Beijing"})
+    );
+    assert_eq!(turn.stop_reason, None);
+
+    // Everything after the sentinel belongs to nobody.
+    assert!(
+        p.process_line(r#"{"choices":[{"delta":{"content":"x"}}]}"#)
+            .is_empty()
+    );
 }

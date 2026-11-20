@@ -61,10 +61,12 @@ pub(crate) async fn dispatch_tool_call(
     // run unreported; see `catching_panics` for why that matters.
     // `this.ctx` is built once per run, so the dispatch pays no
     // workspace clone here.
+    let started = std::time::Instant::now();
     let ran = crate::agent::re_act::panic::catching_panics(drain_one_tool(
         this, tool, input, &this.ctx, tool_name, call_id,
     ))
     .await;
+    let elapsed = started.elapsed().as_secs_f64();
 
     let outcome_label = match &ran {
         Ok(out) if !out.is_error.unwrap_or(false) => "ok",
@@ -75,6 +77,16 @@ pub(crate) async fn dispatch_tool_call(
         Ok(output) => {
             span.record("otel.status_code", "OK");
             uva_telemetry::record_tool_call(tool_name, outcome_label);
+            // The Prometheus counters. `uva-tool`'s registry dispatch
+            // records the calls it serves; the loop's dispatch records
+            // the calls it serves — the loop drains the tool's stream
+            // itself, so the registry's recorder never sees these.
+            // One writer per path, so no call is counted twice.
+            uva_telemetry::record_tool_outcome_metric(
+                tool_name,
+                output.is_error.unwrap_or(false),
+            );
+            uva_telemetry::record_tool_duration(tool_name, elapsed);
             output
         }
         Err(message) => {
@@ -82,6 +94,10 @@ pub(crate) async fn dispatch_tool_call(
             span.record("exception.message", message.as_str());
             span.record("otel.status_code", "ERROR");
             uva_telemetry::record_tool_call(tool_name, "panicked");
+            // A panicked call is counted as a panic, not as an error:
+            // the registry's dispatch counts it the same way.
+            uva_telemetry::record_tool_panic(tool_name);
+            uva_telemetry::record_tool_duration(tool_name, elapsed);
             warn!(
                 tool_name = %tool_name,
                 tool_use_id = %call_id,

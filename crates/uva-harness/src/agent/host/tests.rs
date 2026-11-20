@@ -1,108 +1,28 @@
+//! The host's own tables: what `default_policy` installs, and the
+//! tool bindings.
+
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
 use async_trait::async_trait;
-use parking_lot::Mutex;
-use uva_steering::{HookDecision, HookEvent, RequestParams};
+use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
+use uva_steering::{HookDecision, HookEvent};
 use uva_tool::{Tool, ToolOutput, ToolRegistry};
 
 use super::*;
+use crate::seams::Seams;
 
-// The run-level context every dispatch reads: a state, an event sink
-// and a cancellation token of the test's own.
-struct Fixture {
-    state: uva_context::AgentState,
-    sink: crate::agent::sink::EventSink,
-    cancel: Arc<dyn uva_core::CancelToken>,
-    events: futures::channel::mpsc::UnboundedReceiver<crate::AgentEvent>,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let (tx, rx) = futures::channel::mpsc::unbounded();
-        Self {
-            state: uva_context::AgentState::with_window(1_000),
-            sink: crate::agent::sink::EventSink::new(Arc::new(tx), None),
-            cancel: uva_core::AtomicCancelToken::shared(),
-            events: rx,
-        }
-    }
-
-    /// The hook warnings the run published.
-    fn hook_warnings(&mut self) -> Vec<String> {
-        let mut warnings = Vec::new();
-        while let Ok(event) = self.events.try_recv() {
-            if let crate::AgentEvent::System(uva_events::SystemEvent::Warning {
-                kind,
-                message,
-                ..
-            }) = event
-                && kind == uva_events::WarningKind::Hook
-            {
-                warnings.push(message);
-            }
-        }
-        warnings
-    }
-
-    fn ctx(&self) -> HookContext<'_> {
-        HookContext {
-            state: &self.state,
-            cancel: &self.cancel,
-        }
-    }
-}
-
-// A gate whose answer the test decides, counting its own calls.
-struct CountingGate {
-    name: &'static str,
-    answer: Answer,
-    calls: Arc<AtomicUsize>,
-}
-
-#[derive(Clone)]
-enum Answer {
-    Allow,
-    Decision(HookDecision),
-    Failure(String),
-    Panic,
-}
-
-#[async_trait]
-impl Gate for CountingGate {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn check(
-        &self,
-        _event: &HookEvent,
-        _ctx: &HookContext<'_>,
-    ) -> Result<HookDecision, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        match &self.answer {
-            Answer::Allow => Ok(HookDecision::Allow),
-            Answer::Decision(decision) => Ok(decision.clone()),
-            Answer::Failure(reason) => Err(reason.clone()),
-            Answer::Panic => panic!("intentional gate panic for test"),
-        }
-    }
-}
-
-// An observer with a fixed decision.
-struct FixedObserver {
-    name: &'static str,
-    decision: HookDecision,
-    panic: bool,
+// An observer that counts its own dispatches.
+struct CountingHook {
     calls: Arc<AtomicUsize>,
 }
 
 #[async_trait]
-impl Hook for FixedObserver {
+impl Hook for CountingHook {
     fn name(&self) -> &str {
-        self.name
+        "counting"
     }
 
     async fn observe(
@@ -111,327 +31,8 @@ impl Hook for FixedObserver {
         _ctx: &HookContext<'_>,
     ) -> HookDecision {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if self.panic {
-            panic!("intentional observer panic for test");
-        }
-        self.decision.clone()
+        HookDecision::Allow
     }
-}
-
-// A transformer that stamps the parameters it was given.
-struct StampingTransformer {
-    name: &'static str,
-    model: String,
-    panic: bool,
-}
-
-#[async_trait]
-impl RequestTransformer for StampingTransformer {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn transform(
-        &self,
-        params: &mut RequestParams,
-        _ctx: &HookContext<'_>,
-    ) -> Result<(), String> {
-        if self.panic {
-            panic!("intentional transformer panic for test");
-        }
-        params.model = self.model.clone();
-        Ok(())
-    }
-}
-
-// A transformer that rewrites a tool result.
-struct RewritingTransformer {
-    name: &'static str,
-    content: String,
-    panic: bool,
-    // Whether the transform writes; `false` leaves the output alone.
-    rewrite: bool,
-}
-
-#[async_trait]
-impl ResultTransformer for RewritingTransformer {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn transform(
-        &self,
-        output: &mut ToolOutput,
-        _ctx: &HookContext<'_>,
-    ) -> Result<(), String> {
-        if self.panic {
-            panic!("intentional transformer panic for test");
-        }
-        if !self.rewrite {
-            return Ok(());
-        }
-        output.content = vec![uva_provider::types::ContentPart::Text(
-            uva_provider::types::TextContent {
-                text: self.content.clone(),
-                cache_control: None,
-            },
-        )];
-        Ok(())
-    }
-}
-
-// A plugin that installs a fixed number of observers and gates.
-struct TestPlugin {
-    observers: usize,
-    gates: usize,
-    calls: Arc<AtomicUsize>,
-}
-
-impl Plugin for TestPlugin {
-    fn name(&self) -> &str {
-        "test-plugin"
-    }
-
-    fn install(&self, host: &mut Host) -> PluginHandle {
-        let mut registrations = Vec::new();
-        for _ in 0..self.observers {
-            registrations.push(host.hook(Arc::new(FixedObserver {
-                name: "observer",
-                decision: HookDecision::Allow,
-                panic: false,
-                calls: Arc::clone(&self.calls),
-            })));
-        }
-        for _ in 0..self.gates {
-            registrations.push(host.gate(Arc::new(CountingGate {
-                name: "gate",
-                answer: Answer::Allow,
-                calls: Arc::clone(&self.calls),
-            })));
-        }
-        PluginHandle::new(registrations)
-    }
-}
-
-fn before_tool_event() -> HookEvent {
-    HookEvent::BeforeTool {
-        tool_name: "shell".to_string(),
-        call_id: "c1".to_string(),
-        arguments: serde_json::json!({}),
-    }
-}
-
-#[tokio::test]
-async fn block_wins_over_ask_and_later_gates_do_not_run() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut host = Host::new();
-    let _reg1 = host.gate(Arc::new(CountingGate {
-        name: "asker",
-        answer: Answer::Decision(HookDecision::Ask {
-            reason: "needs approval".to_string(),
-        }),
-        calls: Arc::clone(&calls),
-    }));
-    let _reg2 = host.gate(Arc::new(CountingGate {
-        name: "blocker",
-        answer: Answer::Decision(HookDecision::Block {
-            reason: "denied".to_string(),
-        }),
-        calls: Arc::clone(&calls),
-    }));
-    let _reg3 = host.gate(Arc::new(CountingGate {
-        name: "later",
-        answer: Answer::Allow,
-        calls: Arc::clone(&calls),
-    }));
-
-    let arbitration = crate::seams::Seams::new(host)
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-
-    // The block wins over the ask collected before it.
-    assert_eq!(
-        arbitration.decision,
-        HookDecision::Block {
-            reason: "denied".to_string()
-        }
-    );
-    // The ask was collected, not dropped.
-    assert_eq!(arbitration.asks, vec!["needs approval".to_string()]);
-    // The gate behind the block never ran.
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
-async fn a_panicking_gate_is_a_block() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.gate(Arc::new(CountingGate {
-        name: "broken",
-        answer: Answer::Panic,
-        calls: Arc::new(AtomicUsize::new(0)),
-    }));
-
-    let seams = crate::seams::Seams::new(host);
-    let arbitration = seams
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-
-    // Fail closed: a gate that could not answer does not get to
-    // approve the call — and the refusal says which gate it was.
-    match &arbitration.decision {
-        HookDecision::Block { reason } => {
-            assert!(reason.contains("broken"), "{reason}");
-        }
-        other => panic!("expected a block, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn a_failing_gate_is_a_block() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.gate(Arc::new(CountingGate {
-        name: "broken",
-        answer: Answer::Failure("the policy store is down".to_string()),
-        calls: Arc::new(AtomicUsize::new(0)),
-    }));
-
-    let seams = crate::seams::Seams::new(host);
-    let arbitration = seams
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-
-    match &arbitration.decision {
-        HookDecision::Block { reason } => {
-            assert!(reason.contains("broken"), "{reason}");
-        }
-        other => panic!("expected a block, got {other:?}"),
-    }
-}
-
-#[tokio::test]
-async fn dropping_the_plugin_handle_unregisters_every_hook() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut host = Host::new();
-    let handle = host.install(&TestPlugin {
-        observers: 2,
-        gates: 1,
-        calls: Arc::clone(&calls),
-    });
-    assert_eq!(handle.registrations().len(), 3);
-    assert_eq!(host.registration_count(), 3);
-
-    // The installed registrations run.
-    crate::seams::Seams::new(host.clone())
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-
-    drop(handle);
-
-    assert_eq!(host.registration_count(), 0);
-    // The withdrawn observer's effect stops: the counter does not
-    // move after the uninstall.
-    crate::seams::Seams::new(host)
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
-}
-
-#[tokio::test]
-async fn unsupported_decision_at_a_point_is_a_noop_and_is_reported() {
-    let mut fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.hook(Arc::new(FixedObserver {
-        name: "blocker",
-        decision: HookDecision::Block {
-            reason: "no".to_string(),
-        },
-        panic: false,
-        calls: Arc::new(AtomicUsize::new(0)),
-    }));
-
-    // `before_run` cannot block a tool call: there is no call yet.
-    let seams = crate::seams::Seams::new(host);
-    let arbitration =
-        seams.run_started(&ctx, &fixture.sink, "default", 0).await;
-
-    // The decision does not apply — and it is not silently dropped:
-    // the run's durable record says which registration decided it.
-    assert_eq!(arbitration.decision, HookDecision::Allow);
-    let warnings = fixture.hook_warnings();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("blocker"), "{}", warnings[0]);
-}
-
-#[tokio::test]
-async fn a_panicking_observer_is_disabled_and_reported() {
-    let mut fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let mut host = Host::new();
-    let _reg1 = host.hook(Arc::new(FixedObserver {
-        name: "broken",
-        decision: HookDecision::Allow,
-        panic: true,
-        calls: Arc::clone(&calls),
-    }));
-
-    let first = crate::seams::Seams::new(host.clone())
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-    assert_eq!(first.decision, HookDecision::Allow);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    // The second pass skips the disabled observer.
-    let seams = crate::seams::Seams::new(host);
-    let second = seams
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-    assert_eq!(second.decision, HookDecision::Allow);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    // The panic is reported in the run's durable record: an operator
-    // reading the session sees which registration broke.
-    let warnings = fixture.hook_warnings();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("broken"), "{}", warnings[0]);
-}
-
-#[tokio::test]
-async fn the_observers_run_in_registration_order() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let order = Arc::new(Mutex::new(Vec::new()));
-    let mut host = Host::new();
-    let mut registrations = Vec::new();
-    for name in ["first", "second", "third"] {
-        let order = Arc::clone(&order);
-        registrations.push(host.hook(Arc::new(RecordingObserver {
-            name,
-            order: Arc::clone(&order),
-        })));
-    }
-
-    host.dispatch_hooks(&before_tool_event(), &ctx, &fixture.sink)
-        .await;
-
-    assert_eq!(
-        *order.lock(),
-        vec![
-            "first".to_string(),
-            "second".to_string(),
-            "third".to_string()
-        ]
-    );
 }
 
 // The production policy is installed, not just built: every
@@ -439,170 +40,59 @@ async fn the_observers_run_in_registration_order() {
 // that opts into `default_policy` runs with no guards at all.
 #[test]
 fn default_policy_installs_the_production_policy() {
-    let host = Host::default_policy(std::env::temp_dir());
+    let registry = HookRegistry::new();
+    let host = Host::default_policy(std::env::temp_dir(), registry.clone());
     assert_eq!(
         host.registration_count(),
-        10,
-        "5 guards + 3 hints + 1 tracker + 1 hook"
+        9,
+        "5 guards + 3 hints + 1 tracker"
     );
-    assert!(
-        host.has_event_registrations(),
-        "the installed hook must be dispatchable"
-    );
+    for mount in MountPoint::ALL {
+        assert_eq!(
+            registry.has_entries_at(mount),
+            mount.is_event(),
+            "the logging hook is registered at every event point and \
+             nowhere else: {mount}"
+        );
+    }
     assert!(
         host.diagnostics().is_empty(),
         "the production policy installs without refusals"
     );
 }
 
-struct RecordingObserver {
-    name: &'static str,
-    order: Arc<Mutex<Vec<String>>>,
-}
-
-#[async_trait]
-impl Hook for RecordingObserver {
-    fn name(&self) -> &str {
-        self.name
-    }
-
-    async fn observe(
-        &self,
-        _event: &HookEvent,
-        _ctx: &HookContext<'_>,
-    ) -> HookDecision {
-        self.order.lock().push(self.name.to_string());
-        HookDecision::Allow
-    }
-}
-
+// The registry and the host are one table: a registration made on the
+// table before the host exists is dispatched by the host's seam layer,
+// and a host clone reads the same rows.
 #[tokio::test]
-async fn the_request_transformers_chain() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.request_transformer(Arc::new(StampingTransformer {
-        name: "first",
-        model: "first-model".to_string(),
-        panic: false,
-    }));
-    let _reg2 = host.request_transformer(Arc::new(StampingTransformer {
-        name: "second",
-        model: "second-model".to_string(),
-        panic: false,
-    }));
+async fn the_host_dispatches_the_registry_it_was_built_over() {
+    let (tx, _rx) = futures::channel::mpsc::unbounded();
+    let sink = crate::agent::sink::EventSink::new(Arc::new(tx), None);
+    let state = uva_context::AgentState::with_window(1_000);
+    let cancel = uva_core::AtomicCancelToken::shared();
+    let ctx = HookContext {
+        state: &state,
+        cancel: &cancel,
+    };
 
-    let mut params = RequestParams::from_request(
-        &uva_provider::CompletionRequest::default(),
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _registration = registry.register_hook_at(
+        MountPoint::BeforeRun,
+        Arc::new(CountingHook {
+            calls: Arc::clone(&calls),
+        }),
+        RegistrationOrigin::Plugin,
     );
-    crate::seams::Seams::new(host.clone())
-        .llm_request(&ctx, &fixture.sink, "p", &mut params)
-        .await;
+    let seams =
+        Seams::new(Host::default_policy(std::env::temp_dir(), registry));
 
-    // The last transformer in the chain owns the value.
-    assert_eq!(params.model, "second-model");
-}
-
-#[tokio::test]
-async fn a_panicking_transformer_is_disabled_and_the_chain_continues() {
-    let mut fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.request_transformer(Arc::new(StampingTransformer {
-        name: "broken",
-        model: "broken-model".to_string(),
-        panic: true,
-    }));
-    let _reg2 = host.request_transformer(Arc::new(StampingTransformer {
-        name: "healthy",
-        model: "healthy-model".to_string(),
-        panic: false,
-    }));
-
-    let mut params = RequestParams::from_request(
-        &uva_provider::CompletionRequest::default(),
+    seams.run_started(&ctx, &sink, "a", 0).await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the run's seam layer reads the deployment's table"
     );
-    crate::seams::Seams::new(host.clone())
-        .llm_request(&ctx, &fixture.sink, "p", &mut params)
-        .await;
-
-    // The broken transformer is skipped, the healthy one still ran.
-    assert_eq!(params.model, "healthy-model");
-    // The panic is reported in the run's durable record.
-    let warnings = fixture.hook_warnings();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("broken"), "{}", warnings[0]);
-}
-
-#[tokio::test]
-async fn the_result_transformers_rewrite_the_output() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.result_transformer(Arc::new(RewritingTransformer {
-        name: "rewriter",
-        content: "rewritten".to_string(),
-        panic: false,
-        rewrite: true,
-    }));
-
-    let mut output = ToolOutput::text("original");
-    let names = host.apply_result_transformers(&mut output, &ctx).await;
-
-    assert_eq!(output.content.len(), 1);
-    let rewritten = output.content[0].text().unwrap_or_default();
-    assert_eq!(rewritten, "rewritten");
-    // The host measures the change itself and names what ran: the
-    // caller records provenance from this.
-    assert_eq!(names, vec!["rewriter".to_string()]);
-}
-
-#[tokio::test]
-async fn a_result_transformer_that_changed_nothing_is_not_reported() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.result_transformer(Arc::new(RewritingTransformer {
-        name: "leaver",
-        content: "untouched".to_string(),
-        panic: false,
-        rewrite: false,
-    }));
-
-    let mut output = ToolOutput::text("untouched");
-    let names = host.apply_result_transformers(&mut output, &ctx).await;
-
-    assert!(names.is_empty(), "an unchanged output is nobody's rewrite");
-    assert_eq!(output.content[0].text(), Some("untouched"));
-}
-
-#[tokio::test]
-async fn a_host_without_result_transformers_pays_nothing() {
-    let host = Host::new();
-    assert!(
-        !host.has_result_rewriters(),
-        "the loop must be able to skip the whole pass"
-    );
-}
-
-#[tokio::test]
-async fn the_prompt_sections_keep_their_registration_order() {
-    let mut host = Host::new();
-    let _reg1 = host.prompt_section(PromptSection {
-        title: "first".to_string(),
-        body: "one".to_string(),
-    });
-    let _reg2 = host.prompt_section(PromptSection {
-        title: "second".to_string(),
-        body: "two".to_string(),
-    });
-
-    let titles: Vec<String> = host
-        .prompt_sections()
-        .into_iter()
-        .map(|section| section.title)
-        .collect();
-    assert_eq!(titles, vec!["first".to_string(), "second".to_string()]);
 }
 
 // A tool the host can register, distinguishable by its description.
@@ -712,76 +202,6 @@ fn a_withdrawn_tool_leaves_the_other_entry_under_the_name_alone() {
         entry.tool_instance().description(),
         "the other party's tool",
         "the surviving entry must be the other party's"
-    );
-}
-
-#[tokio::test]
-async fn a_registration_dropped_inside_the_install_is_dead() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let calls = Arc::new(AtomicUsize::new(0));
-    struct DroppingPlugin {
-        calls: Arc<AtomicUsize>,
-    }
-    impl Plugin for DroppingPlugin {
-        fn name(&self) -> &str {
-            "dropping-plugin"
-        }
-
-        fn install(&self, host: &mut Host) -> PluginHandle {
-            let observer = host.hook(Arc::new(FixedObserver {
-                name: "dropped",
-                decision: HookDecision::Allow,
-                panic: false,
-                calls: Arc::clone(&self.calls),
-            }));
-            // The plugin drops the registration: it must not be
-            // resurrected by the install's bookkeeping.
-            drop(observer);
-            PluginHandle::new(Vec::new())
-        }
-    }
-
-    let mut host = Host::new();
-    let handle = host.install(&DroppingPlugin {
-        calls: Arc::clone(&calls),
-    });
-    assert_eq!(host.registration_count(), 0);
-    assert_eq!(handle.registrations().len(), 0);
-
-    host.dispatch_hooks(&before_tool_event(), &ctx, &fixture.sink)
-        .await;
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn an_ask_is_collected_and_reported_together() {
-    let fixture = Fixture::new();
-    let ctx = fixture.ctx();
-    let mut host = Host::new();
-    let _reg1 = host.gate(Arc::new(CountingGate {
-        name: "first",
-        answer: Answer::Decision(HookDecision::Ask {
-            reason: "first reason".to_string(),
-        }),
-        calls: Arc::new(AtomicUsize::new(0)),
-    }));
-    let _reg2 = host.gate(Arc::new(CountingGate {
-        name: "second",
-        answer: Answer::Decision(HookDecision::Ask {
-            reason: "second reason".to_string(),
-        }),
-        calls: Arc::new(AtomicUsize::new(0)),
-    }));
-
-    let arbitration = crate::seams::Seams::new(host)
-        .tool_pre(&ctx, &fixture.sink, "shell", "c1", &serde_json::json!({}))
-        .await;
-
-    assert_eq!(arbitration.decision, HookDecision::Allow);
-    assert_eq!(
-        arbitration.asks,
-        vec!["first reason".to_string(), "second reason".to_string()]
     );
 }
 

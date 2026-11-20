@@ -5,7 +5,9 @@
 //! - [`RpcRouter`] — the method table. A method is a name
 //!   (`domain/verb`, the slash style LSP / MCP / gRPC use) and a
 //!   handler that takes the shared state plus the `params` member
-//!   and answers a JSON value.
+//!   and answers a JSON value. Every name is spelled once, in
+//!   [`methods::names`], and the router registers by those
+//!   constants.
 //! - [`error`] — the boundary error type. Application failures carry
 //!   a machine code in `error.data.code`; protocol failures use the
 //!   standard JSON-RPC codes.

@@ -1,9 +1,19 @@
-//! The `agent-loop` row's behavior: the compactor rules and the
-//! delegation backend the loop consumes as a service.
+//! The `agent-loop` row's behavior: the compactor rules, the
+//! defaults fill, and the delegation backend the loop consumes as a
+//! service.
 
 use std::sync::Arc;
 
-use uva_harness::plugin::RunConfig;
+use uva_harness::{Host, plugin::RunConfig};
+use uva_hook::{
+    Hook,
+    HookContext,
+    HookDecision,
+    HookEvent,
+    MountPoint,
+    RegistrationOrigin,
+    async_trait,
+};
 use uva_kernel::{Context, Plugin, PluginManifest, mount_all};
 use uva_provider::ModelProvider;
 use uva_session::{CompactionPlan, Compactor, TokenBudget};
@@ -203,73 +213,6 @@ fn explicit_provider_runs_get_their_own_compactor() {
     );
 }
 
-/// A gate fixture: it never decides anything.
-struct NoopGate;
-
-#[async_trait::async_trait]
-impl uva_hook::Gate for NoopGate {
-    fn name(&self) -> &str {
-        "noop"
-    }
-
-    async fn check(
-        &self,
-        _event: &uva_hook::HookEvent,
-        _ctx: &uva_hook::HookContext<'_>,
-    ) -> Result<uva_hook::HookDecision, String> {
-        Ok(uva_hook::HookDecision::Allow)
-    }
-}
-
-/// The `hooks` service the `hooks` row publishes reaches the loop's
-/// defaults as a **shared** table: the row's registrations are the
-/// loop's, and dropping a registration withdraws it from both.
-#[test]
-fn the_hooks_service_reaches_the_loop() {
-    let provider: Arc<dyn ModelProvider> =
-        Arc::new(uva_test_support::FakeProvider::text("ok"));
-    let ctx = Context::new();
-    let registry = uva_hook::HookRegistry::new();
-    let registration = registry
-        .register_gate(uva_hook::seam::TOOL_PRE, Arc::new(NoopGate))
-        .expect("the gate registers on the row's table");
-    let plugins: Vec<Arc<dyn Plugin>> = vec![
-        Arc::new(ProviderPlugin {
-            manifest: provider_manifest(),
-            provider,
-        }),
-        Arc::new(uva_hook::HookPlugin::new(registry)),
-    ];
-    let mounted = mount_all(&ctx, &plugins).expect("the fixtures mount");
-
-    let plugin = super::agent_loop_service_plugin(AgentLoopDefaults::default());
-    let loop_ = plugin.resolve(&ctx).expect("the loop resolves");
-    let hooks = loop_
-        .defaults
-        .hooks
-        .clone()
-        .expect("the loop resolved the hooks service");
-    assert!(
-        !hooks.is_empty(),
-        "the loop shares the row's table, so its registration is there"
-    );
-    drop(registration);
-    assert!(
-        hooks.is_empty(),
-        "one dropped handle withdraws the row from every clone"
-    );
-
-    // Unmounting the row withdraws the service; a remount re-resolves
-    // the loop against the new table.
-    drop(mounted);
-    assert!(
-        ctx.get::<uva_hook::HookRegistry>(uva_hook::KEY_HOOKS)
-            .expect("the lookup itself succeeds")
-            .is_none(),
-        "dropping the mount handle withdraws the hooks service"
-    );
-}
-
 /// The `hooks` row is optional, not an inject edge: the kernel rejects
 /// a group whose `inject` key has no provider, so an edge here would
 /// make a profile document written before the row existed — or one
@@ -297,11 +240,71 @@ fn the_loop_boots_without_the_hooks_row() {
         plugin.manifest().inject
     );
 
-    let loop_ = plugin
+    plugin
         .resolve(&ctx)
         .expect("a context without the hooks row resolves the loop");
+}
+
+/// An observer that only makes the host's table non-empty, so the
+/// test can tell the deployment's host from a fresh one.
+struct MarkerObserver;
+
+#[async_trait]
+impl Hook for MarkerObserver {
+    fn name(&self) -> &str {
+        "marker"
+    }
+
+    async fn observe(
+        &self,
+        _event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> HookDecision {
+        HookDecision::Allow
+    }
+}
+
+/// A run that names no host takes the deployment's
+/// `AgentLoopDefaults.host`; a run that brought its own keeps it —
+/// the fill applies only to `None`.
+#[test]
+fn a_run_without_a_host_takes_the_defaults_host() {
+    let provider: Arc<dyn ModelProvider> =
+        Arc::new(uva_test_support::FakeProvider::text("ok"));
+
+    let host = Host::new();
+    let _registration = host.hook_registry().register_hook_at(
+        MountPoint::BeforeRun,
+        Arc::new(MarkerObserver),
+        RegistrationOrigin::InProcess,
+    );
+    let loop_ = ServerAgentLoop {
+        defaults: AgentLoopDefaults {
+            host: Some(host),
+            ..AgentLoopDefaults::default()
+        },
+        default_provider: Arc::clone(&provider),
+        compactor: None,
+    };
+
+    let resolved = loop_.resolve(&run(Arc::clone(&provider)));
+    let resolved = resolved.host.expect("the defaults host fills the run");
     assert!(
-        loop_.defaults.hooks.is_none(),
-        "no hooks row means no external registrations"
+        resolved
+            .hook_registry()
+            .has_entries_at(MountPoint::BeforeRun),
+        "the resolved host is the deployment's host"
+    );
+
+    // A run that already holds a host keeps it.
+    let mut explicit = run(Arc::clone(&provider));
+    explicit.host = Some(Host::new());
+    let resolved = loop_.resolve(&explicit);
+    let resolved = resolved.host.expect("the run's host survives");
+    assert!(
+        !resolved
+            .hook_registry()
+            .has_entries_at(MountPoint::BeforeRun),
+        "an explicit run host is not replaced by the defaults"
     );
 }

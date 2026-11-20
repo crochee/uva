@@ -181,4 +181,84 @@ pub(super) async fn a_failed_turn_records_its_message() {
         message.contains("the provider refused"),
         "the message names the failure: {message}"
     );
+    // The row carries the keys it carried before — the reason, the
+    // turn, the boundary and the message — and nothing else: the
+    // writer of the row did not grow a second shape.
+    let mut keys: Vec<&str> = end["data"]
+        .as_object()
+        .expect("the payload is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["kind", "message", "reason", "turn"],
+        "the failed turn's payload carries today's keys: {end}"
+    );
+}
+
+/// A streamed step's durable usage row carries the tokens the stream
+/// reported.
+///
+/// The usage arrives as a `Usage` chunk on the scripted stream (the
+/// shape both protocol decoders now emit) and the response is the
+/// replayed fold of those chunks, so the row's numbers come from the
+/// streamed step, not from a pre-built response. Until the wire usage
+/// object was modelled, an Anthropic step's row read `0 in / 0 out`.
+/// A provider-reported cache miss is a value and must stay a zero
+/// member of the row, not disappear from it.
+pub(super) async fn a_streamed_step_writes_its_reported_usage() {
+    use serde_json::json;
+    use uva_provider::{ContentPart, StreamChunk, TextContent, TokenUsage};
+    use uva_test_support::ReplayProvider;
+
+    let chunks = vec![
+        StreamChunk::Content(ContentPart::Text(TextContent {
+            text: "done".to_string(),
+            cache_control: None,
+        })),
+        StreamChunk::Usage(TokenUsage {
+            prompt_tokens: 120,
+            completion_tokens: 30,
+            total_tokens: 150,
+            cached_prompt_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(20),
+            reasoning_tokens: None,
+        }),
+        StreamChunk::Stop("end_turn".to_string()),
+    ];
+
+    let sink = Arc::new(InMemorySessionSink::new("s"));
+    let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
+    let agent = ReActAgent::new(
+        Arc::new(ReplayProvider::new(vec![chunks])),
+        Arc::new(ToolRegistry::new()),
+    )
+    .with_log_writer(writer);
+    let mut stream = agent
+        .run(AgentInput::text("go"), Arc::new(CancellationToken::new()))
+        .await;
+    while stream.next().await.is_some() {}
+
+    let rows = sink.read().await.expect("read");
+    let usage = rows
+        .iter()
+        .find(|row| row["type"] == "usage")
+        .expect("the streamed step writes a usage row");
+    assert_eq!(usage["data"]["prompt_tokens"], json!(120));
+    assert_eq!(usage["data"]["completion_tokens"], json!(30));
+    assert_eq!(usage["data"]["total_tokens"], json!(150));
+    assert_eq!(
+        usage["data"]["cache_read_tokens"],
+        json!(0),
+        "a reported cache miss stays a zero member, not an absent one"
+    );
+    assert_eq!(usage["data"]["cache_write_tokens"], json!(20));
+    // The typed report carries the same numbers.
+    assert_eq!(usage["usage"]["input_tokens"], json!(120));
+    assert_eq!(usage["usage"]["output_tokens"], json!(30));
+    assert_eq!(usage["usage"]["cache_read_tokens"], json!(0));
+    assert_eq!(usage["usage"]["cache_write_tokens"], json!(20));
 }

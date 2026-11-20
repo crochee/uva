@@ -82,6 +82,7 @@ use tokio::{
     process::Command,
     sync::mpsc,
 };
+use tower::Layer as _;
 use uva::core::CancelToken as _;
 
 use crate::rpc::framing::{DEFAULT_MAX_FRAME_SIZE, read_frame, write_frame};
@@ -91,6 +92,14 @@ const RESTART_BACKOFF_MIN: Duration = Duration::from_secs(1);
 
 /// The longest a restart waits.
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+/// The prefix of an id the gateway mints for its own requests to the
+/// core.
+///
+/// A browser's id is whatever the client sent, so the prefix is what
+/// keeps the two apart: a response to a gateway-minted id is the
+/// gateway's, never a client's.
+const INTERNAL_ID_PREFIX: &str = "gateway:internal:";
 
 /// The shared App Server state.
 pub struct AppServer {
@@ -102,6 +111,12 @@ pub struct AppServer {
     next_connection: AtomicU64,
     /// Whether the core has announced itself ready.
     ready: Arc<AtomicBool>,
+    /// The gateway's own requests to the core, keyed by the id it
+    /// minted for them. A response to one of these is the gateway's,
+    /// not a browser's.
+    internal_pending: DashMap<String, tokio::sync::oneshot::Sender<String>>,
+    /// The counter behind the ids the gateway mints.
+    next_internal_id: AtomicU64,
 }
 
 /// The handle the supervisor holds for one connected client.
@@ -130,6 +145,45 @@ impl AppServer {
     /// Whether the core is ready to answer.
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Relaxed)
+    }
+
+    /// The core's Prometheus exposition, or `None` when it cannot
+    /// answer.
+    ///
+    /// The core runs the agent loop, so the tool counters live in
+    /// the core's process; the gateway holds the HTTP counters. The
+    /// `/metrics` endpoint is the two together, and this is the half
+    /// the gateway cannot see on its own.
+    async fn core_exposition(&self) -> Option<String> {
+        if !self.is_ready() {
+            return None;
+        }
+        let id = format!(
+            "{INTERNAL_ID_PREFIX}{}",
+            self.next_internal_id.fetch_add(1, Ordering::Relaxed)
+        );
+        let (waiter, answer) = tokio::sync::oneshot::channel();
+        self.internal_pending.insert(id.clone(), waiter);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "metrics/gather",
+            "params": {},
+        });
+        if self.core.send(&request.to_string()).await.is_err() {
+            self.internal_pending.remove(&id);
+            return None;
+        }
+        let frame = tokio::time::timeout(Duration::from_secs(2), answer)
+            .await
+            .ok()?
+            .ok()?;
+        let parsed: Value = serde_json::from_str(&frame).ok()?;
+        parsed
+            .get("result")?
+            .get("text")?
+            .as_str()
+            .map(str::to_string)
     }
 
     /// Hand one upstream frame to the core, and remember who asked.
@@ -198,6 +252,12 @@ impl AppServer {
             let Some(id) = parsed.get("id").and_then(id_key) else {
                 return;
             };
+            // The gateway's own request first: its ids carry the
+            // reserved prefix, so no browser can mint one.
+            if let Some((_, waiter)) = self.internal_pending.remove(&id) {
+                let _ = waiter.send(frame.to_string());
+                return;
+            }
             for handle in self.connections.iter() {
                 if handle.pending.remove(&id).is_some() {
                     handle.send(frame);
@@ -387,6 +447,8 @@ pub async fn serve(
         connections: DashMap::new(),
         next_connection: AtomicU64::new(1),
         ready: Arc::new(AtomicBool::new(false)),
+        internal_pending: DashMap::new(),
+        next_internal_id: AtomicU64::new(1),
     });
 
     // The core subprocess: the same binary, `core` mode.
@@ -584,17 +646,28 @@ fn router(app_server: Arc<AppServer>, web_dir: Option<PathBuf>) -> Router {
         .route("/readyz", get(readyz))
         .route("/version", get(version))
         .route("/metrics", get(metrics))
-        .with_state(app_server);
+        .with_state(app_server)
+        // Every request — the routes above and the front-end's
+        // fallback alike — feeds the Prometheus RED counters. The
+        // layer is applied after the routes so it also wraps the
+        // fallback the static front-end is served from.
+        .layer(axum::middleware::from_fn(metrics::track_request));
     #[cfg(feature = "embed-web")]
     {
         app = app.fallback(axum::routing::get(embedded_assets));
     }
     if let Some(directory) = web_dir {
         let index = directory.join("index.html");
-        app = app.fallback_service(
-            tower_http::services::ServeDir::new(directory)
-                .fallback(tower_http::services::ServeFile::new(index)),
-        );
+        let files = tower_http::services::ServeDir::new(directory)
+            .fallback(tower_http::services::ServeFile::new(index));
+        // The static service sits outside the router's own layer
+        // stack, so the metrics middleware is put around it by hand:
+        // the front-end's requests are traffic too, and they land
+        // under one label (the service matches no route, so there is
+        // no template to collapse them into).
+        let counted =
+            axum::middleware::from_fn(metrics::track_request).layer(files);
+        app = app.fallback_service(counted);
     }
     app
 }
@@ -721,8 +794,17 @@ async fn version() -> impl IntoResponse {
 }
 
 /// The Prometheus text exposition.
-async fn metrics() -> Response {
-    let body = uva::telemetry::gather_text();
+///
+/// Two processes, two halves of the picture: the gateway counts the
+/// HTTP requests it serves, and the core counts the tool calls the
+/// agent loop makes. The core's half is fetched over the RPC
+/// channel and appended — the families are disjoint (the core has no
+/// HTTP surface), so the concatenation is a valid exposition.
+async fn metrics(State(app_server): State<Arc<AppServer>>) -> Response {
+    let mut body = uva::telemetry::gather_text();
+    if let Some(core) = app_server.core_exposition().await {
+        body.extend_from_slice(core.as_bytes());
+    }
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
@@ -800,3 +882,6 @@ pub fn has_web_dir(directory: &Path) -> bool {
 
 #[cfg(test)]
 mod gateway_tests;
+
+/// The Prometheus counters the HTTP surface feeds.
+mod metrics;

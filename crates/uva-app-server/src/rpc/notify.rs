@@ -21,7 +21,7 @@ use std::{future::Future, sync::Arc};
 
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
-use uva::harness::ApprovalRequest;
+use uva::{harness::ApprovalRequest, tool::Risk};
 
 use super::Outbound;
 
@@ -40,6 +40,51 @@ pub const PROFILE_CHANGED: &str = "profile/changed";
 /// `sessions/resume`. `approval_id` correlates the two; it is never
 /// the JSON-RPC `id`.
 pub const APPROVAL_REQUEST: &str = "approval/request";
+
+/// The `approval/request` notification's payload.
+///
+/// The notification projects one held call: the session it belongs to,
+/// the UI correlation id the answer must carry, the call, the tool,
+/// the risk and the agent. The type is the wire contract's owner: a
+/// client decodes the notification into this very type, so the shape
+/// the server publishes and the shape a client reads cannot drift
+/// apart.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalRequestNotification {
+    /// The session the suspension belongs to.
+    pub session_id: String,
+    /// The UI correlation id — what an approval decision refers to.
+    pub approval_id: String,
+    /// The provider's call id for the held call.
+    pub call_id: String,
+    /// The tool the call addresses.
+    pub tool: String,
+    /// A digest of the call's arguments.
+    pub arguments_hash: String,
+    /// The risk the tool declared for this call.
+    pub risk: Risk,
+    /// The agent the call belongs to.
+    pub agent: String,
+}
+
+impl ApprovalRequestNotification {
+    /// The approval request this notification projects.
+    ///
+    /// The notification renames the request's `id` to the UI
+    /// correlation id the answer carries and adds the session the
+    /// suspension belongs to; the held call itself is the same one.
+    #[must_use]
+    pub fn request(&self) -> ApprovalRequest {
+        ApprovalRequest {
+            id: self.approval_id.clone(),
+            call_id: self.call_id.clone(),
+            tool: self.tool.clone(),
+            arguments_hash: self.arguments_hash.clone(),
+            risk: self.risk,
+            agent: self.agent.clone(),
+        }
+    }
+}
 /// The per-session follow subscribers.
 pub struct FollowRegistry {
     outbound: Outbound,
@@ -114,17 +159,24 @@ impl FollowRegistry {
         session_id: &str,
         request: &ApprovalRequest,
     ) {
+        let notification = ApprovalRequestNotification {
+            session_id: session_id.to_string(),
+            approval_id: request.id.clone(),
+            call_id: request.call_id.clone(),
+            tool: request.tool.clone(),
+            arguments_hash: request.arguments_hash.clone(),
+            risk: request.risk,
+            agent: request.agent.clone(),
+        };
         self.outbound.notify(
             APPROVAL_REQUEST,
-            serde_json::json!({
-                "session_id": session_id,
-                "approval_id": request.id,
-                "call_id": request.call_id,
-                "tool": request.tool,
-                "risk": request.risk,
-                "arguments_hash": request.arguments_hash,
-                "agent": request.agent,
-            }),
+            // `ApprovalRequestNotification` holds strings and plain
+            // enums: serialization cannot fail, and a `null` payload
+            // would tell every subscriber something false. The
+            // invariant, stated.
+            serde_json::to_value(&notification).expect(
+                "ApprovalRequestNotification is infallibly serializable",
+            ),
         );
     }
 }

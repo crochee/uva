@@ -55,7 +55,10 @@ pub struct RoundRecord<'a> {
     /// How the round ended: `completed`, `cancelled` or `error`.
     pub status: &'a str,
     /// The isolated round's diff, when one was produced.
-    pub patch: Option<String>,
+    ///
+    /// Borrowed: the diff is the round's own, and a second copy of a
+    /// whole patch is a copy nobody asked for.
+    pub patch: Option<&'a str>,
 }
 
 /// Where the artefacts landed.
@@ -96,7 +99,6 @@ pub fn write(
 
     let patch = record
         .patch
-        .as_deref()
         .filter(|patch| !patch.trim().is_empty())
         .map(|patch| {
             let path = dir.join(format!("{}.patch", record.id));

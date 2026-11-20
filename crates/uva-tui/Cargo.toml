@@ -23,6 +23,19 @@ categories.workspace = true
 # `uva-gateway` is `publish = false`, which is why this crate is
 # too — nothing here belongs on a registry.
 uva-gateway.workspace = true
+# The wire shapes the terminal decodes are the server's own types: the
+# follow baseline arrives as `uva-app-server`'s `FollowSnapshot`, so
+# the shape has one owner instead of two. The edge links **only** the
+# wire types: measured on the built terminal (`nm -C`, debug build),
+# the binary carries 1116 `uva_app_server` symbols and zero
+# `axum::routing`, zero `reqwest::` and zero `AppState` ones — the
+# server's runtime is not pulled in (the gateway does not link the
+# server either; it supervises its `serve` binary as a child
+# process). What the edge does cost is the wire types' own code: the
+# release terminal grows 66,720 bytes (+2.2%) against the one that
+# carried its own copies of the shapes (3,024,080 → 3,090,800 bytes,
+# same tree, same dependency versions).
+uva-app-server.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 # The `ui/schema` wire DTOs deserialize through serde's derive.
@@ -65,8 +78,16 @@ uva-core.workspace = true
 # says what it does with it (`docs/adr/0006-row-vocabulary-owns-the-row.md`).
 uva-provider.workspace = true
 uva-session.workspace = true
+# The approval vocabulary: the held call a suspension projects is the
+# approval crate's own `ApprovalRequest`, so the terminal reads the
+# server's type instead of transcribing the request's fields.
+uva-approval.workspace = true
 
 [dev-dependencies]
+# The interrupt entries a baseline carries are the approval
+# vocabulary's shape, and the risk one names is the tool vocabulary's:
+# the fixtures build them as vocabulary, not as transcribed JSON.
+uva-tool.workspace = true
 # The tests run against an in-process WebSocket gateway, so they need
 # the axum the gateway crate's own tests use; `net` covers the test
 # server's listener, `sync` the notification broadcast.

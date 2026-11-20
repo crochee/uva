@@ -180,7 +180,7 @@ fn settling_a_round_moves_the_child_to_idle() {
     registry.settle("parent", "child-1", RoundOutcome::Completed);
     let roster = registry.list("parent");
     assert_eq!(roster[0].status, ChildStatus::Idle);
-    assert_eq!(roster[0].activity, "finished");
+    assert_eq!(roster[0].activity, "completed");
 }
 
 #[test]

@@ -95,6 +95,43 @@ fn part_is_observable(part: &ContentPart) -> bool {
     }
 }
 
+impl SamplingResult {
+    /// Whether this finished turn carries nothing durable: a terminal
+    /// stop with no text and no tool calls.
+    ///
+    /// Reasoning is deliberately excluded. The streaming path's only
+    /// former consumer of this rule was the conversion to a
+    /// non-streaming response, which dropped reasoning and its
+    /// signature before checking: thinking text alone was never
+    /// content there, and it is not content here.
+    ///
+    /// `max_tokens`/`length` and tool-use stops are NOT empty terminal
+    /// turns even with zero content — they carry their own signal for
+    /// the caller.
+    #[must_use]
+    pub fn is_empty_terminal_turn(&self) -> bool {
+        if !is_terminal_stop_reason(self.stop_reason.as_deref()) {
+            return false;
+        }
+        self.text.is_empty() && self.tool_calls.is_empty()
+    }
+
+    /// Reject a finished turn that produced nothing durable, turning it
+    /// into the typed empty-completion error ([`empty_response_error`])
+    /// instead of handing the caller a successful empty step.
+    ///
+    /// This is the streaming finalize seam both adapters share.
+    pub fn ensure_durable_content(self, model: &str) -> Result<Self, Error> {
+        if self.is_empty_terminal_turn() {
+            return Err(empty_response_error(
+                model,
+                self.stop_reason.as_deref(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 impl CompletionResponse {
     /// Whether this is a degenerate completion: a terminal stop that
     /// produced no text, no reasoning, and no tool calls (dsh
@@ -120,9 +157,10 @@ impl CompletionResponse {
     /// the typed empty-completion error ([`empty_response_error`])
     /// instead of handing the caller a successful empty turn.
     ///
-    /// This is the finalize seam both adapters share: the
-    /// non-streaming `parse_response` output and the streaming
-    /// sampling finalize both pass through here.
+    /// This is the non-streaming finalize seam both adapters'
+    /// `parse_response` output passes through. The streaming path
+    /// returns a [`SamplingResult`] and rejects an empty turn through
+    /// [`SamplingResult::ensure_durable_content`] instead.
     pub fn ensure_non_empty(self) -> Result<Self, Error> {
         if self.is_empty_terminal_completion() {
             return Err(empty_response_error(

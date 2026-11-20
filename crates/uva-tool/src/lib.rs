@@ -98,6 +98,9 @@
 //!   the registry as a native kernel plugin under [`KEY_TOOLS`]. It
 //!   installs no tool; registering a brick is the brick plugin's
 //!   `apply`, and its effect handle is what revokes the registration.
+//! - [`brick`] — the brick lifecycle: [`register_tool_entries`] files
+//!   a brick's tools in the registry and withdraws exactly those when
+//!   the brick unloads.
 //! - [`output`] / [`full_output`] — the render contract, and the
 //!   stash-then-fetch path for results too large to commit.
 //! - [`workspace`] — path confinement for file-touching tools. A
@@ -122,6 +125,9 @@
 //! See [`MINIMAL.md`](https://github.com/) for the smallest complete
 //! agent and `SEAMS.md` for every swappable piece.
 
+/// The brick lifecycle: register a brick's tools in the `tools`
+/// service and withdraw exactly those when the brick unloads.
+pub mod brick;
 pub mod full_output;
 pub mod mcp_self;
 pub mod output;
@@ -143,6 +149,7 @@ mod tool_test;
 #[cfg(test)]
 mod types_test;
 
+pub use brick::register_tool_entries;
 pub use full_output::{
     FULL_OUTPUT_TOOL_NAME,
     RetrieveFullOutputTool,

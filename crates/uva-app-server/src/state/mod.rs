@@ -23,7 +23,7 @@ pub(crate) mod boot;
 #[cfg(test)]
 pub(crate) mod tests;
 
-#[cfg(any(test, feature = "test-utils"))]
+pub(crate) use app_state::MustExistError;
 #[cfg(any(test, feature = "test-utils"))]
 pub(crate) use app_state::catalogue_for_deployment;
 // The boot's row-config seams: the value the boot materializes into a
@@ -36,6 +36,9 @@ pub(crate) use app_state::materialize_row_config;
 pub(crate) use app_state::plugin_tool_registry;
 #[cfg(test)]
 pub(crate) use app_state::seeded_tool_registry;
+/// The session-resolution module: the transcript-location knowledge
+/// and the named policies a route asks for by name.
+pub(crate) use app_state::session_resolution;
 pub use app_state::{
     AppState,
     AppliedToolSurface,

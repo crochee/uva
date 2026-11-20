@@ -16,7 +16,7 @@
 //! `turn/start`, which is the "one row per turn" trade-off.
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uva::{
     harness::{AgentEvent, SystemEvent},
@@ -49,7 +49,7 @@ fn tail_window(text: String, max_bytes: usize) -> String {
 }
 
 /// One tool call the in-progress turn has produced.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LiveToolCall {
     /// The provider's call id.
     pub call_id: String,
@@ -58,7 +58,11 @@ pub struct LiveToolCall {
     /// The arguments the call was made with.
     pub arguments: Value,
     /// `running`, `completed` or `failed`.
-    pub status: &'static str,
+    ///
+    /// A `String` and not a `&'static str`: the projection is
+    /// published on the wire, and a wire type a client cannot decode
+    /// back is a shape with two owners.
+    pub status: String,
     /// The call's output: while it runs, the streamed chunks appended
     /// in arrival order; once it settles, the result text.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -76,7 +80,7 @@ pub struct LiveToolCall {
 
 /// The transient projection of the step that is running (or just
 /// ended) in this process.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LiveTurn {
     /// The log position where this projection's step began.
     ///
@@ -272,7 +276,7 @@ impl LiveTurn {
         let mut output_bytes = 0usize;
         let mut streamed_bytes = 0u64;
         for call in &self.tool_calls {
-            settled += match call.status {
+            settled += match call.status.as_str() {
                 "completed" => 1,
                 "failed" => 2,
                 _ => 0,
@@ -304,7 +308,7 @@ impl LiveTurn {
             call_id: call.id.clone(),
             name: call.name.clone(),
             arguments: call.input.clone(),
-            status,
+            status: status.to_string(),
             output: None,
             streamed_bytes: 0,
         });
@@ -357,7 +361,7 @@ impl LiveTurn {
             call_id: call_id.to_string(),
             name: tool_name.to_string(),
             arguments: Value::Null,
-            status: "running",
+            status: "running".to_string(),
             output: Some(tail_window(
                 chunk.clone(),
                 MAX_LIVE_TOOL_OUTPUT_BYTES,
@@ -398,14 +402,14 @@ impl LiveTurn {
         failed: bool,
         text: String,
     ) {
-        let status = if failed { "failed" } else { "completed" };
+        let status = String::from(if failed { "failed" } else { "completed" });
         let text = tail_window(text, MAX_LIVE_TOOL_OUTPUT_BYTES);
         if let Some(call) = self
             .tool_calls
             .iter_mut()
             .find(|known| known.call_id == call_id)
         {
-            call.status = status;
+            call.status = status.clone();
             call.streamed_bytes = call
                 .streamed_bytes
                 .max(u64::try_from(text.len()).unwrap_or(u64::MAX));

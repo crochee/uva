@@ -13,9 +13,10 @@
 //!   the tool appends the `subagent_exit` footer and flushes. The
 //!   parent's log gets only the ordinary `tool_call` / `tool_result`
 //!   rows — the child session is the one full-fidelity record.
-//! - **Depth** — the parent run's depth is looked up by its session id;
-//!   the child runs at `parent + 1` and the tool refuses to dispatch at
-//!   [`MAX_SUBAGENT_DEPTH`].
+//! - **Depth** — the round module decides whether this session may
+//!   start a round and at what depth the child runs (see
+//!   [`round::depth`]); the tool only asks it and records the child
+//!   it dispatched.
 //! - **One child per call** — the tool is
 //!   [`ExecutionMode::Sequential`], so the loop serialises its calls
 //!   within a batch: one `task` call starts one child run, and several
@@ -34,10 +35,10 @@
 //! one with [`TaskTool::with_writers`]; without it the child streams
 //! live but persists nothing, exactly like a run without a writer.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 
 use futures::future::{BoxFuture, Either};
-use uva_agent::{AgentInput, AgentRegistry, ChannelInbox, SubagentWriters};
+use uva_agent::{AgentRegistry, ChannelInbox, SubagentWriters};
 use uva_core::{
     CancelToken,
     IdGen,
@@ -46,7 +47,6 @@ use uva_core::{
     ThreadSleeper,
     spawn::SharedSpawner,
 };
-use uva_events::SessionEndReason;
 use uva_provider::ToolDefinition;
 use uva_session::SessionLog;
 use uva_tool::{
@@ -59,45 +59,15 @@ use uva_tool::{
 };
 
 use crate::{
-    child::{ChildCancel, drain_child_observed, outcome_of},
-    control::{ChildHandle, ChildState, ControlSurface},
+    args::tool_definition,
+    child::ChildCancel,
+    control::{ChildHandle, ChildState, ControlSurface, RoundOutcome},
     gate::{CommandRunner, StdCommandRunner, apply_gate_to_output, run_gate},
-    progress::{L1Feed, L1Observer, PROGRESS_WINDOW},
-    schema::task_tool_definition_with_features,
-    spec::{MAX_SUBAGENT_DEPTH, TaskSpec},
-    tail::RoundTail,
-    worktree::{self, WorktreeCleanupResult, WorktreeInfo},
+    progress::{L1Feed, PROGRESS_WINDOW},
+    round::{ChildRound, Isolation, RoundInput, depth},
+    spec::TaskSpec,
+    worktree::{self, WorktreeCleanupResult, WorktreeIsolation},
 };
-
-/// The per-run bookkeeping the tool keeps across calls.
-///
-/// Keyed by the **parent** session id (`uva_tool::Context::session_id`):
-/// the depth map remembers what depth a session the tool started runs
-/// at, so a nested `task` call sees its own depth. Entries outlive the
-/// dispatch on purpose — the control surface that lands next reads the
-/// same table — and the lifecycle work owns their eventual pruning.
-#[derive(Default)]
-pub(crate) struct TaskState {
-    depths: parking_lot::Mutex<HashMap<String, usize>>,
-}
-
-impl TaskState {
-    /// Forget a session's depth. The lifecycle prunes a child's entry
-    /// when it parks: the table's row outlives the handles, and a wake
-    /// re-records the depth it read from the child's log before its
-    /// round starts.
-    pub(crate) fn forget_depth(&self, session_id: &str) {
-        self.depths.lock().remove(session_id);
-    }
-
-    fn depth_of(&self, session_id: &str) -> usize {
-        self.depths.lock().get(session_id).copied().unwrap_or(0)
-    }
-
-    pub(crate) fn record_depth(&self, session_id: &str, depth: usize) {
-        self.depths.lock().insert(session_id.to_string(), depth);
-    }
-}
 
 /// The model-facing `task` tool.
 ///
@@ -111,9 +81,9 @@ pub struct TaskTool {
     writers: Option<Arc<dyn SubagentWriters>>,
     runner: Arc<dyn CommandRunner>,
     definition: ToolDefinition,
-    state: Arc<TaskState>,
     id_gen: SharedIdGen,
     control: Arc<ControlSurface>,
+    round: ChildRound,
     sleep: Arc<dyn Sleeper>,
 }
 
@@ -130,19 +100,14 @@ impl TaskTool {
     /// The tool resolving peers from `registry`.
     #[must_use]
     pub fn new(peers: Arc<AgentRegistry>) -> Self {
-        let state = Arc::new(TaskState::default());
+        let control = Arc::new(ControlSurface::new(Arc::clone(&peers)));
         Self {
-            control: Arc::new(
-                ControlSurface::new(Arc::clone(&peers))
-                    .with_task_state(Arc::clone(&state)),
-            ),
+            round: ChildRound::new(Arc::clone(&control)),
+            control,
             peers,
             writers: None,
             runner: Arc::new(StdCommandRunner::new()),
-            definition: task_tool_definition_with_features(
-                &ToolFeatures::isolation(),
-            ),
-            state,
+            definition: tool_definition(&ToolFeatures::isolation()),
             id_gen: SharedIdGen::ulid(),
             sleep: Arc::new(ThreadSleeper),
         }
@@ -168,7 +133,7 @@ impl TaskTool {
     /// Advertise a different feature set in the tool schema.
     #[must_use]
     pub fn with_features(mut self, features: &ToolFeatures) -> Self {
-        self.definition = task_tool_definition_with_features(features);
+        self.definition = tool_definition(features);
         self
     }
 
@@ -371,19 +336,22 @@ impl TaskTool {
             Err(message) => return ToolOutput::error(message),
         };
         let parent_id = context.session_id.as_str();
-        let parent_depth = self.state.depth_of(parent_id);
-        if parent_depth >= MAX_SUBAGENT_DEPTH {
-            tracing::warn!(
-                session_id = parent_id,
-                depth = parent_depth,
-                "task: sub-agent depth limit reached"
-            );
-            return ToolOutput::error(format!(
-                "cannot delegate: maximum sub-agent depth ({}) reached; \
-                 the `task` tool is disabled at this nesting level",
-                MAX_SUBAGENT_DEPTH
-            ));
-        }
+        // The depth rule: the module decides whether this session may
+        // start a round, and at what depth the child runs. The tool
+        // does not count layers itself — and it holds no handle on the
+        // depth table of its own: the surface owns the one table.
+        let depths = self.control.depth_ledger();
+        let child_depth = match depth::admit_child(&depths, parent_id) {
+            Ok(child_depth) => child_depth,
+            Err(refusal) => {
+                tracing::warn!(
+                    session_id = parent_id,
+                    depth = refusal.depth(),
+                    "task: sub-agent depth limit reached"
+                );
+                return ToolOutput::error(refusal.delegation());
+            }
+        };
         let peer = match self.peers.resolve_sync(&spec.agent) {
             Some(peer) => peer,
             None => {
@@ -401,8 +369,9 @@ impl TaskTool {
         };
 
         let child_id = self.id_gen.next_id();
-        let child_depth = parent_depth + 1;
-        self.state.record_depth(&child_id, child_depth);
+        // The accounting: the child session runs at the depth the
+        // module handed out, so a nested `task` call reads it back.
+        depth::record_child(&depths, &child_id, child_depth);
         self.run_child(peer, spec, context, parent_id, &child_id, feed)
             .await
     }
@@ -419,17 +388,28 @@ impl TaskTool {
         feed: Option<Arc<L1Feed>>,
     ) -> ToolOutput {
         // The depth was recorded at mint time; the child run reads it
-        // back instead of threading a sixth parameter through.
-        let child_depth = self.state.depth_of(child_id);
+        // back from the module instead of threading a sixth parameter
+        // through.
+        let child_depth =
+            depth::depth_of(&self.control.depth_ledger(), child_id);
         let base_cwd = if context.workspace_root.as_os_str().is_empty() {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         } else {
             context.workspace_root.clone()
         };
-        let mut worktree: Option<WorktreeInfo> = None;
+        // The worktree's lifecycle is the caller's: whether this
+        // delegation is isolated is this decision, not the round's.
+        // The round only asks its isolation where to run and what it
+        // changed.
+        let mut isolation: Option<Arc<WorktreeIsolation>> = None;
         if spec.isolation.is_some() {
             match worktree::create_worktree(&base_cwd, self.runner.as_ref()) {
-                Ok(info) => worktree = Some(info),
+                Ok(info) => {
+                    isolation = Some(Arc::new(WorktreeIsolation::new(
+                        info,
+                        Arc::clone(&self.runner),
+                    )));
+                }
                 Err(err) => {
                     return ToolOutput::error(format!(
                         "failed to set up worktree for sub-agent `{}`: \
@@ -440,11 +420,6 @@ impl TaskTool {
             }
         }
 
-        let mut input = AgentInput::text(spec.prompt.clone());
-        input.thread_id = Some(child_id.to_string());
-        if let Some(info) = worktree.as_ref() {
-            input = input.with_workspace(info.path.clone());
-        }
         // The child's session opens before its first row can be
         // stamped: the enter header and dispatch prompt land in order.
         let child_log: Option<Arc<dyn SessionLog>> =
@@ -457,9 +432,6 @@ impl TaskTool {
                     Some(&spec.prompt),
                 )
             });
-        if let Some(log) = child_log.as_ref() {
-            input.log_writer = Some(Arc::clone(log));
-        }
 
         // The child's own handles: the steer channel the control
         // surface writes into, and the cancellation token its own
@@ -467,7 +439,6 @@ impl TaskTool {
         // cancelling the parent still ends the child.
         let (inbox, steer) = ChannelInbox::channel();
         let cancel = ChildCancel::new(Arc::clone(&context.cancel));
-        input = input.with_inbox(inbox);
         let mut handle = ChildHandle::new(
             ChildState::spawn(child_id, &spec.agent),
             Arc::clone(&cancel) as Arc<dyn CancelToken>,
@@ -480,51 +451,33 @@ impl TaskTool {
         }
         self.control.registry().register(parent_id, handle);
 
-        // The round's tail: the roster settle, the exit footer and the
-        // artefact set. Armed here — after the roster row exists, and
-        // before the first `await` a cancellation can cut — so a
-        // dropped dispatch future still closes the round.
-        let mut tail = RoundTail::new(
-            Arc::clone(&self.control),
-            parent_id,
-            child_id,
-            &spec.agent,
-            child_depth,
-            child_log.clone(),
-            self.control.spawner(),
-        );
+        // The round itself: the module assembles the child's input,
+        // drains the peer, maps the end reason into the roster's
+        // vocabulary and lands the tail.
+        let result = self
+            .round
+            .run(RoundInput {
+                peer,
+                prompt: spec.prompt.clone(),
+                parent_id: parent_id.to_string(),
+                child_id: child_id.to_string(),
+                agent: spec.agent.clone(),
+                depth: child_depth,
+                writer: child_log,
+                inbox,
+                cancel,
+                isolation: isolation
+                    .clone()
+                    .map(|isolation| isolation.as_isolation()),
+                feed,
+            })
+            .await;
 
-        let usage = self.control.usage();
-        let mut observer = feed.map(|feed| L1Observer::new(feed, child_id));
-        let (end_reason, child_text) = drain_child_observed(
-            peer,
-            input,
-            cancel,
-            observer.as_mut(),
-            usage.as_deref(),
-            child_id,
-        )
-        .await;
-        let outcome = outcome_of(&end_reason);
-        if let Some(observer) = observer.as_mut() {
-            observer.finish(outcome);
-        }
-
-        // The round's artefact set lands in the child's own session
-        // directory. An isolated round also leaves its diff: its
-        // worktree is still standing here, and cleanup removes it.
-        let patch = worktree.as_ref().and_then(|info| {
-            worktree::worktree_patch(info, self.runner.as_ref())
-        });
-        // The child session closes before the gate runs: the gate is
-        // the parent's verdict on the child, not part of the child's
-        // run.
-        tail.land(outcome, patch).await;
-
-        let child_failed = !matches!(end_reason, SessionEndReason::Completed);
-        let gate_cwd = worktree
+        // The gate is the parent's verdict on the child, not part of
+        // the child's run: the child's session has already closed.
+        let gate_cwd = isolation
             .as_ref()
-            .map(|info| info.path.clone())
+            .map(|isolation| isolation.path().to_path_buf())
             .unwrap_or_else(|| base_cwd.clone());
 
         if let Some(gate_spec) = &spec.gate {
@@ -538,7 +491,7 @@ impl TaskTool {
                 Err(err) => {
                     cleanup(
                         &base_cwd,
-                        &mut worktree,
+                        &mut isolation,
                         &spec.agent,
                         &self.runner,
                     );
@@ -550,75 +503,64 @@ impl TaskTool {
             };
             if verdict.is_failure() {
                 let output = apply_gate_to_output(
-                    child_text.as_deref(),
+                    result.text.as_deref(),
                     &verdict,
                     gate_spec.label(),
                 );
-                cleanup(&base_cwd, &mut worktree, &spec.agent, &self.runner);
+                cleanup(&base_cwd, &mut isolation, &spec.agent, &self.runner);
                 return output;
             }
         }
 
         let cleanup_report: Option<WorktreeCleanupResult> =
-            worktree.take().map(|info| {
+            isolation.take().map(|isolation| {
                 worktree::cleanup_worktree(
                     &base_cwd,
-                    &info,
+                    isolation.info(),
                     &spec.agent,
                     self.runner.as_ref(),
                 )
             });
 
-        if child_failed {
-            return ToolOutput::error(format!(
-                "sub-agent `{}` ended before completing: {}\n\
-                 [subagent session: {child_id}]",
-                spec.agent,
-                end_reason.as_str()
-            ));
+        if result.outcome != RoundOutcome::Completed {
+            return ToolOutput::error(result.failure());
         }
-        match child_text {
-            Some(text) => {
-                let mut combined = text;
-                if let Some(report) =
-                    cleanup_report.as_ref().filter(|r| r.has_changes)
-                    && let (Some(branch), Some(path)) =
-                        (report.branch.as_ref(), report.path.as_ref())
-                {
-                    combined.push_str(&format!(
+        // The worktree's report is the delegation's own line: it
+        // lands between the answer and the round's handle line.
+        let worktree_note = cleanup_report
+            .as_ref()
+            .filter(|report| report.has_changes)
+            .and_then(|report| {
+                match (report.branch.as_ref(), report.path.as_ref()) {
+                    (Some(branch), Some(path)) => Some(format!(
                         "\n\n[worktree: branch `{branch}` at {path}, \
                          base {}]",
                         report.base_sha
-                    ));
+                    )),
+                    _ => None,
                 }
-                combined.push_str(&session_line(child_id));
-                ToolOutput::text(combined)
-            }
-            None => ToolOutput::error(format!(
-                "sub-agent `{}` produced no final output{}",
-                spec.agent,
-                session_line(child_id)
-            )),
+            });
+        match result.answer(worktree_note.as_deref()) {
+            Some(text) => ToolOutput::text(text),
+            None => ToolOutput::error(result.failure()),
         }
     }
 }
 
 fn cleanup(
     base_cwd: &std::path::Path,
-    worktree: &mut Option<WorktreeInfo>,
+    isolation: &mut Option<Arc<WorktreeIsolation>>,
     agent: &str,
     runner: &Arc<dyn CommandRunner>,
 ) {
-    if let Some(info) = worktree.take() {
-        let _ =
-            worktree::cleanup_worktree(base_cwd, &info, agent, runner.as_ref());
+    if let Some(isolation) = isolation.take() {
+        let _ = worktree::cleanup_worktree(
+            base_cwd,
+            isolation.info(),
+            agent,
+            runner.as_ref(),
+        );
     }
-}
-
-/// The machine-readable tail line every `task` result carries, naming
-/// the child session the trace lives in (L2 drill-down).
-fn session_line(child_session_id: &str) -> String {
-    format!("\n\n[subagent session: {child_session_id}]")
 }
 
 #[cfg(test)]
@@ -628,9 +570,9 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use uva_agent::{Agent, AgentEntry};
+    use uva_agent::{Agent, AgentEntry, AgentInput};
     use uva_core::{Registry, agent::AgentDescriptor};
-    use uva_events::AgentEvent;
+    use uva_events::{AgentEvent, SessionEndReason};
     use uva_provider::ContentPart;
 
     use super::*;
@@ -686,12 +628,16 @@ mod tests {
 
     #[test]
     fn depth_map_seeds_from_the_parent_session() {
-        let state = TaskState::default();
-        assert_eq!(state.depth_of("parent"), 0);
-        state.record_depth("child", 1);
-        assert_eq!(state.depth_of("child"), 1);
-        state.forget_depth("child");
-        assert_eq!(state.depth_of("child"), 0, "a parked child is pruned");
+        let ledger = crate::round::depth::DepthLedger::new();
+        assert_eq!(depth::depth_of(&ledger, "parent"), 0);
+        depth::record_child(&ledger, "child", 1);
+        assert_eq!(depth::depth_of(&ledger, "child"), 1);
+        depth::forget(&ledger, "child");
+        assert_eq!(
+            depth::depth_of(&ledger, "child"),
+            0,
+            "a parked child is pruned"
+        );
     }
 
     /// Dropping the dispatch future — what the harness does when the
@@ -811,7 +757,11 @@ mod tests {
         peers.put(AgentEntry::new(agent)).await.expect("register");
 
         let tool = TaskTool::new(Arc::clone(&peers));
-        tool.state.record_depth("deep-parent", MAX_SUBAGENT_DEPTH);
+        depth::record_child(
+            &tool.control().depth_ledger(),
+            "deep-parent",
+            crate::spec::MAX_SUBAGENT_DEPTH,
+        );
         let ctx = Context::new("deep-parent".into(), PathBuf::from("/tmp"));
         let out = tool
             .call(serde_json::json!({"agent": "scout", "prompt": "go"}), &ctx)
@@ -825,7 +775,12 @@ mod tests {
                 _ => None,
             })
             .collect::<String>();
-        assert!(text.contains("maximum sub-agent depth"), "{text}");
+        assert_eq!(
+            text,
+            "cannot delegate: maximum sub-agent depth (3) reached; the \
+             `task` tool is disabled at this nesting level",
+            "the refusal the model reads has not changed"
+        );
         assert_eq!(
             started.load(Ordering::SeqCst),
             0,

@@ -269,13 +269,8 @@ impl L1Observer {
     /// The child's round ended: report the idle state and how it went.
     pub(crate) fn finish(&mut self, outcome: RoundOutcome) {
         self.writing = false;
-        let activity = match outcome {
-            RoundOutcome::Completed => "finished",
-            RoundOutcome::Cancelled => "cancelled",
-            RoundOutcome::Failed => "failed",
-        };
         self.feed
-            .record(&self.child_id, ChildStatus::Idle, activity);
+            .record(&self.child_id, ChildStatus::Idle, outcome.as_str());
     }
 
     fn report(&mut self, activity: String) {

@@ -3,6 +3,7 @@
 
 use std::sync::{
     Arc,
+    Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -11,8 +12,11 @@ use uva_steering::{HookDecision, HookEvent, RequestParams};
 
 use super::{Arbitration, HookRegistry, RegistryError};
 use crate::{
+    FactKind,
+    MountPoint,
+    PromptSection,
+    RegistrationOrigin,
     context::HookContext,
-    seam::{LLM_REQUEST, LLM_RESULT, STEP_POST, STEP_PRE, TOOL_POST, TOOL_PRE},
     traits::{Gate, Hook, RequestTransformer, ResultTransformer},
 };
 
@@ -86,6 +90,51 @@ fn before_request() -> HookEvent {
         params: RequestParams::from_request(
             &uva_provider::CompletionRequest::default(),
         ),
+    }
+}
+
+fn before_run() -> HookEvent {
+    HookEvent::BeforeRun {
+        agent_name: "a".to_owned(),
+        run_idx: 0,
+    }
+}
+
+fn after_run() -> HookEvent {
+    HookEvent::AfterRun {
+        agent_name: "a".to_owned(),
+        run_idx: 0,
+        reason: "completed".to_owned(),
+    }
+}
+
+fn before_provider_call() -> HookEvent {
+    HookEvent::BeforeProviderCall {
+        provider: "p".to_owned(),
+        model: "m".to_owned(),
+        estimated_tokens: 12,
+    }
+}
+
+fn on_error() -> HookEvent {
+    HookEvent::OnError {
+        agent_name: "a".to_owned(),
+        reason: "boom".to_owned(),
+    }
+}
+
+fn on_compaction() -> HookEvent {
+    HookEvent::OnCompaction {
+        start: 0,
+        end: 5,
+        summary: "short summary".to_owned(),
+    }
+}
+
+fn section(title: &str, body: &str) -> PromptSection {
+    PromptSection {
+        title: title.to_owned(),
+        body: body.to_owned(),
     }
 }
 
@@ -176,40 +225,163 @@ impl ResultTransformer for Redactor {
     }
 }
 
-#[test]
-fn an_unknown_key_is_refused() {
-    let registry = HookRegistry::new();
-    let (hook, _calls) = FixedHook::new(HookDecision::Allow);
-    let error = registry
-        .register_hook("tool/execute", Arc::new(hook))
-        .expect_err("not a mount point");
-    assert_eq!(
-        error,
-        RegistryError::UnknownMountPoint("tool/execute".to_owned())
-    );
+/// An observer that records its name in a shared log and allows.
+struct NamedHook {
+    name: &'static str,
+    log: Arc<Mutex<Vec<String>>>,
+}
+
+impl NamedHook {
+    fn new(name: &'static str, log: &Arc<Mutex<Vec<String>>>) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            log: Arc::clone(log),
+        })
+    }
+}
+
+#[async_trait]
+impl Hook for NamedHook {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn observe(
+        &self,
+        _event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> HookDecision {
+        self.log
+            .lock()
+            .expect("the log is not poisoned")
+            .push(self.name.to_owned());
+        HookDecision::Allow
+    }
+}
+
+/// An observer that panics on every pass and counts its calls.
+struct PanickingHook {
+    name: &'static str,
+    calls: Arc<AtomicUsize>,
+}
+
+impl PanickingHook {
+    fn new(name: &'static str, calls: &Arc<AtomicUsize>) -> Arc<Self> {
+        Arc::new(Self {
+            name,
+            calls: Arc::clone(calls),
+        })
+    }
+}
+
+#[async_trait]
+impl Hook for PanickingHook {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    async fn observe(
+        &self,
+        _event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> HookDecision {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        panic!("the hook exploded");
+    }
+}
+
+/// A request transformer that panics on every pass and counts its
+/// calls.
+struct PanickingRequestTransformer {
+    calls: Arc<AtomicUsize>,
+}
+
+impl PanickingRequestTransformer {
+    fn new(calls: &Arc<AtomicUsize>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::clone(calls),
+        })
+    }
+}
+
+#[async_trait]
+impl RequestTransformer for PanickingRequestTransformer {
+    fn name(&self) -> &str {
+        "panicking-request"
+    }
+
+    async fn transform(
+        &self,
+        _params: &mut RequestParams,
+        _ctx: &HookContext<'_>,
+    ) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        panic!("the request transformer exploded");
+    }
+}
+
+/// A result transformer that panics on every pass and counts its
+/// calls.
+struct PanickingResultTransformer {
+    calls: Arc<AtomicUsize>,
+}
+
+impl PanickingResultTransformer {
+    fn new(calls: &Arc<AtomicUsize>) -> Arc<Self> {
+        Arc::new(Self {
+            calls: Arc::clone(calls),
+        })
+    }
+}
+
+#[async_trait]
+impl ResultTransformer for PanickingResultTransformer {
+    fn name(&self) -> &str {
+        "panicking-result"
+    }
+
+    async fn transform(
+        &self,
+        _output: &mut uva_tool::ToolOutput,
+        _ctx: &HookContext<'_>,
+    ) -> Result<(), String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        panic!("the result transformer exploded");
+    }
 }
 
 #[test]
 fn a_transformer_must_name_its_own_mount_point() {
     let registry = HookRegistry::new();
+    // The error names the wire spelling of both points: the entry takes
+    // a `MountPoint`, the report speaks the one spelling the enum
+    // declares.
     let error = registry
-        .register_request_transformer(STEP_PRE, Arc::new(ModelRewriter))
+        .register_request_transformer_at(
+            MountPoint::StepPre,
+            Arc::new(ModelRewriter),
+            RegistrationOrigin::Plugin,
+        )
         .expect_err("step-pre cannot rewrite a request");
     assert_eq!(
         error,
         RegistryError::WrongMountPoint {
-            key: STEP_PRE,
-            expected: LLM_REQUEST,
+            key: "agent/step-pre",
+            expected: "llm/request",
         }
     );
     let error = registry
-        .register_result_transformer(TOOL_PRE, Arc::new(Redactor))
+        .register_result_transformer_at(
+            MountPoint::ToolPre,
+            Arc::new(Redactor),
+            RegistrationOrigin::Plugin,
+        )
         .expect_err("tool-pre cannot rewrite a result");
     assert_eq!(
         error,
         RegistryError::WrongMountPoint {
-            key: TOOL_PRE,
-            expected: TOOL_POST,
+            key: "tool/pre-execute",
+            expected: "tool/post-execute",
         }
     );
 }
@@ -220,17 +392,21 @@ async fn the_first_block_short_circuits_the_pass() {
     let (blocker, _blocked_calls) = FixedHook::new(HookDecision::Block {
         reason: "no shell".to_owned(),
     });
-    let _block = registry
-        .register_hook(TOOL_PRE, Arc::new(blocker))
-        .expect("block registers");
+    let _block = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(blocker),
+        RegistrationOrigin::Plugin,
+    );
     let (late, late_calls) = FixedHook::new(HookDecision::Allow);
-    let _late = registry
-        .register_hook(TOOL_PRE, Arc::new(late))
-        .expect("late registers");
+    let _late = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(late),
+        RegistrationOrigin::Plugin,
+    );
 
     let fixture = Fixture::new();
     let pass = registry
-        .dispatch(TOOL_PRE, &before_tool(), &fixture.ctx())
+        .dispatch_at(MountPoint::ToolPre, &before_tool(), &fixture.ctx())
         .await;
     assert_eq!(
         pass.arbitration.decision,
@@ -255,20 +431,22 @@ async fn asks_collect_and_the_pass_continues() {
         let (hook, _calls) = FixedHook::new(HookDecision::Ask {
             reason: reason.into(),
         });
-        handles.push(
-            registry
-                .register_hook(TOOL_PRE, Arc::new(hook))
-                .expect("ask registers"),
-        );
+        handles.push(registry.register_hook_at(
+            MountPoint::ToolPre,
+            Arc::new(hook),
+            RegistrationOrigin::Plugin,
+        ));
     }
     let (allow, calls) = FixedHook::new(HookDecision::Allow);
-    let _allow = registry
-        .register_hook(TOOL_PRE, Arc::new(allow))
-        .expect("allow registers");
+    let _allow = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(allow),
+        RegistrationOrigin::Plugin,
+    );
 
     let fixture = Fixture::new();
     let pass = registry
-        .dispatch(TOOL_PRE, &before_tool(), &fixture.ctx())
+        .dispatch_at(MountPoint::ToolPre, &before_tool(), &fixture.ctx())
         .await;
     assert_eq!(
         pass.arbitration.asks,
@@ -289,13 +467,15 @@ async fn terminate_is_accepted_only_where_the_table_says_so() {
     let (terminal, calls) = FixedHook::new(HookDecision::Terminate {
         reason: "end it".to_owned(),
     });
-    let _handle = registry
-        .register_hook(STEP_PRE, Arc::new(terminal))
-        .expect("terminate registers");
+    let _handle = registry.register_hook_at(
+        MountPoint::StepPre,
+        Arc::new(terminal),
+        RegistrationOrigin::Plugin,
+    );
 
     let fixture = Fixture::new();
     let pass = registry
-        .dispatch(STEP_PRE, &before_step(), &fixture.ctx())
+        .dispatch_at(MountPoint::StepPre, &before_step(), &fixture.ctx())
         .await;
     assert_eq!(
         pass.arbitration.decision,
@@ -310,11 +490,17 @@ async fn terminate_is_accepted_only_where_the_table_says_so() {
     let (terminal, calls) = FixedHook::new(HookDecision::Terminate {
         reason: "too late".to_owned(),
     });
-    let _handle = registry
-        .register_hook(LLM_RESULT, Arc::new(terminal))
-        .expect("terminate registers");
+    let _handle = registry.register_hook_at(
+        MountPoint::LlmResult,
+        Arc::new(terminal),
+        RegistrationOrigin::Plugin,
+    );
     let pass = registry
-        .dispatch(LLM_RESULT, &after_provider_call(), &fixture.ctx())
+        .dispatch_at(
+            MountPoint::LlmResult,
+            &after_provider_call(),
+            &fixture.ctx(),
+        )
         .await;
     assert_eq!(
         pass.arbitration.decision,
@@ -332,35 +518,37 @@ async fn terminate_is_accepted_only_where_the_table_says_so() {
 #[tokio::test]
 async fn a_gate_failure_fails_closed_at_every_point_that_can_refuse() {
     let cases = [
-        (TOOL_PRE, before_tool(), true),
-        (STEP_PRE, before_step(), false),
-        (STEP_POST, after_step(), false),
-        (TOOL_POST, after_tool(), false),
+        (MountPoint::ToolPre, before_tool(), true),
+        (MountPoint::StepPre, before_step(), false),
+        (MountPoint::StepPost, after_step(), false),
+        (MountPoint::ToolPost, after_tool(), false),
     ];
-    for (key, event, wants_block) in cases {
+    for (mount, event, wants_block) in cases {
         let registry = HookRegistry::new();
-        let _handle = registry
-            .register_gate(key, Arc::new(FailingGate))
-            .expect("gate registers");
+        let _handle = registry.register_gate_at(
+            mount,
+            Arc::new(FailingGate),
+            RegistrationOrigin::Plugin,
+        );
         let fixture = Fixture::new();
-        let pass = registry.dispatch(key, &event, &fixture.ctx()).await;
+        let pass = registry.dispatch_at(mount, &event, &fixture.ctx()).await;
         assert!(
             pass.event.is_none(),
-            "`{key}`: a gate that cannot answer ends the pass"
+            "`{mount}`: a gate that cannot answer ends the pass"
         );
         let reason = match &pass.arbitration.decision {
             HookDecision::Block { reason } if wants_block => reason,
             HookDecision::Terminate { reason } if !wants_block => reason,
             other => panic!(
-                "`{key}` wants {}: {other:?}",
+                "`{mount}` wants {}: {other:?}",
                 if wants_block { "Block" } else { "Terminate" }
             ),
         };
-        assert!(reason.contains("could not decide"), "`{key}`: {reason}");
+        assert!(reason.contains("could not decide"), "`{mount}`: {reason}");
         assert_eq!(pass.denied_by.as_deref(), Some("failing"));
         assert!(
             pass.facts.is_empty(),
-            "`{key}`: a carried denial is not a dispatch failure"
+            "`{mount}`: a carried denial is not a dispatch failure"
         );
     }
 }
@@ -387,12 +575,14 @@ async fn a_panicking_gate_terminates_the_step_pass() {
     }
 
     let registry = HookRegistry::new();
-    let _handle = registry
-        .register_gate(STEP_PRE, Arc::new(PanickingGate))
-        .expect("gate registers");
+    let _handle = registry.register_gate_at(
+        MountPoint::StepPre,
+        Arc::new(PanickingGate),
+        RegistrationOrigin::Plugin,
+    );
     let fixture = Fixture::new();
     let pass = registry
-        .dispatch(STEP_PRE, &before_step(), &fixture.ctx())
+        .dispatch_at(MountPoint::StepPre, &before_step(), &fixture.ctx())
         .await;
     assert_eq!(
         pass.arbitration.decision,
@@ -411,27 +601,29 @@ async fn a_panicking_gate_terminates_the_step_pass() {
 #[tokio::test]
 async fn a_gate_failure_at_an_observational_point_is_reported() {
     let cases = [
-        (LLM_REQUEST, before_request()),
-        (LLM_RESULT, after_provider_call()),
+        (MountPoint::LlmRequest, before_request()),
+        (MountPoint::LlmResult, after_provider_call()),
     ];
-    for (key, event) in cases {
+    for (mount, event) in cases {
         let registry = HookRegistry::new();
-        let _handle = registry
-            .register_gate(key, Arc::new(FailingGate))
-            .expect("gate registers");
+        let _handle = registry.register_gate_at(
+            mount,
+            Arc::new(FailingGate),
+            RegistrationOrigin::Plugin,
+        );
         let fixture = Fixture::new();
-        let pass = registry.dispatch(key, &event, &fixture.ctx()).await;
+        let pass = registry.dispatch_at(mount, &event, &fixture.ctx()).await;
         assert_eq!(
             pass.arbitration.decision,
             HookDecision::Allow,
-            "`{key}`: the point carries no denial"
+            "`{mount}`: the point carries no denial"
         );
-        assert!(pass.event.is_some(), "`{key}`: the pass continues");
-        assert_eq!(pass.facts.len(), 1, "`{key}`: {:?}", pass.facts);
+        assert!(pass.event.is_some(), "`{mount}`: the pass continues");
+        assert_eq!(pass.facts.len(), 1, "`{mount}`: {:?}", pass.facts);
         let detail = pass.facts[0].message();
         assert!(
             detail.contains("failing") && detail.contains("could not decide"),
-            "`{key}`: {detail}"
+            "`{mount}`: {detail}"
         );
     }
 }
@@ -440,14 +632,16 @@ async fn a_gate_failure_at_an_observational_point_is_reported() {
 async fn dropping_the_registration_withdraws_it() {
     let registry = HookRegistry::new();
     let (hook, calls) = FixedHook::new(HookDecision::Allow);
-    let registration = registry
-        .register_hook(TOOL_PRE, Arc::new(hook))
-        .expect("hook registers");
+    let registration = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(hook),
+        RegistrationOrigin::Plugin,
+    );
     drop(registration);
 
     let fixture = Fixture::new();
     let pass = registry
-        .dispatch(TOOL_PRE, &before_tool(), &fixture.ctx())
+        .dispatch_at(MountPoint::ToolPre, &before_tool(), &fixture.ctx())
         .await;
     assert_eq!(calls.load(Ordering::SeqCst), 0, "the row was withdrawn");
     assert!(registry.is_empty());
@@ -458,12 +652,16 @@ async fn dropping_the_registration_withdraws_it() {
 async fn a_request_transformer_rewrites_the_effective_event() {
     let registry = HookRegistry::new();
     let _handle = registry
-        .register_request_transformer(LLM_REQUEST, Arc::new(ModelRewriter))
+        .register_request_transformer_at(
+            MountPoint::LlmRequest,
+            Arc::new(ModelRewriter),
+            RegistrationOrigin::Plugin,
+        )
         .expect("transformer registers");
 
     let fixture = Fixture::new();
     let pass = registry
-        .dispatch(LLM_REQUEST, &before_request(), &fixture.ctx())
+        .dispatch_at(MountPoint::LlmRequest, &before_request(), &fixture.ctx())
         .await;
     let Some(HookEvent::BeforeRequest { params, .. }) = pass.event else {
         panic!("a continuing pass hands the rewritten event on");
@@ -475,7 +673,11 @@ async fn a_request_transformer_rewrites_the_effective_event() {
 async fn a_result_transformer_rewrites_the_output_and_reports_its_name() {
     let registry = HookRegistry::new();
     let _handle = registry
-        .register_result_transformer(TOOL_POST, Arc::new(Redactor))
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            Arc::new(Redactor),
+            RegistrationOrigin::Plugin,
+        )
         .expect("transformer registers");
 
     let fixture = Fixture::new();
@@ -491,6 +693,53 @@ async fn a_result_transformer_rewrites_the_output_and_reports_its_name() {
     // provenance row for an unchanged result.
     let names = registry.transform_result(&mut output, &fixture.ctx()).await;
     assert!(names.is_empty(), "the second pass changes nothing");
+}
+
+/// A `Hook` or `Gate` at `tool/post-execute` observes the event; it
+/// is not a rewrite surface. The loop's no-rewrite fast path keys on
+/// this predicate, so a row that cannot transform must not report
+/// one.
+#[tokio::test]
+async fn an_observer_at_tool_post_is_not_a_result_transformer() {
+    let registry = HookRegistry::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _observer = registry.register_hook_at(
+        MountPoint::ToolPost,
+        NamedHook::new("observer", &log),
+        RegistrationOrigin::InProcess,
+    );
+    let _gate = registry.register_gate_at(
+        MountPoint::ToolPost,
+        Arc::new(FailingGate),
+        RegistrationOrigin::InProcess,
+    );
+    assert!(
+        registry.has_entries_at(MountPoint::ToolPost),
+        "the point holds rows"
+    );
+    assert!(
+        !registry.has_result_transformers(),
+        "a Hook or Gate at tool/post-execute transforms nothing"
+    );
+
+    // The transform pass agrees: it returns before copying the output.
+    let fixture = Fixture::new();
+    let mut output = uva_tool::ToolOutput::text("kept");
+    let names = registry.transform_result(&mut output, &fixture.ctx()).await;
+    assert!(names.is_empty(), "no transformer ran");
+    assert_eq!(output.content, uva_tool::ToolOutput::text("kept").content);
+
+    let _transformer = registry
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            Arc::new(Redactor),
+            RegistrationOrigin::Plugin,
+        )
+        .expect("a result transformer belongs on tool/post-execute");
+    assert!(
+        registry.has_result_transformers(),
+        "a real Result registration makes the fast path take the slow branch"
+    );
 }
 
 #[test]
@@ -509,4 +758,410 @@ fn the_deny_only_fold_cannot_be_cleared() {
          {arbitration:?}"
     );
     assert!(arbitration.decided());
+}
+
+#[tokio::test]
+async fn every_mount_point_carries_its_registration() {
+    let cases = [
+        (MountPoint::StepPre, before_step()),
+        (MountPoint::StepPost, after_step()),
+        (MountPoint::ToolPre, before_tool()),
+        (MountPoint::ToolPost, after_tool()),
+        (MountPoint::LlmRequest, before_request()),
+        (MountPoint::LlmResult, after_provider_call()),
+        (MountPoint::BeforeRun, before_run()),
+        (MountPoint::AfterRun, after_run()),
+        (MountPoint::BeforeProviderCall, before_provider_call()),
+        (MountPoint::OnError, on_error()),
+        (MountPoint::OnCompaction, on_compaction()),
+    ];
+    assert_eq!(cases.len(), 11, "every event point is covered");
+    for (mount, event) in cases {
+        let registry = HookRegistry::new();
+        let (hook, calls) = FixedHook::new(HookDecision::Allow);
+        let _handle = registry.register_hook_at(
+            mount,
+            Arc::new(hook),
+            RegistrationOrigin::Plugin,
+        );
+        assert!(registry.has_entries_at(mount), "{mount} holds its row");
+        let fixture = Fixture::new();
+        let pass = registry.dispatch_at(mount, &event, &fixture.ctx()).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "{mount} dispatched");
+        assert!(pass.event.is_some(), "{mount} hands the event on");
+        assert!(pass.facts.is_empty(), "{mount}: {:?}", pass.facts);
+    }
+
+    let registry = HookRegistry::new();
+    let _section = registry
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            section("audit", "the audit body"),
+            RegistrationOrigin::Plugin,
+        )
+        .expect("the collection point carries a section");
+    assert!(registry.has_entries_at(MountPoint::PromptSections));
+    assert_eq!(
+        registry.prompt_sections(),
+        vec![section("audit", "the audit body")]
+    );
+}
+
+#[tokio::test]
+async fn plugin_registrations_run_before_in_process_ones() {
+    let registry = HookRegistry::new();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let _in_process_first = registry.register_hook_at(
+        MountPoint::BeforeRun,
+        NamedHook::new("in-process-first", &log),
+        RegistrationOrigin::InProcess,
+    );
+    let _plugin_second = registry.register_hook_at(
+        MountPoint::BeforeRun,
+        NamedHook::new("plugin-second", &log),
+        RegistrationOrigin::Plugin,
+    );
+    let _in_process_third = registry.register_hook_at(
+        MountPoint::BeforeRun,
+        NamedHook::new("in-process-third", &log),
+        RegistrationOrigin::InProcess,
+    );
+    let _plugin_fourth = registry.register_hook_at(
+        MountPoint::BeforeRun,
+        NamedHook::new("plugin-fourth", &log),
+        RegistrationOrigin::Plugin,
+    );
+
+    let fixture = Fixture::new();
+    let pass = registry
+        .dispatch_at(MountPoint::BeforeRun, &before_run(), &fixture.ctx())
+        .await;
+    assert!(pass.event.is_some());
+    assert_eq!(
+        log.lock().expect("the log is not poisoned").clone(),
+        vec![
+            "plugin-second".to_owned(),
+            "plugin-fourth".to_owned(),
+            "in-process-first".to_owned(),
+            "in-process-third".to_owned(),
+        ],
+        "the plugin lane runs first; registration order decides inside it"
+    );
+}
+
+#[tokio::test]
+async fn a_plugin_panic_is_skipped_and_the_registration_stays() {
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _handle = registry.register_hook_at(
+        MountPoint::ToolPre,
+        PanickingHook::new("panicking-plugin", &calls),
+        RegistrationOrigin::Plugin,
+    );
+    let (later, later_calls) = FixedHook::new(HookDecision::Allow);
+    let _later = registry.register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(later),
+        RegistrationOrigin::Plugin,
+    );
+
+    let fixture = Fixture::new();
+    let pass = registry
+        .dispatch_at(MountPoint::ToolPre, &before_tool(), &fixture.ctx())
+        .await;
+    assert!(
+        pass.event.is_some(),
+        "a plugin panic does not fail the pass"
+    );
+    assert_eq!(
+        later_calls.load(Ordering::SeqCst),
+        1,
+        "later registrations still run"
+    );
+    assert_eq!(pass.facts.len(), 1, "{:?}", pass.facts);
+    assert_eq!(pass.facts[0].kind, FactKind::Panicked);
+    assert!(
+        pass.facts[0].detail.contains("stays registered"),
+        "{:?}",
+        pass.facts[0]
+    );
+
+    let pass = registry
+        .dispatch_at(MountPoint::ToolPre, &before_tool(), &fixture.ctx())
+        .await;
+    assert!(pass.event.is_some());
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the plugin gets another chance on the next pass"
+    );
+    assert!(registry.has_entries_at(MountPoint::ToolPre));
+}
+
+#[tokio::test]
+async fn an_in_process_panic_withdraws_the_registration() {
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handle = registry.register_hook_at(
+        MountPoint::StepPre,
+        PanickingHook::new("panicking-policy", &calls),
+        RegistrationOrigin::InProcess,
+    );
+
+    let fixture = Fixture::new();
+    let pass = registry
+        .dispatch_at(MountPoint::StepPre, &before_step(), &fixture.ctx())
+        .await;
+    assert!(pass.event.is_some(), "withdrawal does not fail the pass");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(pass.facts.len(), 1, "{:?}", pass.facts);
+    assert_eq!(pass.facts[0].kind, FactKind::Panicked);
+    assert!(
+        pass.facts[0].detail.contains("withdrawn"),
+        "{:?}",
+        pass.facts[0]
+    );
+    assert!(!registry.has_entries_at(MountPoint::StepPre));
+    assert!(registry.is_empty());
+
+    let pass = registry
+        .dispatch_at(MountPoint::StepPre, &before_step(), &fixture.ctx())
+        .await;
+    assert!(pass.event.is_some());
+    assert!(
+        pass.facts.is_empty(),
+        "the withdrawn row does not run again"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    drop(handle);
+    assert!(registry.is_empty());
+}
+
+#[tokio::test]
+async fn a_request_transformer_panic_follows_its_origin() {
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _handle = registry
+        .register_request_transformer_at(
+            MountPoint::LlmRequest,
+            PanickingRequestTransformer::new(&calls),
+            RegistrationOrigin::Plugin,
+        )
+        .expect("the plugin transformer registers");
+    let fixture = Fixture::new();
+    for _ in 0..2 {
+        let pass = registry
+            .dispatch_at(
+                MountPoint::LlmRequest,
+                &before_request(),
+                &fixture.ctx(),
+            )
+            .await;
+        assert!(pass.event.is_some(), "a failure never rewrites the pass");
+        assert_eq!(pass.facts.len(), 1);
+        assert_eq!(pass.facts[0].kind, FactKind::Panicked);
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the plugin transformer is kept"
+    );
+    assert!(registry.has_entries_at(MountPoint::LlmRequest));
+
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _handle = registry
+        .register_request_transformer_at(
+            MountPoint::LlmRequest,
+            PanickingRequestTransformer::new(&calls),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("the in-process transformer registers");
+    let pass = registry
+        .dispatch_at(MountPoint::LlmRequest, &before_request(), &fixture.ctx())
+        .await;
+    assert!(pass.event.is_some());
+    assert_eq!(pass.facts.len(), 1);
+    assert!(
+        pass.facts[0].detail.contains("withdrawn"),
+        "{:?}",
+        pass.facts[0]
+    );
+    assert!(!registry.has_entries_at(MountPoint::LlmRequest));
+
+    let pass = registry
+        .dispatch_at(MountPoint::LlmRequest, &before_request(), &fixture.ctx())
+        .await;
+    assert!(pass.event.is_some());
+    assert!(pass.facts.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_result_transformer_panic_follows_its_origin() {
+    let fixture = Fixture::new();
+    let mut output = uva_tool::ToolOutput::text("payload");
+
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _handle = registry
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            PanickingResultTransformer::new(&calls),
+            RegistrationOrigin::Plugin,
+        )
+        .expect("the plugin transformer registers");
+    for _ in 0..2 {
+        let names =
+            registry.transform_result(&mut output, &fixture.ctx()).await;
+        assert!(names.is_empty(), "a panic rewrites nothing");
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the plugin transformer is kept"
+    );
+    assert!(registry.has_entries_at(MountPoint::ToolPost));
+
+    let registry = HookRegistry::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _handle = registry
+        .register_result_transformer_at(
+            MountPoint::ToolPost,
+            PanickingResultTransformer::new(&calls),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("the in-process transformer registers");
+    let _ = registry.transform_result(&mut output, &fixture.ctx()).await;
+    assert!(!registry.has_entries_at(MountPoint::ToolPost));
+    let _ = registry.transform_result(&mut output, &fixture.ctx()).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the row was withdrawn");
+}
+
+#[tokio::test]
+async fn an_observation_point_returns_arbitration_for_the_decisions_it_accepts()
+{
+    let registry = HookRegistry::new();
+    let (hook, calls) = FixedHook::new(HookDecision::Block {
+        reason: "not here".to_owned(),
+    });
+    let _handle = registry.register_hook_at(
+        MountPoint::OnError,
+        Arc::new(hook),
+        RegistrationOrigin::Plugin,
+    );
+
+    let fixture = Fixture::new();
+    let pass = registry
+        .dispatch_at(MountPoint::OnError, &on_error(), &fixture.ctx())
+        .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "the observer saw it");
+    assert_eq!(
+        pass.arbitration.decision,
+        HookDecision::Allow,
+        "on_error carries no block"
+    );
+    assert!(pass.event.is_some(), "the observation hands the event on");
+    assert_eq!(pass.facts.len(), 1, "{:?}", pass.facts);
+    assert_eq!(pass.facts[0].kind, FactKind::Unsupported);
+}
+
+#[test]
+fn prompt_sections_keep_lane_then_registration_order() {
+    let registry = HookRegistry::new();
+    let withdrawn = registry
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            section("in-process-first", "a"),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a section registers");
+    let _plugin = registry
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            section("plugin-second", "b"),
+            RegistrationOrigin::Plugin,
+        )
+        .expect("a section registers");
+    let _in_process = registry
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            section("in-process-third", "c"),
+            RegistrationOrigin::InProcess,
+        )
+        .expect("a section registers");
+
+    assert_eq!(
+        registry.prompt_sections(),
+        vec![
+            section("plugin-second", "b"),
+            section("in-process-first", "a"),
+            section("in-process-third", "c"),
+        ]
+    );
+
+    drop(withdrawn);
+    assert_eq!(
+        registry.prompt_sections(),
+        vec![
+            section("plugin-second", "b"),
+            section("in-process-third", "c"),
+        ],
+        "dropping the handle withdraws the section"
+    );
+}
+
+#[test]
+fn a_section_registers_only_at_the_collection_point() {
+    let registry = HookRegistry::new();
+    let error = registry
+        .register_prompt_section(
+            MountPoint::ToolPre,
+            section("audit", "body"),
+            RegistrationOrigin::Plugin,
+        )
+        .expect_err("tool-pre is not the collection point");
+    assert_eq!(
+        error,
+        RegistryError::WrongMountPoint {
+            key: "tool/pre-execute",
+            expected: "prompt/sections",
+        }
+    );
+}
+
+#[tokio::test]
+async fn the_collection_point_never_dispatches_an_event() {
+    let registry = HookRegistry::new();
+    let (hook, calls) = FixedHook::new(HookDecision::Allow);
+    let _hook = registry.register_hook_at(
+        MountPoint::PromptSections,
+        Arc::new(hook),
+        RegistrationOrigin::Plugin,
+    );
+    let _section = registry
+        .register_prompt_section(
+            MountPoint::PromptSections,
+            section("audit", "body"),
+            RegistrationOrigin::Plugin,
+        )
+        .expect("a section registers");
+
+    let fixture = Fixture::new();
+    let pass = registry
+        .dispatch_at(MountPoint::PromptSections, &before_run(), &fixture.ctx())
+        .await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a collection point manufactures no event"
+    );
+    assert!(pass.event.is_some(), "the caller's event is handed on");
+    assert!(pass.facts.is_empty());
+    assert_eq!(
+        registry.prompt_sections(),
+        vec![section("audit", "body")],
+        "a hook on the collection point is not a section"
+    );
 }

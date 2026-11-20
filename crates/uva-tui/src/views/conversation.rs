@@ -1,6 +1,7 @@
 //! The conversation flow: user messages as right-aligned bubbles,
 //! the thinking block in its two states, the assistant's streamed
-//! answer.
+//! answer and the tool calls the live projection carries while the
+//! turn runs.
 //!
 //! The thinking block is the §6.1 contract: while the turn runs, its
 //! reasoning renders expanded (a heading plus one dim line per
@@ -37,6 +38,9 @@ pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::raw(app.live_text().to_string()),
         ]));
+    }
+    for line in app.live_tool_lines() {
+        lines.push(transcript_line(line));
     }
     let paragraph = Paragraph::new(lines)
         .block(Block::bordered().title(" Conversation "))

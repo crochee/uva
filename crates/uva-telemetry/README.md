@@ -94,17 +94,28 @@ trace's sampling decision is honored.
 ## Prometheus metrics
 
 [`HTTP_REQUESTS_TOTAL`] and [`HTTP_REQUESTS_DURATION_SECONDS`] are the
-RED vectors. They are labeled by `(method, matched_path)` where
-`matched_path` is the axum route template, so a parameterized path like
+RED vectors. They are labeled by `(method, path)`, where `path` is the
+**matched route template** — a parameterized path like
 `/api/v1/chat/sessions/{id}/messages` collapses to a single time series
-regardless of how many distinct session ids are queried. The tool
-vectors (`TOOL_EXECUTIONS_TOTAL`, `TOOL_EXECUTION_DURATION_SECONDS`,
-`TOOL_PANICS_TOTAL`) are recorded by `uva-tool`'s dispatch loop.
+regardless of how many distinct session ids are queried. A request that
+matched no route (the web front-end's own paths, which the router
+serves as a fallback) lands under one `unmatched` label, so the raw URI
+never becomes a label.
 
-`uva-app-server` mounts the per-request `track_metrics` middleware and
-exposes a public `/metrics` endpoint. [`gather_text`] returns the
-standard Prometheus text exposition body (version 0.0.4) for that
-endpoint.
+The tool vectors (`TOOL_EXECUTIONS_TOTAL`, `TOOL_EXECUTION_DURATION_SECONDS`,
+`TOOL_PANICS_TOTAL`) are recorded by whichever dispatch served the
+call: `uva-tool`'s registry dispatch for a consumer that uses the
+registry directly, and `uva-harness`'s own dispatch for the calls an
+agent run makes (the loop drains the tool's stream itself, so the
+registry's recorder never sees them).
+
+`uva-app-server` exposes a public `/metrics` endpoint. The **gateway**
+counts the HTTP requests it serves; the **core** — the process the
+agent loop runs in — counts the tool calls, and the gateway fetches
+that half over the RPC channel (`metrics/gather`) and appends it. The
+two halves' families are disjoint, so the concatenation is a valid
+exposition. [`gather_text`] returns the standard Prometheus text
+exposition body (version 0.0.4) for that endpoint.
 
 ## Trace Context Propagation
 

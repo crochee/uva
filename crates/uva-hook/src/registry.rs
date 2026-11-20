@@ -1,11 +1,21 @@
 //! The revocable registry and the arbitration every pass runs under.
 //!
-//! A third-party plugin registers on one of the seven mount points
-//! ([`crate::seam`]) and gets back a [`HookRegistration`]: dropping
+//! A third-party plugin registers on one of the twelve mount points
+//! ([`MountPoint`]) and gets back a [`HookRegistration`]: dropping
 //! the handle withdraws the registration from every pass that shares
 //! the registry. The registry is cheap to clone — every clone reads
 //! the same table — so a deployment installs one and hands it to the
-//! loop.
+//! loop. Prompt sections are registered on the same table but are a
+//! collection, not an event: [`HookRegistry::prompt_sections`] returns
+//! them in table order and no synthetic [`HookEvent`] is manufactured
+//! for that point.
+//!
+//! # Ordering
+//!
+//! Every registration carries a [`RegistrationOrigin`]. At one mount
+//! point the plugin lane runs before the in-process lane, and inside a
+//! lane the registration order decides. The lane is a field on the
+//! registration, not a second dispatch path.
 //!
 //! # Arbitration (dsh monotonic rejection)
 //!
@@ -30,11 +40,21 @@
 //!   `Block` or `Terminate`, no later registration can turn it back
 //!   into permission, because there is no allow outcome to absorb.
 //!
-//! The harness runs the registry's registrations *before* its own
-//! typed ones and folds both results through the same [`Arbitration`],
-//! so the two surfaces cannot disagree about a pass. A `Block` at
-//! `tool/pre-execute` also makes the harness write the durable
-//! `hook_block` row, naming the registration that vetoed the call.
+//! A registration that panics follows its origin: the plugin lane is
+//! skipped and kept (a plugin may fail transiently and is not told it
+//! was disabled), the in-process lane is withdrawn and the fact says
+//! so (a broken in-process policy would panic again). A gate that
+//! panics is still a gate that could not answer — the pass fails
+//! closed where the point can refuse, and the withdrawal applies on
+//! top of that.
+//!
+//! This table is the only interception registration surface (ADR
+//! 0028): the harness's `Seams` dispatches it and folds the result
+//! through this [`Arbitration`]; the `Host`'s typed tables (guards,
+//! hints, trackers, output transformers) sit beside it, not inside
+//! it. A `Block` at `tool/pre-execute` also makes the harness write
+//! the durable `hook_block` row, naming the registration that vetoed
+//! the call.
 
 use std::{
     collections::HashMap,
@@ -53,70 +73,26 @@ use uva_steering::{HookDecision, HookEvent};
 use uva_tool::ToolOutput;
 
 use crate::{
-    arbitration::{
-        Arbitration,
-        Fact,
-        PanicPolicy,
-        Refusal,
-        Ruling,
-        refusal,
-        rule,
-    },
+    PromptSection,
+    arbitration::{Arbitration, Fact, Refusal, Ruling, refusal, rule},
     context::HookContext,
-    seam::{
-        LLM_REQUEST,
-        LLM_RESULT,
-        PROMPT_SECTIONS,
-        STEP_POST,
-        STEP_PRE,
-        TOOL_POST,
-        TOOL_PRE,
-    },
+    mount::{MountPoint, RegistrationOrigin},
     traits::{Gate, Hook, RequestTransformer, ResultTransformer},
 };
-
-/// The seven mount points a registration may name.
-///
-/// The six event-driven keys dispatch on their seam pass. The seventh,
-/// `prompt/sections`, is the collection key: the loop's prompt
-/// assembly reads the host's section table, so a registration there is
-/// recorded but never runs a pass. Registrations validate against all
-/// seven so the key vocabulary is one list (ADR 0004).
-const MOUNT_POINTS: [&str; 7] = [
-    STEP_PRE,
-    STEP_POST,
-    TOOL_PRE,
-    TOOL_POST,
-    LLM_REQUEST,
-    LLM_RESULT,
-    PROMPT_SECTIONS,
-];
-
-/// Whether `key` is one of the seven mount points.
-#[must_use]
-pub fn is_mount_point(key: &str) -> bool {
-    MOUNT_POINTS.contains(&key)
-}
-
-/// The registry's panic policy: an external plugin that panics is
-/// skipped and **stays registered** — it may fail transiently, and
-/// nothing tells it that it was disabled.
-///
-/// The harness's typed registrations use
-/// [`PanicPolicy::Withdraw`] instead: an in-process registration
-/// that panics is broken.
-const PANIC_POLICY: PanicPolicy = PanicPolicy::Keep;
 
 /// What went wrong with one registration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryError {
-    /// The key is not one of the seven mount points.
-    UnknownMountPoint(String),
-    /// A transformer named a mount point it cannot dispatch on.
+    /// A registration named a mount point it cannot carry.
+    ///
+    /// The key is the point's wire spelling: a request transformer
+    /// belongs only on `llm/request`, a result transformer only on
+    /// `tool/post-execute`, and a prompt section only on
+    /// `prompt/sections`.
     WrongMountPoint {
         /// The key the caller passed.
         key: &'static str,
-        /// The only key that dispatches this registration kind.
+        /// The only key that carries this registration kind.
         expected: &'static str,
     },
 }
@@ -124,9 +100,6 @@ pub enum RegistryError {
 impl std::fmt::Display for RegistryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnknownMountPoint(key) => {
-                write!(f, "`{key}` is not a mount-point key")
-            }
             Self::WrongMountPoint { key, expected } => write!(
                 f,
                 "`{key}` cannot dispatch this registration; it belongs \
@@ -157,11 +130,13 @@ pub struct RegistryPass {
     pub facts: Vec<Fact>,
 }
 
-/// The shared table of external registrations, keyed by mount point.
+/// The shared interception table, keyed by mount point.
 ///
 /// Clone is cheap and shares one table: every clone sees every
 /// registration, and a [`HookRegistration`] handle dropped anywhere
-/// withdraws its row everywhere.
+/// withdraws its row everywhere. One table carries the four
+/// interception traits and the prompt-section collection, so an
+/// observation and a pass cannot drift into two stores.
 #[derive(Clone, Default)]
 pub struct HookRegistry {
     inner: Arc<RegistryInner>,
@@ -169,7 +144,7 @@ pub struct HookRegistry {
 
 #[derive(Default)]
 struct RegistryInner {
-    entries: Mutex<HashMap<&'static str, Vec<Entry>>>,
+    entries: Mutex<HashMap<MountPoint, Vec<Entry>>>,
     next_id: AtomicU64,
 }
 
@@ -177,6 +152,7 @@ struct RegistryInner {
 struct Entry {
     id: u64,
     name: String,
+    origin: RegistrationOrigin,
     kind: Registered,
 }
 
@@ -186,6 +162,7 @@ enum Registered {
     Gate(Arc<dyn Gate>),
     Request(Arc<dyn RequestTransformer>),
     Result(Arc<dyn ResultTransformer>),
+    Section(PromptSection),
 }
 
 /// One registration in a [`HookRegistry`].
@@ -199,7 +176,7 @@ pub struct HookRegistration {
 }
 
 struct RegistrationInner {
-    key: &'static str,
+    mount: MountPoint,
     id: u64,
     registry: Weak<RegistryInner>,
 }
@@ -207,7 +184,7 @@ struct RegistrationInner {
 impl std::fmt::Debug for HookRegistration {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HookRegistration")
-            .field("key", &self.inner.key)
+            .field("mount", &self.inner.mount)
             .field("id", &self.inner.id)
             .finish()
     }
@@ -219,12 +196,12 @@ impl Drop for RegistrationInner {
             return;
         };
         let mut entries = lock(&registry.entries);
-        let Some(list) = entries.get_mut(self.key) else {
+        let Some(list) = entries.get_mut(&self.mount) else {
             return;
         };
         list.retain(|entry| entry.id != self.id);
         if list.is_empty() {
-            entries.remove(self.key);
+            entries.remove(&self.mount);
         }
     }
 }
@@ -236,23 +213,26 @@ impl HookRegistry {
         Self::default()
     }
 
-    /// Register an observer on `key`.
+    /// Register an observer at `mount`.
     ///
-    /// # Errors
-    ///
-    /// [`RegistryError::UnknownMountPoint`] when `key` is not one of
-    /// the seven mount points.
-    pub fn register_hook(
+    /// An observer may run at any mount point. A registration on the
+    /// prompt-section collection is recorded but never dispatched:
+    /// that point is a collection, not an event.
+    pub fn register_hook_at(
         &self,
-        key: &'static str,
+        mount: MountPoint,
         hook: Arc<dyn Hook>,
-    ) -> Result<HookRegistration, RegistryError> {
-        self.validate(key)?;
-        let name = hook.name().to_owned();
-        Ok(self.add(key, name, Registered::Hook(hook)))
+        origin: RegistrationOrigin,
+    ) -> HookRegistration {
+        self.add(
+            mount,
+            hook.name().to_owned(),
+            origin,
+            Registered::Hook(hook),
+        )
     }
 
-    /// Register a gate on `key`.
+    /// Register a gate at `mount`.
     ///
     /// A gate fails closed: an `Err` or a panic from
     /// [`Gate::check`] ends the pass with the decision the mount
@@ -263,71 +243,102 @@ impl HookRegistry {
     /// a failure there is reported in [`RegistryPass::facts`]
     /// instead — the harness writes a `hook` warning — and is never
     /// folded into `Allow`.
-    ///
-    /// # Errors
-    ///
-    /// [`RegistryError::UnknownMountPoint`] when `key` is not one of
-    /// the seven mount points.
-    pub fn register_gate(
+    pub fn register_gate_at(
         &self,
-        key: &'static str,
+        mount: MountPoint,
         gate: Arc<dyn Gate>,
-    ) -> Result<HookRegistration, RegistryError> {
-        self.validate(key)?;
-        let name = gate.name().to_owned();
-        Ok(self.add(key, name, Registered::Gate(gate)))
+        origin: RegistrationOrigin,
+    ) -> HookRegistration {
+        self.add(
+            mount,
+            gate.name().to_owned(),
+            origin,
+            Registered::Gate(gate),
+        )
     }
 
-    /// Register a request transformer.
+    /// Register a request transformer at `mount`.
     ///
-    /// `key` must be [`LLM_REQUEST`]: the
-    /// rewrite surface exists only on a `BeforeRequest` pass.
+    /// `mount` must be [`MountPoint::LlmRequest`]: the rewrite
+    /// surface exists only on a `BeforeRequest` pass.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::UnknownMountPoint`] for an unknown key,
     /// [`RegistryError::WrongMountPoint`] for any other mount point.
-    pub fn register_request_transformer(
+    pub fn register_request_transformer_at(
         &self,
-        key: &'static str,
+        mount: MountPoint,
         transformer: Arc<dyn RequestTransformer>,
+        origin: RegistrationOrigin,
     ) -> Result<HookRegistration, RegistryError> {
-        self.validate_for(key, LLM_REQUEST)?;
+        self.validate_for_at(mount, MountPoint::LlmRequest)?;
         let name = transformer.name().to_owned();
-        Ok(self.add(key, name, Registered::Request(transformer)))
+        Ok(self.add(mount, name, origin, Registered::Request(transformer)))
     }
 
-    /// Register a result transformer.
+    /// Register a result transformer at `mount`.
     ///
-    /// `key` must be [`TOOL_POST`]: the
-    /// rewrite surface exists only on the tool-result seam.
+    /// `mount` must be [`MountPoint::ToolPost`]: the rewrite surface
+    /// exists only on the tool-result seam.
     ///
     /// # Errors
     ///
-    /// [`RegistryError::UnknownMountPoint`] for an unknown key,
     /// [`RegistryError::WrongMountPoint`] for any other mount point.
-    pub fn register_result_transformer(
+    pub fn register_result_transformer_at(
         &self,
-        key: &'static str,
+        mount: MountPoint,
         transformer: Arc<dyn ResultTransformer>,
+        origin: RegistrationOrigin,
     ) -> Result<HookRegistration, RegistryError> {
-        self.validate_for(key, TOOL_POST)?;
+        self.validate_for_at(mount, MountPoint::ToolPost)?;
         let name = transformer.name().to_owned();
-        Ok(self.add(key, name, Registered::Result(transformer)))
+        Ok(self.add(mount, name, origin, Registered::Result(transformer)))
     }
 
-    /// Whether `key` has at least one registration.
+    /// Register a system-prompt section.
+    ///
+    /// `mount` must be [`MountPoint::PromptSections`]. A section is a
+    /// collection, not an event: [`prompt_sections`](Self::prompt_sections)
+    /// returns it in table order, and
+    /// [`dispatch_at`](Self::dispatch_at) never manufactures an event
+    /// for this point.
+    ///
+    /// # Errors
+    ///
+    /// [`RegistryError::WrongMountPoint`] for any other mount point.
+    pub fn register_prompt_section(
+        &self,
+        mount: MountPoint,
+        section: PromptSection,
+        origin: RegistrationOrigin,
+    ) -> Result<HookRegistration, RegistryError> {
+        self.validate_for_at(mount, MountPoint::PromptSections)?;
+        let name = section.title.clone();
+        Ok(self.add(mount, name, origin, Registered::Section(section)))
+    }
+
+    /// Whether `mount` has at least one registration.
     #[must_use]
-    pub fn has_entries(&self, key: &str) -> bool {
+    pub fn has_entries_at(&self, mount: MountPoint) -> bool {
         lock(&self.inner.entries)
-            .get(key)
+            .get(&mount)
             .is_some_and(|list| !list.is_empty())
     }
 
     /// Whether any result transformer is registered.
+    ///
+    /// The entry kind decides, not the mount point: a [`Hook`] or
+    /// [`Gate`] at [`MountPoint::ToolPost`] observes the `AfterTool`
+    /// event and rewrites nothing, so it does not make the loop take
+    /// its rewrite path.
     #[must_use]
     pub fn has_result_transformers(&self) -> bool {
-        self.has_entries(TOOL_POST)
+        lock(&self.inner.entries)
+            .get(&MountPoint::ToolPost)
+            .is_some_and(|list| {
+                list.iter()
+                    .any(|entry| matches!(&entry.kind, Registered::Result(_)))
+            })
     }
 
     /// Whether the registry holds no registration at all.
@@ -338,23 +349,39 @@ impl HookRegistry {
             .all(|list| list.is_empty())
     }
 
-    /// Run the registrations on `key` over `event`.
+    /// Run the registrations at `mount` over `event`.
     ///
-    /// Hooks and gates fold into the pass arbitration in registration
-    /// order; request transformers rewrite the effective event in
-    /// place. A deciding registration short-circuits the pass — later
-    /// registrations do not run.
-    pub async fn dispatch(
+    /// One entry point serves the six pass points and the five
+    /// observation points. Hooks and gates fold into the pass
+    /// arbitration; request transformers rewrite the effective event
+    /// in place. At a point the plugin lane runs before the
+    /// in-process lane, registration order inside a lane; a deciding
+    /// registration short-circuits the pass — later registrations do
+    /// not run.
+    ///
+    /// [`MountPoint::PromptSections`] is a collection, not an event:
+    /// the pass is returned unchanged and no synthetic event is
+    /// manufactured for it. Read that point with
+    /// [`prompt_sections`](Self::prompt_sections).
+    pub async fn dispatch_at(
         &self,
-        key: &'static str,
+        mount: MountPoint,
         event: &HookEvent,
         ctx: &HookContext<'_>,
     ) -> RegistryPass {
+        if !mount.is_event() {
+            return RegistryPass {
+                arbitration: Arbitration::default(),
+                denied_by: None,
+                event: Some(event.clone()),
+                facts: Vec::new(),
+            };
+        }
         let mut effective = event.clone();
         let mut arbitration = Arbitration::default();
         let mut denied_by = None;
         let mut facts = Vec::new();
-        for entry in self.entries_for(key) {
+        for entry in self.entries_for(mount) {
             if arbitration.decided() {
                 break;
             }
@@ -368,16 +395,17 @@ impl HookRegistry {
                     let decision = match observed {
                         Ok(decision) => decision,
                         Err(_) => {
-                            // The registry's panic policy: an external
-                            // plugin may fail transiently, so it stays
-                            // registered.
+                            let policy = entry.origin.panic_policy();
                             tracing::warn!(
                                 hook = %entry.name,
-                                "hook registration panicked; skipped"
+                                consequence = policy.consequence(),
+                                "hook registration panicked"
                             );
+                            if entry.origin == RegistrationOrigin::InProcess {
+                                self.withdraw(mount, entry.id);
+                            }
                             facts.push(
-                                PANIC_POLICY
-                                    .fact(&entry.name, "the call panicked"),
+                                policy.fact(&entry.name, "the call panicked"),
                             );
                             continue;
                         }
@@ -407,6 +435,18 @@ impl HookRegistry {
                             "the gate failed: {reason}"
                         )),
                         Err(_) => {
+                            let policy = entry.origin.panic_policy();
+                            tracing::warn!(
+                                gate = %entry.name,
+                                consequence = policy.consequence(),
+                                "gate registration panicked"
+                            );
+                            if entry.origin == RegistrationOrigin::InProcess {
+                                self.withdraw(mount, entry.id);
+                            }
+                            facts.push(
+                                policy.fact(&entry.name, "the gate panicked"),
+                            );
                             GateOutcome::Failed("the gate panicked".to_owned())
                         }
                     };
@@ -475,13 +515,23 @@ impl HookRegistry {
                             %reason,
                             "request transformer failed; skipped"
                         ),
-                        Err(_) => tracing::warn!(
-                            transformer = %entry.name,
-                            "request transformer panicked; skipped"
-                        ),
+                        Err(_) => {
+                            let policy = entry.origin.panic_policy();
+                            tracing::warn!(
+                                transformer = %entry.name,
+                                consequence = policy.consequence(),
+                                "request transformer panicked"
+                            );
+                            if entry.origin == RegistrationOrigin::InProcess {
+                                self.withdraw(mount, entry.id);
+                            }
+                            facts.push(
+                                policy.fact(&entry.name, "the call panicked"),
+                            );
+                        }
                     }
                 }
-                Registered::Result(_) => {}
+                Registered::Result(_) | Registered::Section(_) => {}
             }
         }
         if arbitration.decided() {
@@ -503,30 +553,33 @@ impl HookRegistry {
 
     /// Run the result transformers over `output`.
     ///
-    /// Returns the names that ran, in registration order, when the
-    /// aggregate output changed; an unchanged output reports no
-    /// names, so the loop writes no provenance row for a no-op.
+    /// Returns the names that ran, in table order, when the aggregate
+    /// output changed; an unchanged output reports no names, so the
+    /// loop writes no provenance row for a no-op. The early return
+    /// reads [`has_result_transformers`](Self::has_result_transformers),
+    /// so a `Hook` or `Gate` at the point does not make this pass copy
+    /// the output. A panicking transformer follows its origin: a
+    /// plugin is kept, an in-process registration is withdrawn.
     pub async fn transform_result(
         &self,
         output: &mut ToolOutput,
         ctx: &HookContext<'_>,
     ) -> Vec<String> {
-        let transformers: Vec<(String, Arc<dyn ResultTransformer>)> = self
-            .entries_for(TOOL_POST)
-            .into_iter()
-            .filter_map(|entry| match entry.kind {
-                Registered::Result(transformer) => {
-                    Some((entry.name, transformer))
-                }
-                _ => None,
-            })
-            .collect();
-        if transformers.is_empty() {
+        if !self.has_result_transformers() {
             return Vec::new();
         }
         let before = output.clone();
         let mut ran = Vec::new();
-        for (name, transformer) in transformers {
+        for entry in self.entries_for(MountPoint::ToolPost) {
+            let Entry {
+                id,
+                name,
+                origin,
+                kind: Registered::Result(transformer),
+            } = entry
+            else {
+                continue;
+            };
             match std::panic::AssertUnwindSafe(
                 transformer.transform(output, ctx),
             )
@@ -543,10 +596,15 @@ impl HookRegistry {
                     ran.push(name);
                 }
                 Err(_) => {
+                    let policy = origin.panic_policy();
                     tracing::warn!(
                         transformer = %name,
-                        "result transformer panicked; skipped"
+                        consequence = policy.consequence(),
+                        "result transformer panicked"
                     );
+                    if origin == RegistrationOrigin::InProcess {
+                        self.withdraw(MountPoint::ToolPost, id);
+                    }
                 }
             }
         }
@@ -556,52 +614,88 @@ impl HookRegistry {
         ran
     }
 
-    fn validate(&self, key: &'static str) -> Result<(), RegistryError> {
-        if is_mount_point(key) {
-            Ok(())
-        } else {
-            Err(RegistryError::UnknownMountPoint(key.to_owned()))
-        }
+    /// The prompt sections, in table order.
+    ///
+    /// The collection follows the table's order — the plugin lane
+    /// before the in-process lane, registration order inside a lane —
+    /// and a dropped [`HookRegistration`] withdraws its section like
+    /// any other row. This is the collection the prompt assembly
+    /// reads; no [`HookEvent`] is manufactured for it.
+    #[must_use]
+    pub fn prompt_sections(&self) -> Vec<PromptSection> {
+        self.entries_for(MountPoint::PromptSections)
+            .into_iter()
+            .filter_map(|entry| match entry.kind {
+                Registered::Section(section) => Some(section),
+                _ => None,
+            })
+            .collect()
     }
 
-    fn validate_for(
+    fn validate_for_at(
         &self,
-        key: &'static str,
-        expected: &'static str,
+        mount: MountPoint,
+        expected: MountPoint,
     ) -> Result<(), RegistryError> {
-        self.validate(key)?;
-        if key == expected {
+        if mount == expected {
             Ok(())
         } else {
-            Err(RegistryError::WrongMountPoint { key, expected })
+            Err(RegistryError::WrongMountPoint {
+                key: mount.as_str(),
+                expected: expected.as_str(),
+            })
         }
     }
 
     fn add(
         &self,
-        key: &'static str,
+        mount: MountPoint,
         name: String,
+        origin: RegistrationOrigin,
         kind: Registered,
     ) -> HookRegistration {
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
         lock(&self.inner.entries)
-            .entry(key)
+            .entry(mount)
             .or_default()
-            .push(Entry { id, name, kind });
+            .push(Entry {
+                id,
+                name,
+                origin,
+                kind,
+            });
         HookRegistration {
             inner: Arc::new(RegistrationInner {
-                key,
+                mount,
                 id,
                 registry: Arc::downgrade(&self.inner),
             }),
         }
     }
 
-    fn entries_for(&self, key: &str) -> Vec<Entry> {
-        lock(&self.inner.entries)
-            .get(key)
+    fn withdraw(&self, mount: MountPoint, id: u64) {
+        let mut entries = lock(&self.inner.entries);
+        let Some(list) = entries.get_mut(&mount) else {
+            return;
+        };
+        list.retain(|entry| entry.id != id);
+        if list.is_empty() {
+            entries.remove(&mount);
+        }
+    }
+
+    /// The registrations at `mount`, in table order.
+    ///
+    /// The plugin lane precedes the in-process lane; ids increase in
+    /// registration order, so `(lane, id)` is the whole ordering
+    /// rule.
+    fn entries_for(&self, mount: MountPoint) -> Vec<Entry> {
+        let mut entries = lock(&self.inner.entries)
+            .get(&mount)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        entries.sort_by_key(|entry| (entry.origin.lane(), entry.id));
+        entries
     }
 }
 

@@ -12,8 +12,6 @@
 //! - [`validate_resource_name`]: regex `^[a-zA-Z0-9_-]{1,255}$`
 //!   — prevents path traversal (`../etc/passwd`) and other
 //!   injected path components.
-//! - [`validate_sort`]: whitelist enforcement for sort fields
-//!   (after stripping the optional `-` descending prefix).
 //! - [`api_key_mask`]: keep first 4 + last 3 chars, middle `***`.
 //!
 //! Validators return the cross-crate
@@ -58,37 +56,6 @@ pub fn validate_resource_name(name: &str) -> Result<(), Error> {
         Ok(())
     } else {
         Err(Error::invalid_item(name))
-    }
-}
-
-/// Validate a sort parameter against a whitelist.
-///
-/// Strips a leading `-` (descending marker) before checking
-/// membership. Empty sort strings (after trimming) are rejected.
-/// Returns `Ok(())` if the field is whitelisted, otherwise
-/// `Err(Error)` with the [`Error::Validation`] variant.
-///
-/// # Examples
-///
-/// ```
-/// use uva_app_server::api::validate_sort;
-/// assert!(validate_sort("name", &["name", "created_at"]).is_ok());
-/// assert!(validate_sort("-created_at", &["name", "created_at"]).is_ok());
-/// assert!(validate_sort("invalid", &["name", "created_at"]).is_err());
-/// ```
-pub fn validate_sort(sort: &str, whitelist: &[&str]) -> Result<(), Error> {
-    let trimmed = sort.trim();
-    if trimmed.is_empty() {
-        return Err(Error::validation("sort field cannot be empty"));
-    }
-    let field = trimmed.strip_prefix('-').unwrap_or(trimmed);
-    if field.is_empty() {
-        return Err(Error::validation("sort field cannot be empty"));
-    }
-    if whitelist.contains(&field) {
-        Ok(())
-    } else {
-        Err(Error::invalid_item(field))
     }
 }
 
@@ -181,56 +148,6 @@ mod tests {
     fn resource_name_255_chars_passes() {
         let max = "a".repeat(255);
         assert!(validate_resource_name(&max).is_ok());
-    }
-
-    // --- validate_sort ---
-
-    #[test]
-    fn validate_sort_plain_field_passes() {
-        assert!(validate_sort("name", &["name", "created_at"]).is_ok());
-        assert!(validate_sort("created_at", &["name", "created_at"]).is_ok());
-    }
-
-    #[test]
-    fn validate_sort_descending_prefix_passes() {
-        assert!(validate_sort("-created_at", &["name", "created_at"]).is_ok());
-        assert!(validate_sort("-name", &["name", "created_at"]).is_ok());
-    }
-
-    #[test]
-    fn validate_sort_invalid_field_rejected() {
-        assert!(validate_sort("invalid", &["name", "created_at"]).is_err());
-    }
-
-    #[test]
-    fn validate_sort_invalid_descending_field_rejected() {
-        assert!(validate_sort("-invalid", &["name", "created_at"]).is_err());
-    }
-
-    #[test]
-    fn validate_sort_empty_string_rejected() {
-        assert!(validate_sort("", &["name"]).is_err());
-    }
-
-    #[test]
-    fn validate_sort_whitespace_only_rejected() {
-        assert!(validate_sort("   ", &["name"]).is_err());
-    }
-
-    #[test]
-    fn validate_sort_dash_only_rejected() {
-        assert!(validate_sort("-", &["name"]).is_err());
-    }
-
-    #[test]
-    fn validate_sort_trims_whitespace() {
-        assert!(validate_sort("  name  ", &["name"]).is_ok());
-        assert!(validate_sort("  -name  ", &["name"]).is_ok());
-    }
-
-    #[test]
-    fn validate_sort_empty_whitelist_rejects_anything() {
-        assert!(validate_sort("name", &[]).is_err());
     }
 
     // --- api_key_mask ---

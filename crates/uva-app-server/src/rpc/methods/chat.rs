@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use validator::Validate;
 
-use super::{parse, parse_raw};
+use super::{names, parse, parse_raw};
 use crate::{
     api::OperationRequest,
     routes::chat::{
@@ -57,33 +57,33 @@ impl FeedbackParams {
 }
 /// Register the chat methods.
 pub fn register(router: &mut RpcRouter) {
-    router.register("chat/session/create", |state, raw| async move {
+    router.register(names::CHAT_SESSION_CREATE, |state, raw| async move {
         let request: CreateSessionRequest = parse(raw)?;
         encode(chat::create_session(state, request).await?)
     });
-    router.register("chat/message/send", |state, raw| async move {
+    router.register(names::CHAT_MESSAGE_SEND, |state, raw| async move {
         let params = SendMessageParams::parse(raw)?;
         encode(
             chat::send_message(state, params.session_id, params.request)
                 .await?,
         )
     });
-    router.register("chat/cancel", |state, raw| async move {
+    router.register(names::CHAT_CANCEL, |state, raw| async move {
         let params: CancelParams = parse(raw)?;
         encode(chat::cancel_session(state, params.session_id).await?)
     });
-    router.register("chat/regenerate", |state, raw| async move {
+    router.register(names::CHAT_REGENERATE, |state, raw| async move {
         let params: CancelParams = parse(raw)?;
         encode(chat::regenerate(state, params.session_id).await?)
     });
-    router.register("chat/feedback", |state, raw| async move {
+    router.register(names::CHAT_FEEDBACK, |state, raw| async move {
         let params = FeedbackParams::parse(raw)?;
         encode(chat::feedback(state, params.message_id, params.request).await?)
     });
-    router.register("chat/usage", |state, _raw| async move {
+    router.register(names::CHAT_USAGE, |state, _raw| async move {
         encode(chat::usage(state).await)
     });
-    router.register("chat/operation", |state, raw| async move {
+    router.register(names::CHAT_OPERATION, |state, raw| async move {
         let params: OperationParams = parse_raw(raw)?;
         encode(chat::operation(state, params.session_id, params.request).await?)
     });

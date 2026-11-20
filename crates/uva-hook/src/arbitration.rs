@@ -1,10 +1,10 @@
 //! The arbitration every interception pass runs under.
 //!
 //! One rule, one place: **what a registration's decision means at a
-//! mount point**. Two surfaces run registrations — the external
-//! [`HookRegistry`](crate::HookRegistry) and the harness's typed host
-//! — and they used to answer that question three times, in three
-//! shapes, with three different answers:
+//! mount point**. One table runs registrations — the external
+//! [`HookRegistry`](crate::HookRegistry) — and it used to answer that
+//! question in two shapes against a harness host, with different
+//! answers:
 //!
 //! - a gate that could not answer ended the run on the registry's
 //!   path and was downgraded to "allow" on the host's;
@@ -13,8 +13,9 @@
 //! - a decision the point did not accept was dropped silently on one
 //!   path and reported on another.
 //!
-//! This module is the one answer. The surfaces apply it; they do not
-//! restate it.
+//! This module is the one answer. The one table applies it; the
+//! host's typed tables (guards, hints, trackers, output transformers)
+//! sit beside it and do not restate it.
 //!
 //! ## The rule
 //!
@@ -37,9 +38,9 @@
 //!   no later registration turns it back into permission
 //!   ([`Arbitration::absorb`]).
 //!
-//! What a surface does with the rule's output is the surface's: the
-//! registry reports through its pass, the host through its
-//! diagnostics, and the harness writes the durable row.
+//! What the table does with the rule's output is the table's: the
+//! registry reports through its pass and the harness writes the
+//! durable row.
 
 use uva_steering::{HookDecision, HookEvent};
 
@@ -182,10 +183,10 @@ pub fn refusal(event: &HookEvent, source: &str, why: &str) -> Refusal {
     })
 }
 
-/// What a surface does with a registration that panicked.
+/// What the table does with a registration that panicked.
 ///
-/// Two policies, named in one place, so the two surfaces cannot drift
-/// into a third.
+/// Two policies, named in one place, so the table cannot drift into a
+/// third.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanicPolicy {
     /// Skip the call and keep the registration.
@@ -228,9 +229,9 @@ impl PanicPolicy {
 
 /// One fact about a registration's behaviour at one mount point.
 ///
-/// A fact is what a surface reports: the registry hands them back
-/// with its pass, the host records them in its diagnostics, and the
-/// harness writes the ones that belong in the run's durable record.
+/// A fact is what the table reports: the registry hands them back
+/// with its pass, and the harness writes the ones that belong in the
+/// run's durable record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     /// What happened.
@@ -242,7 +243,7 @@ pub struct Fact {
 }
 
 impl Fact {
-    /// The one line a surface reports.
+    /// The one line the table reports.
     #[must_use]
     pub fn message(&self) -> &str {
         &self.detail
@@ -261,7 +262,7 @@ pub enum FactKind {
 }
 
 impl FactKind {
-    /// The name a surface reports the fact under.
+    /// The name the table reports the fact under.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {

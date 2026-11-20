@@ -192,8 +192,12 @@ fn echo_tool_call() -> ToolUse {
 
 #[tokio::test]
 async fn a_host_observer_blocks_a_tool_call() {
-    let mut host = Host::new();
-    let _observer = host.hook(Arc::new(EchoBlocker));
+    let host = Host::new();
+    let _observer = host.hook_registry().register_hook_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(EchoBlocker),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -243,8 +247,12 @@ async fn a_host_observer_blocks_a_tool_call() {
 async fn a_hook_veto_writes_a_hook_block_row() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
-    let mut host = Host::new();
-    let _observer = host.hook(Arc::new(EchoBlocker));
+    let host = Host::new();
+    let _observer = host.hook_registry().register_hook_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(EchoBlocker),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -288,9 +296,11 @@ async fn an_external_registry_veto_writes_a_hook_block_row() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
     let registry = uva_hook::HookRegistry::new();
-    let _registration = registry
-        .register_gate(uva_hook::seam::TOOL_PRE, Arc::new(RegistryBlocker))
-        .expect("the external gate registers");
+    let _registration = registry.register_gate_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(RegistryBlocker),
+        uva_hook::RegistrationOrigin::Plugin,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -298,7 +308,8 @@ async fn an_external_registry_veto_writes_a_hook_block_row() {
     ]));
     let (tool_registry, executions) = echo_registry();
     let agent = ReActAgent::new(provider, tool_registry)
-        .with_hook_registry(registry)
+        .with_host(Host::new_with_registry(registry))
+        .expect("bind the host")
         .with_log_writer(writer);
 
     let mut stream = agent
@@ -334,9 +345,11 @@ async fn an_external_registry_termination_writes_a_hook_block_row() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
     let registry = uva_hook::HookRegistry::new();
-    let _registration = registry
-        .register_gate(uva_hook::seam::TOOL_PRE, Arc::new(RegistryTerminator))
-        .expect("the external gate registers");
+    let _registration = registry.register_gate_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(RegistryTerminator),
+        uva_hook::RegistrationOrigin::Plugin,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -344,7 +357,8 @@ async fn an_external_registry_termination_writes_a_hook_block_row() {
     ]));
     let (tool_registry, executions) = echo_registry();
     let agent = ReActAgent::new(provider, tool_registry)
-        .with_hook_registry(registry)
+        .with_host(Host::new_with_registry(registry))
+        .expect("bind the host")
         .with_log_writer(writer);
 
     let mut stream = agent
@@ -380,17 +394,17 @@ async fn an_external_registry_termination_writes_a_hook_block_row() {
 #[tokio::test]
 async fn a_gate_failure_at_an_observational_point_surfaces_a_warning() {
     let registry = uva_hook::HookRegistry::new();
-    let _registration = registry
-        .register_gate(
-            uva_hook::seam::LLM_RESULT,
-            Arc::new(FailingObserverGate),
-        )
-        .expect("the external gate registers");
+    let _registration = registry.register_gate_at(
+        uva_hook::MountPoint::LlmResult,
+        Arc::new(FailingObserverGate),
+        uva_hook::RegistrationOrigin::Plugin,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![done_chunk("done")]));
     let (tool_registry, _executions) = echo_registry();
-    let agent =
-        ReActAgent::new(provider, tool_registry).with_hook_registry(registry);
+    let agent = ReActAgent::new(provider, tool_registry)
+        .with_host(Host::new_with_registry(registry))
+        .expect("bind the host");
 
     let mut stream = agent
         .run(
@@ -433,8 +447,12 @@ async fn a_gate_failure_at_an_observational_point_surfaces_a_warning() {
 async fn a_hook_block_row_leaves_the_folded_surface_unchanged() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
-    let mut host = Host::new();
-    let _observer = host.hook(Arc::new(EchoBlocker));
+    let host = Host::new();
+    let _observer = host.hook_registry().register_hook_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(EchoBlocker),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -479,8 +497,12 @@ async fn a_hook_block_row_leaves_the_folded_surface_unchanged() {
 
 #[tokio::test]
 async fn a_host_gate_ask_without_a_log_is_refused() {
-    let mut host = Host::new();
-    let _gate = host.gate(Arc::new(ApprovalAsker));
+    let host = Host::new();
+    let _gate = host.hook_registry().register_gate_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(ApprovalAsker),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -538,8 +560,12 @@ async fn a_host_gate_ask_without_a_log_is_refused() {
 
 #[tokio::test]
 async fn a_host_observer_ends_the_run_before_the_first_sample() {
-    let mut host = Host::new();
-    let _observer = host.hook(Arc::new(RunStopper));
+    let host = Host::new();
+    let _observer = host.hook_registry().register_hook_at(
+        uva_hook::MountPoint::BeforeRun,
+        Arc::new(RunStopper),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
 
     let provider =
         Arc::new(CapturingProvider::new(vec![done_chunk("never sampled")]));
@@ -586,8 +612,15 @@ async fn a_host_observer_ends_the_run_before_the_first_sample() {
 
 #[tokio::test]
 async fn the_host_rewrites_the_request_parameters() {
-    let mut host = Host::new();
-    let _transformer = host.request_transformer(Arc::new(ModelRewriter));
+    let host = Host::new();
+    let _transformer = host
+        .hook_registry()
+        .register_request_transformer_at(
+            uva_hook::MountPoint::LlmRequest,
+            Arc::new(ModelRewriter),
+            uva_hook::RegistrationOrigin::InProcess,
+        )
+        .expect("llm/request carries a request transformer");
 
     let provider = Arc::new(CapturingProvider::new(vec![done_chunk("done")]));
     let (registry, _executions) = echo_registry();
@@ -611,11 +644,18 @@ async fn the_host_rewrites_the_request_parameters() {
 // host, one run goes out, and the model's system message carries it.
 #[tokio::test]
 async fn a_host_prompt_section_reaches_the_model() {
-    let mut host = Host::new();
-    let _section = host.prompt_section(PromptSection {
-        title: "Audit".to_string(),
-        body: "Always cite the source.".to_string(),
-    });
+    let host = Host::new();
+    let _section = host
+        .hook_registry()
+        .register_prompt_section(
+            uva_hook::MountPoint::PromptSections,
+            PromptSection {
+                title: "Audit".to_string(),
+                body: "Always cite the source.".to_string(),
+            },
+            uva_hook::RegistrationOrigin::InProcess,
+        )
+        .expect("the collection point carries a section");
 
     let provider = Arc::new(CapturingProvider::new(vec![done_chunk("done")]));
     let (registry, _executions) = echo_registry();
@@ -679,8 +719,15 @@ impl ResultTransformer for ResultRewriter {
 async fn a_host_result_rewrite_leaves_one_audit_row() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
-    let mut host = Host::new();
-    let _transformer = host.result_transformer(Arc::new(ResultRewriter));
+    let host = Host::new();
+    let _transformer = host
+        .hook_registry()
+        .register_result_transformer_at(
+            uva_hook::MountPoint::ToolPost,
+            Arc::new(ResultRewriter),
+            uva_hook::RegistrationOrigin::InProcess,
+        )
+        .expect("tool/post-execute carries a result transformer");
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),
@@ -742,8 +789,15 @@ async fn a_host_result_rewrite_leaves_one_audit_row() {
 async fn the_tool_result_row_holds_the_post_transform_text() {
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
-    let mut host = Host::new();
-    let _transformer = host.result_transformer(Arc::new(ResultRewriter));
+    let host = Host::new();
+    let _transformer = host
+        .hook_registry()
+        .register_result_transformer_at(
+            uva_hook::MountPoint::ToolPost,
+            Arc::new(ResultRewriter),
+            uva_hook::RegistrationOrigin::InProcess,
+        )
+        .expect("tool/post-execute carries a result transformer");
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![echo_tool_call()]),

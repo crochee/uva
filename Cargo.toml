@@ -168,6 +168,11 @@ axum = { version = "0.8", features = ["ws"] }
 # tokio async command surface is needed (multiplexed connections),
 # so the client's extra capabilities stay off.
 tower-http = { version = "0.7", features = ["fs"] }
+# `tower` itself: the app-server wraps the static front-end's service
+# in a layer (so the metrics middleware covers it too), and its router
+# tests drive a `Router` as a service (`ServiceExt::oneshot`) — the
+# only way to assert a middleware's effect without binding a port.
+tower = { version = "0.5" }
 http = "1.5"
 
 # HTTP client

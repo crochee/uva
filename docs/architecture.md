@@ -30,8 +30,8 @@
 | 装配 | `uva-runtime` | 配置驱动的装配：provider catalogue、tier-1 包装链、agent-loop 工厂 |
 | 运行时 | `uva-events` | run 事件词汇（`AgentEvent` / `SystemEvent` / `WarningKind` / `SessionEndReason`）；`uva-harness` 根与 `events` 深路径经 re-export 保路径 |
 | 运行时 | `uva-agent` | agent 词汇：`Agent` trait、`AgentInput`、转向通道收件箱（`RunInbox` / `ChannelInbox`）、peer 注册表（`AgentRegistry` / `AgentEntry`）、子会话写入者来源、prompt manifest（`PromptContext` / `PromptSection`）；`AgentCaps` 与 `ReActAgent` 留 harness，harness 根与深路径经 re-export 保路径 |
-| 运行时 | `uva-hook` | 拦截契约（`Hook` / `Gate` / 请求与结果 transformer、七个挂载点键、解耦 `HookContext`、`HookPayload`）、可撤销 `HookRegistry` 与仲裁、发布 `hooks` 服务的 `HookPlugin`；`uva-harness` 根与深路径 re-export 保持 |
-| 运行时 | `uva-harness` | ReAct 循环、`Agent` / `ReasoningStrategy` seam、`Host` 注册表 |
+| 运行时 | `uva-hook` | 拦截契约（`Hook` / `Gate` / 请求与结果 transformer、十二点 `MountPoint`、注册来源、解耦 `HookContext`）、可撤销 `HookRegistry` 与仲裁、发布 `hooks` 服务的 `HookPlugin`；`uva-harness` 根与 `agent::host` 深路径 re-export 保持 |
+| 运行时 | `uva-harness` | ReAct 循环、`Agent` / `ReasoningStrategy` seam、`Host`（typed 策略表 + 部署的拦截表） |
 | 检索 | `uva-search` | 多域检索引擎：BM25 + 向量混合、可插拔 tokenizer / embedder / reranker |
 | 调度 | `uva-scheduler` | runtime-free 的 cron / interval / once 分发 + 原子 JSON 持久化（调用方持有定时器） |
 | 评测 | `uva-eval` | 评测框架：suite、同步 / 异步指标、runner、judge + schema 校验、JSON / CSV 导出 |
@@ -39,7 +39,7 @@
 | 观测 | `uva-telemetry` | console / file logging、Prometheus metrics、OTel 导出；日志与指标的唯一入口 |
 | 适配 | `uva-mcp` | MCP 客户端：stdio / HTTP / in-memory 传输、supervisor 重连，把远端工具注册进本机 `ToolRegistry` |
 | 宿主 | `uva-app-server` | 应用 crate：`core`（stdio 无头内核）+ `serve`（WebSocket 网关 + 探针 + 静态前端） |
-| 宿主 | `uva-tui` | 终端投影：ratatui + crossterm，经 `uva-gateway` 驱动 `serve` 的 `/rpc` |
+| 宿主 | `uva-tui` | 终端投影：ratatui + crossterm，经 `uva-gateway` 驱动 `serve` 的 `/rpc`；wire 类型（follow 基线、活动投影、schema 树、方法名）直接取自 `uva-app-server`，终端不留副本（ADR-0025） |
 | 宿主 | `uva-gateway` | 两宿主共用的网关支撑：进程监管（拉起 / 探活 / 退避 / 回收）+ 网关 JSON-RPC client；公开面 runtime-free |
 | 宿主 | `uva-mcp-server` | stdio 上的 MCP 服务器，把插件砖块工具暴露给任意外部 MCP 客户端 |
 | 门面 | `uva` | facade：每个部件一个 feature + 精选 `prelude`；只有 `pub use`，零逻辑 |

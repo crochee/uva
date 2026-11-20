@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
+use uva_hook::{MountPoint, RegistrationOrigin};
 use uva_provider::ContentPart;
 use uva_steering::{HookDecision, HookEvent};
 use uva_test_support::FakeTool;
@@ -37,8 +38,12 @@ async fn terminate_before_run_ends_the_run_without_sampling() {
         }
     }
 
-    let mut host = Host::new();
-    let _gate = host.hook(Arc::new(PlanModeGate));
+    let host = Host::new();
+    let _gate = host.hook_registry().register_hook_at(
+        MountPoint::BeforeRun,
+        Arc::new(PlanModeGate),
+        RegistrationOrigin::InProcess,
+    );
 
     let provider =
         Arc::new(CapturingProvider::new(vec![done_chunk("never reached")]));
@@ -105,10 +110,14 @@ async fn terminate_after_step_ends_the_run_after_commit() {
     }
 
     let seen: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut host = Host::new();
-    let _stopper = host.hook(Arc::new(StopAfterStep {
-        seen: Arc::clone(&seen),
-    }));
+    let host = Host::new();
+    let _stopper = host.hook_registry().register_hook_at(
+        MountPoint::StepPost,
+        Arc::new(StopAfterStep {
+            seen: Arc::clone(&seen),
+        }),
+        RegistrationOrigin::InProcess,
+    );
 
     let provider = Arc::new(CapturingProvider::new(vec![
         tool_call_response(vec![ToolUse {
@@ -230,8 +239,12 @@ async fn block_at_before_tool_vetoes_and_reaches_the_next_request() {
         }
     }
 
-    let mut host = Host::new();
-    let _blocker = host.hook(Arc::new(BlockEcho));
+    let host = Host::new();
+    let _blocker = host.hook_registry().register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(BlockEcho),
+        RegistrationOrigin::InProcess,
+    );
 
     let tool_use = ToolUse {
         id: "c1".to_string(),
@@ -330,10 +343,14 @@ async fn after_tool_success_carries_the_real_call_id() {
 
     let seen: Arc<Mutex<Vec<(String, String, bool)>>> =
         Arc::new(Mutex::new(Vec::new()));
-    let mut host = Host::new();
-    let _recorder = host.hook(Arc::new(RecordAfterTool {
-        seen: Arc::clone(&seen),
-    }));
+    let host = Host::new();
+    let _recorder = host.hook_registry().register_hook_at(
+        MountPoint::ToolPost,
+        Arc::new(RecordAfterTool {
+            seen: Arc::clone(&seen),
+        }),
+        RegistrationOrigin::InProcess,
+    );
 
     let tool_use = ToolUse {
         id: "call_echo_1".to_string(),
@@ -409,8 +426,12 @@ async fn a_hook_veto_writes_the_row_and_still_publishes_the_live_warning() {
 
     let sink = Arc::new(InMemorySessionSink::new("s"));
     let writer = Arc::new(LogWriter::new(sink.clone(), Arc::new(SystemClock)));
-    let mut host = Host::new();
-    let _blocker = host.hook(Arc::new(BlockEcho));
+    let host = Host::new();
+    let _blocker = host.hook_registry().register_hook_at(
+        MountPoint::ToolPre,
+        Arc::new(BlockEcho),
+        RegistrationOrigin::InProcess,
+    );
 
     let tool_use = ToolUse {
         id: "c1".to_string(),

@@ -2,9 +2,9 @@
 //!
 //! Post-execution reflection / self-critique hook.
 //!
-//! [`ReflectionHook`] implements `uva_hook::Hook`:
-//! install it with `host.hook(Arc::new(hook))`, and its `after_tool`
-//! observer asks a **critic model** (cheap + fast) to critique the
+//! [`ReflectionHook`] implements `uva_hook::Hook`: register it on
+//! `tool/post-execute`, and its `after_tool` observer asks a
+//! **critic model** (cheap + fast) to critique the
 //! running trajectory every `every_n_steps` tool calls. If the
 //! critique flags drift (severity ≥ `Warn`), the hook stages a
 //! [`Hint`] that the next LLM call surfaces to the model.
@@ -14,9 +14,9 @@
 //! use std::sync::Arc;
 //!
 //! use uva_core::SharedClock;
+//! use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 //! use uva_hook_plugins::reflection::{ReflectorConfig, ReflectionHook};
 //! use uva_provider::ModelProvider;
-//! use uva_harness::agent::host::Host;
 //!
 //! // The critic is the consumer's own provider: this crate takes the
 //! // `ModelProvider` trait, not one of `uva-provider`'s HTTP
@@ -28,8 +28,12 @@
 //!         .every_n_steps(3),
 //!     Arc::new(SharedClock::system()),
 //! ));
-//! let mut host = Host::default_policy(root);
-//! let _registration = host.hook(hook);
+//! let registry = HookRegistry::new();
+//! let _registration = registry.register_hook_at(
+//!     MountPoint::ToolPost,
+//!     hook,
+//!     RegistrationOrigin::InProcess,
+//! );
 //! ```
 
 pub mod critique;

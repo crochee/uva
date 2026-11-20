@@ -63,6 +63,7 @@ async fn table_driven_runs_every_fixture() {
     run!(step_pairing::every_step_start_has_a_matching_end);
     run!(step_pairing::reasoning_reaches_the_next_request);
     run!(structural_rows::structural_rows_go_through_the_writer);
+    run!(structural_rows::a_streamed_step_writes_its_reported_usage);
     run!(structural_rows::the_request_header_names_the_configured_provider);
     run!(structural_rows::a_failed_turn_records_its_message);
     run!(max_iterations::run_emits_warning_at_max_iterations);

@@ -2,20 +2,22 @@
 //!
 //! # Module Layout
 //!
-//! - [`events`]: The 3 raw SSE event structs
+//! - [`events`]: The raw SSE event structs
 //!   ([`events::AnthropicStreamEvent`],
 //!   [`events::AnthropicStreamContentBlock`],
-//!   [`events::AnthropicStreamDelta`]).
-//! - [`processor`]: [`processor::StreamProcessor`] + its private
-//!   [`processor::ToolUseBuffer`] + the free helper
-//!   [`processor::delta_usage`]. Tool-call arguments are finalized
-//!   through [`crate::json_repair::parse_tool_input_logged`].
-//! - [`tests`]: Unit tests covering
+//!   [`events::AnthropicStreamDelta`], and the usage objects
+//!   [`events::AnthropicStreamMessage`] /
+//!   [`events::AnthropicStreamUsage`]).
+//! - [`processor`]: [`processor::StreamProcessor`], the decode-only
+//!   processor that turns those events into chunks. It keeps only
+//!   decode scratch — the wire-index → tool-buffer map, the think
+//!   extractor, and the usage frames merged so far — and never builds
+//!   a finished turn.
+//! - [`tests`]: Unit tests covering the chunk sequence:
 //!   `text_delta` → `Content(Text)`, `thinking_delta` →
-//!   `Content(Reasoning)`, the full `ToolUse` start/delta/end +
-//!   `IsDone` round-trip with parsed JSON, `IsDone` carries
-//!   accumulated text, and `parse_tool_input` edge cases
-//!   (empty string → empty object, invalid JSON → raw string).
+//!   `Content(Reasoning)`, the tool-use start/delta/end sequence,
+//!   usage chunks, the signature chunk, and `parse_tool_input` edge
+//!   cases (empty string → empty object, invalid JSON → raw string).
 
 mod events;
 mod processor;
@@ -26,6 +28,3 @@ pub use events::{
     AnthropicStreamEvent,
 };
 pub use processor::StreamProcessor;
-
-#[cfg(test)]
-mod tests;

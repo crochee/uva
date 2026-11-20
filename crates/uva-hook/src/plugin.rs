@@ -10,15 +10,21 @@
 //!
 //! ```ignore
 //! let registry = HookRegistry::new();
-//! let registration = registry.register_gate(TOOL_PRE, gate)?;
-//! mount_all(&ctx, &[Arc::new(HookPlugin::new(registry.clone()))])?;
-//! // `agent-loop` injects `hooks`, resolves the service, and hands
-//! // the registry to every run's `Seams`.
+//! let registration = registry.register_gate_at(
+//!     MountPoint::ToolPre,
+//!     gate,
+//!     RegistrationOrigin::Plugin,
+//! );
+//! let host = Host::default_policy(workspace, registry.clone());
+//! mount_all(&ctx, &[Arc::new(HookPlugin::new(registry))])?;
+//! // Runs built over `host` dispatch the same table.
 //! ```
 //!
 //! Dropping `registration` withdraws the row from every agent that
 //! shares the registry; dropping the mount handle withdraws the
-//! service, and the kernel parks every consumer that injected it.
+//! service. The plugin is not an `inject` edge of the loop — the
+//! table reaches a run on the host — so a deployment without this row
+//! still carries its default policy.
 //!
 //! # Lifecycle
 //!

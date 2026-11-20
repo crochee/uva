@@ -92,7 +92,7 @@ impl ModelProvider for CapturingProvider {
         request: CompletionRequest,
         _cancel: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         self.captured_tools.lock().await.push(request.tools.clone());
         let chunks = {
             let mut g = self.scripted.lock().await;
@@ -104,28 +104,13 @@ impl ModelProvider for CapturingProvider {
                 g.remove(0)
             }
         };
-        let mut sampling: Option<SamplingResult> = None;
+        let mut assembler = uva_provider::BlockAssembler::new();
         for c in chunks {
-            if let StreamChunk::IsDone { result } = &c {
-                sampling = Some((**result).clone());
-            }
+            assembler.push(c.clone());
             on_delta(c);
         }
-        let s = sampling.unwrap_or_default();
-        Ok(CompletionResponse {
-            id: "cap".into(),
-            model: "capturing".into(),
-            content: uva_provider::Content::Single(ContentPart::Text(
-                TextContent {
-                    text: s.text.clone(),
-                    cache_control: None,
-                },
-            )),
-            usage: s.usage.clone(),
-            cached: false,
-            replay_state: None,
-            stop_reason: s.stop_reason.clone(),
-        })
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 
@@ -174,7 +159,7 @@ impl ModelProvider for EchoChildProvider {
         request: CompletionRequest,
         _cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let snapshot_prefix = "Current runtime context. \
             This snapshot supersedes earlier runtime-context \
@@ -196,30 +181,18 @@ impl ModelProvider for EchoChildProvider {
             })
             .unwrap_or_default();
         let text = format!("child-answered: {user_text}");
-        on_delta(StreamChunk::IsDone {
-            result: Box::new(SamplingResult {
-                text: text.clone(),
-                tool_calls: vec![],
-                reasoning: String::new(),
-                reasoning_signature: None,
-                usage: TokenUsage::default(),
-                ..Default::default()
-            }),
-        });
-        Ok(CompletionResponse {
-            id: "child".into(),
-            model: "echo-child".into(),
-            content: uva_provider::Content::Single(ContentPart::Text(
-                TextContent {
-                    text,
-                    cache_control: None,
-                },
-            )),
+        let turn = SamplingResult {
+            text,
+            tool_calls: vec![],
+            reasoning: String::new(),
+            reasoning_signature: None,
             usage: TokenUsage::default(),
-            cached: false,
-            replay_state: None,
             stop_reason: None,
-        })
+        };
+        on_delta(StreamChunk::IsDone {
+            result: Box::new(turn.clone()),
+        });
+        Ok(turn)
     }
 }
 

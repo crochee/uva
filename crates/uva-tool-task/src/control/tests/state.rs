@@ -258,7 +258,7 @@ fn only_an_idle_child_ages_into_parked() {
 fn a_finished_round_reports_its_outcome() {
     let mut state = ChildState::spawn("child-1", "scout");
     state.finish(RoundOutcome::Completed).expect("finish");
-    assert_eq!(state.activity, "finished");
+    assert_eq!(state.activity, "completed");
     assert_eq!(state.status, ChildStatus::Idle);
 
     let mut state = ChildState::spawn("child-1", "scout");
@@ -267,7 +267,16 @@ fn a_finished_round_reports_its_outcome() {
 
     let mut state = ChildState::spawn("child-1", "scout");
     state.finish(RoundOutcome::Failed).expect("finish");
-    assert_eq!(state.activity, "failed");
+    assert_eq!(state.activity, "error");
+}
+
+/// The round's outcome has one vocabulary: the word the roster, the
+/// progress line and the exit footer all write.
+#[test]
+fn the_outcome_has_one_word_per_way_a_round_can_end() {
+    assert_eq!(RoundOutcome::Completed.as_str(), "completed");
+    assert_eq!(RoundOutcome::Cancelled.as_str(), "cancelled");
+    assert_eq!(RoundOutcome::Failed.as_str(), "error");
 }
 
 /// The state names the model sees are the four the design fixes.

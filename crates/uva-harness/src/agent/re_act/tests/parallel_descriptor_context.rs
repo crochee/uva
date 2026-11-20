@@ -183,28 +183,19 @@ impl ModelProvider for TinyWindowProvider {
         _request: CompletionRequest,
         _cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
-        let sampling = SamplingResult {
+    ) -> Result<SamplingResult, Error> {
+        let turn = SamplingResult {
             text: "ok".to_string(),
             ..Default::default()
         };
-        on_delta(StreamChunk::IsDone {
-            result: Box::new(sampling.clone()),
-        });
-        Ok(CompletionResponse {
-            id: "tiny-1".to_string(),
-            model: "tiny".to_string(),
-            content: uva_provider::Content::Single(ContentPart::Text(
-                TextContent {
-                    text: sampling.text.clone(),
-                    cache_control: None,
-                },
-            )),
-            usage: sampling.usage.clone(),
-            cached: false,
-            replay_state: None,
-            stop_reason: sampling.stop_reason.clone(),
-        })
+        let mut assembler = uva_provider::BlockAssembler::new();
+        let done = StreamChunk::IsDone {
+            result: Box::new(turn),
+        };
+        assembler.push(done.clone());
+        on_delta(done);
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 

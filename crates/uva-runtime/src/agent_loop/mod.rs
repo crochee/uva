@@ -27,21 +27,17 @@
 //! Delegation is an ordinary tool brick (`tool-task`) that the boot
 //! mounts into the tool registry; the loop has no delegation edge.
 //!
-//! # The hook registry
+//! # The interception table
 //!
-//! The external hook registry is a service too: the `hooks` row
-//! publishes [`uva_hook::KEY_HOOKS`] and this row resolves it at
-//! mount into the defaults, which `ServerAgentLoop::create` hands
-//! to every run's [`uva_harness::seams::Seams`].
-//!
-//! The lookup is **opportunistic** (`ctx.get`), not an `inject` edge:
-//! the kernel validates `inject` keys statically and refuses the whole
-//! group when a provider is absent, so an edge here would make the
-//! `hooks` row mandatory — a profile document written before the row
-//! existed, or one that switches it off, would fail at boot with no
-//! way back in. Without the service the loop simply runs with no
-//! external registrations. The native profile still lists `hooks`
-//! before `agent-loop`, so the row mounts first when it is there.
+//! The loop does not resolve a hook table of its own: the
+//! deployment's one [`uva_hook::HookRegistry`] lives on the plugin
+//! host ([`Host::hook_registry`](uva_harness::Host::hook_registry)),
+//! which arrives on every run as `AgentLoopDefaults.host` and is
+//! read by that run's [`uva_harness::seams::Seams`]. The `hooks` row
+//! publishes the same instance under [`uva_hook::KEY_HOOKS`] so
+//! out-of-tree code can register against it; the row is optional and
+//! not an `inject` edge, and a deployment without it still carries
+//! its full default policy.
 
 use std::{sync::Arc, time::Duration};
 
@@ -80,11 +76,9 @@ pub struct AgentLoopDefaults {
     /// The deployment's one context manager (request-level
     /// truncation); `None` keeps the run's own.
     pub context_manager: Option<Arc<dyn uva_context::ContextManager>>,
-    /// The deployment's plugin host.
+    /// The deployment's plugin host — the one that carries the
+    /// deployment's interception table.
     pub host: Option<uva_harness::Host>,
-    /// The deployment's external hook registry, resolved from the
-    /// mounted `hooks` service at mount time.
-    pub hooks: Option<uva_hook::HookRegistry>,
     /// Where the run's detached work executes.
     pub spawner: Option<Arc<dyn uva_core::spawn::Spawner>>,
     /// The policy a per-run compactor is built from when the run
@@ -129,19 +123,6 @@ fn build_loop(
     })
 }
 
-/// The external hook registry the `hooks` row published, when it is
-/// mounted.
-///
-/// The row publishes an `Arc<HookRegistry>` (the registry itself is
-/// cheap to clone and shares one table), so the loop keeps its own
-/// clone and the plugin's provenance is irrelevant.
-fn hooks_registry(
-    ctx: &Context,
-) -> Result<Option<uva_hook::HookRegistry>, PluginError> {
-    let registry = ctx.get::<uva_hook::HookRegistry>(uva_hook::KEY_HOOKS)?;
-    Ok(registry.map(|registry| (*registry).clone()))
-}
-
 /// The mounted `agent-loop` factory: one per deployment, rebuilt by a
 /// remount (which is how a provider swap reaches new runs).
 pub(crate) struct ServerAgentLoop {
@@ -154,15 +135,11 @@ pub(crate) struct ServerAgentLoop {
 
 impl AgentLoopFactory for ServerAgentLoop {
     fn create(&self, run: &RunConfig) -> Arc<dyn uva_harness::Agent> {
-        let agent = self.resolve(run).build();
-        // The registry reaches every run's seam layer here: a
-        // registration dropped anywhere withdraws from every agent
-        // that shares the table, including runs created later.
-        let agent = match &self.defaults.hooks {
-            Some(registry) => agent.with_hook_registry(registry.clone()),
-            None => agent,
-        };
-        Arc::new(agent)
+        // The interception table reaches the seam layer on the host
+        // the run resolves: `AgentLoopDefaults.host` is the
+        // deployment's plugin host, which carries the same registry
+        // the `hooks` row publishes (ADR 0028).
+        Arc::new(self.resolve(run).build())
     }
 }
 
@@ -287,11 +264,7 @@ impl AgentLoopServicePlugin {
     /// The factory this plugin publishes: the deployment's defaults
     /// plus the services the context resolved.
     fn resolve(&self, ctx: &Context) -> Result<ServerAgentLoop, PluginError> {
-        let mut defaults = self.defaults.clone();
-        if let Some(registry) = hooks_registry(ctx)? {
-            defaults.hooks = Some(registry);
-        }
-        build_loop(ctx, defaults)
+        build_loop(ctx, self.defaults.clone())
     }
 }
 
@@ -327,9 +300,9 @@ impl uva_kernel::Plugin for AgentLoopServicePlugin {
 ///
 /// `hooks` is **not** one either, and must never be added: an `inject`
 /// key is a hard dependency (the kernel rejects the group when nothing
-/// provides it), while the registry is optional. [`AgentLoopServicePlugin`]
-/// resolves it with `ctx.get` at mount instead, so a missing or
-/// switched-off `hooks` row boots a loop with no external registrations.
+/// provides it), while the registry is optional and reaches the loop
+/// on the host. A missing or switched-off `hooks` row therefore boots
+/// a loop with the deployment's default policy intact.
 pub const AGENT_LOOP_INJECTS: [&str; 4] =
     ["llm", "llm.default", "tools", "sessions"];
 

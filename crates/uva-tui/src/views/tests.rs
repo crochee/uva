@@ -29,7 +29,7 @@ fn session_rows(n: usize) -> Vec<Value> {
         .map(|index| {
             json!({
                 "id": format!("s{index}"),
-                "status": "idle",
+                "status": "completed",
                 "created_at": "2026-11-09T10:00:00Z",
                 "agent_name": "agent",
             })
@@ -318,7 +318,7 @@ use crate::{
     app::{App, WorkspaceNode},
     domains::DOMAINS,
     transport::{RequestKind, TransportEvent},
-    views::catalog::{Catalog, ResumeMaterial},
+    views::catalog::{Catalog, ResumeMaterial, draw_catalog},
 };
 
 fn opened(spec: &'static DomainSpec, rows: Value) -> Catalog {
@@ -340,7 +340,10 @@ fn opening_a_domain_asks_for_the_first_page() {
     let requests = catalog.open(&DOMAINS[0]);
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].kind, RequestKind::Catalog("sessions/list"));
-    assert_eq!(requests[0].params, json!({ "limit": 50 }));
+    assert_eq!(
+        requests[0].params,
+        json!({ "limit": uva_app_server::api::v1::DEFAULT_LIMIT })
+    );
 }
 
 #[test]
@@ -378,6 +381,34 @@ fn a_list_response_renders_rows_and_a_get_opens_detail() {
     assert!(detail.rows.iter().any(|(path, _)| path == "name"));
 }
 
+/// A list answer that is not the server's `List<T>` envelope is
+/// **reported**: the table says the shape drifted instead of showing
+/// an empty listing as if the domain held no rows.
+#[test]
+fn an_envelope_that_does_not_decode_is_a_status_line_not_an_empty_table() {
+    let mut catalog = Catalog::new();
+    let _ = catalog.open(sessions());
+    // The envelope's `data` member is renamed: the answer is no
+    // longer the shape the server publishes.
+    catalog.apply_response(
+        "sessions/list",
+        &Ok(json!({ "rows": [{ "id": "s1" }] })),
+    );
+    assert!(
+        catalog.list.rows.is_empty(),
+        "the drifted frame is not applied"
+    );
+    let screen = render_with(80, 24, |frame| {
+        let area = frame.area();
+        draw_catalog(frame, area, &catalog);
+    });
+    let squeezed = squeezed(&screen);
+    assert!(
+        squeezed.contains("解析失败"),
+        "the status line names the drift:\n{screen}"
+    );
+}
+
 #[test]
 fn delete_requires_confirmation_before_sending() {
     let mut catalog = opened(
@@ -406,7 +437,10 @@ fn delete_requires_confirmation_before_sending() {
     let requests = catalog.refresh();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].kind, RequestKind::Catalog("sessions/list"));
-    assert_eq!(requests[0].params, json!({ "limit": 50 }));
+    assert_eq!(
+        requests[0].params,
+        json!({ "limit": uva_app_server::api::v1::DEFAULT_LIMIT })
+    );
 }
 
 #[test]

@@ -86,8 +86,6 @@ uva-harness::Hook
 uva-harness::HookContext
 uva-harness::Host
 uva-harness::KEY_APPROVAL
-uva-harness::Plugin
-uva-harness::PluginHandle
 uva-harness::PromptContext
 uva-harness::PromptSection
 uva-harness::ReActAgent
@@ -260,6 +258,7 @@ uva-session::RowDefect
 uva-session::RowDialect
 uva-session::RowTag
 uva-session::Rows
+uva-session::STEP_INTERRUPTED
 uva-session::SearchError
 uva-session::SearchQuery
 uva-session::SessionEndReason
@@ -304,7 +303,12 @@ uva-session::balanced_message_cut
 uva-session::begin_compaction
 uva-session::build_balance_cache
 uva-session::compaction_balanced
+uva-session::compaction_end_committed
+uva-session::compaction_end_failed
 uva-session::compaction_outcomes
+uva-session::compaction_row
+uva-session::compaction_start
+uva-session::compaction_summary
 uva-session::derive_history
 uva-session::estimate_message_tokens
 uva-session::feedback
@@ -326,6 +330,7 @@ uva-session::parked_prompt
 uva-session::parked_prompts
 uva-session::plan_compaction
 uva-session::plan_compaction_from_rows
+uva-session::plugin_row
 uva-session::prune_tool_results
 uva-session::publish_row
 uva-session::publish_rows
@@ -437,5 +442,6 @@ uva-tool::called_tool_names
 uva-tool::full_output_tool
 uva-tool::is_mcp_self_tool
 uva-tool::project_tool_definitions
+uva-tool::register_tool_entries
 uva-tool::signal_of
 uva-tool::structured_output_tool

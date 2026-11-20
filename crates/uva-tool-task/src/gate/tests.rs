@@ -135,10 +135,7 @@ fn code_status(code: i32) -> ExitStatus {
 fn empty_command_is_rejected_before_spawn() {
     let runner = FakeRunner::default();
     let err = run_gate(
-        &GateSpec {
-            command: vec![],
-            timeout: None,
-        },
+        &GateSpec { command: vec![] },
         &temp_dir(),
         &runner,
         never_cancel(),
@@ -269,12 +266,11 @@ fn verdict_summary_names_variants() {
 }
 
 #[test]
-fn gate_spec_builder_chains_args_and_timeout() {
+fn gate_spec_builder_chains_args() {
     let spec = GateSpec::new("cargo")
         .arg("test")
         .arg("-p")
-        .arg("uva-harness")
-        .with_timeout(Duration::from_secs(30));
+        .arg("uva-harness");
     assert_eq!(
         spec.command,
         vec![
@@ -284,7 +280,6 @@ fn gate_spec_builder_chains_args_and_timeout() {
             "uva-harness".to_string()
         ]
     );
-    assert_eq!(spec.timeout, Some(Duration::from_secs(30)));
     assert_eq!(spec.label(), "cargo");
 }
 
@@ -292,7 +287,6 @@ fn gate_spec_builder_chains_args_and_timeout() {
 fn from_string_slices_yields_one_arg_command() {
     let spec: GateSpec = "make".into();
     assert_eq!(spec.command, vec!["make".to_string()]);
-    assert_eq!(spec.timeout, None);
 }
 
 #[test]
@@ -311,5 +305,4 @@ fn from_vec_string_preserves_argv() {
             "--check".to_string()
         ]
     );
-    assert_eq!(spec.timeout, None);
 }

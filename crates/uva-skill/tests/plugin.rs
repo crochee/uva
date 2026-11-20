@@ -29,6 +29,7 @@ use uva_skill::{
 };
 use uva_tool::{
     ToolEntry,
+    ToolProvenance,
     ToolRegistry,
     plugin::{KEY_TOOLS, ToolRegistryPlugin},
 };
@@ -148,6 +149,18 @@ async fn provides_the_discovered_registry_and_registers_the_skill_tool() {
     let tools = ctx
         .require::<ToolRegistry>(KEY_TOOLS)
         .expect("`tools` resolves");
+    // A profile-row-scoped tool is `Dynamic`: the name is the row's to give away, so a later `Core` registration may take it.
+    let record = tools
+        .snapshot_with_provenance()
+        .into_iter()
+        .find(|record| record.metadata.name == "skill")
+        .expect("the brick's tool is registered");
+    assert_eq!(
+        record.provenance,
+        ToolProvenance::Dynamic,
+        "the `skill` tool is the profile row's to give away"
+    );
+
     assert!(tools.contains(SKILL_TOOL_NAME), "`skill` is registered");
     assert_eq!(tools.name_occupants(SKILL_TOOL_NAME), 1);
 

@@ -1,4 +1,14 @@
 use serde_json::{Value, json};
+use uva_app_server::{
+    api::List,
+    routes::{
+        follow::{FollowEvent, FollowSnapshot},
+        sessions::SessionSummary,
+    },
+    rpc::notify::ApprovalRequestNotification,
+    session::{controller::LiveTurn, status::SessionStatus},
+};
+use uva_approval::ApprovalRequest;
 use uva_provider::{
     Content,
     ContentPart,
@@ -7,6 +17,7 @@ use uva_provider::{
     TextContent,
     ToolUse,
 };
+use uva_tool::Risk;
 
 use super::*;
 use crate::{
@@ -72,28 +83,25 @@ fn turn_end() -> Value {
     })
 }
 
+/// The follow baseline the server publishes, built as the server's
+/// own type.
+///
+/// The fixture used to spell the envelope out as JSON — a second copy
+/// of the shape, and the copy is what this crate is leaving behind.
+/// Building the server's [`FollowSnapshot`] keeps the fixture and the
+/// wire the same thing.
+fn snapshot(rows: Vec<Value>) -> FollowSnapshot {
+    let state = if rows.is_empty() {
+        SessionStatus::Unspecified
+    } else {
+        SessionStatus::Completed
+    };
+    crate::tests::follow_snapshot("s1", state, rows)
+}
+
+/// The baseline on the wire.
 fn baseline(rows: Vec<Value>) -> Value {
-    json!({
-        "header": {
-            "session_id": "s1",
-            "user_id": "u1",
-            "agent_name": "default",
-            "state": "idle",
-        },
-        "rows": rows,
-        "cursor": 9,
-        "live": {
-            "start_seq": 0,
-            "live_seq": 0,
-            "running": false,
-            "text": "",
-            "reasoning": "",
-            "tool_calls": [],
-        },
-        "context": { "used": 0 },
-        "pending_interrupts": [],
-        "request_snapshot_hash": "",
-    })
+    serde_json::to_value(snapshot(rows)).expect("the baseline serializes")
 }
 
 fn follow(rows: Vec<Value>) -> TransportEvent {
@@ -111,18 +119,66 @@ fn ready() -> TransportEvent {
     }
 }
 
+/// The `approval/request` notification, built as the server's own
+/// type.
+///
+/// The fixture used to spell the payload out as JSON — a second copy
+/// of the shape. The server's
+/// [`ApprovalRequestNotification`] *is* the shape, so the fixture
+/// builds that.
 fn approval_notification() -> TransportEvent {
     TransportEvent::Notification {
         method: "approval/request".to_string(),
-        params: json!({
-            "session_id": "s1",
-            "approval_id": "a1",
-            "call_id": "c1",
-            "tool": "shell",
-            "risk": "high",
-            "arguments_hash": "sha256:args",
-            "agent": "default",
-        }),
+        params: serde_json::to_value(ApprovalRequestNotification {
+            session_id: "s1".to_string(),
+            approval_id: "a1".to_string(),
+            call_id: "c1".to_string(),
+            tool: "shell".to_string(),
+            arguments_hash: "sha256:args".to_string(),
+            risk: Risk::High,
+            agent: "default".to_string(),
+        })
+        .expect("the notification serializes"),
+    }
+}
+
+/// A live frame, built as the server's own frame envelope.
+///
+/// The frame is the server's [`FollowEvent`], and the projection in it
+/// is the server's [`LiveTurn`]: a fixture that guesses the shape
+/// hides a reader drifting from it.
+fn live_frame(start_seq: u64, live_seq: u64, text: &str) -> Value {
+    let mut live = LiveTurn::default();
+    live.start_seq = start_seq;
+    live.live_seq = live_seq;
+    live.running = true;
+    live.text = text.to_string();
+    serde_json::to_value(FollowEvent::Live { live })
+        .expect("the frame serializes")
+}
+
+/// An interrupts frame, built as the server's own frame envelope.
+fn interrupts_frame(requests: Vec<ApprovalRequest>) -> Value {
+    serde_json::to_value(FollowEvent::Interrupts {
+        pending_interrupts: requests,
+    })
+    .expect("the frame serializes")
+}
+
+/// The session listing, built as the server's own envelope.
+fn session_listing(rows: Vec<SessionSummary>) -> Value {
+    serde_json::to_value(List::new(rows)).expect("the listing serializes")
+}
+
+/// One row of the session listing.
+fn session_summary(id: &str, status: SessionStatus) -> SessionSummary {
+    SessionSummary {
+        id: id.to_string(),
+        status,
+        context_id: None,
+        created_at: None,
+        parent_session_id: None,
+        agent_name: None,
     }
 }
 
@@ -138,18 +194,7 @@ fn a_completed_turn_row_returns_the_projection_to_idle() {
 
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "session_id": "s1",
-            "kind": "live",
-            "live": {
-                "start_seq": 8,
-                "live_seq": 1,
-                "running": true,
-                "text": "Sunny",
-                "reasoning": "",
-                "tool_calls": [],
-            },
-        }),
+        params: live_frame(8, 1, "Sunny"),
     });
     assert_eq!(app.live_text(), "Sunny");
     assert_eq!(app.turn(), TurnState::Running);
@@ -173,10 +218,7 @@ fn the_assistant_row_replaces_the_live_copy() {
     app.apply(follow(Vec::new()));
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "start_seq": 3, "live_seq": 1, "running": true, "text": "partial" },
-        }),
+        params: live_frame(3, 1, "partial"),
     });
     assert_eq!(app.live_text(), "partial");
     app.apply(TransportEvent::Notification {
@@ -203,10 +245,7 @@ fn an_older_row_does_not_retire_the_projection() {
     app.apply(follow(Vec::new()));
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "start_seq": 12, "live_seq": 1, "running": true, "text": "streaming" },
-        }),
+        params: live_frame(12, 1, "streaming"),
     });
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
@@ -231,17 +270,11 @@ fn a_frame_at_or_below_the_accepted_counter_is_ignored() {
     app.apply(follow(Vec::new()));
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "start_seq": 3, "live_seq": 5, "running": true, "text": "newer" },
-        }),
+        params: live_frame(3, 5, "newer"),
     });
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "start_seq": 3, "live_seq": 4, "running": true, "text": "older" },
-        }),
+        params: live_frame(3, 4, "older"),
     });
     assert_eq!(app.live_text(), "newer", "the older frame is discarded");
 }
@@ -254,10 +287,7 @@ fn a_frame_for_a_superseded_projection_is_ignored() {
     app.apply(follow(Vec::new()));
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "start_seq": 3, "live_seq": 1, "running": true, "text": "streaming" },
-        }),
+        params: live_frame(3, 1, "streaming"),
     });
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
@@ -269,10 +299,7 @@ fn a_frame_for_a_superseded_projection_is_ignored() {
     });
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "live",
-            "live": { "start_seq": 3, "live_seq": 2, "running": true, "text": "streaming" },
-        }),
+        params: live_frame(3, 2, "streaming"),
     });
     assert!(
         app.live_text().is_empty(),
@@ -331,24 +358,21 @@ fn an_interrupts_event_opens_and_closes_the_prompt() {
     app.apply(follow(Vec::new()));
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({
-            "kind": "interrupts",
-            "pending_interrupts": [{
-                "id": "a2",
-                "call_id": "c2",
-                "tool": "write",
-                "arguments_hash": "sha256:x",
-                "risk": "medium",
-                "agent": "default",
-            }],
-        }),
+        params: interrupts_frame(vec![ApprovalRequest {
+            id: "a2".to_string(),
+            call_id: "c2".to_string(),
+            tool: "write".to_string(),
+            arguments_hash: "sha256:x".to_string(),
+            risk: Risk::High,
+            agent: "default".to_string(),
+        }]),
     });
     assert_eq!(app.approval().expect("a prompt").approval_id, "a2");
     assert_eq!(app.turn(), TurnState::AwaitingApproval);
 
     app.apply(TransportEvent::Notification {
         method: "session/event".to_string(),
-        params: json!({ "kind": "interrupts", "pending_interrupts": [] }),
+        params: interrupts_frame(Vec::new()),
     });
     assert!(app.approval().is_none());
     assert_eq!(app.turn(), TurnState::Running);
@@ -357,23 +381,86 @@ fn an_interrupts_event_opens_and_closes_the_prompt() {
 #[test]
 fn a_follow_baseline_loads_the_pending_interrupt() {
     let mut app = App::new();
-    let mut snapshot = baseline(vec![text_row("user_message", 1, "hello")]);
-    snapshot["pending_interrupts"] = json!([{
-        "id": "a3",
-        "call_id": "c3",
-        "tool": "shell",
-        "arguments_hash": "sha256:y",
-        "risk": "high",
-        "agent": "default",
-    }]);
-    snapshot["header"]["state"] = json!("awaiting_approval");
+    let mut baseline = snapshot(vec![text_row("user_message", 1, "hello")]);
+    baseline.pending_interrupts = vec![ApprovalRequest {
+        id: "a3".to_string(),
+        call_id: "c3".to_string(),
+        tool: "shell".to_string(),
+        arguments_hash: "sha256:y".to_string(),
+        risk: Risk::High,
+        agent: "default".to_string(),
+    }];
+    baseline.header.state = SessionStatus::InputRequired;
     app.apply(TransportEvent::Response {
         id: json!(1),
         request: Some(RequestKind::Follow),
-        result: Ok(snapshot),
+        result: Ok(
+            serde_json::to_value(&baseline).expect("the baseline serializes")
+        ),
     });
     assert_eq!(app.approval().expect("a prompt").approval_id, "a3");
     assert_eq!(app.turn(), TurnState::AwaitingApproval);
+}
+
+/// The baseline the terminal folds is the server's own type: the
+/// fields it reads are the server's, not a transcription of them.
+#[test]
+fn a_follow_baseline_decodes_through_the_server_snapshot_type() {
+    let mut app = App::new();
+    let mut baseline = snapshot(vec![text_row("user_message", 1, "hello")]);
+    baseline.header.state = SessionStatus::Working;
+    // The projection's own bookkeeping field is the server's, so the
+    // fixture starts from its default and names the wire fields.
+    let mut live = LiveTurn::default();
+    live.start_seq = 3;
+    live.live_seq = 7;
+    live.running = true;
+    live.text = "streaming".to_string();
+    live.reasoning = "thinking".to_string();
+    baseline.live = live;
+    baseline.cursor = 42;
+    baseline.request_snapshot_hash = "abc123".to_string();
+    app.apply(TransportEvent::Response {
+        id: json!(1),
+        request: Some(RequestKind::Follow),
+        result: Ok(
+            serde_json::to_value(&baseline).expect("the baseline serializes")
+        ),
+    });
+
+    assert_eq!(app.session_id(), Some("s1"));
+    assert_eq!(app.turn(), TurnState::Running);
+    assert_eq!(app.live_text(), "streaming");
+    assert_eq!(app.reasoning(), "thinking");
+    let material = app.resume_material().expect("a followed session");
+    assert_eq!(material.last_seq, 42);
+    assert_eq!(material.request_snapshot_hash, "abc123");
+}
+
+/// A baseline the terminal cannot decode is a status line, not a
+/// half-applied state.
+///
+/// The shape has one owner: a frame that drifted says so, instead of
+/// quietly losing a field the way a transcribed read does.
+#[test]
+fn an_undecodable_baseline_is_a_status_line_not_a_half_applied_state() {
+    let mut app = App::new();
+    let mut wire = baseline(vec![text_row("user_message", 1, "hello")]);
+    wire.as_object_mut()
+        .expect("the baseline is an object")
+        .remove("cursor");
+    app.apply(TransportEvent::Response {
+        id: json!(1),
+        request: Some(RequestKind::Follow),
+        result: Ok(wire),
+    });
+
+    assert_eq!(app.messages().len(), 0, "the transcript stays empty");
+    assert!(
+        app.status().contains("unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
 }
 
 #[test]
@@ -483,12 +570,10 @@ fn the_first_bare_baseline_lists_sessions_for_the_sidebar() {
     app.apply(TransportEvent::Response {
         id: json!(2),
         request: Some(RequestKind::ListSessions),
-        result: Ok(json!({
-            "data": [
-                { "id": "s1", "status": "completed" },
-                { "id": "s0", "status": "working" },
-            ],
-        })),
+        result: Ok(session_listing(vec![
+            session_summary("s1", SessionStatus::Completed),
+            session_summary("s0", SessionStatus::Working),
+        ])),
     });
     let tree = app.workspaces();
     assert_eq!(tree.len(), 1);
@@ -705,14 +790,15 @@ fn enter_opens_the_selected_session() {
 
     // Enter on the followed session re-opens nothing. The follow
     // baseline lands with the newly opened session's id.
-    let mut event = follow(vec![text_row("user_message", 1, "hi")]);
-    if let TransportEvent::Response {
-        result: Ok(value), ..
-    } = &mut event
-    {
-        value["header"]["session_id"] = json!("s2");
-    }
-    app.apply(event);
+    let mut baseline = snapshot(vec![text_row("user_message", 1, "hi")]);
+    baseline.header.session_id = "s2".to_string();
+    app.apply(TransportEvent::Response {
+        id: json!(1),
+        request: Some(RequestKind::Follow),
+        result: Ok(
+            serde_json::to_value(&baseline).expect("the baseline serializes")
+        ),
+    });
     app.set_workspaces(vec![crate::app::WorkspaceNode {
         name: "work".to_string(),
         sessions: vec![crate::app::SessionEntry {
@@ -871,7 +957,10 @@ fn o_opens_the_catalog_and_enter_follows_the_row() {
     let requests = app.take_catalog_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].kind, RequestKind::Catalog("sessions/list"));
-    assert_eq!(requests[0].params, json!({ "limit": 50 }));
+    assert_eq!(
+        requests[0].params,
+        json!({ "limit": uva_app_server::api::v1::DEFAULT_LIMIT })
+    );
 
     // The listing lands the way `main` folds it.
     app.catalog_mut().apply_response(
@@ -892,18 +981,24 @@ fn o_opens_the_catalog_and_enter_follows_the_row() {
 #[test]
 fn the_follow_baseline_records_the_resume_material() {
     let mut app = App::new();
-    let mut event = follow(vec![text_row("user_message", 1, "hello")]);
-    if let TransportEvent::Response {
-        result: Ok(value), ..
-    } = &mut event
-    {
-        value["cursor"] = json!(9);
-        value["pending_interrupts"] = json!([
-            { "id": "a1", "call_id": "call-1", "tool": "shell", "risk": "high", "agent": "agent" },
-        ]);
-        value["request_snapshot_hash"] = json!("abc123");
-    }
-    app.apply(event);
+    let mut baseline = snapshot(vec![text_row("user_message", 1, "hello")]);
+    baseline.cursor = 9;
+    baseline.pending_interrupts = vec![ApprovalRequest {
+        id: "a1".to_string(),
+        call_id: "call-1".to_string(),
+        tool: "shell".to_string(),
+        arguments_hash: "sha256:x".to_string(),
+        risk: Risk::High,
+        agent: "agent".to_string(),
+    }];
+    baseline.request_snapshot_hash = "abc123".to_string();
+    app.apply(TransportEvent::Response {
+        id: json!(1),
+        request: Some(RequestKind::Follow),
+        result: Ok(
+            serde_json::to_value(&baseline).expect("the baseline serializes")
+        ),
+    });
 
     let material = app.resume_material().expect("a followed session");
     assert_eq!(material.session_id, "s1");
@@ -1102,7 +1197,10 @@ fn a_write_response_republishes_the_listing_through_the_loop() {
     let requests = app.take_catalog_requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].kind, RequestKind::Catalog("sessions/list"));
-    assert_eq!(requests[0].params, json!({ "limit": 50 }));
+    assert_eq!(
+        requests[0].params,
+        json!({ "limit": uva_app_server::api::v1::DEFAULT_LIMIT })
+    );
 
     // A failed send clears the loading state instead of spinning.
     app.catalog_mut().note_send_failure("still connecting");
@@ -1201,6 +1299,173 @@ fn an_unreadable_ui_schema_only_notes_the_status() {
     assert!(
         app.status().contains("the ui schema was unreadable"),
         "unexpected status: {}",
+        app.status()
+    );
+}
+
+// -- the shapes are the server's ------------------------------------
+//
+// Each case below is one wire shape the terminal reads. The shape
+// has one owner — the server's type — so a frame this build cannot
+// read is a status line, never a half-read projection.
+
+/// The live projection is the server's own type: a frame this build
+/// cannot read is a status line, not a half-applied projection.
+#[test]
+fn a_live_frame_the_servers_projection_cannot_decode_is_refused() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        // The server's projection always carries its reasoning and
+        // its tool calls; a frame without them is not one.
+        params: json!({
+            "kind": "live",
+            "live": { "start_seq": 3, "live_seq": 1, "running": true, "text": "partial" },
+        }),
+    });
+    assert!(
+        app.live_text().is_empty(),
+        "the unreadable frame was not applied"
+    );
+    assert!(
+        app.status().contains("the session frame was unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
+}
+
+/// The frame envelope is the server's own: a kind this build does not
+/// know is refused, not half-read.
+#[test]
+fn a_frame_the_servers_envelope_does_not_name_is_refused() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({ "kind": "future", "payload": {} }),
+    });
+    assert!(
+        app.status().contains("the session frame was unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
+}
+
+/// The interrupt set is the approval vocabulary's: a request whose
+/// risk this build does not know opens no prompt.
+#[test]
+fn an_interrupt_the_servers_vocabulary_cannot_decode_opens_no_prompt() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Notification {
+        method: "session/event".to_string(),
+        params: json!({
+            "kind": "interrupts",
+            "pending_interrupts": [{
+                "id": "a2", "call_id": "c2", "tool": "write",
+                "arguments_hash": "sha256:x", "risk": "medium",
+                "agent": "default",
+            }],
+        }),
+    });
+    assert!(
+        app.approval().is_none(),
+        "the unreadable interrupt opened no prompt"
+    );
+    assert!(
+        app.status().contains("the session frame was unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
+}
+
+/// The listing is the server's envelope: a row whose status this
+/// build does not know is a status line, not a half-read sidebar.
+#[test]
+fn a_session_listing_with_an_unknown_status_is_refused() {
+    let mut app = App::new();
+    app.apply(TransportEvent::Response {
+        id: json!(2),
+        request: Some(RequestKind::ListSessions),
+        result: Ok(json!({
+            "data": [{ "id": "s1", "status": "idle" }],
+        })),
+    });
+    assert!(
+        app.workspaces().is_empty(),
+        "the unreadable listing was not applied"
+    );
+    assert!(
+        app.status().contains("the session listing was unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
+}
+
+/// The send answer is the server's own type: a delivery this build
+/// does not know is not guessed at.
+#[test]
+fn a_send_answer_the_servers_type_cannot_decode_is_not_guessed_at() {
+    let mut app = App::new();
+    app.apply(follow(Vec::new()));
+    app.apply(TransportEvent::Response {
+        id: json!(2),
+        request: Some(RequestKind::SendMessage),
+        result: Ok(json!({
+            "message_id": "m1", "queued": true, "delivery": "broadcast",
+        })),
+    });
+    assert!(
+        app.status().contains("the send answer was unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
+}
+
+/// The ui schema is the server's own type: a version this build
+/// cannot read is not painted.
+#[test]
+fn a_ui_schema_the_servers_type_cannot_decode_is_not_read() {
+    let mut app = App::new();
+    app.apply(TransportEvent::Response {
+        id: json!(3),
+        request: Some(RequestKind::UiSchema),
+        result: Ok(serde_json::from_str(
+            r#"{
+                "slots": [],
+                "schemas": [{ "version": 4294967296, "components": [
+                    { "slot": "chat.sidebar", "kind": "panel", "props": {} }
+                ] }]
+            }"#,
+        )
+        .expect("the wire parses")),
+    });
+    assert!(
+        app.ui().components_in("chat.sidebar").is_empty(),
+        "the unreadable schema was not applied"
+    );
+    assert!(
+        app.status().contains("the ui schema was unreadable"),
+        "the status names the drift: {}",
+        app.status()
+    );
+}
+
+/// The create answer is the server's own type: an answer without a
+/// session id is a status line, not a session the terminal follows.
+#[test]
+fn a_create_answer_the_servers_type_cannot_decode_creates_no_session() {
+    let mut app = App::new();
+    app.apply(TransportEvent::Response {
+        id: json!(1),
+        request: Some(RequestKind::CreateSession),
+        result: Ok(json!({ "agent_name": null })),
+    });
+    assert_eq!(app.session_id(), None, "no session was created");
+    assert!(
+        app.status().contains("the create answer was unreadable"),
+        "the status names the drift: {}",
         app.status()
     );
 }

@@ -27,6 +27,7 @@ use uva_kernel::{
 use uva_tool::{
     Tool,
     ToolEntry,
+    ToolProvenance,
     ToolRegistry,
     plugin::{KEY_TOOLS, ToolRegistryPlugin},
 };
@@ -184,6 +185,19 @@ fn registers_the_tool_and_unload_removes_it() {
         .expect("`tools` resolves");
     assert!(service.contains(&name), "the brick's tool is dispatchable");
     assert_eq!(service.tool_count(), 1);
+    // A shipped tool is `Core`: once it is registered, no later
+    // registration may take the name.
+    let record = service
+        .snapshot_with_provenance()
+        .into_iter()
+        .find(|record| record.metadata.name == name)
+        .expect("the brick's tool is registered");
+    assert_eq!(
+        record.provenance,
+        ToolProvenance::Core,
+        "the `shell` tool owns its name"
+    );
+
     assert!(
         service.descriptors().iter().any(|tool| tool.name == name),
         "the brick's tool is advertised to the model"

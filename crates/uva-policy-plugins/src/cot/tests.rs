@@ -238,7 +238,7 @@ impl uva_provider::ModelProvider for ParkProvider {
         _request: CompletionRequest,
         _cancel_token: Option<Arc<dyn uva_core::CancelToken>>,
         _on_delta: Box<dyn FnMut(uva_provider::StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, CoreError> {
+    ) -> Result<uva_provider::SamplingResult, CoreError> {
         // The model is being asked. Everything it is about to see is
         // already on disk.
         self.entered.notify_one();
@@ -479,6 +479,115 @@ fn cot_reports_provider_failure_as_session_end() {
         }
         other => panic!("expected Error end reason, got {other:?}"),
     }
+}
+
+/// A provider that streams two usage frames, each carrying the merge
+/// so far (the Anthropic decoder's shape), then its terminal stop.
+struct CumulativeUsageProvider;
+
+#[async_trait]
+impl uva_provider::ModelProvider for CumulativeUsageProvider {
+    async fn initialize(
+        &mut self,
+        _config: uva_provider::ProviderConfig,
+    ) -> Result<(), CoreError> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "cumulative-usage"
+    }
+
+    fn model_config(&self) -> ModelConfig {
+        ModelConfig {
+            name: "cumulative-1".into(),
+            provider: "cumulative".into(),
+            context_window: 8_192,
+            max_output_tokens: 1_024,
+            supports_tools: false,
+            supports_streaming: true,
+            supports_reasoning: false,
+        }
+    }
+
+    async fn complete(
+        &self,
+        _request: CompletionRequest,
+    ) -> Result<CompletionResponse, CoreError> {
+        unreachable!("the strategy streams")
+    }
+
+    async fn complete_with_stream(
+        &self,
+        _request: CompletionRequest,
+        _cancel_token: Option<Arc<dyn uva_core::CancelToken>>,
+        mut on_delta: Box<dyn FnMut(uva_provider::StreamChunk) + Send>,
+    ) -> Result<uva_provider::SamplingResult, CoreError> {
+        let chunks = vec![
+            uva_provider::StreamChunk::Content(
+                uva_provider::ContentPart::Text(uva_provider::TextContent {
+                    text: "Answer: 4".into(),
+                    cache_control: None,
+                }),
+            ),
+            uva_provider::StreamChunk::Usage(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..TokenUsage::default()
+            }),
+            uva_provider::StreamChunk::Usage(TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 7,
+                total_tokens: 17,
+                ..TokenUsage::default()
+            }),
+            uva_provider::StreamChunk::Stop("end_turn".into()),
+        ];
+        let mut assembler = uva_provider::BlockAssembler::new();
+        for chunk in &chunks {
+            assembler.push(chunk.clone());
+        }
+        for chunk in chunks {
+            on_delta(chunk);
+        }
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
+    }
+}
+
+/// The chunk decoders emit one `Usage` chunk per wire frame, each
+/// carrying the merge so far; forwarding them all would add the same
+/// tokens up once per frame in the process counters and the
+/// Anthropic-compatible response. Usage is published once, from the
+/// fold's finished turn, and the numbers are the last (merged) totals.
+#[test]
+fn cot_publishes_usage_once_from_the_finished_turn() {
+    let events = drive(
+        &ChainOfThoughtStrategy::default(),
+        runtime(
+            Arc::new(CumulativeUsageProvider),
+            Arc::new(TruncatingContextManager),
+            uva_core::AtomicCancelToken::shared(),
+        ),
+    );
+
+    let usages: Vec<(usize, usize)> = events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::System(SystemEvent::Usage {
+                input_tokens,
+                output_tokens,
+                ..
+            }) => Some((*input_tokens, *output_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        usages,
+        vec![(10, 7)],
+        "one usage event carrying the merged totals; got {usages:?}"
+    );
 }
 
 #[test]

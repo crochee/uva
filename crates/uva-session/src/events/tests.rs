@@ -193,7 +193,7 @@ fn log_only_events_carry_no_surface_op() {
 #[test]
 fn a_plugin_payload_under_the_cap_is_kept_verbatim() {
     let payload = json!({"span": "s1", "attrs": {"attempt": 1}});
-    let ev = SessionEvent::plugin(
+    let ev = crate::typed_event_builders::plugin_row(
         5,
         "2026-10-26T00:00:00Z",
         "acme.span",
@@ -223,7 +223,7 @@ fn a_plugin_payload_over_the_cap_is_cut_to_its_encoded_budget() {
     // so a raw-length cap would let the row carry ~1.5× the
     // constant it promises.
     let filler = "\"".repeat(MAX_PLUGIN_PAYLOAD_BYTES);
-    let ev = SessionEvent::plugin(
+    let ev = crate::typed_event_builders::plugin_row(
         6,
         "2026-10-26T00:00:01Z",
         "acme.blob",
@@ -269,7 +269,7 @@ fn a_plugin_payload_over_the_cap_is_cut_to_its_encoded_budget() {
 #[test]
 fn a_plugin_kind_is_capped_and_an_empty_one_is_named() {
     let long = "k".repeat(MAX_PLUGIN_KIND_BYTES * 4);
-    let ev = SessionEvent::plugin(7, "t", long, Value::Null);
+    let ev = crate::typed_event_builders::plugin_row(7, "t", long, Value::Null);
     let SessionEvent::Plugin { kind, .. } = &ev else {
         panic!("a plugin row, got {ev:?}");
     };
@@ -280,7 +280,8 @@ fn a_plugin_kind_is_capped_and_an_empty_one_is_named() {
         stored.len()
     );
 
-    let empty = SessionEvent::plugin(8, "t", "", Value::Null);
+    let empty =
+        crate::typed_event_builders::plugin_row(8, "t", "", Value::Null);
     let SessionEvent::Plugin { kind, .. } = &empty else {
         panic!("a plugin row, got {empty:?}");
     };
@@ -1104,4 +1105,473 @@ fn an_old_tool_call_row_names_the_call_it_opens() {
     let event = SessionEvent::from_value(&row).expect("the row parses");
     assert_eq!(event.tool_call_id(), Some("c1"), "{event:?}");
     assert_eq!(event.tool_call_name(), Some("read"));
+}
+
+// ---------------------------------------------------------------------------
+// The reader is the read side only
+//
+// `normalize` completes the typed fields of a row written before the
+// typed layer existed. That is the reader's leniency and the whole of
+// it: the constructors in `crate::typed_event_builders` write both
+// views of a row today, so a row the vocabulary writes needs nothing
+// from the reader — and the reader never excuses a writer that wrote
+// a row whose two views disagree.
+// ---------------------------------------------------------------------------
+
+/// A row's typed fields — everything but the shell (`type` / `seq` /
+/// `ts`) and the payload bag.
+fn typed_fields(event: &SessionEvent) -> Value {
+    let mut wire = serde_json::to_value(event).expect("the row serialises");
+    let object = wire.as_object_mut().expect("a row is an object");
+    object.remove("type");
+    object.remove("seq");
+    object.remove("ts");
+    object.remove("data");
+    wire
+}
+
+/// Every row the vocabulary's constructors write.
+///
+/// One row per constructor: a tag may have several shapes — a turn
+/// has a start, an end, a suspension and a suspended end — and each
+/// shape belongs to its own constructor.
+///
+/// The reader keeps this list of its own, because the reader's
+/// promise is about the rows it reads: whatever the write side
+/// produces, the reader hands back the very same row.
+fn the_rows_the_vocabulary_writes() -> Vec<(&'static str, SessionEvent)> {
+    use crate::{sink::SessionEndReason, typed_event_builders as builders};
+
+    vec![
+        ("step_start", builders::step_start(2, 4)),
+        ("step_end", builders::step_end(2, 4, "tool_call")),
+        ("step_end_suspended", builders::step_end_suspended()),
+        ("turn_start", builders::turn_start(2)),
+        ("turn_end", builders::turn_end(2, "error", Some("boom"))),
+        (
+            "turn_suspended",
+            builders::turn_suspended(vec!["c1".to_string()]),
+        ),
+        ("turn_end_suspended", builders::turn_end_suspended()),
+        ("iteration_start", builders::iteration_start(7)),
+        ("iteration_end", builders::iteration_end(7, "completed")),
+        (
+            "approval_asked",
+            builders::approval_asked(
+                "req-1",
+                "call-1",
+                "shell",
+                "sha256:a",
+                "high",
+                "researcher",
+            ),
+        ),
+        (
+            "approval_decided",
+            builders::approval_decided(
+                "req-1",
+                "call-1",
+                "denied",
+                "operator",
+                Some(json!({"reason": "no"})),
+            ),
+        ),
+        (
+            "approval_granted",
+            builders::approval_granted("req-1", "shell", "session", "sha256:w"),
+        ),
+        (
+            "tool_dispatch",
+            builders::tool_dispatch("call-1", "shell", "sha256:a"),
+        ),
+        (
+            "tool_output",
+            builders::tool_output("call-1", "shell", "half"),
+        ),
+        (
+            "tool_result",
+            builders::tool_result(
+                json!({"role": "tool", "content": "ok"}),
+                Some("call-1".to_string()),
+                true,
+            ),
+        ),
+        (
+            "tool_result_interrupted",
+            builders::tool_result_interrupted(
+                "call-1",
+                "shell",
+                "TOOL_OUTCOME_UNKNOWN",
+            ),
+        ),
+        (
+            "tool_result_transformed",
+            builders::tool_result_transformed(
+                vec!["redact".to_string()],
+                "shell",
+                "call-1",
+                "before".to_string(),
+                "after".to_string(),
+            ),
+        ),
+        (
+            "request_snapshot",
+            builders::request_snapshot(
+                "anthropic",
+                "claude-opus-4-7",
+                "params",
+                "tools",
+                "system",
+                vec!["identity".to_string()],
+                "policy",
+            ),
+        ),
+        (
+            "subagent_enter",
+            builders::subagent_enter("child-1", "parent-1", 2, "researcher"),
+        ),
+        (
+            "subagent_exit",
+            builders::subagent_exit("child-1", 2, "completed"),
+        ),
+        (
+            "request_header",
+            builders::request_header(
+                "anthropic",
+                "claude-opus-4-7",
+                "deadbeef",
+                "initial",
+            ),
+        ),
+        (
+            "usage",
+            builders::usage(100, 50, 150, Some(7), Some(80), Some(20)),
+        ),
+        ("sandbox_mode", builders::sandbox_mode("read-only")),
+        (
+            "user_message",
+            builders::user_message(
+                json!({"role": "user", "content": "hi"}),
+                Some("steer"),
+            ),
+        ),
+        (
+            "turn_prompt_row",
+            builders::turn_prompt_row(
+                json!({"role": "user", "content": "hi"}),
+                Vec::new(),
+                Some(SurfaceOp::append()),
+            ),
+        ),
+        (
+            "message_row",
+            builders::message_row(&uva_provider::Message::user("hi"))
+                .expect("the row builds"),
+        ),
+        (
+            "assistant_message",
+            builders::assistant_message(
+                json!({"role": "assistant", "content": "ok"}),
+            ),
+        ),
+        (
+            "warning",
+            builders::warning("config_drift", "envelope changed"),
+        ),
+        (
+            "hook_block",
+            builders::hook_block("guard", "denied", "shell", "call-1"),
+        ),
+        (
+            "parked_prompt",
+            builders::parked_prompt(
+                "park-1".to_string(),
+                "queued".to_string(),
+                Vec::new(),
+                None,
+                Some("anthropic".to_string()),
+                Some("claude-opus-4-7".to_string()),
+                true,
+            ),
+        ),
+        (
+            "park_consumed",
+            builders::park_consumed("park-1".to_string()),
+        ),
+        ("feedback", builders::feedback("42".to_string(), true)),
+        (
+            "session_shutdown",
+            builders::session_shutdown(SessionEndReason::Cancelled),
+        ),
+        (
+            "plugin_row",
+            builders::plugin_row(
+                3,
+                "2026-11-13T00:00:00Z",
+                "acme.span",
+                json!({"span": "s1"}),
+            ),
+        ),
+        (
+            "compaction_start",
+            builders::compaction_start(
+                "token-1",
+                "context_pressure",
+                2,
+                5,
+                321,
+            ),
+        ),
+        (
+            "compaction_summary",
+            builders::compaction_summary("token-1", "the summary"),
+        ),
+        (
+            "compaction_row",
+            builders::compaction_row(
+                "the summary",
+                vec![2, 3, 4],
+                321,
+                Some("anthropic"),
+                Some("claude-opus-4-7"),
+                None,
+                SurfaceOp::Replace {
+                    start: 2,
+                    end: 5,
+                    source_event_seqs: vec![7, 8, 9],
+                },
+            ),
+        ),
+        (
+            "compaction_end_committed",
+            builders::compaction_end_committed(
+                "token-1",
+                3,
+                321,
+                "context_pressure",
+            ),
+        ),
+        (
+            "compaction_end_failed",
+            builders::compaction_end_failed(
+                "token-1",
+                CompactionLifecycleOutcome::Failed,
+                "the summariser refused",
+                "context_pressure",
+            ),
+        ),
+    ]
+}
+
+/// The reader changes nothing about a row the vocabulary wrote.
+///
+/// The constructors write the payload bag and the typed fields
+/// together, so the reader has nothing to complete: the row that
+/// goes on disk is the row that comes back, byte for byte.
+///
+/// A constructor that left a typed field empty would break this — the
+/// reader would fill it from the payload bag, and the row would come
+/// back different from the one that was written. So the write side
+/// owes the read side a row that needs no repair.
+#[test]
+fn a_row_the_vocabulary_wrote_needs_nothing_from_the_reader() {
+    for (owner, row) in the_rows_the_vocabulary_writes() {
+        let written = serde_json::to_string(&row).expect("the row serialises");
+        let read = SessionEvent::from_value(
+            &serde_json::to_value(&row).expect("the row serialises"),
+        )
+        .unwrap_or_else(|| panic!("{owner}: the row reads back"));
+        assert_eq!(
+            serde_json::to_string(&read).expect("the row serialises"),
+            written,
+            "{owner}: the reader must not change a row the vocabulary wrote"
+        );
+    }
+}
+
+/// The reader's list of the rows it reads is exhaustive: every tag a
+/// constructor writes is in it.
+///
+/// The four tags nobody writes are the ones production has no
+/// constructor for — `assistant_chunk`, `tool_call`, `steering_guard`
+/// and `steering_hint` — so their rows exist only as the
+/// vocabulary's skeleton.
+#[test]
+fn the_readers_rows_cover_every_tag_a_constructor_writes() {
+    let covered: Vec<RowTag> = the_rows_the_vocabulary_writes()
+        .iter()
+        .map(|(_, row)| row.tag())
+        .collect();
+    let mut missing: Vec<RowTag> = RowTag::ALL
+        .iter()
+        .copied()
+        .filter(|tag| !covered.contains(tag))
+        .collect();
+    missing.sort_by_key(|tag| tag.as_wire());
+    assert_eq!(
+        missing,
+        vec![
+            RowTag::AssistantChunk,
+            RowTag::SteeringGuard,
+            RowTag::SteeringHint,
+            RowTag::ToolCall,
+        ],
+        "these four tags have no constructor: production never writes them"
+    );
+}
+
+/// The reader still completes the rows written before the typed layer
+/// existed: the values live in the payload bag, and the typed fields
+/// come out of it.
+///
+/// These are the seven shapes the reader completes. A row written
+/// today needs none of it — the constructors write both views (see
+/// `a_row_the_vocabulary_wrote_needs_nothing_from_the_reader`) — but
+/// an old log still reads.
+#[test]
+fn an_old_row_is_still_completed_by_the_reader() {
+    let cases: Vec<(&str, Value, Value)> = vec![
+        (
+            "turn",
+            json!({
+                "type": "turn",
+                "seq": 1,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {"kind": "start", "turn": 3},
+            }),
+            json!({"kind": "start", "turn": 3}),
+        ),
+        (
+            "step",
+            json!({
+                "type": "step",
+                "seq": 2,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {"kind": "end", "turn": 1, "step": 2},
+            }),
+            json!({"kind": "end", "turn": 1, "step": 2}),
+        ),
+        (
+            "tool_call",
+            json!({
+                "type": "tool_call",
+                "seq": 3,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {"call_id": "c1", "name": "read"},
+            }),
+            json!({"call_id": "c1", "name": "read"}),
+        ),
+        (
+            "tool_result",
+            json!({
+                "type": "tool_result",
+                "seq": 4,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {"role": "tool", "call_id": "c1", "content": "ok"},
+            }),
+            json!({"tool_call_id": "c1"}),
+        ),
+        (
+            "subagent_enter",
+            json!({
+                "type": "subagent_enter",
+                "seq": 5,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {
+                    "child_session_id": "child-1",
+                    "parent_session_id": "parent-1",
+                    "depth": 1,
+                    "agent_name": "researcher",
+                },
+            }),
+            json!({
+                "child_session_id": "child-1",
+                "parent_session_id": "parent-1",
+                "agent_name": "researcher",
+                "depth": 1,
+            }),
+        ),
+        (
+            "subagent_exit",
+            json!({
+                "type": "subagent_exit",
+                "seq": 6,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {
+                    "child_session_id": "child-1",
+                    "depth": 1,
+                    "status": "completed",
+                },
+            }),
+            json!({
+                "child_session_id": "child-1",
+                "depth": 1,
+                "status": "completed",
+            }),
+        ),
+        (
+            "request_header",
+            json!({
+                "type": "request_header",
+                "seq": 7,
+                "ts": "2026-11-13T00:00:00Z",
+                "data": {
+                    "provider": "anthropic",
+                    "model": "claude-test",
+                    "reason": "start",
+                },
+            }),
+            json!({"provider": "anthropic", "model": "claude-test"}),
+        ),
+    ];
+
+    for (name, row, expected) in cases {
+        let event = SessionEvent::from_value(&row)
+            .unwrap_or_else(|| panic!("{name}: the row reads"));
+        assert_eq!(
+            typed_fields(&event),
+            expected,
+            "{name}: the reader completes the row, and nothing else"
+        );
+    }
+}
+
+/// The reader does not paper over a contradiction: it completes the
+/// fields that are empty and leaves the ones that are there alone.
+///
+/// A row whose typed field contradicts its payload bag therefore
+/// keeps its contradiction — the reader does not excuse a writer that
+/// wrote one. The constructors are the one owner of a row's shape,
+/// and their own tests are where a shape that drifts fails.
+#[test]
+fn a_row_whose_views_contradict_each_other_keeps_the_contradiction() {
+    let row = json!({
+        "type": "turn",
+        "seq": 8,
+        "ts": "2026-11-13T00:00:00Z",
+        "turn": 9,
+        "data": {"kind": "start", "turn": 3},
+    });
+    let event = SessionEvent::from_value(&row).expect("the row reads");
+    let SessionEvent::Turn {
+        kind, turn, data, ..
+    } = &event
+    else {
+        panic!("the row is a turn: {event:?}");
+    };
+    assert_eq!(
+        *turn,
+        Some(9),
+        "the reader does not overwrite a typed field that is there"
+    );
+    assert_eq!(
+        kind.as_deref(),
+        Some("start"),
+        "the reader still completes the field that is empty"
+    );
+    assert_eq!(
+        data.get("turn").and_then(Value::as_u64),
+        Some(3),
+        "the reader does not rewrite the payload bag either"
+    );
 }

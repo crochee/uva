@@ -34,7 +34,7 @@ const THINK_CLOSE_LEN: usize = THINK_CLOSE.len();
 
 /// Streaming state for splitting `<think>…</think>` markers out of
 /// plain-text deltas. Constructed per-turn; `process_text` is fed each
-/// delta, and `flush` is called once before the final `IsDone` chunk
+/// delta, and `flush` is called once before the terminal `Stop` chunk
 /// to drain any residual buffer.
 pub struct ThinkExtractor {
     /// True while we are between `<think>` and `</think>` markers.
@@ -80,9 +80,9 @@ impl ThinkExtractor {
     }
 
     /// Drain any residual text or reasoning that the carry was
-    /// withholding. Callers should invoke this right before emitting
-    /// `IsDone` so the final `SamplingResult` aggregates complete
-    /// content.
+    /// withholding. Callers invoke this right before the terminal
+    /// `Stop` so the drained text travels as content and reaches both
+    /// the live projection and the finished turn.
     pub fn flush(&mut self) -> Vec<StreamChunk> {
         if self.in_think {
             if self.reasoning_tail.is_empty() {

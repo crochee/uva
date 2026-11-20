@@ -88,6 +88,11 @@ impl Registry for ToolRegistry {
         // tools in registration order and the HTTP surface
         // doesn't expose sort yet. Cursor + limit + envelope
         // come from the shared pagination primitive.
-        paginate_registry_list(result, cursor.as_deref(), limit)
+        paginate_registry_list(
+            result,
+            cursor.as_deref(),
+            limit,
+            |entry: &ToolEntry| entry.name(),
+        )
     }
 }

@@ -20,10 +20,11 @@
 //!
 //! # A refused registration fails loudly
 //!
-//! [`register_core_entry_with_token`](uva_tool::ToolRegistry::register_core_entry_with_token)
-//! returns `None` when a Core tool already owns the name. `apply` turns
-//! that into a [`PluginError`](uva_kernel::PluginError) naming the
-//! tool and the core owner, so the mount rolls back rather than
+//! The lifecycle lives in
+//! [`register_tool_entries`](uva_tool::register_tool_entries): the
+//! registry refuses a name a Core tool already owns, and the helper
+//! turns that into a [`PluginError`](uva_kernel::PluginError) naming
+//! the tool and the core owner, so the mount rolls back rather than
 //! shipping a brick whose tool never appeared.
 
 use std::sync::Arc;
@@ -37,7 +38,13 @@ use uva_kernel::{
     PluginManifest,
     RuntimeKind,
 };
-use uva_tool::{KEY_TOOLS, Tool, ToolEntry, ToolRegistry};
+use uva_tool::{
+    KEY_TOOLS,
+    Tool,
+    ToolEntry,
+    ToolProvenance,
+    register_tool_entries,
+};
 
 use crate::read::ReadTool;
 
@@ -85,32 +92,13 @@ impl KernelPlugin for ReadToolPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
-        let name = self.tool.name();
-        let entry: Arc<dyn Tool> = self.tool.clone();
-        let Some(token) =
-            tools.register_core_entry_with_token(ToolEntry::new(entry))
-        else {
-            return Err(PluginError::new(format!(
-                "the `{KEY_TOOLS}` registry refused to register the \
-                 `{name}` tool: a core tool already owns the name `{name}`"
-            )));
-        };
-        // The closure owns one token clone; `rollback` covers the case
-        // where the framework refuses to file the effect at all.
-        let rollback = token.clone();
-        let registry = Arc::clone(&tools);
-        let unregister = ctx.effect(READ_TOOL_EFFECT, move || {
-            registry.unregister_by_token(token);
-            Ok(())
-        });
-        let effect = match unregister {
-            Ok(effect) => effect,
-            Err(error) => {
-                tools.unregister_by_token(rollback);
-                return Err(error);
-            }
-        };
+        let tool: Arc<dyn Tool> = self.tool.clone();
+        let effect = register_tool_entries(
+            ctx,
+            vec![ToolEntry::new(tool)],
+            ToolProvenance::Core,
+            READ_TOOL_EFFECT,
+        )?;
         Ok(vec![effect])
     }
 }

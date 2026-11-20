@@ -30,7 +30,6 @@ use uva_provider::{
         ContentPart,
         ModelConfig,
         ProviderConfig,
-        TextContent,
     },
 };
 use uva_tool::{
@@ -392,7 +391,7 @@ impl ModelProvider for ScriptedStreamProvider {
         _request: CompletionRequest,
         _cancel_token: Option<std::sync::Arc<dyn uva_core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         use std::sync::atomic::Ordering;
         self.call_count.fetch_add(1, Ordering::SeqCst);
         let chunks = {
@@ -405,25 +404,12 @@ impl ModelProvider for ScriptedStreamProvider {
                 guard.remove(0)
             }
         };
-        let mut final_sampling: Option<SamplingResult> = None;
+        let mut assembler = uva_provider::BlockAssembler::new();
         for chunk in chunks {
-            if let StreamChunk::IsDone { result } = &chunk {
-                final_sampling = Some((**result).clone());
-            }
+            assembler.push(chunk.clone());
             on_delta(chunk);
         }
-        let sampling = final_sampling.unwrap_or_default();
-        Ok(CompletionResponse {
-            id: format!("resp-{}", self.call_count.load(Ordering::SeqCst)),
-            model: "fake-stream".to_string(),
-            content: Content::Single(ContentPart::Text(TextContent {
-                text: sampling.text.clone(),
-                cache_control: None,
-            })),
-            usage: sampling.usage.clone(),
-            cached: false,
-            replay_state: None,
-            stop_reason: sampling.stop_reason.clone(),
-        })
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }

@@ -6,23 +6,45 @@
 //! sends JavaScript or CSS, and an unknown component kind reaches the
 //! client unchanged so its registry can show the fallback placeholder
 //! instead of dropping the whole segment.
+//!
+//! The answer is the wire contract's owner: a client decodes it into
+//! [`UiSchemaResponse`] itself, so the shape the server publishes and
+//! the shape a client reads cannot drift apart.
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     state::AppState,
-    ui::{schema::UiSchema, tree::SlotInfo},
+    ui::{
+        schema::{UiComponent, UiSchema},
+        tree::SlotInfo,
+    },
 };
 
 /// `ui/schema` response body.
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Clone, Default, JsonSchema, Serialize, Deserialize)]
 pub struct UiSchemaResponse {
     /// The slots this deployment's `[ui]` rows declare, in declaration
     /// order.
     pub slots: Vec<SlotInfo>,
     /// The schemas of every `[ui]` row, in assembly order.
     pub schemas: Vec<UiSchema>,
+}
+
+impl UiSchemaResponse {
+    /// The components delivered into `slot`, in registration order.
+    ///
+    /// The query the answer's own shape answers: a host that places
+    /// components asks the response, not its own copy of it.
+    #[must_use]
+    pub fn components_in(&self, slot: &str) -> Vec<&UiComponent> {
+        self.schemas
+            .iter()
+            .flat_map(|schema| schema.components.iter())
+            .filter(|component| component.slot == slot)
+            .collect()
+    }
 }
 
 /// `ui/schema` — the resolved `[ui]` segment.

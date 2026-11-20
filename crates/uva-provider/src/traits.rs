@@ -90,22 +90,30 @@ pub trait ModelProvider: Send + Sync {
     /// streaming may override this to emit incremental deltas
     /// (`Content` / `ToolCallDelta` / `Usage` / etc.) and the terminal
     /// `IsDone` chunk. See `StreamChunk` for the event vocabulary.
+    ///
+    /// The returned value is the finished turn the fold produced from
+    /// the emitted chunks — never a non-streaming response.
     async fn complete_with_stream(
         &self,
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         // The default impl ignores `cancel_token` (it does a single
         // `complete()` call which is bounded by HTTP timeouts). Real
         // streaming overrides must honour it.
         let _ = cancel_token;
         let response = self.complete(request).await?;
         let sampling = completion_to_sampling(&response);
-        on_delta(StreamChunk::IsDone {
+        let mut assembler = crate::assembler::BlockAssembler::new();
+        assembler.push(StreamChunk::IsDone {
             result: Box::new(sampling),
         });
-        Ok(response)
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        on_delta(StreamChunk::IsDone {
+            result: Box::new(turn.clone()),
+        });
+        Ok(turn)
     }
 
     /// Generate dense vector embeddings for a list of text strings.

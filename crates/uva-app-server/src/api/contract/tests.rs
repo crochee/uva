@@ -207,6 +207,74 @@ fn the_wire_no_longer_publishes_a_dialect_union() {
 }
 
 #[test]
+fn the_row_envelope_covers_every_member_the_vocabulary_can_write() {
+    // The envelope describes the published row, and the published row
+    // is the vocabulary's own row: a member a `SessionEvent` variant
+    // declares is a member the wire carries. The envelope used to
+    // name nine of them, so a variant that grew a field reached the
+    // wire without the contract learning about it — and the browser,
+    // unable to see the typed member, read the payload bag's second
+    // spelling of the same fact instead.
+    //
+    // This assertion is the guard: the member list is derived from
+    // the vocabulary's own schema, so there is no second hand-written
+    // list to keep in step — only this one comparison.
+    let vocabulary: Value =
+        serde_json::to_value(schemars::schema_for!(uva::session::SessionEvent))
+            .expect("the vocabulary schema serialises");
+    let branches = vocabulary["oneOf"]
+        .as_array()
+        .expect("the vocabulary is a union over its variants");
+    let mut declared: BTreeSet<&str> = BTreeSet::new();
+    for branch in branches {
+        let properties = branch["properties"]
+            .as_object()
+            .expect("a variant names its members");
+        for member in properties.keys() {
+            declared.insert(member.as_str());
+        }
+    }
+
+    let document = document();
+    let turn = &document["definitions"]["SessionTurn"];
+    let envelope: BTreeSet<&str> = turn["oneOf"]
+        .as_array()
+        .expect("the row is a union over its tags")
+        .iter()
+        .flat_map(|branch| {
+            branch["properties"]
+                .as_object()
+                .expect("a branch names its members")
+                .keys()
+                .map(String::as_str)
+        })
+        .collect();
+
+    let missing: Vec<&str> = declared
+        .iter()
+        .copied()
+        .filter(|member| !envelope.contains(member))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the row envelope does not describe {missing:?} — a variant \
+         writes them, so the wire carries them and the contract must \
+         name them"
+    );
+
+    // The writer stamps two members no variant declares, and the
+    // envelope must name them too: a row's ordinal and instant ride
+    // every row, and the `ignorable` marker rides the rows whose kind
+    // a build does not know.
+    for member in ["seq", "ts", "ignorable"] {
+        assert!(
+            envelope.contains(member),
+            "the row envelope does not describe `{member}`"
+        );
+    }
+}
+
+#[test]
 fn a_session_turn_discriminates_over_the_whole_tag_vocabulary() {
     // `SessionTurn` is a discriminated union on the row's tag: one
     // branch per tag of the closed vocabulary, so the browser cannot

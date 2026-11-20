@@ -194,7 +194,7 @@ async fn the_parent_tool_block_grows_while_the_child_runs() {
     assert!(
         progress
             .iter()
-            .any(|line| line.contains("[id-0] idle: finished")),
+            .any(|line| line.contains("[id-0] idle: completed")),
         "the block ends on the child's outcome: {progress:?}"
     );
     assert!(

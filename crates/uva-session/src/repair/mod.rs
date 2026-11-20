@@ -19,14 +19,20 @@
 //!    `TOOL_OUTCOME_UNKNOWN` (the call was recorded but no
 //!    completion row was durably committed — the agent must
 //!    replay-or-retry on resume).
-//! 2. A `Step { kind: "end", turn, step }` event if a step is
+//! 2. A `Step { kind: "end", turn, step, action }` event if a step is
 //!    currently open.
 //! 3. A `Turn { kind: "end", turn, reason: "interrupted" }` event.
 //!
-//! Timestamps on synthetic events reuse the last real event's
-//! timestamp. The row the writer writes carries its own `ts` — the
-//! writer stamps the wall clock it is given — so the log records
-//! when the repair ran, not when the interrupted turn did.
+//! The rows come from the vocabulary's constructors — the same ones
+//! a run's own boundary rows come from — so a repaired tail and a
+//! normally closed tail carry the same payload. The step a crash cut
+//! short has no outcome of its own, so its action says
+//! `interrupted`.
+//!
+//! The synthetic rows carry no timestamp of their own: the row the
+//! writer writes carries its own `ts` — the writer stamps the wall
+//! clock it is given — so the log records when the repair ran, not
+//! when the interrupted turn did.
 //!
 //! ## Compaction crash detection
 //!
@@ -41,15 +47,12 @@
 //! downstream consumers (UI, dashboard, prompt recovery flow)
 //! can recognise them across the two runtimes.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use uva_provider::ContentPart;
 
-use crate::events::{
-    CompactionLifecycleOutcome,
-    RowTag,
-    SessionEvent,
-    SurfaceOp,
-    restore_row,
+use crate::{
+    events::{CompactionLifecycleOutcome, RowTag, SessionEvent, restore_row},
+    typed_event_builders::{step_end, tool_result_interrupted, turn_end},
 };
 
 /// Recovery code for an assistant tool request that never reached
@@ -63,6 +66,14 @@ pub const TOOL_OUTCOME_UNKNOWN: &str = "TOOL_OUTCOME_UNKNOWN";
 /// Recovery reason attached to the synthesised
 /// `Turn { kind: "end" }` closer.
 pub const TURN_INTERRUPTED: &str = "interrupted";
+
+/// Recovery action attached to the synthesised `Step { kind: "end" }`
+/// closer.
+///
+/// The step a crash cut short has no outcome of its own, so the only
+/// ending it can carry is the interruption — the same word the
+/// turn's own reason carries.
+pub const STEP_INTERRUPTED: &str = "interrupted";
 
 /// Synthesise the boundary events needed to close an open tail
 /// turn after a crash.
@@ -79,10 +90,13 @@ pub const TURN_INTERRUPTED: &str = "interrupted";
 /// 2. A `Step { kind: "end", ... }` if a step is open.
 /// 3. A `Turn { kind: "end", reason: TURN_INTERRUPTED, ... }`.
 ///
-/// Timestamps on synthetic events reuse the last real event's
-/// timestamp. A log whose events carry no timestamp leaves the
-/// closers' `ts` empty; either way the writer stamps the row it
-/// writes with its clock, so the log records when the repair ran.
+/// Every closer comes from the vocabulary's constructors, so the
+/// repaired tail carries the same payload a run's own closers carry
+/// — the step's `action` key included.
+///
+/// The closers carry no timestamp of their own: the writer stamps
+/// the row it writes with its clock, so the log records when the
+/// repair ran.
 ///
 /// The closers carry `seq: 0`: their ordinal is the writer's to
 /// hand out, exactly like every other row's. A closer that numbered
@@ -96,11 +110,10 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
     // State carried across the scan.
     #[derive(Default)]
     struct State {
-        open_turn: Option<u64>,
-        open_step: Option<(u64, u64)>,
+        open_turn: Option<u32>,
+        open_step: Option<(u32, u32)>,
         // call_id → (turn, step, was_a_tool_call_event_logged)
         pending_calls: std::collections::HashMap<String, PendingCall>,
-        last_ts: String,
     }
     #[derive(Clone)]
     struct PendingCall {
@@ -111,14 +124,11 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
     fn scan(events: &[SessionEvent]) -> State {
         let mut s = State::default();
         for ev in events {
-            if let Some(ts) = event_ts(ev) {
-                s.last_ts = ts.to_string();
-            }
             match ev {
                 SessionEvent::Turn { .. } => match ev.boundary_kind() {
                     Some("start") => {
                         if let Some(turn) = ev.boundary_turn() {
-                            s.open_turn = Some(turn);
+                            s.open_turn = Some(ordinal(turn));
                             s.open_step = None;
                         }
                     }
@@ -134,7 +144,7 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
                         if let (Some(turn), Some(step)) =
                             (ev.boundary_turn(), ev.boundary_step())
                         {
-                            s.open_step = Some((turn, step));
+                            s.open_step = Some((ordinal(turn), ordinal(step)));
                         }
                     }
                     Some("end") => {
@@ -241,7 +251,6 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
     let Some(turn) = state.open_turn else {
         return closers;
     };
-    let ts = state.last_ts.clone();
     // Step insertion order follows Map iteration (HashMap is
     // non-deterministic; sort by call_id for wire stability).
     let mut pending: Vec<_> = state.pending_calls.into_iter().collect();
@@ -252,50 +261,32 @@ pub fn interrupted_turn_closers(events: &[SessionEvent]) -> Vec<SessionEvent> {
         } else {
             TOOL_NOT_STARTED
         };
-        closers.push(SessionEvent::ToolResult {
-            seq: 0,
-            ts: ts.clone(),
-            data: json!({
-                "call_id": call_id,
-                "tool_name": pending_call.name,
-                "error": error_code,
-                "interrupted": true,
-            }),
-            // The call never finished, so the row says the tool
-            // failed: a reader that trusts the flag must not read
-            // this as a call that returned.
-            is_error: true,
-            tool_call_id: Some(call_id.clone()),
-            surface_op: Some(SurfaceOp::append()),
-        });
+        closers.push(tool_result_interrupted(
+            &call_id,
+            &pending_call.name,
+            error_code,
+        ));
     }
 
     if let Some((_, step)) = state.open_step {
-        closers.push(SessionEvent::Step {
-            seq: 0,
-            ts: ts.clone(),
-            data: json!({
-                "kind": "end",
-                "turn": turn,
-                "step": step,
-            }),
-            kind: Some("end".to_string()),
-            turn: Some(turn),
-            step: Some(step),
-        });
+        closers.push(step_end(turn, step, STEP_INTERRUPTED));
     }
-    closers.push(SessionEvent::Turn {
-        seq: 0,
-        ts,
-        data: json!({
-            "kind": "end",
-            "turn": turn,
-            "reason": TURN_INTERRUPTED,
-        }),
-        kind: Some("end".to_string()),
-        turn: Some(turn),
-    });
+    closers.push(turn_end(turn, TURN_INTERRUPTED, None));
     closers
+}
+
+/// Clamp a log ordinal to the `u32` the constructors take.
+///
+/// The boundary ordinals in the constructors' signatures are `u32`,
+/// while a restored row's `turn` / `step` are `u64`-shaped on the
+/// wire. A log whose ordinal exceeds `u32::MAX` saturates here — and
+/// `u32::MAX` names a turn that is not the one the log carried, so
+/// the saturation is a wrong rather than a fallback. No log reaches
+/// it (it would have to hold four billion turns), and the
+/// alternative — a second ordinal type threaded through every
+/// constructor — is a bigger wrong for a case nothing can hit.
+fn ordinal(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// A `CompactionStart` with no matching `CompactionEnd`.
@@ -522,44 +513,6 @@ pub fn parked_prompts(rows: &[Value]) -> Vec<ParkedPromptRecovery> {
     }
     parked.retain(|prompt| !consumed.contains(&prompt.park_id));
     parked
-}
-
-fn event_ts(ev: &SessionEvent) -> Option<&str> {
-    match ev {
-        SessionEvent::UserMessage { ts, .. }
-        | SessionEvent::AssistantMessage { ts, .. }
-        | SessionEvent::AssistantChunk { ts, .. }
-        | SessionEvent::ToolResult { ts, .. }
-        | SessionEvent::Compaction { ts, .. }
-        | SessionEvent::CompactionStart { ts, .. }
-        | SessionEvent::CompactionSummary { ts, .. }
-        | SessionEvent::CompactionEnd { ts, .. }
-        | SessionEvent::ToolCall { ts, .. }
-        | SessionEvent::ToolOutput { ts, .. }
-        | SessionEvent::Step { ts, .. }
-        | SessionEvent::Turn { ts, .. }
-        | SessionEvent::Iteration { ts, .. }
-        | SessionEvent::Warning { ts, .. }
-        | SessionEvent::SteeringGuard { ts, .. }
-        | SessionEvent::SteeringHint { ts, .. }
-        | SessionEvent::HookBlock { ts, .. }
-        | SessionEvent::SubagentEnter { ts, .. }
-        | SessionEvent::SubagentExit { ts, .. }
-        | SessionEvent::RequestHeader { ts, .. }
-        | SessionEvent::ApprovalAsked { ts, .. }
-        | SessionEvent::ApprovalDecided { ts, .. }
-        | SessionEvent::ApprovalGranted { ts, .. }
-        | SessionEvent::ToolDispatch { ts, .. }
-        | SessionEvent::RequestSnapshot { ts, .. }
-        | SessionEvent::Usage { ts, .. }
-        | SessionEvent::SandboxMode { ts, .. }
-        | SessionEvent::ToolResultTransformed { ts, .. }
-        | SessionEvent::ParkedPrompt { ts, .. }
-        | SessionEvent::ParkConsumed { ts, .. }
-        | SessionEvent::Feedback { ts, .. }
-        | SessionEvent::Plugin { ts, .. }
-        | SessionEvent::SessionShutdown { ts, .. } => Some(ts.as_str()),
-    }
 }
 
 #[cfg(test)]

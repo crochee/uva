@@ -24,7 +24,6 @@ use uva_provider::{
     ModelProvider,
     SamplingResult,
     TextContent,
-    completion_to_sampling,
 };
 use uva_session::{step_end, step_start};
 
@@ -90,7 +89,7 @@ async fn sample_candidate(
     let result = provider
         .complete_with_stream(request, Some(cancel), Box::new(|_chunk| {}))
         .await
-        .map(|response| completion_to_sampling(&response).text)
+        .map(|turn| turn.text)
         .map_err(|err| err.to_string());
     let _ = tx.unbounded_send((index, result));
 }

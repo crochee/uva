@@ -74,7 +74,6 @@ use uva_provider::{
     SamplingResult,
     StreamChunk,
     TextContent,
-    ToolUse,
 };
 
 /// Errors raised while building or checking a [`ReplayProvider`].
@@ -355,14 +354,13 @@ impl ModelProvider for ReplayProvider {
         _request: CompletionRequest,
         cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         let (call_no, chunks) = self.bind_next_script()?;
         self.replay_script(call_no, &chunks, cancel_token.as_ref(), |chunk| {
             on_delta(chunk);
         })
         .await?;
-        let sampling = fold_chunks(&chunks);
-        Ok(response_for(call_no, &sampling))
+        Ok(fold_chunks(&chunks))
     }
 }
 
@@ -450,111 +448,23 @@ fn text_chunk(text: &str) -> StreamChunk {
 
 /// Fold a script into the final sampling result it represents.
 ///
-/// A terminal `IsDone` is authoritative (last one wins — mirrors
-/// how `re_act` treats streamed chunks versus the final result).
-/// Without one, content/usage/stop chunks are accumulated, and
-/// tool-call deltas are materialised into `ToolUse` entries the
-/// way the agent's stream ingest does.
+/// A terminal `IsDone` is the script's recorded final answer (last one
+/// wins — a replay fixture's `IsDone` replaces the deltas it summarizes,
+/// which is why it is not passed through the fold's merge). Without
+/// one, the chunks go through the production fold
+/// ([`uva_provider::BlockAssembler`]) — the same unit the adapters and
+/// the agent loop use — so this crate carries no second fold to drift.
 fn fold_chunks(chunks: &[StreamChunk]) -> SamplingResult {
-    let mut folded = SamplingResult::default();
-    let mut buffers: Vec<(String, String, String)> = Vec::new();
+    let mut assembler = uva_provider::BlockAssembler::new();
     let mut done: Option<SamplingResult> = None;
-
     for chunk in chunks {
-        match chunk {
-            StreamChunk::Content(ContentPart::Text(t)) => {
-                folded.text.push_str(&t.text);
-            }
-            StreamChunk::Content(ContentPart::Reasoning(r)) => {
-                folded.reasoning.push_str(&r.text);
-                if r.signature.is_some() {
-                    folded.reasoning_signature = r.signature.clone();
-                }
-            }
-            StreamChunk::Content(ContentPart::ToolUse(tool)) => {
-                folded.tool_calls.push(tool.clone());
-            }
-            StreamChunk::Content(_) => {}
-            StreamChunk::Usage(usage) => folded.usage = usage.clone(),
-            StreamChunk::Stop(reason) => {
-                folded.stop_reason = Some(reason.clone());
-            }
-            StreamChunk::ToolCallStart {
-                id,
-                name,
-                arguments,
-            } => {
-                buffers.push((
-                    id.clone(),
-                    name.clone(),
-                    initial_args(arguments),
-                ));
-            }
-            StreamChunk::ToolCallDelta {
-                id,
-                arguments_delta,
-            } => {
-                if let Some(buf) = buffers.iter_mut().find(|buf| buf.0 == *id) {
-                    buf.2.push_str(arguments_delta);
-                }
-            }
-            StreamChunk::ToolCallEnd { id } => {
-                if let Some((call_id, name, raw)) =
-                    take_buffer(&mut buffers, id)
-                {
-                    folded.tool_calls.push(ToolUse {
-                        id: call_id,
-                        name,
-                        input: parse_tool_input(&raw),
-                    });
-                }
-            }
-            StreamChunk::IsDone { result } => {
-                done = Some((**result).clone());
-            }
+        if let StreamChunk::IsDone { result } = chunk {
+            done = Some((**result).clone());
+        } else {
+            assembler.push(chunk.clone());
         }
     }
-
-    // Streams that end mid-tool-call still surface the partial
-    // buffer, matching the agent's drain-on-termination behavior.
-    for (id, name, raw) in buffers {
-        folded.tool_calls.push(ToolUse {
-            id,
-            name,
-            input: parse_tool_input(&raw),
-        });
-    }
-
-    done.unwrap_or(folded)
-}
-
-/// Remove and return the buffered tool call for `id`, if any.
-fn take_buffer(
-    buffers: &mut Vec<(String, String, String)>,
-    id: &str,
-) -> Option<(String, String, String)> {
-    let pos = buffers.iter().position(|buf| buf.0 == id)?;
-    Some(buffers.remove(pos))
-}
-
-/// Initial raw argument text for a `ToolCallStart` chunk.
-fn initial_args(arguments: &Value) -> String {
-    match arguments {
-        Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// Parse a tool input JSON string; empty input yields `{}`,
-/// unparseable input yields the raw string (mirrors
-/// `re_act::parse_tool_input`).
-fn parse_tool_input(raw: &str) -> Value {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Value::Object(serde_json::Map::new());
-    }
-    serde_json::from_str(trimmed)
-        .unwrap_or_else(|_| Value::String(raw.to_string()))
+    done.unwrap_or_else(|| assembler.finalize_assistant().0)
 }
 
 /// Build the `CompletionResponse` for one replayed call.

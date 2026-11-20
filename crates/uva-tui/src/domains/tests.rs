@@ -1,13 +1,7 @@
 use serde_json::{Value, json};
+use uva_app_server::rpc::{RpcRouter, methods::register_all};
 
-use super::{
-    DOMAINS,
-    DomainSpec,
-    EnterOp,
-    KNOWN_METHODS,
-    cell_text,
-    decode_list,
-};
+use super::{DOMAINS, DomainSpec, EnterOp, cell_text, decode_list};
 
 fn sessions() -> &'static DomainSpec {
     DomainSpec::by_list_method("sessions/list").expect("the sessions domain")
@@ -18,15 +12,16 @@ fn the_sessions_row_decodes_from_the_list_envelope() {
     let page = decode_list(
         &json!({
             "data": [
-                { "id": "s1", "status": "idle",
+                { "id": "s1", "status": "completed",
                   "created_at": "2026-11-09T10:00:00Z", "agent_name": "agent" },
-                { "id": "s2", "status": "running" },
+                { "id": "s2", "status": "working" },
             ],
             "next_cursor": "Y3Vyc29y",
             "total": 12,
         }),
         sessions(),
-    );
+    )
+    .expect("the envelope decodes");
     assert_eq!(page.rows.len(), 2);
     assert_eq!(page.next_cursor.as_deref(), Some("Y3Vyc29y"));
     assert_eq!(page.total, Some(12));
@@ -48,9 +43,25 @@ fn id_keys_are_declared_per_op_not_per_domain() {
     assert_eq!(sessions().op("删除").map(|op| op.id_key), Some("id"));
 }
 
+/// An envelope domain whose answer does not decode is **reported**:
+/// the shape drifted, and a page of zero rows would hide it.
 #[test]
-fn missing_rows_pointer_yields_an_empty_page() {
-    let page = decode_list(&json!({ "unexpected": [] }), sessions());
+fn an_envelope_that_does_not_decode_is_reported() {
+    let error = decode_list(&json!({ "unexpected": [] }), sessions())
+        .expect_err("the envelope does not decode");
+    assert!(
+        error.to_string().contains("data"),
+        "the error names the member that is missing: {error}"
+    );
+}
+
+/// The bespoke envelopes have no typed shape to decode against, so a
+/// pointer that misses degrades to an empty page.
+#[test]
+fn a_bespoke_domain_with_a_missing_pointer_yields_an_empty_page() {
+    let models = DomainSpec::by_list_method("models/list").expect("models");
+    let page = decode_list(&json!({ "unexpected": [] }), models)
+        .expect("the bespoke shape never fails to decode");
     assert!(page.rows.is_empty());
     assert!(page.next_cursor.is_none());
     assert!(page.total.is_none());
@@ -59,10 +70,27 @@ fn missing_rows_pointer_yields_an_empty_page() {
 #[test]
 fn list_params_carry_the_cursor_and_limit() {
     let spec = sessions();
-    assert_eq!(spec.list_params(None, None), json!({ "limit": 50 }));
+    assert_eq!(
+        spec.list_params(None, None),
+        json!({ "limit": uva_app_server::api::v1::DEFAULT_LIMIT })
+    );
     assert_eq!(
         spec.list_params(Some("Y3Vyc29y"), None),
-        json!({ "limit": 50, "cursor": "Y3Vyc29y" }),
+        json!({
+            "limit": uva_app_server::api::v1::DEFAULT_LIMIT,
+            "cursor": "Y3Vyc29y"
+        }),
+    );
+}
+
+/// The page size a list request asks for is the server's own default,
+/// asked of the server that owns the number — the terminal keeps no
+/// page size of its own to drift from it.
+#[test]
+fn the_list_page_size_is_the_server_s_own_default() {
+    assert_eq!(
+        sessions().list_params(None, None)["limit"],
+        json!(uva_app_server::api::v1::DEFAULT_LIMIT),
     );
 }
 
@@ -127,23 +155,26 @@ fn the_six_catalog_domains_declare_the_registered_methods() {
 }
 
 #[test]
-fn every_declared_method_is_a_real_registered_name() {
+fn every_declared_method_is_served_by_the_server() {
+    let mut router = RpcRouter::new();
+    register_all(&mut router);
+    let served = router.method_names();
     for spec in DOMAINS {
         assert!(
-            KNOWN_METHODS.contains(&spec.list_method),
-            "list method {} is not in the registry copy",
+            served.contains(&spec.list_method),
+            "list method {} is not served by the server",
             spec.list_method
         );
         if let Some(get) = spec.get_method {
             assert!(
-                KNOWN_METHODS.contains(&get),
-                "get method {get} is not in the registry copy"
+                served.contains(&get),
+                "get method {get} is not served by the server"
             );
         }
         for op in spec.ops {
             assert!(
-                KNOWN_METHODS.contains(&op.method),
-                "op method {} is not in the registry copy",
+                served.contains(&op.method),
+                "op method {} is not served by the server",
                 op.method
             );
         }
@@ -162,7 +193,8 @@ fn non_list_envelopes_decode_through_rows_pointers() {
             "default_model": "gpt",
         }),
         models,
-    );
+    )
+    .expect("the bespoke shape decodes");
     assert_eq!(page.rows.len(), 1);
     assert_eq!(cell_text(&page.rows[0], "/provider"), "openai");
 
@@ -170,7 +202,8 @@ fn non_list_envelopes_decode_through_rows_pointers() {
     let page = decode_list(
         &json!({ "schemas": [{ "slot": "chat.sidebar", "kind": "note" }] }),
         ui,
-    );
+    )
+    .expect("the bespoke shape decodes");
     assert_eq!(page.rows.len(), 1);
     assert_eq!(cell_text(&page.rows[0], "/slot"), "chat.sidebar");
 }
@@ -181,11 +214,17 @@ fn the_search_domain_requires_a_query_and_pages_at_the_server_default() {
     assert_eq!(search.query_key, Some("q"));
     assert_eq!(
         search.list_params(None, Some("rust")),
-        json!({ "q": "rust", "limit": 20 })
+        json!({
+            "q": "rust",
+            "limit": uva_app_server::routes::search::DEFAULT_LIMIT
+        })
     );
     // Without a query the params would be rejected by the server
     // (`q` is required); the catalog collects it first.
-    assert_eq!(search.list_params(None, None), json!({ "limit": 20 }));
+    assert_eq!(
+        search.list_params(None, None),
+        json!({ "limit": uva_app_server::routes::search::DEFAULT_LIMIT })
+    );
 }
 
 #[test]
@@ -291,7 +330,8 @@ fn the_six_domains_decode_their_real_wire_shapes() {
     ];
     for (method, envelope, expected) in cases {
         let spec = DomainSpec::by_list_method(method).expect(method);
-        let page = decode_list(&envelope, spec);
+        let page = decode_list(&envelope, spec)
+            .unwrap_or_else(|error| panic!("{method} decodes: {error}"));
         assert_eq!(page.rows.len(), 1, "{method} decodes one row");
         let row = &page.rows[0];
         let cells: Vec<String> = spec

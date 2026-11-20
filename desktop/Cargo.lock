@@ -3599,6 +3599,7 @@ version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "ref-cast",
  "schemars_derive 1.2.3",
@@ -5095,12 +5096,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "serde_json",
+ "uva-agent",
+ "uva-approval",
  "uva-attachment",
  "uva-context",
  "uva-core",
  "uva-core-tokio",
  "uva-eval",
+ "uva-events",
  "uva-harness",
+ "uva-hook",
+ "uva-hook-plugins",
  "uva-kernel",
  "uva-mcp",
  "uva-policy-plugins",
@@ -5114,6 +5120,22 @@ dependencies = [
  "uva-telemetry",
  "uva-tool",
  "uva-tool-plugins",
+ "uva-tool-task",
+]
+
+[[package]]
+name = "uva-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "parking_lot",
+ "tracing",
+ "uva-approval",
+ "uva-core",
+ "uva-events",
+ "uva-provider",
+ "uva-session",
 ]
 
 [[package]]
@@ -5144,6 +5166,21 @@ dependencies = [
  "uuid",
  "uva",
  "validator",
+]
+
+[[package]]
+name = "uva-approval"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "uva-kernel",
+ "uva-session",
+ "uva-tool",
 ]
 
 [[package]]
@@ -5226,12 +5263,25 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tracing",
  "uva-core",
  "uva-kernel",
+]
+
+[[package]]
+name = "uva-events"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uva-approval",
+ "uva-provider",
+ "uva-session",
+ "uva-tool",
 ]
 
 [[package]]
@@ -5262,13 +5312,47 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "tracing",
+ "uva-agent",
+ "uva-approval",
  "uva-context",
  "uva-core",
+ "uva-events",
+ "uva-hook",
  "uva-kernel",
  "uva-provider",
  "uva-session",
  "uva-steering",
  "uva-telemetry",
+ "uva-tool",
+]
+
+[[package]]
+name = "uva-hook"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "tracing",
+ "uva-context",
+ "uva-core",
+ "uva-kernel",
+ "uva-steering",
+ "uva-tool",
+]
+
+[[package]]
+name = "uva-hook-plugins"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "uva-context",
+ "uva-core",
+ "uva-hook",
+ "uva-provider",
+ "uva-steering",
  "uva-tool",
 ]
 
@@ -5341,6 +5425,7 @@ dependencies = [
  "parking_lot",
  "regex",
  "reqwest",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5364,13 +5449,13 @@ dependencies = [
  "uva-context",
  "uva-core",
  "uva-harness",
+ "uva-hook",
  "uva-kernel",
  "uva-policy-plugins",
  "uva-provider",
  "uva-search",
  "uva-session",
  "uva-tool",
- "uva-tool-plugins",
 ]
 
 [[package]]
@@ -5382,6 +5467,7 @@ dependencies = [
  "futures",
  "libc",
  "parking_lot",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -5414,6 +5500,7 @@ dependencies = [
  "chrono",
  "futures",
  "parking_lot",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -5513,11 +5600,31 @@ dependencies = [
  "ulid",
  "url",
  "uva-core",
- "uva-harness",
  "uva-kernel",
- "uva-provider",
  "uva-scheduler",
  "uva-search",
+ "uva-tool",
+]
+
+[[package]]
+name = "uva-tool-task"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tracing",
+ "ulid",
+ "uva-agent",
+ "uva-core",
+ "uva-events",
+ "uva-kernel",
+ "uva-provider",
+ "uva-session",
  "uva-tool",
 ]
 

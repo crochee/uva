@@ -25,7 +25,7 @@ fn collector() -> (CollectedChunks, Box<dyn FnMut(StreamChunk) + Send>) {
 
 async fn stream_once(
     provider: &ReplayProvider,
-) -> Result<CompletionResponse, Error> {
+) -> Result<SamplingResult, Error> {
     let (_, on_delta) = collector();
     provider
         .complete_with_stream(CompletionRequest::default(), None, on_delta)
@@ -71,10 +71,8 @@ async fn scripts_replay_in_order_and_advance_per_call() {
     );
     assert!(matches!(&delivered_a[1], StreamChunk::IsDone { .. }));
     // `IsDone` is authoritative over the streamed text.
-    assert_eq!(response_text(&first), "hello");
+    assert_eq!(first.text, "hello");
     assert_eq!(first.stop_reason.as_deref(), Some("end_turn"));
-    assert_eq!(first.id, "replay-1");
-    assert_eq!(first.model, "replay-model");
 
     let (seen_b, on_b) = collector();
     let second = provider
@@ -82,8 +80,7 @@ async fn scripts_replay_in_order_and_advance_per_call() {
         .await
         .unwrap();
     assert_eq!(seen_b.lock().len(), 2);
-    assert_eq!(response_text(&second), "bye");
-    assert_eq!(second.id, "replay-2");
+    assert_eq!(second.text, "bye");
 
     provider.assert_consumed().unwrap();
     assert_eq!(provider.remaining_chunks(1), 0);
@@ -248,11 +245,11 @@ async fn fixture_derives_one_script_per_model_call() {
     let provider = ReplayProvider::from_events_jsonl(fixture).unwrap();
 
     let first = stream_once(&provider).await.unwrap();
-    assert_eq!(response_text(&first), "Hello");
+    assert_eq!(first.text, "Hello");
     assert_eq!(first.stop_reason.as_deref(), Some("end_turn"));
 
     let second = stream_once(&provider).await.unwrap();
-    assert_eq!(response_text(&second), "again");
+    assert_eq!(second.text, "again");
 
     // A third call is an underrun: two calls were recorded.
     assert!(stream_once(&provider).await.is_err());

@@ -38,8 +38,7 @@ hook（`default = []`）。
 ```rust
 use std::sync::Arc;
 
-use uva_hook::HookRegistry;
-use uva_hook::seam::TOOL_PRE;
+use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 use uva_hook_plugins::traffic_light::{TrafficLight, TrafficPolicy};
 use uva_tool::{Risk, registry::ToolRegistry};
 
@@ -49,8 +48,11 @@ let gate = TrafficLight::with_policy(
     TrafficPolicy::blocking([Risk::High, Risk::Unknown]),
 );
 let registry = HookRegistry::new();
-let _registration =
-    registry.register_gate(TOOL_PRE, Arc::new(gate));
+let _registration = registry.register_gate_at(
+    MountPoint::ToolPre,
+    Arc::new(gate),
+    RegistrationOrigin::InProcess,
+);
 ```
 
 注册表判 `Block` 时由 harness 写 durable `hook_block` 行（hook 名、
@@ -58,11 +60,17 @@ reason、tool、call_id），重载会话后仍知道谁拦了什么。
 
 ## 注册方式
 
-三个模块都经契约 crate 注册，不经过本 crate：
+三个模块都经契约 crate 的同一张表注册，不经过本 crate：
 
-- `Hook` / `Gate` → `HookRegistry` 的对应挂载点键，或 harness `Host`
-  的 `hook` / `gate`；
-- `ResultTransformer` → `Host::result_transformer`（`tool/post-execute`）。
+- `Hook` → `HookRegistry::register_hook_at`，挂在
+  `MountPoint::ToolPost`（`reflection` 的 `after_tool` 观察）；
+- `Gate` → `HookRegistry::register_gate_at`，挂在
+  `MountPoint::ToolPre`；
+- `ResultTransformer` → `HookRegistry::register_result_transformer_at`，
+  挂在 `MountPoint::ToolPost`。
+
+每条注册带 `RegistrationOrigin`（仓外插件用 `Plugin`，仓内部署用
+`InProcess`）；句柄 drop 即撤回。
 
 ## Examples
 

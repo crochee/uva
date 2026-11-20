@@ -54,6 +54,7 @@
 //! surface. A caller replaying a mixed log should feed the meter
 //! the same typed partition it feeds `fold_surface`.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uva_provider::{
@@ -78,7 +79,15 @@ use crate::{
 /// included in `output`. Every field carries a serde default so
 /// partial payloads (and pre-R30 rows) keep parsing.
 #[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize,
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
 )]
 pub struct UsageBuckets {
     /// Uncached prompt tokens the provider billed.

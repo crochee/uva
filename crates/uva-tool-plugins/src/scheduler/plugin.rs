@@ -21,13 +21,14 @@
 //!
 //! # Unload removes exactly the brick's entry
 //!
-//! `register_entry_with_token` returns the token the registration is
-//! filed under; `apply` returns a [`ctx.effect`](uva_kernel::Context::effect)
-//! that calls `unregister_by_token`, so unloading removes only this
-//! brick's `schedule` entry — never a same-named entry another
-//! registrant owns. A refused registration (a core tool already owns
-//! the name) fails `apply` loudly instead of mounting a brick whose
-//! tool silently never appeared.
+//! The lifecycle lives in
+//! [`register_tool_entries`](uva_tool::register_tool_entries): the
+//! registration is filed under a token and the effect `apply` returns
+//! calls `unregister_by_token`, so unloading removes only this brick's
+//! `schedule` entry — never a same-named entry another registrant owns.
+//! A refused registration (a core tool already owns the name) fails
+//! `apply` loudly instead of mounting a brick whose tool silently never
+//! appeared.
 
 use std::sync::Arc;
 
@@ -41,9 +42,9 @@ use uva_kernel::{
     RuntimeKind,
 };
 use uva_scheduler::{SchedulerService, plugin::KEY_SCHEDULER};
-use uva_tool::{KEY_TOOLS, ToolEntry, ToolRegistry};
+use uva_tool::{KEY_TOOLS, ToolEntry, ToolProvenance, register_tool_entries};
 
-use crate::scheduler::{SCHEDULE_TOOL_NAME, SchedulerTool};
+use crate::scheduler::SchedulerTool;
 
 /// The plugin id the `schedule-tool` manifest declares.
 const SCHEDULE_TOOL_ID: &str = "schedule-tool";
@@ -90,32 +91,13 @@ impl KernelPlugin for ScheduleToolPlugin {
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
         let service = ctx.require::<SchedulerService>(KEY_SCHEDULER)?;
-        let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
         let tool = SchedulerTool::new(Arc::clone(service.store()));
-        let Some(token) =
-            tools.register_entry_with_token(ToolEntry::new(Arc::new(tool)))
-        else {
-            return Err(PluginError::new(format!(
-                "the `{KEY_TOOLS}` registry refused to register the \
-                 `{SCHEDULE_TOOL_NAME}` tool: a core tool already owns the \
-                 name `{SCHEDULE_TOOL_NAME}`"
-            )));
-        };
-        // The closure owns one token clone; `rollback` covers the case
-        // where the framework refuses to file the effect at all.
-        let rollback = token.clone();
-        let registry = Arc::clone(&tools);
-        let unregister = ctx.effect(SCHEDULE_TOOL_EFFECT, move || {
-            registry.unregister_by_token(token);
-            Ok(())
-        });
-        let effect = match unregister {
-            Ok(effect) => effect,
-            Err(error) => {
-                tools.unregister_by_token(rollback);
-                return Err(error);
-            }
-        };
+        let effect = register_tool_entries(
+            ctx,
+            vec![ToolEntry::new(Arc::new(tool))],
+            ToolProvenance::Dynamic,
+            SCHEDULE_TOOL_EFFECT,
+        )?;
         Ok(vec![effect])
     }
 }

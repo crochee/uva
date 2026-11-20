@@ -243,3 +243,14 @@ async fn a_catalog_request_round_trips_its_method_name() {
         other => panic!("expected a catalog response, got {other:?}"),
     }
 }
+
+/// The session page the sidebar asks for is the server's own default,
+/// asked of the server that owns the number — the terminal keeps no
+/// page size of its own anywhere.
+#[test]
+fn the_session_page_size_is_the_server_s_own_default() {
+    assert_eq!(
+        Request::list_sessions().params["limit"],
+        json!(uva_app_server::api::v1::DEFAULT_LIMIT),
+    );
+}

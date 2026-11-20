@@ -12,11 +12,17 @@
 //! The row envelope is not invented here: it is what the session sink
 //! writes. `uva_session`'s writer stamps `seq` and `ts` onto the top
 //! level of every durable row, and [`uva::session::SessionEvent`]
-//! supplies `type` / `data` plus the optional `source`, `is_error` and
-//! `surface_op` members. Every member of [`SessionTurn`] is optional
-//! because a row may legitimately carry any subset: an event family
+//! supplies `type` / `data` plus the members its own variant declares.
+//! Every member of [`SessionTurn`] is optional because a row carries
+//! the members its tag declares and omits the rest: an event family
 //! that does not record `source` omits it, and a non-object value is
 //! wrapped as `{data, seq, ts}` with no `type` at all.
+//!
+//! The envelope is therefore a **superset** of the published row —
+//! every member any row can carry, all optional — and a contract test
+//! pins that it stays complete against the vocabulary's own schema. A
+//! variant that grows a field cannot reach the wire without the
+//! contract learning about it.
 //!
 //! The row's `type` is not named here either: it is
 //! [`uva::session::RowTag`] — the vocabulary that owns the tag set.
@@ -44,7 +50,7 @@ use schemars::JsonSchema;
 use serde_json::Value;
 use uva::{
     provider::Message,
-    session::{RowTag, SurfaceOp},
+    session::{RowTag, SurfaceOp, UsageBuckets},
 };
 
 /// One durable row of a session log, as `sessions/get` returns it in
@@ -63,11 +69,22 @@ use uva::{
 #[schemars(schema_with = "session_turn_schema")]
 pub struct SessionTurn;
 
-/// The row envelope — the members every row carries, whatever its
-/// tag.
+/// The row envelope — **every** member a published row can carry,
+/// whatever its tag.
 ///
-/// The published row is the union over the tags
-/// ([`SessionTurn`]); this is the shape each of its branches shares.
+/// The published row is the union over the tags ([`SessionTurn`]);
+/// this is the shape each of its branches shares. It is a **superset**:
+/// a row carries the members its own tag declares and omits the rest,
+/// so every member is optional and the row's tag decides which are
+/// present.
+///
+/// The member set is the vocabulary's, not this file's: a row's
+/// members are the typed fields its
+/// [`SessionEvent`](uva::session::SessionEvent) variant declares, and
+/// the writer stamps `seq` / `ts` (and `ignorable`) on top. The
+/// contract test in [`crate::api::contract`] pins that this envelope
+/// covers every one of them — so a variant that grows a field cannot
+/// reach the wire without the contract learning about it.
 #[derive(Debug, Clone, JsonSchema)]
 pub struct SessionTurnEnvelope {
     /// The event family the row belongs to — a tag of the closed
@@ -89,27 +106,171 @@ pub struct SessionTurnEnvelope {
     /// turn boundary. Today only `"steer"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
-    /// Set on a `tool_result` row whose tool failed.
+    /// `true` on a `tool_result` row whose tool failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
-    /// Set on a `tool_output` row: the provider call id the streamed
-    /// chunk belongs to, so a client can attach the chunk to the tool
-    /// block it is streaming into.
+    /// The provider call id — a `tool_call` / `tool_output` row, an
+    /// approval row, a `tool_dispatch` row or a transformed result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
-    /// Re-readable refs to the attachments a `user_message` row's turn
-    /// carried — an array of `{kind, hash, name, mime_type, byte_len,
-    /// unstored}` objects. The bytes never ride the log: a multimodal
-    /// payload lives in the deployment's attachment store and the ref
-    /// resolves back to it by hash, so a chip renders from the ref
-    /// alone. Omitted for a text-only turn and on rows written before
-    /// the refs landed.
+    /// The provider call id a `tool_result` row answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// Re-readable refs to the attachments a row's turn carried — an
+    /// array of `{kind, hash, name, mime_type, byte_len, unstored}`
+    /// objects. The bytes never ride the log: a multimodal payload
+    /// lives in the deployment's attachment store and the ref resolves
+    /// back to it by hash, so a chip renders from the ref alone. A
+    /// legacy dialect row carries the older spelling of the same
+    /// refs, so the wire carries both shapes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Value>,
     /// The surface op the row applies instead of appending —
     /// `"append"` (a plain string) or a replace range.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface_op: Option<SurfaceOp>,
+    /// `true` on a row whose kind this build does not know — the
+    /// writer's marker, letting such a build skip the row instead of
+    /// refusing the whole log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ignorable: Option<bool>,
+    /// Which boundary the row is — a `step` / `turn` row. On a
+    /// `plugin` row it is the plugin's own event kind, a different
+    /// fact that happens to share the name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Which turn the row belongs to — a `step` / `turn` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+    /// Which step inside the turn — a `step` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<u64>,
+    /// The chunk's ordinal within its turn — an `assistant_chunk` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_seq: Option<u64>,
+    /// The provider stop reason — a terminal `assistant_chunk` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    /// The correlation token of a compaction — the `compaction_start` /
+    /// `compaction_summary` / `compaction_end` rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// How a compaction ended — `committed` / `failed` / `interrupted`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// The tool a `tool_call` row names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The tool a row addresses — a `tool_output` row, an approval row
+    /// or a `tool_dispatch` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// The delegated child's session — a `subagent_enter` /
+    /// `subagent_exit` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_session_id: Option<String>,
+    /// The delegating session — a `subagent_enter` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// The agent a row names — a `subagent_enter` / `parked_prompt` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// How deep the delegation is — the root session is `0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depth: Option<u64>,
+    /// How a row ended — a `subagent_exit` / `approval_decided` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// The provider a row names — a `request_header` /
+    /// `request_snapshot` / `parked_prompt` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The model a row names — a `request_header` / `request_snapshot` /
+    /// `parked_prompt` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// The request id an approval row refers to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The digest of a held call's arguments — an `approval_asked` /
+    /// `tool_dispatch` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arguments_hash: Option<String>,
+    /// The risk a held call was judged at — an `approval_asked` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    /// The agent a held call belongs to — an `approval_asked` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Who decided — an `approval_decided` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    /// A row's own payload — an `approval_decided` row's decision, a
+    /// `plugin` row's event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+    /// What a grant covers — `"session"` / `"deployment"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// The workspace a grant is bound to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_hash: Option<String>,
+    /// The digest of the sampling parameters — a `request_snapshot` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params_hash: Option<String>,
+    /// The digest of the offered tool definitions — a `request_snapshot`
+    /// row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_hash: Option<String>,
+    /// The digest of the assembled system prompt — a `request_snapshot`
+    /// row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_hash: Option<String>,
+    /// The prompt-section ids that contributed — a `request_snapshot`
+    /// row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sections: Option<Vec<String>>,
+    /// The digest of the approval policy — a `request_snapshot` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_hash: Option<String>,
+    /// The typed provider usage report — a `usage` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageBuckets>,
+    /// The execution-policy override — a `sandbox_mode` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The transformers that ran, in registration order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transformers: Option<Vec<String>>,
+    /// The tool a transformed result belongs to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// The digest of the result before a transformer rewrote it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// The digest of the result the model reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    /// The handle a parked prompt is spent by — a `parked_prompt` /
+    /// `park_consumed` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub park_id: Option<String>,
+    /// The parked prompt's text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// `true` when the turn was parked by a `Rerun`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerun: Option<bool>,
+    /// The ordinal of the message a `feedback` row rates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// `true` for a thumbs-up, `false` for a thumbs-down.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbs_up: Option<bool>,
+    /// The payload's encoded size, when a cap truncated it — a
+    /// `plugin` row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_bytes: Option<u64>,
 }
 
 /// One legacy attachment slot of a session detail.

@@ -13,7 +13,7 @@ use futures::{Stream, channel::mpsc};
 use uva_core::CancelToken;
 use uva_events::{AgentEvent, SessionEndReason, SystemEvent, WarningKind};
 use uva_provider::{Message, ToolDefinition};
-use uva_session::{SessionError, SessionEvent, SessionLog};
+use uva_session::{SessionError, SessionLog};
 
 use crate::agent::{caps::AgentCaps, re_act::projection::tool_names_hash};
 
@@ -273,7 +273,7 @@ impl EventSink {
             payload: payload.clone(),
         });
         writer
-            .append_event(&SessionEvent::plugin(
+            .append_event(&uva_session::plugin_row(
                 0,
                 String::new(),
                 kind,

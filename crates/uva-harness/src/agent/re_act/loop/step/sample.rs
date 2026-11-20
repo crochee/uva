@@ -9,9 +9,9 @@ use uva_context::AgentState;
 use uva_events::{SessionEndReason, WarningKind};
 use uva_provider::{
     CompletionRequest,
-    CompletionResponse,
     ContentPart,
     Message,
+    SamplingResult,
     ToolChoice,
     ToolUse,
 };
@@ -246,17 +246,14 @@ async fn rewrite_request(
 
 fn log_sample_result(
     iteration: usize,
-    resp: &CompletionResponse,
+    turn: &SamplingResult,
     outcome: &SampleOutcome,
 ) {
     info!(
         iteration,
-        response_id = %resp.id,
-        response_model = %resp.model,
-        prompt_tokens = resp.usage.prompt_tokens,
-        completion_tokens = resp.usage.completion_tokens,
-        cached = resp.cached,
-        stop_reason = ?resp.stop_reason,
+        prompt_tokens = turn.usage.prompt_tokens,
+        completion_tokens = turn.usage.completion_tokens,
+        stop_reason = ?turn.stop_reason,
         assistant_text_len = outcome.result.text.len(),
         tool_call_count = outcome.result.tool_calls.len(),
         "step 2 sample_once: streaming completion returned"
@@ -286,7 +283,7 @@ async fn stream_completion(
     state: &AgentState,
     req: CompletionRequest,
     iteration: usize,
-) -> Result<(CompletionResponse, SampleOutcome), SessionEndReason> {
+) -> Result<(SamplingResult, SampleOutcome), SessionEndReason> {
     let cancel = Arc::clone(&this.run.cancel);
     let cb_cancel = cancel.clone();
     let assembler = ChunkAssembler::new();
@@ -332,12 +329,14 @@ async fn stream_completion(
     match result {
         Ok(resp) => {
             let mut outcome = assembler.finalize_outcome(&this.sink);
-            // `Arc::make_mut` mutates in place when the
-            // assembler's Arc is sole-owner (the common case);
-            // when a live event consumer still holds a clone it
-            // copies — the only correct way to give this
-            // outcome a different `stop_reason` than the one
-            // already published.
+            // The override remains because the streaming callback
+            // drops chunks once the run is cancelled, so the
+            // assembler's fold can miss the terminal `Stop` that the
+            // provider's own fold saw. `Arc::make_mut` mutates in
+            // place when the assembler's Arc is sole-owner (the common
+            // case); when a live event consumer still holds a clone it
+            // copies — the only correct way to give this outcome a
+            // different `stop_reason` than the one already published.
             Arc::make_mut(&mut outcome.result).stop_reason =
                 resp.stop_reason.clone();
             // The turn's row is one `assistant_message`, written
@@ -388,7 +387,7 @@ async fn provider_failed(
 
 async fn observe_provider_success(
     this: &ReActLoop,
-    resp: &CompletionResponse,
+    resp: &SamplingResult,
     agent_state: &mut AgentState,
 ) {
     agent_state.add_token_usage(&resp.usage);

@@ -64,8 +64,10 @@ async fn main() {
         ),
     );
 
-    // Piece 2 — the interception surface, assembled from guards.
-    let host = Host::default_policy(&workspace);
+    // Piece 2 — the interception surface: the typed policy over the
+    // deployment's one table (empty here: the consumer registers no
+    // hook of its own).
+    let host = Host::default_policy(&workspace, uva_hook::HookRegistry::new());
 
     // Piece 3 — the session's one writer (runtime-neutral).
     let sink = Arc::new(InMemorySessionSink::new("consumer-proof"));

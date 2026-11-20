@@ -17,10 +17,117 @@ agent 词汇（[`uva-agent`](../uva-agent/README.md)）、事件词汇
 |---|---|
 | 子会话 | 派发前铸造 child id，经 `SubagentWriters` 开档：`subagent_enter(child,parent,depth,agent)` + 派发词；子 run 结束后追加 `subagent_exit` 并 flush |
 | 父侧行 | 只有工具的 `tool_dispatch` / `tool_output` / `tool_result`；`tool_output` 是 L1 摘要的 durable 副本（重载由它重放），`tool_result` 是模型的副本并以 child id 收口；子会话是唯一全保真记录 |
-| 深度 | 父 run 深度按会话 id 查表，子 run 为 `+1`；`MAX_SUBAGENT_DEPTH = 3` 时工具拒绝派发并给出可读错误 |
+| 深度 | 深度规则归 [`round::depth`](src/round/depth.rs) 模块：上限判定与深度记账只有一处，会话深度按会话 id 查表、子会话为 `+1`；`MAX_SUBAGENT_DEPTH = 3` 时**发起轮次的那一方**（`task` 的调用方、`agents_message` 的调用方）不能再起一轮，给出可读错误 |
 | 并发 | 一个 `task` 调用起一个子代理。工具声明 `ExecutionMode::Sequential`，批次调度器因此把同一批里的 `task` 调用串行化——委派起的是整个 run，批次内并发会改动取消与批次语义，不只是时序 |
 | 取消 | 子 run 拿自己的令牌（`ChildCancel`）：父 run 的令牌仍然透传，父取消即子终止；子自己的令牌由控制面的 `interrupt` 点火 |
 | 校验 | `gate`（子 run 后跑验证命令）与 `isolation`（git worktree 隔离）沿用原 `task` 语义，由 `CommandRunner` seam 执行 |
+
+## 参数声明归一个模块
+
+`task` 的每个参数由一份声明拥有——名字、JSON 形状、边界、含义：一张表写在
+[`args`](src/args.rs) 模块里，模型读到的 schema 与工具接受的参数都是这张表
+的两个投影。
+
+- **模型读到的**：[`args`](src/args.rs) 把表里「告知模型的那一侧」渲染成
+  JSON Schema；有多种形状的字段渲染成 `oneOf`；`isolation` 仍由
+  `worktree_isolation` feature 门控，feature 关掉时模型连这个词都看不到。
+- **工具接受的**：[`spec`](src/spec.rs) 按表里「解析器收的那一侧」读参数，
+  连键名也取自声明——解析器自己不写线名，改名只改一处；形状不合就按表里
+  写的文案拒绝，边界也在同一处判定。
+
+两侧并排放就是漂移的账本：模型被告知而工具不收的形状是契约上的洞，工具
+收而模型没听过的形状是秘密。`worktree_isolation` 开着时，今天两边没有洞、
+也没有秘密——工具收的每一种形状都写进了模型读到的 schema：验证门是**命令
+对象或一条裸命令**，隔离是**布尔或一个对象**，两者都还收 `null`（＝「没有」）。
+已发布的调用方不受影响：这些形状今天就被收着，schema 只是如实说出来。
+feature 关掉时 `isolation` 仍可解析——工具收、模型没听过——这是**故意**留的
+不对称：一个没有 worktree 能力的部署不该向模型广告这个词，而解析端不为
+同一个词维护第二套规则（决策记录见
+[`docs/adr/0023`](../../docs/adr/0023-one-owner-for-the-tool-arguments.md)）。
+
+边界两边说的是同一件事：schema 写下的每条边界，解析器都兑现；解析器多守的
+一条也不藏。今天没有例外。
+
+- `agent` 非空：解析器早就拒空名，schema 现在写明（`minLength: 1`）。
+- 命令数组至少一项：解析器早就拒空数组，schema 现在写明（`minItems: 1`）。
+- `prompt` 是必填字符串：schema 一直这么说，解析器过去却把缺失与非字符串
+  静默当成空串——现在改为拒绝，拒绝的话说得清是哪个字段不对。
+
+`args` 模块自己的测试逐字段核对两侧的类型与边界一致（模型被告知的每个形状
+解析器都收，解析器收的每个形状模型都被告知——对象成员也算字段，`gate.command`
+在册）；[`tests/argument_shapes.rs`](tests/argument_shapes.rs) 从公开面钉住
+今天的行为——schema 的形状、今天被接受的形状、拒绝的文案逐字不变（`prompt`
+缺失这一条按新事实改成被拒），并断言解析器读的键集合就是声明表的 `name`
+集合：解析器既不读表外的键，也不把表里的键写成第二份字面量。
+
+## 没有读者的字段从声明里消失
+
+两个字段解析之后**没有人读**：`trace_context`（模型在 schema 里看不见它，
+以为带了上下文，实际没人读）与 `gate.timeout_secs`（模型被告知可以给一个
+墙钟预算，实际那个预算被丢掉，门照跑不误）。两者都从声明里消失：模型读到
+的 schema 里没有它们，解析器也不再读它们。声明里今天没有未兑现的边界了
+——唯一一条没兑现的，跟着它自己那个字段一起走了。
+
+「消失」不等于「静默丢弃」：其它没声明过的键今天仍然照旧被丢掉，但这两个
+字段模型**被告知过**，所以传它们会得到一个说得出理由的拒绝：
+
+- `trace_context` → 「`trace_context` is no longer an argument of the
+  `task` tool: the tool never read it, so a trace context sent with a call
+  was parsed and then dropped」
+- `gate.timeout_secs` → 「`gate.timeout_secs` is no longer an argument of
+  the `task` tool: the gate never applied it, so a wall-clock budget sent
+  with a call was parsed and then dropped」
+
+被删掉的字段连同它那句「为什么没有读者」的记录一起留在声明里（`REMOVED`），
+所以这条拒绝文案与别的文案一样只有一处出处。
+
+公开面随之收缩：`TaskTraceContext` 这个类型与 `TaskSpec::trace_context`
+这个字段一起消失；`GateSpec::timeout` 字段与 `with_timeout` 构造器也删了——
+生产代码从来填不上它，`run_gate` 也不执行它，一个公开字段不该是这种处境。
+`GateVerdict::Timeout` 留着：`verdict_summary` 与 `apply_gate_to_output` 读
+它，一个想给验证门记自己预算的宿主也用得上它——只是 `run_gate` 今天不产出
+这个结局（门跑到退出或父侧取消为止）。「显式 `null`」按「没带」处理：传
+`"trace_context": null` 或 `"gate": {"timeout_secs": null}` 的调用不会被拒，
+与旧解析的行为一致。
+
+## 工具描述归一处
+
+工具自己的那句描述也只有一份，写在 [`args`](src/args.rs) 模块里
+（`DESCRIPTION`）：模型读到的那句就是这一句，逐字不差。以前仓里导着一份
+没人调用的工具定义，挂载给模型的却是另一个变体——两份描述，谁也不知道
+哪份算数；现在发布出去的只有一份，而它就是仓里记着的那份。
+
+- **发布的那一份**：挂在模型上的工具（[`TaskTool`](src/tool.rs)）带着这句
+  描述进注册表，注册表交给模型的就是它。
+- **没人调用的那份没了**：crate 不再导出任何工具定义，外部拿不到第二份
+  描述来跟这一份分家。
+
+[`tests/tool_description.rs`](tests/tool_description.rs) 从仓里自己的源码
+读出记着的那句，与模型收到的那句逐字对比；同一份测试还钉住「这句话在
+crate 里只写了一遍」与「crate 不发布自己的定义」。
+
+## 一轮子会话归一个模块
+
+一轮子会话——子 run 的一次——由 [`round`](src/round.rs) 模块拥有：装配子
+run 的输入、挂取消、抽干同伴的输出、把结束原因映射成轮次结果、把尾巴
+（名册结算 + `subagent_exit` 脚手 + 工件集）与用量记账落下来。委派路径喂它
+一份输入，拿一个结果值（文本、结束原因、补丁、子会话 id）；模型看到的东西
+基本没变——失败文案里句柄行前多了一个换行：委派路径原先自己拼那句，只用
+一个 `\n`，现在两条路共用轮次模块拼的 `\n\n`。
+
+隔离（worktree 生命周期）与验证门留在调用方：要不要隔离、要不要过门是那次
+委派的决定，不是轮次的一部分——轮次只问它的隔离「在哪跑」「改了什么」。
+
+深度规则也在这个模块里（[`round::depth`](src/round/depth.rs)）：**发起轮次
+的那一方**（`task` 的调用方、`agents_message` 的调用方）坐在上限上时不能再
+起一轮。委派路径问它「能不能派发、子会话跑在第几层」，唤醒路径问它「能不能
+再起一轮」，深度表也只有这一处写：调用方不再自己数层数。
+
+一轮的**结局**只有一套词：名册的活动行、L1 进度行的收尾摘要、子会话的
+`subagent_exit` 脚手写的是同一个词（`completed` / `cancelled` / `error`），
+由 [`RoundOutcome::as_str`](src/control/state.rs) 一处给出——三处各写一份
+词表就是同一件事的三种说法。模型看到的失败文案说的是**原因**
+（`max_iterations` / `suspended` / …），那是比结局细的一根轴，不换成结局词。
 
 ## L1 进度：父页工具块里的子代理摘要
 
@@ -30,7 +137,7 @@ agent 词汇（[`uva-agent`](../uva-agent/README.md)）、事件词汇
 ```text
 [01J8…A1] running: LLM pass 1 (1/5)
 [01J8…A1] running: calling read
-[01J8…A1] idle: finished
+[01J8…A1] idle: completed
 ```
 
 - **合并窗口 ~150 ms**：子事件流（每次模型增量、每个步进通知）频率很高，
@@ -58,6 +165,13 @@ brick 里的三个普通工具（同样经注册表定义/曝光/限制）：
 | `agents_list` | 列本会话的子代理：id / 名 / 状态（running / idle / parked / aborted）/ 当前活动一行 |
 | `agents_message` | 按目标态分流：running → steer（写子 run 的转向通道，子日志出现 `source: "steer"` 的用户行）；idle（在内存）→ 追问（同写入者再跑一轮）；本进程不持有 → 冷唤醒（读子日志头取 agent 名 → 解析 peer → 用该子会话写入者再跑一轮，进入 running） |
 | `agents_interrupt` | 点火该子保留的取消令牌：当前轮终止 → idle（不是杀死，仍可续聊）；硬终止才是 aborted 终态 |
+
+追问与冷唤醒跑的是**同一个轮次模块**（[`round.rs`](src/round.rs)）：它装配
+子会话的输入、抽干同伴、映射结束原因、落尾巴，并报告模型看到的东西。因此
+两条路的结果同形——都带 `[subagent session: <id>]` 句柄行，结束方式
+（正常 / 取消 / 失败）的文案也逐字相同。唤醒路径不再自带一份轮次流程；
+它保留自己的语义：不铸造子会话 id、不开子会话、不隔离、不过验证门，
+自己写用户轮行，追问时也不重新入册。
 
 生命周期状态机是纯逻辑（[`control/state.rs`](src/control/state.rs)），迁移表
 以实现来源 [`docs/prototypes/plugin-splits-b-double-prime.prototype.html`](../../docs/prototypes/plugin-splits-b-double-prime.prototype.html)

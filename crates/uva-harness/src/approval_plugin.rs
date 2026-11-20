@@ -45,7 +45,13 @@
 //! let gate = ApprovalGate::new(policy, workspace_hash, Arc::new(|tool, args| {
 //!     registry.get(tool).map_or(Risk::Unknown, |entry| entry.risk(args))
 //! }));
-//! host.gate(Arc::new(gate));
+//! // The deployment's one table: the host carries it, `hooks`
+//! // publishes it.
+//! hooks.register_gate_at(
+//!     uva_hook::MountPoint::ToolPre,
+//!     Arc::new(gate),
+//!     uva_hook::RegistrationOrigin::InProcess,
+//! );
 //! ```
 
 use std::sync::Arc;

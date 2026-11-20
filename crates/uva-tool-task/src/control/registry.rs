@@ -188,7 +188,7 @@ impl ChildHandle {
             cancel: Some(cancel),
             writer: None,
             peer: None,
-            depth: 1,
+            depth: crate::round::depth::FIRST_CHILD_DEPTH,
             idle_since: None,
         }
     }
@@ -210,7 +210,7 @@ impl ChildHandle {
             cancel: None,
             writer: None,
             peer: None,
-            depth: 1,
+            depth: crate::round::depth::FIRST_CHILD_DEPTH,
             idle_since: None,
         }
     }
@@ -287,6 +287,47 @@ impl std::fmt::Debug for ChildHandle {
 pub struct ControlRegistry {
     sessions: Mutex<HashMap<String, HashMap<String, ChildHandle>>>,
     clock: RwLock<SharedClock>,
+}
+
+/// Which branch a message to a child takes.
+///
+/// The branch is the target's state, read without touching the row:
+/// the message tool asks it before it starts a round, because the
+/// depth rule applies to the branches that run a round and not to the
+/// one that steers a running child.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MessageBranch {
+    /// The child is running: the message steers its round.
+    Steer,
+    /// The child is idle in memory: the message starts another round.
+    FollowUp,
+    /// The child's memory is gone: the message wakes it.
+    ColdWake,
+    /// The child is terminal: the message is refused.
+    Terminal,
+    /// This process does not hold the child: the message wakes it.
+    Unknown,
+}
+
+impl MessageBranch {
+    /// Whether this branch starts a round — and so whether the depth
+    /// rule applies to it.
+    pub(crate) fn starts_round(self) -> bool {
+        matches!(self, Self::FollowUp | Self::ColdWake | Self::Unknown)
+    }
+}
+
+/// The branch a child's state takes a message down.
+///
+/// One mapping, read by both the branch lookup and the move itself:
+/// the two can never disagree about which branch a state takes.
+fn branch_of(status: ChildStatus) -> MessageBranch {
+    match status {
+        ChildStatus::Running => MessageBranch::Steer,
+        ChildStatus::Idle => MessageBranch::FollowUp,
+        ChildStatus::Parked => MessageBranch::ColdWake,
+        ChildStatus::Aborted => MessageBranch::Terminal,
+    }
 }
 
 impl Default for ControlRegistry {
@@ -434,6 +475,27 @@ impl ControlRegistry {
             .map(ChildHandle::has_handles)
     }
 
+    /// Which branch a message to `child` takes, read without touching
+    /// the row.
+    ///
+    /// The row is left alone: the message tool asks this before it
+    /// asks the depth rule, and a refused message must leave the
+    /// child's row where it was.
+    pub(crate) fn message_branch(
+        &self,
+        parent: &str,
+        child: &str,
+    ) -> MessageBranch {
+        let sessions = self.sessions.lock();
+        let Some(handle) = sessions
+            .get(parent)
+            .and_then(|children| children.get(child))
+        else {
+            return MessageBranch::Unknown;
+        };
+        branch_of(handle.state.status)
+    }
+
     /// What a message to `child` should do.
     ///
     /// `cancel` is the token the new round is cancelled by. It is
@@ -459,8 +521,8 @@ impl ControlRegistry {
         else {
             return Err(ControlError::UnknownChild(child.to_string()));
         };
-        match handle.state.status {
-            ChildStatus::Running => {
+        match branch_of(handle.state.status) {
+            MessageBranch::Steer => {
                 handle.state.message().map_err(ControlError::Rejected)?;
                 let steer =
                     handle.steer.clone().ok_or(ControlError::NoLiveRun)?;
@@ -469,7 +531,7 @@ impl ControlRegistry {
                     steer,
                 }))
             }
-            ChildStatus::Idle => {
+            MessageBranch::FollowUp => {
                 // The peer is checked before the move: a child that
                 // cannot run must not be left "running" a round that
                 // never starts.
@@ -496,16 +558,20 @@ impl ControlRegistry {
                     depth,
                 }))
             }
-            ChildStatus::Parked => {
+            MessageBranch::ColdWake => {
                 // The child's memory is gone: the wake reads its log
                 // and starts a fresh round. The handle is replaced by
                 // the wake itself.
                 Ok(MessageTarget::ColdWake)
             }
-            ChildStatus::Aborted => {
+            MessageBranch::Terminal => {
                 Err(ControlError::Rejected(TransitionError::Aborted {
                     action: "be messaged",
                 }))
+            }
+            // The child is in the table, so it is never unknown here.
+            MessageBranch::Unknown => {
+                Err(ControlError::UnknownChild(child.to_string()))
             }
         }
     }
@@ -593,11 +659,18 @@ impl ControlRegistry {
     /// The child's handles are released with the move: a terminal
     /// child will never need another round.
     ///
+    /// The surface owns the depth table, so the surface is where a
+    /// kill happens — see [`ControlSurface::kill`](super::ControlSurface::kill).
+    ///
     /// # Errors
     ///
     /// Refused when this session has no such child, or when the child
     /// is already terminal.
-    pub fn kill(&self, parent: &str, child: &str) -> Result<(), ControlError> {
+    pub(crate) fn kill(
+        &self,
+        parent: &str,
+        child: &str,
+    ) -> Result<(), ControlError> {
         let mut sessions = self.sessions.lock();
         let Some(handle) = sessions
             .get_mut(parent)

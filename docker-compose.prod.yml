@@ -1,0 +1,55 @@
+# Docker Compose for the production stack: the server and the
+# front-end, each in its own image, with Nginx in front of the
+# front-end's bundle.
+#
+# The web image serves the built SPA and proxies the server's HTTP
+# surface — `/rpc` (the JSON-RPC websocket the SPA talks on),
+# `/livez`, `/readyz`, `/version` and `/metrics` — to the server, so
+# the SPA and the API share one origin (no CORS, first-party
+# cookies).
+#
+#   make docker-prod-up      # build + start
+#   make docker-prod-down    # stop
+#
+# The server's durable state (sessions, schedules, evals,
+# attachments) lives in the workspace directory `--directory` names;
+# the volume below keeps it across restarts.
+
+services:
+  app-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: uva-app-server:prod
+    container_name: uva-app-server-prod
+    command: ["serve", "--directory", "/srv/uva"]
+    environment:
+      - RUST_LOG=info
+      - UVA_HOST=0.0.0.0
+      - UVA_PORT=8080
+    volumes:
+      - uva-state:/srv/uva
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    image: uva-web:prod
+    container_name: uva-web-prod
+    depends_on:
+      - app-server
+    environment:
+      # Where the server is reachable inside the compose network.
+      - UVA_UPSTREAM=http://app-server:8080
+      # The port nginx listens on. Above 1024, so the container runs
+      # as a non-root user with no capabilities.
+      - UVA_PORT=8080
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+volumes:
+  uva-state:

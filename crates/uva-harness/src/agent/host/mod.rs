@@ -1,4 +1,5 @@
-//! The host: the typed registration frontend over the seam chains.
+//! The host: the typed policy tables the loop reads, and the one
+//! interception registry it carries.
 //!
 //! A host belongs to one agent — `ReActAgent::with_host` installs it
 //! — so two agents never share one policy. Every registration
@@ -7,26 +8,30 @@
 //! registration, so a plugin can be uninstalled without rebuilding
 //! the agent.
 //!
-//! ## Where each kind dispatches
+//! ## What the host holds
 //!
-//! Every extension point is a registration here; where it runs is
-//! the kind's home:
+//! The host is the composition point for the typed policies the
+//! [`HookRegistry`](uva_hook::HookRegistry) cannot express, plus the
+//! registry itself:
 //!
 //! | Kind | Home |
 //! |---|---|
-//! | [`Hook`](crate::agent::host::Hook) | middleware on the six pass chains, plus the residual hooks table for the five observation points (`before_run`, `after_run`, `before_provider_call`, `on_error`, `on_compaction`) |
-//! | [`Gate`](crate::agent::host::Gate) | middleware on the six pass chains, fail-closed |
-//! | [`RequestTransformer`](crate::agent::host::RequestTransformer) | middleware on the `llm/request` chain |
+//! | [`Hook`](crate::agent::host::Hook), [`Gate`](crate::agent::host::Gate), [`RequestTransformer`](crate::agent::host::RequestTransformer), [`ResultTransformer`](crate::agent::host::ResultTransformer) | the [`HookRegistry`](uva_hook::HookRegistry) this host carries — one table for the six passes and the five observation points |
 //! | [`Guard`](uva_steering::Guard) | the guard pipeline (`tool_guards`), a sibling of `tool/pre-execute` — data-plane, stays a table |
 //! | [`Hint`](uva_steering::Hint) | a scoped read the run queries, not a pass — stays a table |
 //! | [`Tracker`](uva_steering::tracker::Tracker) | a table object the loop reads at its boundaries — stays |
 //! | [`OutputTransformer`](uva_steering::OutputTransformer) | a rewrite of the run's final text — stays a table |
-//! | [`ResultTransformer`](crate::agent::host::ResultTransformer) | a rewrite of a tool result outside the pass payload — stays a table |
-//! | [`PromptSection`](crate::agent::host::PromptSection) | a collection the prompt assembly snapshots once per run, not a chain pass — stays a table |
 //! | tool | the bound [`ToolRegistry`](uva_tool::ToolRegistry), via token |
 //!
-//! A chain registration's lifetime is the returned handle's, exactly
-//! like a table row's: the middleware withdraws with the row.
+//! A registration's lifetime is the returned handle's, exactly like a
+//! registry row's: the entry withdraws with the handle.
+//!
+//! The registry is part of the host, not a second surface beside it:
+//! boot builds one instance,
+//! [`Host::default_policy`](crate::agent::host::Host::default_policy) writes the
+//! deployment policy into it, and the loop's `Seams` reads it from
+//! here. Every host clone shares it, so a registration made after an
+//! agent was built is visible to that agent's next pass.
 //!
 //! The remaining tables are published as one immutable
 //! `HostSnapshot`; a registration change builds a new snapshot and
@@ -35,27 +40,21 @@
 //!
 //! ## The arbitration rules
 //!
-//! - a `Block` / `Terminate` decision ends the pass and wins over
-//!   everything collected before it;
-//! - an `Ask` never ends the pass — the reasons are collected and
-//!   reported together, so one approval request can carry all of
-//!   them;
-//! - the transformers chain: each one sees what the previous one
-//!   left;
-//! - a gate that fails or panics is a block (fail closed), because
-//!   a broken gate must not become an approval;
-//! - an observer or transformer that panics is disabled with a
-//!   diagnostic — fail open is only for decisions that are not
-//!   security decisions;
+//! The interception rules live with the table
+//! ([`HookRegistry`](uva_hook::HookRegistry)): source lane then
+//! registration order, the first `Block` short-circuits, `Ask`
+//! reasons collect, and a panicking registration follows its origin.
+//! The host's own rules stay what they were:
+//!
 //! - guards run in registration order and the first denial wins, the
-//!   same pipeline `uva_steering::run_guards` defines.
+//!   same pipeline `uva_steering::run_guards` defines;
+//! - a hint that panics is disabled with a diagnostic.
 
 use std::{
     panic::AssertUnwindSafe,
-    sync::{Arc, Weak},
+    sync::{Arc, Weak, atomic::AtomicU64},
 };
 
-use futures::FutureExt;
 use parking_lot::{Mutex, RwLock};
 // The prompt-section vocabulary lives one layer down with the run
 // input that carries it (`uva-agent`); the deep path
@@ -63,10 +62,10 @@ use parking_lot::{Mutex, RwLock};
 // both re-export it from there.
 pub use uva_agent::PromptSection;
 use uva_context::AgentState;
-use uva_events::WarningKind;
 // The interception contract lives one layer down (ADR 0004): the
-// traits and the dispatch context are `uva-hook`'s, re-exported here
-// so neither the crate-root facade nor this deep path moves.
+// traits, the dispatch context and the registry are `uva-hook`'s,
+// re-exported here so neither the crate-root facade nor this deep
+// path moves.
 pub use uva_hook::{
     Arbitration,
     Gate,
@@ -75,10 +74,7 @@ pub use uva_hook::{
     RequestTransformer,
     ResultTransformer,
 };
-use uva_hook::{
-    HookPayload,
-    arbitration::{Fact, PanicPolicy, Refusal, Ruling, refusal, rule},
-};
+use uva_hook::{HookRegistration, HookRegistry};
 use uva_steering::{
     Guard,
     GuardOutcome,
@@ -99,9 +95,9 @@ use uva_steering::{
     run_guards,
     tracker::{AdaptiveTracker, Tracker},
 };
-use uva_tool::{RegistrationToken, Tool, ToolEntry, ToolOutput, ToolRegistry};
+use uva_tool::{RegistrationToken, Tool, ToolEntry, ToolRegistry};
 
-use crate::{agent::sink::EventSink, seams::VetoRow};
+use crate::seams::VetoRow;
 
 #[cfg(test)]
 mod tests;
@@ -109,37 +105,8 @@ mod tests;
 // How many diagnostics the host keeps.
 const DIAGNOSTIC_LIMIT: usize = 64;
 
-// Record a policy veto as a durable `hook_block` row.
-//
-// The row is the veto's own record: the model-visible tool result
-// says that *something* refused the call, and the live warning that
-// named the policy was live-only — so a reloaded session had no
-// answer to "which policy blocked this, and why".
-//
-// Only a veto of a tool call is recorded: a denial at another seam
-// refuses no call, so it has no call to name. Both denials count —
-// `Block` and `Terminate` each refuse the call. The row is log-only —
-// the surface fold ignores it.
-//
-// The sink is an explicit argument, not a `HookContext` field: the
-// context a registration sees is decoupled run state only (ADR 0004),
-// and the writer half stays with the component that owns the run.
-fn record_hook_block(
-    sink: &EventSink,
-    name: &str,
-    decision: &HookDecision,
-    event: &HookEvent,
-) {
-    if let Some(veto) = veto_row(name, decision, event) {
-        veto.record(sink);
-    }
-}
-
-// The veto one adapter layer owes a pass: a denial of a tool call,
-// with everything the `hook_block` row names. The chain adapters
-// cannot reach the run's sink from inside the chain, so they fold the
-// veto into their short-circuit value and the seam layer records it
-// where the sink lives (`Decided`).
+// The veto one pass owes the `hook_block` row: a denial of a tool
+// call, with everything the row names.
 //
 // Both denial kinds count at `BeforeTool`: `Block` renders an error
 // result the model can react to, `Terminate` ends the run — either
@@ -170,49 +137,6 @@ pub(crate) fn veto_row(
     })
 }
 
-// Apply one decision at one point.
-//
-// The point's own table decides — the owner's rule — and the host's
-// answer to "the point does not accept this" is the same everywhere:
-// the decision does not apply, and the fact travels with the pass so
-// the operator can see it.
-fn accept(
-    event: &HookEvent,
-    decision: HookDecision,
-    source: &str,
-) -> (HookDecision, Option<Fact>) {
-    match rule(event, decision, source) {
-        Ruling::Stands(decision) => (decision, None),
-        Ruling::Unsupported { fact, .. } => (HookDecision::Allow, Some(fact)),
-    }
-}
-
-// Report one fact in the run's durable record.
-//
-// The fact is what the arbitration learned about a registration; the
-// warning row is where an operator reads it. The registry's path
-// reports the same facts the same way — one channel, two surfaces.
-fn report_fact(sink: &EventSink, fact: &Fact) {
-    sink.warn(WarningKind::Hook, None, fact.message().to_owned());
-}
-
-// The host's panic policy: an in-process registration that panics is
-// broken, so it is withdrawn and the fact says so.
-//
-// The registry keeps an external plugin registered instead — the
-// policies are named in one place (`PanicPolicy`), so the two
-// surfaces cannot drift into a third.
-const PANIC_POLICY: PanicPolicy = PanicPolicy::Withdraw;
-
-/// A plugin: a bundle of registrations installed into one host.
-pub trait Plugin: Send + Sync {
-    /// The plugin's name.
-    fn name(&self) -> &str;
-
-    /// Install the plugin's registrations; the handle owns them.
-    fn install(&self, host: &mut Host) -> PluginHandle;
-}
-
 /// One registration in a host.
 ///
 /// Dropping the registration withdraws it: the host stops calling
@@ -223,22 +147,6 @@ pub struct Registration {
     inner: Arc<RegistrationInner>,
 }
 
-impl Registration {
-    // Whether the host's install bookkeeping is the only holder: the
-    // plugin dropped its own copy, so the registration is dead.
-    fn is_unclaimed(&self) -> bool {
-        Arc::strong_count(&self.inner) == 1
-    }
-
-    // Withdraw the registration now, without waiting for the last
-    // handle to drop.
-    fn withdraw(&self) {
-        if let Some(host) = self.inner.host.upgrade() {
-            host.withdraw(self.inner.kind, self.inner.id);
-        }
-    }
-}
-
 struct RegistrationInner {
     id: u64,
     kind: RegistrationKind,
@@ -247,16 +155,20 @@ struct RegistrationInner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegistrationKind {
-    Hook,
-    Gate,
     Guard,
     Hint,
     Tracker,
     OutputTransformer,
-    RequestTransformer,
-    ResultTransformer,
-    PromptSection,
     Tool,
+}
+
+impl std::fmt::Debug for Registration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registration")
+            .field("kind", &self.inner.kind)
+            .field("id", &self.inner.id)
+            .finish()
+    }
 }
 
 impl Drop for RegistrationInner {
@@ -268,33 +180,8 @@ impl Drop for RegistrationInner {
     }
 }
 
-/// The handle a plugin install returns: it owns every registration
-/// the install made, so dropping it uninstalls the plugin.
-#[derive(Clone, Default)]
-pub struct PluginHandle {
-    registrations: Vec<Registration>,
-}
-
-impl PluginHandle {
-    /// A handle over the registrations one install made.
-    #[must_use]
-    pub fn new(registrations: Vec<Registration>) -> Self {
-        Self { registrations }
-    }
-
-    /// The registrations the handle owns.
-    #[must_use]
-    pub fn registrations(&self) -> &[Registration] {
-        &self.registrations
-    }
-
-    /// Withdraw every registration now.
-    pub fn uninstall(self) {
-        drop(self.registrations);
-    }
-}
-
-/// The per-agent registry of plugin registrations.
+/// The per-agent registry of typed policy registrations, over the one
+/// interception table it carries.
 ///
 /// # Deprecation direction
 ///
@@ -303,63 +190,54 @@ impl PluginHandle {
 /// target. `Host` remains while the chat path still builds each run
 /// through the consumer's run assembly, which hands every agent a
 /// host clone; removing it before that path moves to the `agentLoop`
-/// service would break chat. New code should register through kernel
-/// effects, not this table.
+/// service would break chat.
 pub struct Host {
     inner: Arc<HostInner>,
-    // One scope per install in progress: the registrations that
-    // install made, so the returned handle can own them.
-    scopes: Vec<Vec<Registration>>,
 }
 
 impl Clone for Host {
     fn clone(&self) -> Self {
-        // The clone shares the registrations — a host is one policy,
-        // not a copy of it — and starts with no install in progress.
+        // The clone shares the registrations and the interception
+        // table — a host is one policy, not a copy of it.
         Self {
             inner: Arc::clone(&self.inner),
-            scopes: Vec::new(),
         }
     }
 }
 
 struct HostInner {
-    // The kernel chains the seam keys front for. One root context the
-    // chains (and their reversible registrations) live on.
-    seams: crate::seams::SeamChains,
-    // The chain middleware handles of the registrations whose kind
-    // dispatches on a seam chain (hooks, gates, request
-    // transformers), keyed by registration id so a withdrawal or a
-    // panic-disable removes the chain entries with the table row.
-    chain_regs:
-        Mutex<std::collections::HashMap<u64, Vec<uva_kernel::EffectHandle>>>,
-    // Registrations whose kind has no table row (gates, request
-    // transformers): they live only as chain middleware, so the
-    // count of registrations the host holds includes them.
-    chain_only: Mutex<std::collections::HashSet<u64>>,
+    // The one interception table this deployment dispatches: the six
+    // pass points, the five observation points and the prompt-section
+    // collection.
+    registry: HookRegistry,
     state: Mutex<HostState>,
     // The published dispatch tables. Rebuilt on every change.
     snapshot: RwLock<Arc<HostSnapshot>>,
-    next_id: std::sync::atomic::AtomicU64,
-    // The registrations [`Host::default_policy`] installed. They
-    // live as long as the host does — a registration withdraws when
-    // its last handle drops, so a default policy must not let its
-    // handles fall out of scope.
-    _defaults: Mutex<Vec<Registration>>,
+    next_id: AtomicU64,
+    // The handles [`Host::default_policy`] installed. They live as
+    // long as the host does — a registration withdraws when its last
+    // handle drops, so a default policy must not let its handles fall
+    // out of scope.
+    _defaults: Mutex<DefaultHandles>,
+}
+
+// The handles the default policy owns, one list per registration
+// surface. Holding the handles is the whole job — a registration
+// withdraws when its last handle drops — so nothing reads these lists.
+#[derive(Default)]
+struct DefaultHandles {
+    // The typed policy rows (guards, hints, tracker).
+    _tables: Vec<Registration>,
+    // The `LoggingHook` at each event mount point.
+    _registry: Vec<HookRegistration>,
 }
 
 #[derive(Default)]
 struct HostState {
-    // Hooks live twice by design: once as chain middleware for the
-    // six pass seams, once in this residual table for the five
-    // observation points, which have no chain.
-    hooks: Vec<Entry<Arc<dyn Hook>>>,
     guards: Vec<Entry<Arc<dyn Guard>>>,
     hints: Vec<Entry<Arc<dyn Hint>>>,
     trackers: Vec<Entry<Arc<dyn Tracker>>>,
     output_transformers: Vec<Entry<Arc<dyn OutputTransformer>>>,
-    result_transformers: Vec<Entry<Arc<dyn ResultTransformer>>>,
-    prompt_sections: Vec<Entry<PromptSection>>,
     tools: Vec<ToolRow>,
     // The registry the host's tools live in. The host is bound to it
     // when the agent installs the host; before that, the tools wait
@@ -371,35 +249,15 @@ struct HostState {
 /// The immutable dispatch view one pass reads.
 #[derive(Default)]
 pub(crate) struct HostSnapshot {
-    pub(crate) hooks: Vec<Entry<Arc<dyn Hook>>>,
     pub(crate) guards: Vec<Arc<dyn Guard>>,
     pub(crate) hints: Vec<Entry<Arc<dyn Hint>>>,
     pub(crate) trackers: Vec<Arc<dyn Tracker>>,
     pub(crate) output_transformers: Vec<Arc<dyn OutputTransformer>>,
-    pub(crate) result_transformers: Vec<Entry<Arc<dyn ResultTransformer>>>,
-    pub(crate) prompt_sections: Vec<PromptSection>,
-    pub(crate) has_event_registrations: bool,
-    pub(crate) has_result_rewriters: bool,
 }
 
 impl HostSnapshot {
     fn build(state: &HostState) -> Self {
-        let hooks: Vec<_> = state
-            .hooks
-            .iter()
-            .filter(|entry| !entry.disabled)
-            .cloned()
-            .collect();
-        let result_transformers: Vec<_> = state
-            .result_transformers
-            .iter()
-            .filter(|entry| !entry.disabled)
-            .cloned()
-            .collect();
         Self {
-            has_event_registrations: !hooks.is_empty(),
-            has_result_rewriters: !result_transformers.is_empty(),
-            hooks,
             guards: state
                 .guards
                 .iter()
@@ -424,13 +282,6 @@ impl HostSnapshot {
                 .filter(|entry| !entry.disabled)
                 .map(|entry| Arc::clone(&entry.value))
                 .collect(),
-            prompt_sections: state
-                .prompt_sections
-                .iter()
-                .filter(|entry| !entry.disabled)
-                .map(|entry| entry.value.clone())
-                .collect(),
-            result_transformers,
         }
     }
 }
@@ -477,8 +328,6 @@ where
 pub enum DiagnosticKind {
     // The registration panicked; it was disabled.
     Disabled,
-    // The transformer reported a failure; its change was skipped.
-    TransformerFailed,
     // A tool's name is already owned by a core tool; the host's
     // tool stays out of the registry.
     ToolNameConflict,
@@ -498,38 +347,40 @@ pub struct Diagnostic {
 }
 
 impl Host {
-    /// An empty host: no registrations at all.
+    /// An empty host: no policy rows and an empty interception table.
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_registry(HookRegistry::new())
+    }
+
+    /// An empty host over `registry`.
+    ///
+    /// The registry is the deployment's one table: a host built this
+    /// way dispatches exactly the registrations it already holds, and
+    /// every later registration on the same table is visible to this
+    /// host's runs. An embedder with no deployment table calls
+    /// [`Host::new`], which builds an empty one.
+    #[must_use]
+    pub fn new_with_registry(registry: HookRegistry) -> Self {
         Self {
             inner: Arc::new(HostInner {
-                seams: crate::seams::SeamChains::new(),
-                chain_regs: Mutex::new(std::collections::HashMap::new()),
-                chain_only: Mutex::new(std::collections::HashSet::new()),
+                registry,
                 state: Mutex::new(HostState::default()),
                 snapshot: RwLock::new(Arc::new(HostSnapshot::default())),
-                next_id: std::sync::atomic::AtomicU64::new(1),
-                _defaults: Mutex::new(Vec::new()),
+                next_id: AtomicU64::new(1),
+                _defaults: Mutex::new(DefaultHandles::default()),
             }),
-            scopes: Vec::new(),
         }
     }
 
-    #[must_use]
-    /// The kernel waterfall a seam key fronts for.
+    /// The one interception table this host dispatches.
     ///
-    /// `key` is one of the [`crate::seams`] chain names. A plugin
-    /// registers middleware on the returned chain and keeps the
-    /// [`uva_kernel::EffectHandle`] for as long as it wants the
-    /// middleware to run; the chain dispatches before the host's own
-    /// registrations for that seam.
-    pub fn waterfall(&self, key: &str) -> Option<&uva_kernel::Waterfall> {
-        self.inner.seams.get(key)
-    }
-
-    /// The root context the seam chains resolve services through.
-    pub(crate) fn seam_context(&self) -> uva_kernel::Context {
-        self.inner.seams.context()
+    /// The loop's seam layer reads it from here (ADR 0028): the
+    /// deployment builds one registry, this host carries it, and
+    /// every pass of every run over this host reads the same rows.
+    #[must_use]
+    pub fn hook_registry(&self) -> &HookRegistry {
+        &self.inner.registry
     }
 
     /// The production policy: defensive guards, budget / iteration /
@@ -537,7 +388,11 @@ impl Host {
     /// hook.
     ///
     /// A base-library agent starts with [`Host::new`] and no policy;
-    /// a deployment installs this explicitly. Tuned to never
+    /// a deployment installs this explicitly. The logging hook is an
+    /// in-process registration on the same table `registry` names —
+    /// eleven event mount points, all but the prompt-section
+    /// collection — so a deployment's out-of-tree registrations and
+    /// its policy dispatch through one surface. Tuned to never
     /// interfere with legitimate work: the loop detector only fires on
     /// the 3rd identical consecutive call, the tool budget (250)
     /// exceeds the theoretical maximum of a bounded run, and the shell
@@ -545,11 +400,12 @@ impl Host {
     #[must_use]
     pub fn default_policy(
         workspace_root: impl Into<std::path::PathBuf>,
+        registry: HookRegistry,
     ) -> Self {
-        let mut host = Self::new();
+        let mut host = Self::new_with_registry(registry);
         // The handles must outlive this call: a registration withdraws
         // its entry when dropped, so the host itself owns them.
-        let defaults = vec![
+        let tables = vec![
             host.guard(Arc::new(LoopDetectionGuard::new(3))),
             host.guard(Arc::new(ToolBudgetGuard::new(250))),
             host.guard(Arc::new(ShellDenyGuard::new())),
@@ -559,86 +415,26 @@ impl Host {
             host.hint(Arc::new(IterationReminderHint::new(10))),
             host.hint(Arc::new(TruncationHint)),
             host.tracker(Arc::new(AdaptiveTracker::new(8))),
-            host.hook(Arc::new(uva_steering::LoggingHook)),
         ];
-        *host.inner._defaults.lock() = defaults;
+        // The policy's observer runs in the in-process lane at every
+        // event point: the same eleven points the loop dispatches.
+        let logging: Arc<dyn Hook> = Arc::new(uva_steering::LoggingHook);
+        let registry_handles = uva_hook::MountPoint::ALL
+            .into_iter()
+            .filter(|mount| mount.is_event())
+            .map(|mount| {
+                host.inner.registry.register_hook_at(
+                    mount,
+                    Arc::clone(&logging),
+                    uva_hook::RegistrationOrigin::InProcess,
+                )
+            })
+            .collect();
+        *host.inner._defaults.lock() = DefaultHandles {
+            _tables: tables,
+            _registry: registry_handles,
+        };
         host
-    }
-
-    /// Install a plugin.
-    pub fn install(&mut self, plugin: &dyn Plugin) -> PluginHandle {
-        self.scopes.push(Vec::new());
-        let plugin_handle = plugin.install(self);
-        let scope = self.scopes.pop().unwrap_or_default();
-        let mut kept = Vec::with_capacity(scope.len());
-        for registration in scope {
-            if registration.is_unclaimed() {
-                registration.withdraw();
-            } else {
-                kept.push(registration);
-            }
-        }
-        drop(plugin_handle);
-        PluginHandle::new(kept)
-    }
-
-    /// Register an observer.
-    ///
-    /// The registration lands on every seam chain as middleware (the
-    /// six pass seams) *and* in the residual hooks table the five
-    /// observation points dispatch. Dropping the returned handle
-    /// withdraws both.
-    pub fn hook(&mut self, hook: Arc<dyn Hook>) -> Registration {
-        let name = hook.name().to_string();
-        let id = self.next_id();
-        let weak = Arc::downgrade(&self.inner);
-        let mut handles = Vec::new();
-        for key in crate::seams::pass_chain_keys() {
-            let Some(chain) = self.inner.seams.get(key) else {
-                continue;
-            };
-            if let Ok(handle) = chain.register(hook_adapter(
-                std::sync::Weak::clone(&weak),
-                id,
-                name.clone(),
-                Arc::clone(&hook),
-            )) {
-                handles.push(handle);
-            }
-        }
-        self.inner.chain_regs.lock().insert(id, handles);
-        self.register_value(
-            RegistrationKind::Hook,
-            name,
-            hook,
-            |state, entry| state.hooks.push(entry),
-            id,
-        )
-    }
-
-    /// Register a gate.
-    ///
-    /// The registration is middleware on every seam chain: a gate is
-    /// the security capability, fails closed (an `Err` or a panic is
-    /// a block), and short-circuits the pass when it decides.
-    pub fn gate(&mut self, gate: Arc<dyn Gate>) -> Registration {
-        let name = gate.name().to_string();
-        let id = self.next_id();
-        let mut handles = Vec::new();
-        for key in crate::seams::pass_chain_keys() {
-            let Some(chain) = self.inner.seams.get(key) else {
-                continue;
-            };
-            if let Ok(handle) =
-                chain.register(gate_adapter(name.clone(), Arc::clone(&gate)))
-            {
-                handles.push(handle);
-            }
-        }
-        self.inner.chain_regs.lock().insert(id, handles);
-        self.inner.chain_only.lock().insert(id);
-        self.publish();
-        self.finish_registration(id, RegistrationKind::Gate)
     }
 
     /// Register a synchronous guard.
@@ -679,61 +475,6 @@ impl Host {
             name,
             transformer,
             |state, entry| state.output_transformers.push(entry),
-        )
-    }
-
-    /// Register a request transformer.
-    ///
-    /// The registration is middleware on the `llm/request` chain: it
-    /// rewrites the pass's parameters in place and lets the chain
-    /// continue. A failure is recorded and skipped; a panic disables
-    /// the registration.
-    pub fn request_transformer(
-        &mut self,
-        transformer: Arc<dyn RequestTransformer>,
-    ) -> Registration {
-        let name = transformer.name().to_string();
-        let id = self.next_id();
-        let weak = Arc::downgrade(&self.inner);
-        let mut handles = Vec::new();
-        if let Some(chain) = self.inner.seams.get(crate::seams::LLM_REQUEST)
-            && let Ok(handle) = chain.register(request_transformer_adapter(
-                std::sync::Weak::clone(&weak),
-                id,
-                name.clone(),
-                Arc::clone(&transformer),
-            ))
-        {
-            handles.push(handle);
-        }
-        self.inner.chain_regs.lock().insert(id, handles);
-        self.inner.chain_only.lock().insert(id);
-        self.publish();
-        self.finish_registration(id, RegistrationKind::RequestTransformer)
-    }
-
-    /// Register a result transformer.
-    pub fn result_transformer(
-        &mut self,
-        transformer: Arc<dyn ResultTransformer>,
-    ) -> Registration {
-        let name = transformer.name().to_string();
-        self.register(
-            RegistrationKind::ResultTransformer,
-            name,
-            transformer,
-            |state, entry| state.result_transformers.push(entry),
-        )
-    }
-
-    /// Register a system-prompt section.
-    pub fn prompt_section(&mut self, section: PromptSection) -> Registration {
-        let name = section.title.clone();
-        self.register(
-            RegistrationKind::PromptSection,
-            name,
-            section,
-            |state, entry| state.prompt_sections.push(entry),
         )
     }
 
@@ -862,58 +603,6 @@ impl Host {
         Arc::clone(&self.inner.snapshot.read())
     }
 
-    /// Run every observer in registration order.
-    ///
-    /// A policy veto records its `hook_block` row through `sink`:
-    /// the context a registration reads carries run state only, so
-    /// the writer half arrives as an explicit argument (ADR 0004).
-    pub async fn dispatch_hooks(
-        &self,
-        event: &HookEvent,
-        ctx: &HookContext<'_>,
-        sink: &EventSink,
-    ) -> Arbitration {
-        let snapshot = self.snapshot();
-        let mut arbitration = Arbitration::default();
-        for entry in &snapshot.hooks {
-            let decision =
-                match AssertUnwindSafe(entry.value.observe(event, ctx))
-                    .catch_unwind()
-                    .await
-                {
-                    Ok(decision) => decision,
-                    Err(_) => {
-                        // The host's panic policy: an in-process
-                        // registration that panics is broken, so it is
-                        // withdrawn and the fact says so.
-                        let fact = PANIC_POLICY
-                            .fact(entry.value.name(), "the observer panicked");
-                        self.disable(
-                            RegistrationKind::Hook,
-                            entry.id,
-                            entry.value.name(),
-                        );
-                        report_fact(sink, &fact);
-                        continue;
-                    }
-                };
-            let (decision, fact) = accept(event, decision, entry.value.name());
-            if let Some(fact) = fact {
-                report_fact(sink, &fact);
-            }
-            match decision {
-                HookDecision::Allow => {}
-                HookDecision::Ask { reason } => arbitration.asks.push(reason),
-                other => {
-                    record_hook_block(sink, entry.value.name(), &other, event);
-                    arbitration.absorb(other);
-                    break;
-                }
-            }
-        }
-        arbitration
-    }
-
     /// Run the guard pipeline: registration order, first denial wins,
     /// a panic is a denial.
     pub fn dispatch_guards(
@@ -1029,59 +718,7 @@ impl Host {
         out
     }
 
-    /// Run the result transformers in registration order.
-    ///
-    /// Returns the transformers that ran when the aggregate output
-    /// changed, so the loop can record provenance.
-    #[must_use]
-    pub async fn apply_result_transformers(
-        &self,
-        output: &mut ToolOutput,
-        ctx: &HookContext<'_>,
-    ) -> Vec<String> {
-        let snapshot = self.snapshot();
-        if snapshot.result_transformers.is_empty() {
-            return Vec::new();
-        }
-        let before = output.clone();
-        let mut ran = Vec::with_capacity(snapshot.result_transformers.len());
-        for entry in &snapshot.result_transformers {
-            let outcome = AssertUnwindSafe(entry.value.transform(output, ctx))
-                .catch_unwind()
-                .await;
-            match outcome {
-                Ok(Ok(())) => ran.push(entry.value.name().to_string()),
-                Ok(Err(reason)) => {
-                    self.record(
-                        DiagnosticKind::TransformerFailed,
-                        entry.value.name(),
-                        reason,
-                    );
-                    ran.push(entry.value.name().to_string());
-                }
-                Err(_) => {
-                    self.disable(
-                        RegistrationKind::ResultTransformer,
-                        entry.id,
-                        entry.value.name(),
-                    );
-                }
-            }
-        }
-        if *output == before {
-            return Vec::new();
-        }
-        ran
-    }
-
-    /// The prompt sections, in registration order.
-    #[must_use]
-    pub fn prompt_sections(&self) -> Vec<PromptSection> {
-        self.snapshot().prompt_sections.clone()
-    }
-
     /// The registered tools, in registration order.
-    #[must_use]
     pub fn tools(&self) -> Vec<Arc<dyn Tool>> {
         let state = self.inner.state.lock();
         state
@@ -1091,32 +728,20 @@ impl Host {
             .collect()
     }
 
-    /// How many registrations the host holds.
+    /// How many typed policy rows the host holds.
+    ///
+    /// The interception table has its own query
+    /// ([`HookRegistry::has_entries_at`](uva_hook::HookRegistry::has_entries_at));
+    /// this count is the host's own tables, so a deployment can assert
+    /// what [`Host::default_policy`] installed.
     #[must_use]
     pub fn registration_count(&self) -> usize {
         let state = self.inner.state.lock();
-        let chain_only = self.inner.chain_only.lock().len();
-        state.hooks.len()
-            + chain_only
-            + state.guards.len()
+        state.guards.len()
             + state.hints.len()
             + state.trackers.len()
             + state.output_transformers.len()
-            + state.result_transformers.len()
-            + state.prompt_sections.len()
             + state.tools.len()
-    }
-
-    /// Whether the host holds registrations that consume events.
-    #[must_use]
-    pub fn has_event_registrations(&self) -> bool {
-        self.snapshot().has_event_registrations
-    }
-
-    /// Whether the host can change a tool result.
-    #[must_use]
-    pub fn has_result_rewriters(&self) -> bool {
-        self.snapshot().has_result_rewriters
     }
 
     /// The diagnostics recorded so far, oldest first.
@@ -1137,15 +762,13 @@ impl Host {
         id: u64,
         kind: RegistrationKind,
     ) -> Registration {
-        let registration = Registration {
+        Registration {
             inner: Arc::new(RegistrationInner {
                 id,
                 kind,
                 host: Arc::downgrade(&self.inner),
             }),
-        };
-        self.track(registration.clone());
-        registration
+        }
     }
 
     fn register<T>(
@@ -1156,17 +779,6 @@ impl Host {
         push: impl FnOnce(&mut HostState, Entry<T>),
     ) -> Registration {
         let id = self.next_id();
-        self.register_value(kind, name, value, push, id)
-    }
-
-    fn register_value<T>(
-        &mut self,
-        kind: RegistrationKind,
-        name: String,
-        value: T,
-        push: impl FnOnce(&mut HostState, Entry<T>),
-        id: u64,
-    ) -> Registration {
         {
             let mut state = self.inner.state.lock();
             push(
@@ -1190,19 +802,13 @@ impl Host {
         *self.inner.snapshot.write() = Arc::new(snapshot);
     }
 
-    fn track(&mut self, registration: Registration) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.push(registration);
-        }
-    }
-
     // Withdraw a registration that broke, and say so.
     //
-    // The host's panic policy: an in-process registration that panics
-    // is broken, so it stops being called. Where the run's sink is
-    // reachable, the fact also lands in the run's durable record; the
-    // paths without a sink (hints, result transformers) keep the
-    // host's own diagnostic.
+    // The host's panic policy for its own tables: an in-process
+    // registration that panics is broken, so it stops being called.
+    // The interception table's policy lives on the registration
+    // origin (ADR 0020); this path covers the tables the registry does
+    // not carry.
     fn disable(&self, kind: RegistrationKind, id: u64, name: &str) {
         self.inner.withdraw(kind, id);
         self.record(
@@ -1244,47 +850,16 @@ impl Host {
 }
 
 impl HostInner {
-    // Record one diagnostic into the state's ring.
-    fn record(
-        &self,
-        kind: DiagnosticKind,
-        source: &str,
-        detail: impl Into<String>,
-    ) {
-        let mut state = self.state.lock();
-        state.diagnostics.push(Diagnostic {
-            kind,
-            source: source.to_string(),
-            detail: detail.into(),
-        });
-        let overflow = state.diagnostics.len().saturating_sub(DIAGNOSTIC_LIMIT);
-        state.diagnostics.drain(..overflow);
-    }
-
-    // Withdraw one registration and publish the new tables. Chain
-    // middleware handles live in `chain_regs`; dropping them removes
-    // the middleware from its chain.
+    // Withdraw one registration and publish the new tables.
     fn withdraw(&self, kind: RegistrationKind, id: u64) {
         {
-            let handles = self.chain_regs.lock().remove(&id);
-            drop(handles);
-            self.chain_only.lock().remove(&id);
             let mut state = self.state.lock();
             match kind {
-                RegistrationKind::Hook => retain_id(&mut state.hooks, id),
-                RegistrationKind::Gate => {}
                 RegistrationKind::Guard => retain_id(&mut state.guards, id),
                 RegistrationKind::Hint => retain_id(&mut state.hints, id),
                 RegistrationKind::Tracker => retain_id(&mut state.trackers, id),
                 RegistrationKind::OutputTransformer => {
                     retain_id(&mut state.output_transformers, id);
-                }
-                RegistrationKind::RequestTransformer => {}
-                RegistrationKind::ResultTransformer => {
-                    retain_id(&mut state.result_transformers, id);
-                }
-                RegistrationKind::PromptSection => {
-                    retain_id(&mut state.prompt_sections, id);
                 }
                 RegistrationKind::Tool => withdraw_tool(&mut state, id),
             }
@@ -1347,252 +922,4 @@ fn triggered_hint(
         }
     }))
     .map_err(|_| ())
-}
-
-// -- seam-chain adapters -------------------------------------------------
-//
-// The typed registrations the seam chains dispatch. Each layer
-// reconstructs the `HookContext` from the pass payload (a state
-// snapshot plus the shareable sink and cancel handles), applies the
-// same arbitration the table dispatch had — accept-filtering, panic
-// isolation, fail-closed gates — and maps the decision onto the
-// chain vocabulary: `Ask` is recorded on the pass and the chain
-// continues, a deciding ruling short-circuits it.
-
-use std::panic::AssertUnwindSafe as HostAdapterUnwindSafe;
-
-type ChainCtx = Arc<uva_kernel::WaterfallCtx>;
-type ChainNext = uva_kernel::Next;
-type ChainResult = Result<uva_kernel::Outcome, uva_kernel::WaterfallError>;
-
-fn hook_adapter(
-    host: std::sync::Weak<HostInner>,
-    id: u64,
-    name: String,
-    hook: Arc<dyn Hook>,
-) -> uva_kernel::Middleware {
-    Arc::new(move |ctx, next| {
-        Box::pin(hook_layer(
-            std::sync::Weak::clone(&host),
-            id,
-            name.clone(),
-            Arc::clone(&hook),
-            ctx,
-            Arc::clone(&next),
-        ))
-    })
-}
-
-async fn hook_layer(
-    host: std::sync::Weak<HostInner>,
-    id: u64,
-    name: String,
-    hook: Arc<dyn Hook>,
-    ctx: ChainCtx,
-    next: ChainNext,
-) -> ChainResult {
-    let Some(pass) = HookPayload::payload(&ctx) else {
-        return next(ctx).await;
-    };
-    let event = pass.event().clone();
-    let observed =
-        HostAdapterUnwindSafe(hook.observe(&event, &pass.hook_context()))
-            .catch_unwind()
-            .await;
-    let decision = match observed {
-        Ok(decision) => decision,
-        Err(_) => {
-            return panicked(
-                &host,
-                RegistrationKind::Hook,
-                id,
-                &name,
-                ctx,
-                &next,
-                pass.as_ref(),
-            )
-            .await;
-        }
-    };
-    let (decision, fact) = accept(&event, decision, &name);
-    if let Some(fact) = fact {
-        pass.record_fact(fact);
-    }
-    let veto = veto_row(&name, &decision, &event);
-    apply_decision(ctx, next, pass, decision, veto).await
-}
-
-fn gate_adapter(name: String, gate: Arc<dyn Gate>) -> uva_kernel::Middleware {
-    Arc::new(move |ctx, next| {
-        Box::pin(gate_layer(
-            name.clone(),
-            Arc::clone(&gate),
-            ctx,
-            Arc::clone(&next),
-        ))
-    })
-}
-
-async fn gate_layer(
-    name: String,
-    gate: Arc<dyn Gate>,
-    ctx: ChainCtx,
-    next: ChainNext,
-) -> ChainResult {
-    let Some(pass) = HookPayload::payload(&ctx) else {
-        return next(ctx).await;
-    };
-    let event = pass.event().clone();
-    let checked =
-        HostAdapterUnwindSafe(gate.check(&event, &pass.hook_context()))
-            .catch_unwind()
-            .await;
-    let outcome = match checked {
-        Ok(Ok(decision)) => Ok(decision),
-        Ok(Err(reason)) => Err(format!("the gate failed: {reason}")),
-        Err(_) => Err("the gate panicked".to_owned()),
-    };
-    let (decision, fact) = match outcome {
-        Ok(decision) => accept(&event, decision, &name),
-        // The gate could not answer: the pass fails closed where the
-        // point can refuse, and the failure is reported where it
-        // cannot.
-        Err(why) => match refusal(&event, &name, &why) {
-            Refusal::Decided(decision) => (decision, None),
-            Refusal::Reported(fact) => (HookDecision::Allow, Some(fact)),
-        },
-    };
-    if let Some(fact) = fact {
-        pass.record_fact(fact);
-    }
-    let veto = veto_row(&name, &decision, &event);
-    apply_decision(ctx, next, pass, decision, veto).await
-}
-
-fn request_transformer_adapter(
-    host: std::sync::Weak<HostInner>,
-    id: u64,
-    name: String,
-    transformer: Arc<dyn RequestTransformer>,
-) -> uva_kernel::Middleware {
-    Arc::new(move |ctx, next| {
-        Box::pin(request_transformer_layer(
-            std::sync::Weak::clone(&host),
-            id,
-            name.clone(),
-            Arc::clone(&transformer),
-            ctx,
-            Arc::clone(&next),
-        ))
-    })
-}
-
-async fn request_transformer_layer(
-    host: std::sync::Weak<HostInner>,
-    id: u64,
-    name: String,
-    transformer: Arc<dyn RequestTransformer>,
-    ctx: ChainCtx,
-    next: ChainNext,
-) -> ChainResult {
-    let Some(pass) = HookPayload::payload(&ctx) else {
-        return next(ctx).await;
-    };
-    let HookEvent::BeforeRequest { provider, params } = pass.event() else {
-        return next(ctx).await;
-    };
-    let mut params = params.clone();
-    let transformed = HostAdapterUnwindSafe(
-        transformer.transform(&mut params, &pass.hook_context()),
-    )
-    .catch_unwind()
-    .await;
-    match transformed {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => {
-            if let Some(host) = host.upgrade() {
-                host.record(DiagnosticKind::TransformerFailed, &name, reason);
-            }
-            return next(ctx).await;
-        }
-        Err(_) => {
-            return panicked(
-                &host,
-                RegistrationKind::RequestTransformer,
-                id,
-                &name,
-                ctx,
-                &next,
-                pass.as_ref(),
-            )
-            .await;
-        }
-    }
-    let rewritten = HookPayload::rewrite(
-        &ctx,
-        HookEvent::BeforeRequest {
-            provider: provider.clone(),
-            params,
-        },
-    );
-    next(rewritten).await
-}
-
-// Apply one accepted decision to the chain: `Allow` continues,
-// `Ask` is recorded and continues, a deciding ruling short-circuits,
-// and `ReplaceParams` rewrites the request parameters in place.
-// A deciding ruling travels as a `Decided` value — the ruling plus
-// the veto row it owes — so the seam layer can record the veto
-// where the run's sink lives.
-async fn apply_decision(
-    ctx: ChainCtx,
-    next: ChainNext,
-    pass: Arc<HookPayload>,
-    decision: HookDecision,
-    veto: Option<VetoRow>,
-) -> ChainResult {
-    match decision {
-        HookDecision::Allow => next(ctx).await,
-        HookDecision::Ask { reason } => {
-            pass.ask(reason);
-            next(ctx).await
-        }
-        HookDecision::ReplaceParams(params) => {
-            if let HookEvent::BeforeRequest { provider, .. } = pass.event() {
-                let rewritten = HookPayload::rewrite(
-                    &ctx,
-                    HookEvent::BeforeRequest {
-                        provider: provider.clone(),
-                        params,
-                    },
-                );
-                return next(rewritten).await;
-            }
-            next(ctx).await
-        }
-        deciding => Ok(uva_kernel::Outcome::ShortCircuit(
-            uva_kernel::EventValue::new(crate::seams::Decided {
-                ruling: crate::seams::SeamRuling::from(deciding),
-                veto,
-            }),
-        )),
-    }
-}
-
-// A registration panicked: withdraw it, record the diagnostic, and
-// let the chain continue without it.
-async fn panicked(
-    host: &std::sync::Weak<HostInner>,
-    kind: RegistrationKind,
-    id: u64,
-    name: &str,
-    ctx: ChainCtx,
-    next: &ChainNext,
-    pass: &HookPayload,
-) -> ChainResult {
-    if let Some(host) = host.upgrade() {
-        host.withdraw(kind, id);
-    }
-    pass.record_fact(PANIC_POLICY.fact(name, "the registration panicked"));
-    next(ctx).await
 }

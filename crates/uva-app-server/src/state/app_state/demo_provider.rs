@@ -113,23 +113,31 @@ impl ModelProvider for DemoEchoProvider {
         request: CompletionRequest,
         _cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         let text = echo_text(&request);
-        on_delta(StreamChunk::Content(ContentPart::Text(TextContent {
-            text: text.clone(),
-            cache_control: None,
-        })));
-        on_delta(StreamChunk::IsDone {
-            result: Box::new(SamplingResult {
+        let chunks = [
+            StreamChunk::Content(ContentPart::Text(TextContent {
                 text: text.clone(),
-                tool_calls: Vec::new(),
-                reasoning: String::new(),
-                reasoning_signature: None,
-                usage: TokenUsage::default(),
-                ..Default::default()
-            }),
-        });
-        Ok(response(text))
+                cache_control: None,
+            })),
+            StreamChunk::IsDone {
+                result: Box::new(SamplingResult {
+                    text,
+                    tool_calls: Vec::new(),
+                    reasoning: String::new(),
+                    reasoning_signature: None,
+                    usage: TokenUsage::default(),
+                    ..Default::default()
+                }),
+            },
+        ];
+        let mut assembler = uva::provider::BlockAssembler::new();
+        for chunk in chunks {
+            assembler.push(chunk.clone());
+            on_delta(chunk);
+        }
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 
@@ -179,10 +187,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            response.content.extract_text().as_deref(),
-            Some("demo echo: ping")
-        );
+        assert_eq!(response.text, "demo echo: ping");
         assert_eq!(
             seen.lock().unwrap().len(),
             2,

@@ -8,11 +8,11 @@
 //! the per-row operations. Adding a domain means adding an entry to
 //! [`DOMAINS`], never a new screen.
 //!
-//! **The method names are the server registry's names.** Every string
-//! in this file must be greppable in
-//! `crates/uva-app-server/src/rpc/methods/**` (`router.register`).
-//! [`KNOWN_METHODS`] is the client-side copy of that registry; the
-//! tests assert every declared method is in it.
+//! **The method names are the server's own.** Every method this table
+//! names is the server's constant
+//! ([`uva_app_server::rpc::methods::names`]) — the terminal keeps no
+//! copy of the registry, so a method it calls cannot be misspelled and
+//! a method the server adds needs nothing here.
 //!
 //! Two facts from the server wire shape drove the field list:
 //!
@@ -24,16 +24,36 @@
 //!   (`models/list` → `{"models": […]}`, `ui/schema` →
 //!   `{"schemas": […]}`), so [`DomainSpec::rows_pointer`] names
 //!   where the row array is.
+//!
+//! The envelope itself is the server's: the domains that answer
+//! `List<T>` are read through that type ([`decode_list`]), so the
+//! rows, the cursor and the total are the server's members rather
+//! than a second reading of them here. An envelope that does not
+//! decode is **reported** — a drifted shape says so on the status
+//! line instead of passing for a domain that holds no rows.
 
 use serde_json::{Map, Value, json};
+use uva_app_server::{api::List, rpc::methods::names};
 
-/// The default page size a list request asks for. The server's own
-/// default is 20 and its ceiling is 100 (`api/v1/page_query.rs`).
-const PAGE_LIMIT: u16 = 50;
+/// The page size a list request asks for: the server's own default.
+///
+/// The number is the server's (`api/v1/page_query.rs`), referenced
+/// rather than copied — the terminal asks for the size the server
+/// would use anyway, so it cannot name a page size the server never
+/// published.
+const PAGE_LIMIT: u64 = uva_app_server::api::v1::DEFAULT_LIMIT;
 
-/// A query-shaped listing (search) pages at the server's default
-/// instead, so one keystroke does not fan out across every domain.
-const QUERY_PAGE_LIMIT: u16 = 20;
+/// The hit cap a query-shaped listing (search) asks for: the search
+/// route's own default (`routes/search.rs`), not the list envelope's
+/// — the two endpoints page independently, and one keystroke should
+/// not fan out across every domain.
+const QUERY_PAGE_LIMIT: usize = uva_app_server::routes::search::DEFAULT_LIMIT;
+
+/// The row array of the server's `List<T>` envelope.
+///
+/// The cursor-paginated domains answer that envelope; the two bespoke
+/// ones (`models/list`, `ui/schema`) answer their own shape.
+const LIST_ROWS_POINTER: &str = "/data";
 
 /// One column: the header label, the row pointer that fills it
 /// (serde_json pointer syntax) and a suggested width.
@@ -84,9 +104,6 @@ pub struct DomainSpec {
     pub list_method: &'static str,
     /// Where the row array sits in the list response.
     pub rows_pointer: &'static str,
-    /// Where the next-page cursor sits (`""` when the response has
-    /// none).
-    pub next_cursor_pointer: &'static str,
     /// The registered detail method, when the domain has one.
     pub get_method: Option<&'static str>,
     /// The params key the detail method takes its id under.
@@ -112,10 +129,9 @@ pub struct DomainSpec {
 pub const DOMAINS: &[DomainSpec] = &[
     DomainSpec {
         label: "会话",
-        list_method: "sessions/list",
+        list_method: names::SESSIONS_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("sessions/get"),
+        get_method: Some(names::SESSIONS_GET),
         get_id_key: "id",
         id_pointer: "/id",
         enter: EnterOp::Follow,
@@ -146,49 +162,49 @@ pub const DOMAINS: &[DomainSpec] = &[
             // `{"id"}`, `sessions/usage` takes `{"session_id"}`.
             Op {
                 label: "详情",
-                method: "sessions/get",
+                method: names::SESSIONS_GET,
                 id_key: "id",
                 confirm: false,
             },
             Op {
                 label: "用量",
-                method: "sessions/usage",
+                method: names::SESSIONS_USAGE,
                 id_key: "session_id",
                 confirm: false,
             },
             Op {
                 label: "运行状态",
-                method: "sessions/status",
+                method: names::SESSIONS_STATUS,
                 id_key: "id",
                 confirm: false,
             },
             Op {
                 label: "导出",
-                method: "sessions/export",
+                method: names::SESSIONS_EXPORT,
                 id_key: "id",
                 confirm: false,
             },
             Op {
                 label: "fork",
-                method: "sessions/fork",
+                method: names::SESSIONS_FORK,
                 id_key: "id",
                 confirm: true,
             },
             Op {
                 label: "resume",
-                method: "sessions/resume",
+                method: names::SESSIONS_RESUME,
                 id_key: "session_id",
                 confirm: true,
             },
             Op {
                 label: "压缩",
-                method: "sessions/compact",
+                method: names::SESSIONS_COMPACT,
                 id_key: "session_id",
                 confirm: true,
             },
             Op {
                 label: "删除",
-                method: "sessions/delete",
+                method: names::SESSIONS_DELETE,
                 id_key: "id",
                 confirm: true,
             },
@@ -197,10 +213,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "智能体",
-        list_method: "agents/list",
+        list_method: names::AGENTS_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("agents/get"),
+        get_method: Some(names::AGENTS_GET),
         get_id_key: "name",
         id_pointer: "/name",
         enter: EnterOp::Detail,
@@ -223,7 +238,7 @@ pub const DOMAINS: &[DomainSpec] = &[
         ],
         ops: &[Op {
             label: "删除",
-            method: "agents/delete",
+            method: names::AGENTS_DELETE,
             id_key: "name",
             confirm: true,
         }],
@@ -231,10 +246,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "技能",
-        list_method: "skills/list",
+        list_method: names::SKILLS_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("skills/get"),
+        get_method: Some(names::SKILLS_GET),
         get_id_key: "name",
         id_pointer: "/name",
         enter: EnterOp::Detail,
@@ -253,14 +267,14 @@ pub const DOMAINS: &[DomainSpec] = &[
         ops: &[
             Op {
                 label: "删除",
-                method: "skills/delete",
+                method: names::SKILLS_DELETE,
                 id_key: "name",
                 confirm: true,
             },
             // Domain-level: no target id, so it runs with `{}`.
             Op {
                 label: "重载",
-                method: "skills/reload",
+                method: names::SKILLS_RELOAD,
                 id_key: "",
                 confirm: true,
             },
@@ -269,10 +283,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "工具",
-        list_method: "tools/list",
+        list_method: names::TOOLS_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("tools/get"),
+        get_method: Some(names::TOOLS_GET),
         get_id_key: "name",
         id_pointer: "/name",
         enter: EnterOp::Detail,
@@ -290,7 +303,7 @@ pub const DOMAINS: &[DomainSpec] = &[
         ],
         ops: &[Op {
             label: "注销",
-            method: "tools/unregister",
+            method: names::TOOLS_UNREGISTER,
             id_key: "name",
             confirm: true,
         }],
@@ -298,10 +311,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "任务",
-        list_method: "tasks/list",
+        list_method: names::TASKS_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("tasks/get"),
+        get_method: Some(names::TASKS_GET),
         get_id_key: "id",
         id_pointer: "/id",
         enter: EnterOp::Detail,
@@ -333,10 +345,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "计划",
-        list_method: "schedules/list",
+        list_method: names::SCHEDULES_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("schedules/get"),
+        get_method: Some(names::SCHEDULES_GET),
         get_id_key: "id",
         id_pointer: "/id",
         enter: EnterOp::Detail,
@@ -365,13 +376,13 @@ pub const DOMAINS: &[DomainSpec] = &[
         ops: &[
             Op {
                 label: "触发",
-                method: "schedules/tick",
+                method: names::SCHEDULES_TICK,
                 id_key: "id",
                 confirm: true,
             },
             Op {
                 label: "删除",
-                method: "schedules/delete",
+                method: names::SCHEDULES_DELETE,
                 id_key: "id",
                 confirm: true,
             },
@@ -380,10 +391,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "评测",
-        list_method: "evals/list",
+        list_method: names::EVALS_LIST,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
-        get_method: Some("evals/get"),
+        get_method: Some(names::EVALS_GET),
         get_id_key: "name",
         id_pointer: "/name",
         enter: EnterOp::Detail,
@@ -403,13 +413,13 @@ pub const DOMAINS: &[DomainSpec] = &[
         ops: &[
             Op {
                 label: "运行",
-                method: "evals/run",
+                method: names::EVALS_RUN,
                 id_key: "name",
                 confirm: true,
             },
             Op {
                 label: "删除",
-                method: "evals/delete",
+                method: names::EVALS_DELETE,
                 id_key: "name",
                 confirm: true,
             },
@@ -418,9 +428,8 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "模型",
-        list_method: "models/list",
+        list_method: names::MODELS_LIST,
         rows_pointer: "/models",
-        next_cursor_pointer: "",
         get_method: None,
         get_id_key: "",
         id_pointer: "/model",
@@ -447,9 +456,8 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "搜索",
-        list_method: "search/all",
+        list_method: names::SEARCH_ALL,
         rows_pointer: "/data",
-        next_cursor_pointer: "/next_cursor",
         get_method: None,
         get_id_key: "",
         id_pointer: "/id",
@@ -481,10 +489,9 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
     DomainSpec {
         label: "UI",
-        list_method: "ui/schema",
+        list_method: names::UI_SCHEMA,
         // `UiSchemaResponse { schemas }`.
         rows_pointer: "/schemas",
-        next_cursor_pointer: "",
         get_method: None,
         get_id_key: "",
         id_pointer: "/slot",
@@ -506,88 +513,6 @@ pub const DOMAINS: &[DomainSpec] = &[
     },
 ];
 
-/// Every method name the server registers, as one static list.
-///
-/// This is the client-side copy of
-/// `crates/uva-app-server/src/rpc/methods/**`'s
-/// `router.register` calls (64 names). [`DOMAINS`] may only reference
-/// names in here — the test asserts that — and the `:json` gate
-/// resolves a typed method name against it before falling back to a
-/// leaked string.
-pub const KNOWN_METHODS: &[&str] = &[
-    // chat
-    "chat/session/create",
-    "chat/message/send",
-    "chat/cancel",
-    "chat/regenerate",
-    "chat/feedback",
-    "chat/usage",
-    "chat/operation",
-    // agents / skills / tools
-    "agents/list",
-    "agents/create",
-    "agents/default",
-    "agents/get",
-    "agents/delete",
-    "skills/list",
-    "skills/create",
-    "skills/reload",
-    "skills/get",
-    "skills/delete",
-    "tools/list",
-    "tools/register",
-    "tools/get",
-    "tools/unregister",
-    // automation
-    "schedules/list",
-    "schedules/create",
-    "schedules/get",
-    "schedules/patch",
-    "schedules/delete",
-    "schedules/tick",
-    "tasks/list",
-    "tasks/get",
-    "evals/list",
-    "evals/create",
-    "evals/get",
-    "evals/delete",
-    "evals/run",
-    // sessions
-    "sessions/list",
-    "sessions/get",
-    "sessions/delete",
-    "sessions/export",
-    "sessions/fork",
-    "sessions/events",
-    "sessions/status",
-    "sessions/follow",
-    "session/unfollow",
-    "sessions/resume",
-    "approval/respond",
-    "sessions/compact",
-    "sessions/usage",
-    "sessions/search",
-    // misc
-    "health/ping",
-    "health/version",
-    "health/livez",
-    "health/readyz",
-    "models/list",
-    "ui/schema",
-    "anthropic/messages",
-    "search/all",
-    "attachments/create",
-    "attachments/get",
-    "attachments/delete",
-    // profile (the settings surface's write path; the terminal reaches
-    // it through the `:json` gate, which whitelists this copy)
-    "profile/list",
-    "profile/get",
-    "profile/set",
-    "profile/create",
-    "profile/delete",
-];
-
 impl DomainSpec {
     /// The domain whose list method is `method`.
     #[must_use]
@@ -607,6 +532,17 @@ impl DomainSpec {
         self.ops.iter().find(|op| op.label == label)
     }
 
+    /// Whether the domain answers the server's `List<T>` envelope.
+    ///
+    /// The cursor-paginated domains do: their rows sit in the
+    /// envelope's `data`, and the cursor and the total are the
+    /// envelope's members. The two bespoke ones (`models/list`,
+    /// `ui/schema`) answer their own shape — rows, and nothing else.
+    #[must_use]
+    pub fn answers_list_envelope(&self) -> bool {
+        self.rows_pointer == LIST_ROWS_POINTER
+    }
+
     /// The `list` params: the page limit, the next-page cursor passed
     /// through untouched (the server's cursor is an opaque base64
     /// token), and the query when the domain needs one.
@@ -617,16 +553,19 @@ impl DomainSpec {
         query: Option<&str>,
     ) -> Value {
         let mut params = Map::new();
-        // Only cursor-paginated domains take a limit; the bespoke
-        // envelopes (models / ui) answer whole and ignore paging
-        // params.
-        if !self.next_cursor_pointer.is_empty() {
+        // Only the domains that answer the server's `List<T>`
+        // envelope take a limit; the bespoke envelopes (models / ui)
+        // answer whole and ignore paging params.
+        if self.answers_list_envelope() {
+            // Each endpoint's own default: the cursor-paginated
+            // envelope pages at `api/v1`'s, the search at the search
+            // route's — two owners, two numbers.
             let limit = if self.query_key.is_some() {
-                QUERY_PAGE_LIMIT
+                json!(QUERY_PAGE_LIMIT)
             } else {
-                PAGE_LIMIT
+                json!(PAGE_LIMIT)
             };
-            params.insert("limit".to_string(), json!(limit));
+            params.insert("limit".to_string(), limit);
         }
         if let Some(cursor) = cursor {
             params.insert("cursor".to_string(), json!(cursor));
@@ -651,8 +590,9 @@ impl DomainSpec {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ListPage {
     /// The row array the spec's pointer selected (empty when the
-    /// pointer missed — a changed server shape degrades to an empty
-    /// table, never a panic).
+    /// pointer missed — the bespoke envelopes degrade to an empty
+    /// table, never a panic; the `List<T>` domains report their
+    /// decode failure instead of degrading).
     pub rows: Vec<Value>,
     /// The next-page cursor, when the response carried one.
     pub next_cursor: Option<String>,
@@ -662,28 +602,43 @@ pub struct ListPage {
 }
 
 /// Take one page out of a list response through the spec's pointers.
-#[must_use]
-pub fn decode_list(value: &Value, spec: &DomainSpec) -> ListPage {
-    let rows = value
-        .pointer(spec.rows_pointer)
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let next_cursor = if spec.next_cursor_pointer.is_empty() {
-        None
-    } else {
-        value
-            .pointer(spec.next_cursor_pointer)
-            .and_then(Value::as_str)
-            .filter(|cursor| !cursor.is_empty())
-            .map(str::to_string)
-    };
-    let total = value.get("total").and_then(Value::as_u64);
-    ListPage {
-        rows,
-        next_cursor,
-        total,
+///
+/// The cursor-paginated domains answer the server's `List<T>`
+/// envelope: the rows, the cursor and the total are that type's
+/// members, so the page is read through it — not through a second,
+/// hand-written reading of the same envelope. An envelope that does
+/// not decode is **reported**: a renamed member is a fact about the
+/// server, and a table that silently shows no rows hides it.
+///
+/// The two bespoke envelopes (`models/list`, `ui/schema`) answer
+/// their own shape, and the page they carry has neither a cursor nor
+/// a total; their rows are read through the spec's pointer.
+///
+/// # Errors
+///
+/// Returns the decode error when the domain answers the `List<T>`
+/// envelope and the answer does not decode as one.
+pub fn decode_list(
+    value: &Value,
+    spec: &DomainSpec,
+) -> Result<ListPage, serde_json::Error> {
+    if spec.answers_list_envelope() {
+        let list: List<Value> = serde_json::from_value(value.clone())?;
+        return Ok(ListPage {
+            rows: list.data,
+            next_cursor: list.next_cursor,
+            total: list.total,
+        });
     }
+    Ok(ListPage {
+        rows: value
+            .pointer(spec.rows_pointer)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        next_cursor: None,
+        total: None,
+    })
 }
 
 /// One cell's text: strings as-is, numbers and booleans rendered,

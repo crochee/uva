@@ -23,9 +23,9 @@ uva-core.workspace = true
 # this does not pull a runtime into the harness.
 uva-kernel.workspace = true
 # The interception contract (the Hook/Gate/transformer traits, the
-# seven mount-point keys, the decoupled HookContext and HookPayload)
-# the seam layer dispatches through; the harness re-exports every
-# name, so the frozen paths do not move (ADR 0004).
+# twelve mount points, the decoupled HookContext and the registry) the
+# seam layer dispatches through; the harness re-exports the trait and
+# context names, so the frozen paths do not move (ADR 0004, ADR 0028).
 uva-hook.workspace = true
 uva-provider.workspace = true
 uva-context.workspace = true
@@ -47,8 +47,12 @@ uva-events.workspace = true
 # and the `agent`/`input`/`prompt` modules re-export it, so the frozen
 # surface keeps its paths.
 uva-agent.workspace = true
-# The loop names `SpanKind` in its tracing spans.
-uva-telemetry = { workspace = true, default-features = false }
+# The loop names `SpanKind` in its tracing spans, and its tool
+# dispatch feeds the Prometheus tool counters (`metrics`). The
+# OTLP exporter stays off: the harness links no transport.
+uva-telemetry = { workspace = true, default-features = false, features = [
+  "metrics",
+] }
 
 chrono.workspace = true
 serde.workspace = true

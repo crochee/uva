@@ -110,7 +110,12 @@ pub struct CreateSessionRequest {
     pub agent_name: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+/// The answer to `chat/session/create`.
+///
+/// The type is the wire contract's owner: a client decodes the answer
+/// into this very type, so the shape the server publishes and the
+/// shape a client reads cannot drift apart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionResponse {
     pub session_id: String,
     pub agent_name: Option<String>,
@@ -142,6 +147,22 @@ pub enum Delivery {
     /// Injected into the live run; it reaches the model at that run's
     /// next step boundary and never rewrites the request in flight.
     Steer,
+}
+
+impl Delivery {
+    /// The wire spelling of the delivery — the variant name the
+    /// `snake_case` derivation writes.
+    ///
+    /// The hand-written mirror of that derivation, the pattern the
+    /// session status and the row vocabulary use: a client that shows
+    /// the delivery reads this, so the spelling has one owner.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Steer => "steer",
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, validator::Validate)]
@@ -194,7 +215,7 @@ pub struct WireAttachment {
     pub attachment_hash: Option<String>,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SendMessageResponse {
     pub message_id: String,
     /// `true` when the turn waits for the session's next run.
@@ -247,7 +268,7 @@ pub async fn create_session(
     validate_resource_name(&session_id)?;
     let agent_name = state.resolve_agent_name_for(req.agent_name.as_deref());
     state
-        .get_or_create_session_controller(&user_id, &session_id)
+        .create_on_demand_session_controller(&user_id, &session_id)
         .await?;
     Ok(CreateSessionResponse {
         session_id,
@@ -380,7 +401,7 @@ async fn steer_session_op(
     validate_resource_name(session_id)?;
     let user_id = resolve_user_id(state);
     let controller = state
-        .get_or_create_session_controller(&user_id, session_id)
+        .create_on_demand_session_controller(&user_id, session_id)
         .await?;
     let delivery = controller
         .steer(content, provider)
@@ -434,7 +455,7 @@ async fn submit_session_op(
     validate_resource_name(session_id)?;
     let user_id = resolve_user_id(state);
     let controller = state
-        .get_or_create_session_controller(&user_id, session_id)
+        .create_on_demand_session_controller(&user_id, session_id)
         .await?;
     controller
         .submit_durable_with_provider(op, provider)
@@ -500,7 +521,7 @@ pub async fn cancel_session(
     validate_resource_name(&session_id)?;
     let user_id = resolve_user_id(&state);
     let controller = state
-        .get_or_create_session_controller(&user_id, &session_id)
+        .create_on_demand_session_controller(&user_id, &session_id)
         .await?;
     controller
         .submit(SessionOp::Cancel { reason: None })
@@ -519,20 +540,16 @@ pub async fn regenerate(
 ) -> Result<(), RpcError> {
     validate_resource_name(&session_id)?;
     let user_id = resolve_user_id(&state);
-    // Recover the turn BEFORE resolving the controller.
-    // `get_or_create_session_controller` eagerly creates the session
-    // when it is unknown, so resolving first would make a miss —
-    // the one case that must not have side effects — the very path
-    // that creates a session.
-    //
-    // A miss is also NOT a cancel. `Cancel` is the same op the
-    // `/cancel` route submits, so answering "nothing to replay"
-    // with it would abort the session — a destructive side effect
-    // from a read that simply found no user turn (a log whose
-    // prompt was shadowed by a compaction `Replace`, a session
-    // driven only by programmatic input, or a session created but
-    // never written, whose log file does not exist yet). Report the
-    // miss instead.
+    let controller = state
+        .create_on_demand_session_controller(&user_id, &session_id)
+        .await?;
+    // A miss is NOT a cancel. `Cancel` is the same op the `/cancel`
+    // route submits, so answering "nothing to replay" with it would
+    // abort the session — a destructive side effect from a read that
+    // simply found no user turn (a log whose prompt was shadowed by
+    // a compaction `Replace`, a session driven only by programmatic
+    // input, or a session created but never written, whose log file
+    // does not exist yet). Report the miss instead.
     let Some(parts) =
         read_last_user_turn(&state.session_manager, &user_id, &session_id)
             .await
@@ -542,9 +559,6 @@ pub async fn regenerate(
         )
         .into());
     };
-    let controller = state
-        .get_or_create_session_controller(&user_id, &session_id)
-        .await?;
     let priority = 1u8;
     let agent_name = state.resolve_agent_name_for(None);
     // The `202` promises a queued turn: the rerun's `parked_prompt`
@@ -575,10 +589,12 @@ pub async fn feedback(
     validate_resource_name(&req.session_id)?;
     let session_id = req.session_id;
     let user_id = resolve_user_id(&state);
-    // The target is resolved against the session's OWN log, and the
-    // resolution happens BEFORE the controller is opened: a rating
-    // that names no assistant row is the caller's mistake, and it
-    // must not create the session on the way to being refused.
+    // The target is resolved against the session's OWN log: a
+    // rating is about a row the session wrote, so the log is the
+    // only place the target can be checked against.
+    let controller = state
+        .create_on_demand_session_controller(&user_id, &session_id)
+        .await?;
     let rows = match state
         .session_manager
         .sink(&user_id, &session_id)
@@ -597,9 +613,6 @@ pub async fn feedback(
     };
     let ordinal =
         feedback_target(&rows, &message_id).map_err(feedback_target_unknown)?;
-    let controller = state
-        .get_or_create_session_controller(&user_id, &session_id)
-        .await?;
     // The `204` promises the record: the feedback row is on disk
     // before the answer goes out.
     controller

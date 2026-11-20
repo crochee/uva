@@ -37,11 +37,11 @@ The frozen surface is that set of names, per crate:
 |---|---|
 | `uva-core` | 41 |
 | `uva-context` | 19 |
-| `uva-harness` | 61 |
+| `uva-harness` | 59 |
 | `uva-provider` | 93 |
-| `uva-session` | 137 |
+| `uva-session` | 154 |
 | `uva-steering` | 36 |
-| `uva-tool` | 44 |
+| `uva-tool` | 45 |
 
 The full lists are in [The frozen names](#the-frozen-names) below. Every
 entry is spelled exactly as you would write it after the crate name:
@@ -87,6 +87,49 @@ Be explicit about the other side of the promise:
 
 Signatures evolve under the rule above. The breaking shapes this line
 ships are recorded here, beside the promise they narrow:
+
+- **The streaming call returns the fold's turn** (stream fold, ADR 0029).
+  `ModelProvider::complete_with_stream` returns the fold's
+  `SamplingResult` rather than a `CompletionResponse`, and
+  `SamplingResult::into_completion_response` is **gone**: a
+  non-streaming response is now produced only by `complete`.
+  `StreamChunk` gained two variants — `ReasoningSignature` and
+  `ToolCallName` — and its `Stop` variant is the terminal fact of a stream.
+  No crate-root name moved —
+  `CompletionResponse`, `SamplingResult`, `StreamChunk` and
+  `BlockAssembler` all stay importable from the crate root — so the
+  frozen baseline is unchanged. Migration: a caller that wants a
+  `CompletionResponse` from a stream must fold the chunks with
+  `BlockAssembler` itself, which is what the harness and both adapters
+  already do.
+
+- **`Host` lost its interception registration surface** (interception
+  table, ticket 04 — ADR 0028). `Host::{hook, gate,
+  request_transformer, result_transformer, prompt_section}` are **gone**:
+  the four interception traits and prompt sections now register on the
+  deployment's one `uva_hook::HookRegistry`, and the loop dispatches
+  that single table. The packaging bundle built on those methods left
+  with them — `uva_harness::agent::host::Plugin` (also re-exported as
+  `uva_harness::Plugin`), `Host::install` and
+  `uva_harness::PluginHandle` are **no longer importable** — and
+  `Host::default_policy` now takes the table it writes into:
+  `default_policy(workspace, registry)`. `Host` keeps the typed tables
+  the registry cannot express (`guard`, `hint`, `tracker`,
+  `output_transformer`, `tool`), and `Host::hook_registry()` is the
+  loop's read handle on the table. The *names* `Host`, `Hook`, `Gate`,
+  `RequestTransformer`, `ResultTransformer`, `HookContext`,
+  `Arbitration` and `Registration` stay on the frozen list and their
+  import paths do not move; `Plugin` and `PluginHandle` leave it, so the
+  `uva-harness` count moves 61 → 59. Migration: build one
+  `HookRegistry` at boot (or read the one a host carries), register
+  with `register_hook_at` / `register_gate_at` /
+  `register_request_transformer_at` / `register_result_transformer_at`
+  / `register_prompt_section` under a `MountPoint` and a
+  `RegistrationOrigin`, and drop the returned `HookRegistration` to
+  withdraw it. The five observation points (`before_run`, `after_run`,
+  `before_provider_call`, `on_error`, `on_compaction`) are now
+  registrable from an out-of-tree crate that depends only on
+  `uva-hook`.
 
 - **Three names left the curated surface** (plugin-crate splits, ticket
   10 — the delegation channel's retirement). `DelegatingTool` (the
@@ -232,6 +275,78 @@ ships are recorded here, beside the promise they narrow:
   be able to *name* a legacy row to restore it; only its publication
   stopped.
 
+- **The row's payload shape moved into its constructors** (row payload
+  shape, ADR 0021). Two shapes changed on the curated `uva-session`
+  surface:
+
+  - `turn_end` gained a third parameter, the optional failure detail
+    (`Option<&str>`): a failed turn's message is part of the row, so
+    the constructor writes the payload and the typed fields in one
+    place and no caller patches the payload after the fact. The
+    *name* `turn_end` stays on the frozen list and its import path
+    does not move.
+  - `SessionEvent::plugin` — the associated constructor a plugin's
+    own row used to be built through — is **gone**. Plugin rows are
+    built by `plugin_row` instead, which joined the curated surface
+    with the same signature and the same payload bounding. The *name*
+    `SessionEvent` stays on the frozen list and its import path does
+    not move.
+
+  `compaction_start`, `compaction_summary`, `compaction_row`,
+  `compaction_end_committed`, `compaction_end_failed` and `plugin_row`
+  joined the curated surface (152 → 153 names), and `STEP_INTERRUPTED`
+  — the `action` the crash repair writes into the step-end row it
+  closes an interrupted turn with — joined it with this change
+  (153 → 154), so an out-of-tree reader can match the value it reads
+  off the wire by its crate-root name.
+
+- **The server's wire types grew** (TUI wire shapes, ADR 0025). The
+  **seven frozen crates are untouched by this line** — what follows is
+  the *server* crate's public surface, recorded here because the
+  terminal now reads these very types as its wire contract: the
+  terminal keeps no copy of them, so the shape both ends decode is
+  one shape.
+
+  - **Added** — the `rpc::methods::names` module (64 `pub const`
+    method names plus `pub const ALL`), and
+    `rpc::notify::ApprovalRequestNotification` (with its `request()`
+    accessor).
+  - **Added (public methods)** — `routes::chat::Delivery::as_wire` and
+    `routes::ui::UiSchemaResponse::components_in`.
+  - **Visibility widened** — `routes::search::DEFAULT_LIMIT` is now
+    `pub`: the terminal asks for the search route's own page size.
+  - **Signature changed** — `routes::follow::FollowEvent::payload()`
+    returns `Result<Value, serde_json::Error>` instead of `Value`, and
+    lost its `#[must_use]`.
+  - **Field type changed** — `session::controller::LiveToolCall::status`
+    is a `String` instead of a `&'static str`.
+  - **New `Deserialize` derives** — `routes::follow::{SessionHeader,
+    ContextMeter, FollowSnapshot, FollowEvent}`,
+    `routes::chat::{CreateSessionResponse, SendMessageResponse,
+    WireAttachment}`, `routes::sessions::SessionSummary`,
+    `session::status::SessionStatus`, `ui::schema::{UiSchema,
+    UiComponent}` and `ui::tree::SlotInfo`.
+
+  **The wire bytes do not change**: `LiveToolCall::status` is a
+  Rust-side type change (`&'static str` → `String`) that serializes to
+  the same string. What changed is whether a client can decode the
+  frame back — that is the whole point of the line.
+
+- **`uva_core::paginate_registry_list` takes the row's key**
+  (list recipe, ADR 0027). The primitive used to require
+  `T: RegistryItem` for one thing only — `item.name()`, the value the
+  cursor encodes and resumes after. It now takes `id_of: impl Fn(&T)
+  -> &str` and has no bound on `T`, so a list whose rows are wire types
+  with no registry metadata (a session summary, a schedule row) uses
+  the same slicing arithmetic instead of carrying a second copy. The
+  two production registries pass `|entry| entry.name()`; the cursor,
+  `next_cursor`, `total` and the deleted-cursor empty page are
+  unchanged. The *name* `paginate_registry_list` stays on the frozen
+  list, spelled and importable exactly as before; the `uva-core` count
+  does not move. Adding the argument is a call-site edit at three
+  places (the agent registry, the tool registry, one in-crate mock),
+  all inside this workspace.
+
 ## How long the promise runs
 
 The workspace is on the `0.1` line. **Every name listed below is
@@ -350,10 +465,11 @@ The context-window policy and the three-tier memory paradigm.
 `NoopContextManager`, `SharedContextManager`, `TruncatingContextManager`, `UsageMeter`
 
 
-### uva-harness — 61 names
+### uva-harness — 59 names
 
-The agent loop: strategies, approval/resume, checkpoints, host
-hooks, events, and the loop's own contract.
+The agent loop: strategies, approval/resume, checkpoints, the host's
+typed policy tables and its one interception registry, events, and the
+loop's own contract.
 
 
 `Agent`, `AgentCaps`, `AgentDescriptor`, `AgentEntry`, `AgentEvent`
@@ -362,7 +478,7 @@ hooks, events, and the loop's own contract.
 `ChannelInbox`, `DEFAULT_MAX_ITERATIONS`, `DEFAULT_SYSTEM_PROMPT`
 `Diagnostic`, `DiagnosticKind`, `EventSink`, `EventStream`, `Gate`
 `GrantKey`, `GrantScope`, `Hook`, `HookContext`, `Host`
-`KEY_APPROVAL`, `Plugin`, `PluginHandle`, `PromptContext`, `PromptSection`
+`KEY_APPROVAL`, `PromptContext`, `PromptSection`
 `ReActAgent`, `ReActStrategy`, `ReasoningStrategy`, `Registration`, `RequestTransformer`
 `ResultTransformer`, `ResumeCoverageError`, `ResumeDecision`, `ResumeStatus`, `ResumeToken`
 `RiskOf`, `RunInbox`, `SessionEndReason`, `StrategyRegistry`, `SubagentWriters`
@@ -398,7 +514,7 @@ types, credentials, retry classification, cache policy, JSON repair.
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
 
-### uva-session — 147 names
+### uva-session — 154 names
 
 The durable ledger: JSONL sink and version header, events, the row
 vocabulary (tags, dialects, the restore to the current row, borrowed
@@ -419,23 +535,24 @@ RowDialect, RowTag, Rows, SearchError, SearchQuery
 SessionEndReason, SessionError, SessionEvent, SessionHit, SessionLog
 SessionMetadataHeader, SessionSearch, SessionSink, SessionSnapshot, SessionStoreConfig
 SessionStorePlugin, SharedSessionSearch, SharedSurfaceLedger, SnapshotBus, SnapshotReceiver
-SummaryCompactor, SurfaceLedger, SurfaceOp, SurfaceRole, SurfaceToken
-TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, TURN_INTERRUPTED, TokenBudget, TokenMeasurement
-TokenMeter, TokenMeterError, TouchedPair, UnbalancedCut, UnreadableLog
-UsageBuckets, ValidationError, approval_asked, approval_decided, approval_granted
-assemble_chunks, assistant_message, balanced_cut_at_or_before, balanced_message_cut, begin_compaction
-build_balance_cache, compaction_balanced, compaction_outcomes, derive_history, estimate_message_tokens
-feedback, finish_compaction, fold_log_surface, fold_surface, hook_block
-interrupted_turn_closers, is_metadata_header_row, iteration_end, iteration_start, jsonl_session_search
-log_tail_seq, message_row, modified_at, orphaned_compactions, park_consumed
-parked_prompt, parked_prompts, plan_compaction, plan_compaction_from_rows, prune_tool_results
-publish_row, publish_rows, repair_log, request_header, request_snapshot
-restore_row, round_trip, session_shutdown, should_compact, step_end
-step_end_suspended, step_start, structural_kind, subagent_enter, subagent_exit
-surface_message, surface_to_messages, tool_dispatch, tool_output, tool_result
-tool_result_transformed, touched_target, try_fold_log_surface, turn_end, turn_end_suspended
-turn_prompt_row, turn_start, turn_suspended, usage, user_message
-validate_replace_with_balance, warning
+STEP_INTERRUPTED, SummaryCompactor, SurfaceLedger, SurfaceOp, SurfaceRole
+SurfaceToken, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, TURN_INTERRUPTED, TokenBudget
+TokenMeasurement, TokenMeter, TokenMeterError, TouchedPair, UnbalancedCut
+UnreadableLog, UsageBuckets, ValidationError, approval_asked, approval_decided
+approval_granted, assemble_chunks, assistant_message, balanced_cut_at_or_before, balanced_message_cut
+begin_compaction, build_balance_cache, compaction_balanced, compaction_end_committed, compaction_end_failed
+compaction_outcomes, compaction_row, compaction_start, compaction_summary, derive_history
+estimate_message_tokens, feedback, finish_compaction, fold_log_surface, fold_surface
+hook_block, interrupted_turn_closers, is_metadata_header_row, iteration_end, iteration_start
+jsonl_session_search, log_tail_seq, message_row, modified_at, orphaned_compactions
+park_consumed, parked_prompt, parked_prompts, plan_compaction, plan_compaction_from_rows
+plugin_row, prune_tool_results, publish_row, publish_rows, repair_log
+request_header, request_snapshot, restore_row, round_trip, session_shutdown
+should_compact, step_end, step_end_suspended, step_start, structural_kind
+subagent_enter, subagent_exit, surface_message, surface_to_messages, tool_dispatch
+tool_output, tool_result, tool_result_transformed, touched_target, try_fold_log_surface
+turn_end, turn_end_suspended, turn_prompt_row, turn_start, turn_suspended
+usage, user_message, validate_replace_with_balance, warning
 
 
 ### uva-steering — 36 names
@@ -454,7 +571,7 @@ transformers.
 `tool_fingerprint`
 
 
-### uva-tool — 44 names
+### uva-tool — 45 names
 
 The tool paradigm: registry, traits, annotations, restriction, surface
 projection.
@@ -468,4 +585,5 @@ projection.
 `ToolFeatures`, `ToolMetadataSnapshot`, `ToolOutput`, `ToolOutputDefinition`, `ToolProvenance`
 `ToolRegistry`, `ToolRegistryPlugin`, `ToolRestriction`, `ToolSchemaBuilder`, `ToolSurfacePolicy`
 `TruncatedBy`, `Visibility`, `bound_output`, `called_tool_names`, `full_output_tool`
-`is_mcp_self_tool`, `project_tool_definitions`, `signal_of`, `structured_output_tool`
+`is_mcp_self_tool`, `project_tool_definitions`, `register_tool_entries`, `signal_of`
+`structured_output_tool`

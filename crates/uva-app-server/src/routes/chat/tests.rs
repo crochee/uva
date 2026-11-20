@@ -515,3 +515,144 @@ mod feedback_target_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The create_on_demand policy the chat surface asks for by name
+// ---------------------------------------------------------------------------
+
+mod create_on_demand_tests {
+    use std::sync::Arc;
+
+    use uva::session::manager::SessionRegistry;
+
+    use super::{CreateSessionRequest, create_session, regenerate};
+    use crate::state::AppState;
+
+    /// A chat state with no session opened in it yet.
+    async fn chat_state() -> (Arc<AppState>, tempfile::TempDir, String) {
+        let temp = tempfile::TempDir::new().expect("a temp workspace");
+        let registry = SessionRegistry::new(temp.path().to_path_buf());
+        let state = Arc::new(
+            AppState::for_test(registry, temp.path().to_path_buf()).await,
+        );
+        let user = state.default_user_id().to_string();
+        (state, temp, user)
+    }
+
+    /// A session the chat surface is asked to create is durable and
+    /// registered: the directory on disk **and** the registry entry.
+    /// That two-layer side effect is the `create_on_demand` policy's
+    /// contract, pinned here instead of left an accident of the
+    /// resolve path.
+    #[tokio::test]
+    async fn a_session_the_chat_surface_creates_is_durable_and_registered() {
+        let (state, temp, user) = chat_state().await;
+        let answer = create_session(
+            Arc::clone(&state),
+            CreateSessionRequest {
+                session_id: Some("brand-new".to_string()),
+                agent_name: None,
+            },
+        )
+        .await
+        .expect("the session is created");
+        assert_eq!(answer.session_id, "brand-new");
+        assert!(
+            temp.path().join(&user).join("brand-new").is_dir(),
+            "the session's directory is minted on disk"
+        );
+        assert!(
+            state.session_manager.get("brand-new").await.is_some(),
+            "the registry holds the session from now on"
+        );
+    }
+
+    /// Regenerate on an unknown session still answers the miss — the
+    /// not-found that is never a cancel — and the session's
+    /// existence is the policy's business now: the route asks for
+    /// `create_on_demand` by name instead of reading the log first
+    /// to steer around creation.
+    #[tokio::test]
+    async fn regenerate_on_an_unknown_session_leaves_creation_to_the_policy() {
+        let (state, temp, user) = chat_state().await;
+        let error = regenerate(Arc::clone(&state), "never-seen".to_string())
+            .await
+            .expect_err("a session with no user turn is a miss");
+        assert_eq!(error.code, "not_found");
+        assert_eq!(
+            error.message,
+            "not found: no user turn to regenerate in this session",
+            "the miss is reported, never turned into a cancel"
+        );
+        assert!(
+            state.session_manager.get("never-seen").await.is_some(),
+            "the create_on_demand policy minted the registry entry"
+        );
+        assert!(
+            temp.path().join(&user).join("never-seen").is_dir(),
+            "the session's directory was minted by the policy"
+        );
+    }
+
+    /// Two failures can sit on one regenerate — a log whose schema
+    /// version this build does not read, and no user turn to replay
+    /// — and the policy decides which answer wins: the controller
+    /// is opened **before** the log is read for the turn, so the
+    /// schema refusal is the answer, not the no-user-turn 404 the
+    /// read-first patch used to give. The new priority is the more
+    /// honest one: "this build cannot open the log" is a fact
+    /// about the session, while "no user turn" would be a claim
+    /// about a log this build cannot even read.
+    #[tokio::test]
+    async fn an_unopenable_log_outranks_the_missing_user_turn_on_regenerate() {
+        let (state, temp, user) = chat_state().await;
+        // A log from a newer build: the header names a schema
+        // version this build refuses to read, and it holds no user
+        // turn — both failures present at once.
+        let dir = temp.path().join(&user).join("from-the-future");
+        std::fs::create_dir_all(&dir).expect("the session's directory");
+        std::fs::write(
+            dir.join("events.jsonl"),
+            "{\"_meta\":{\"kind\":\"uva_session_meta\",\
+             \"schema_version\":9999,\"id\":\"from-the-future\"}}\n",
+        )
+        .expect("the transcript");
+        let error =
+            regenerate(Arc::clone(&state), "from-the-future".to_string())
+                .await
+                .expect_err("a log this build cannot open is refused");
+        assert_eq!(
+            error.code, "session",
+            "opening the controller comes first; its refusal is the answer"
+        );
+        assert!(
+            error.message.contains("schema version 9999"),
+            "the refusal names the version it found: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("no user turn"),
+            "the schema refusal outranks the no-user-turn miss"
+        );
+    }
+
+    /// The chat surface asks for its policy by name: the default
+    /// resolve path and its creation-avoiding patch are gone from
+    /// the surface's source.
+    #[test]
+    fn the_chat_surface_asks_for_its_policy_by_name() {
+        let source = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/routes/chat.rs");
+        let text = std::fs::read_to_string(&source).expect("readable source");
+        assert!(
+            !text.contains("get_or_create_session_controller"),
+            "the chat surface names the create_on_demand policy, not the \
+             default resolve path"
+        );
+        assert!(
+            !text.contains("eagerly creates"),
+            "the read-the-log-first patch comment is gone; the policy owns \
+             the read-before-create timing"
+        );
+    }
+}

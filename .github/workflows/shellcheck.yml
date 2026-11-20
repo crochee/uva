@@ -53,6 +53,7 @@ jobs:
             ./scripts/check-harness-shape.sh
             ./scripts/check-hook-external.sh
             ./scripts/check-kernel-deps.sh
+            ./scripts/check-list-recipe.sh
             ./scripts/check-plugin-shape.sh
             ./scripts/check-profile-document.sh
             ./scripts/check-pub-surface-strict.sh

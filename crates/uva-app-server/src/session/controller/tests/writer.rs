@@ -19,7 +19,6 @@ use serde_json::{Value, json};
 use uva::{
     harness::AgentEvent,
     provider::{
-        Content,
         ContentPart,
         StreamChunk,
         TextContent,
@@ -219,31 +218,28 @@ impl ModelProvider for ToolThenParkProvider {
         _request: uva::provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn uva::core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<uva::provider::CompletionResponse, uva::core::Error> {
+    ) -> Result<uva::provider::SamplingResult, uva::core::Error> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-            on_delta(StreamChunk::ToolCallStart {
-                id: "c1".to_string(),
-                name: "echo".to_string(),
-                arguments: json!({"text": "proof"}),
-            });
-            on_delta(StreamChunk::ToolCallEnd {
-                id: "c1".to_string(),
-            });
-            on_delta(StreamChunk::IsDone {
-                result: Box::default(),
-            });
-            return Ok(uva::provider::CompletionResponse {
-                id: "resp-1".to_string(),
-                model: "fake".to_string(),
-                content: Content::Single(ContentPart::Text(TextContent {
-                    text: String::new(),
-                    cache_control: None,
-                })),
-                usage: uva::provider::TokenUsage::default(),
-                cached: false,
-                replay_state: None,
-                stop_reason: None,
-            });
+            let chunks = [
+                StreamChunk::ToolCallStart {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: json!({"text": "proof"}),
+                },
+                StreamChunk::ToolCallEnd {
+                    id: "c1".to_string(),
+                },
+                StreamChunk::IsDone {
+                    result: Box::default(),
+                },
+            ];
+            let mut assembler = uva::provider::BlockAssembler::new();
+            for chunk in chunks {
+                assembler.push(chunk.clone());
+                on_delta(chunk);
+            }
+            let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+            return Ok(turn);
         }
         // The second pass parks: the run never ends, so the tail
         // flush never runs.
@@ -361,7 +357,7 @@ impl ModelProvider for ParkProvider {
         _request: uva::provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn uva::core::CancelToken>>,
         _on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<uva::provider::CompletionResponse, uva::core::Error> {
+    ) -> Result<uva::provider::SamplingResult, uva::core::Error> {
         // The model is being asked. Everything it is about to see is
         // already on disk — the harness flushed the writer at the step
         // boundary, before this call went out.

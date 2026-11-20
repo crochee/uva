@@ -25,11 +25,12 @@
 //!
 //! # A refused registration fails loudly
 //!
-//! [`register_core_entry_with_token`](uva_tool::ToolRegistry::register_core_entry_with_token)
-//! returns `None` when a Core tool already owns the name. `apply` turns
-//! that into a [`PluginError`](uva_kernel::PluginError) naming the tool,
-//! so the mount rolls back rather than shipping a brick whose tool never
-//! appeared.
+//! The lifecycle lives in
+//! [`register_tool_entries`](uva_tool::register_tool_entries): the
+//! registry refuses a name a Core tool already owns, and the helper
+//! turns that into a [`PluginError`](uva_kernel::PluginError) naming
+//! the tool, so the mount rolls back rather than shipping a brick whose
+//! tool never appeared.
 
 use std::sync::Arc;
 
@@ -43,7 +44,13 @@ use uva_kernel::{
     PluginManifest,
     RuntimeKind,
 };
-use uva_tool::{KEY_TOOLS, Tool, ToolEntry, ToolRegistry};
+use uva_tool::{
+    KEY_TOOLS,
+    Tool,
+    ToolEntry,
+    ToolProvenance,
+    register_tool_entries,
+};
 
 use crate::tool::TaskTool;
 
@@ -117,62 +124,22 @@ impl KernelPlugin for TaskToolPlugin {
     }
 
     fn apply(&self, ctx: &Context) -> Result<Vec<EffectHandle>, PluginError> {
-        let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
         let surface = self.tool.control();
         if let Some((spawner, sleeper)) = self.park.clone() {
             surface.set_park_loop(spawner, sleeper);
         }
-        let entries: Vec<(Arc<dyn Tool>, &str)> = vec![
-            (Arc::clone(&self.tool) as Arc<dyn Tool>, "task"),
-            (
-                surface.list_tool() as Arc<dyn Tool>,
-                crate::control::AGENTS_LIST_TOOL_NAME,
-            ),
-            (
-                surface.message_tool() as Arc<dyn Tool>,
-                crate::control::AGENTS_MESSAGE_TOOL_NAME,
-            ),
-            (
-                surface.interrupt_tool() as Arc<dyn Tool>,
-                crate::control::AGENTS_INTERRUPT_TOOL_NAME,
-            ),
+        let entries: Vec<ToolEntry> = vec![
+            ToolEntry::new(Arc::clone(&self.tool) as Arc<dyn Tool>),
+            ToolEntry::new(surface.list_tool() as Arc<dyn Tool>),
+            ToolEntry::new(surface.message_tool() as Arc<dyn Tool>),
+            ToolEntry::new(surface.interrupt_tool() as Arc<dyn Tool>),
         ];
-        let mut tokens: Vec<uva_tool::RegistrationToken> =
-            Vec::with_capacity(entries.len());
-        for (tool, name) in entries {
-            let Some(token) =
-                tools.register_core_entry_with_token(ToolEntry::new(tool))
-            else {
-                // Roll the brick back: a half-mounted control surface
-                // would leave the model with a tool that answers for a
-                // table nobody fills.
-                for token in &tokens {
-                    tools.unregister_by_token(token.clone());
-                }
-                return Err(PluginError::new(format!(
-                    "the `{KEY_TOOLS}` registry refused to register the \
-                     `{name}` tool: a core tool already owns the name `{name}`"
-                )));
-            };
-            tokens.push(token);
-        }
-        let registry = Arc::clone(&tools);
-        let rollback = tokens.clone();
-        let unregister = ctx.effect(TASK_TOOL_EFFECT, move || {
-            for token in &tokens {
-                registry.unregister_by_token(token.clone());
-            }
-            Ok(())
-        });
-        let effect = match unregister {
-            Ok(effect) => effect,
-            Err(error) => {
-                for token in &rollback {
-                    tools.unregister_by_token(token.clone());
-                }
-                return Err(error);
-            }
-        };
+        let effect = register_tool_entries(
+            ctx,
+            entries,
+            ToolProvenance::Core,
+            TASK_TOOL_EFFECT,
+        )?;
         Ok(vec![effect])
     }
 }

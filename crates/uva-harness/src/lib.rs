@@ -62,21 +62,21 @@
 //!
 //! # The two public layers
 //!
-//! The crate root re-exports a curated facade of 61 names. That
+//! The crate root re-exports a curated facade of 59 names. That
 //! facade is the promised surface: depend on it, and a release will
 //! not move your names.
 //!
 //! The crate is public further down too — under `uva_harness::agent::…`,
 //! `uva_harness::events::…` (a re-export of the event vocabulary that
-//! lives in `uva-events`) and `uva_harness::seams::…` (the mount-point
-//! keys re-exported from `uva-hook`), plus the `plugin` module (the
-//! `agentLoop` kernel service) and the `seams` module itself (the
-//! loop's interception keys). The deep paths hold 21 names the facade
-//! does not promise on its own: 22 of the 36 public paths rustdoc
-//! records under `agent` are facade names at their defining path, so
-//! 14 are names the facade does not carry, and the seven mount-point
-//! keys re-exported from `uva-hook` into `seams` are the one
-//! cross-crate deep-only set — 21 in all. The approval vocabulary (the
+//! lives in `uva-events`) and `uva_harness::seams::…` (the loop's seam
+//! layer), plus the `plugin` module (the `agentLoop` kernel service).
+//! The deep paths hold 11 names the facade does not promise on its
+//! own: 17 of the 28 public paths rustdoc records under `agent` are
+//! facade names at their defining path, so 11 are names the facade
+//! does not carry. The seven mount-point keys that used to be the one
+//! cross-crate deep-only set are gone with the string keys they
+//! spelled: ADR 0028 folded them into `uva-hook`'s `MountPoint` enum.
+//! The approval vocabulary (the
 //! old `agent::approval` module, and `Risk` re-exported from
 //! `uva-tool`) moved to `uva-approval`; the event vocabulary moved to
 //! `uva-events`; the agent vocabulary (`Agent`, `AgentInput`, the steer
@@ -122,8 +122,6 @@ pub use crate::{
             Hook,
             HookContext,
             Host,
-            Plugin,
-            PluginHandle,
             PromptSection,
             Registration,
             RequestTransformer,

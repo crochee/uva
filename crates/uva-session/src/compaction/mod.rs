@@ -66,17 +66,19 @@ use uva_provider::{
 
 use crate::{
     SessionError,
-    events::{
-        CompactionLifecycleOutcome,
-        SessionEvent,
-        SurfaceOp,
-        SurfaceToken,
-    },
+    events::{CompactionLifecycleOutcome, SurfaceOp, SurfaceToken},
     history::surface_message,
     log::SessionLog,
     log_surface::try_fold_log_surface,
     surface::FoldError,
     tool_pairing::balanced_cut_at_or_before,
+    typed_event_builders::{
+        compaction_end_committed,
+        compaction_end_failed,
+        compaction_row,
+        compaction_start,
+        compaction_summary,
+    },
 };
 
 /// The placeholder an oversized tool result is replaced with in
@@ -709,17 +711,13 @@ pub async fn begin_compaction(
 ) -> Result<SurfaceToken, SessionError> {
     let token = SurfaceToken::new();
     writer
-        .append_event(&SessionEvent::CompactionStart {
-            seq: 0,
-            ts: String::new(),
-            token: token.to_string(),
-            data: serde_json::json!({
-                "reason": reason,
-                "start": plan.range.start,
-                "end": plan.range.end,
-                "shadowed_token_count": plan.shadowed_tokens,
-            }),
-        })
+        .append_event(&compaction_start(
+            token.as_str(),
+            reason,
+            plan.range.start,
+            plan.range.end,
+            plan.shadowed_tokens,
+        ))
         .await?;
     Ok(token)
 }
@@ -747,59 +745,44 @@ pub async fn finish_compaction(
     let seq = match pass {
         CompactionPass::Committed(outcome) => {
             writer
-                .append_event(&SessionEvent::CompactionSummary {
-                    seq: 0,
-                    ts: String::new(),
-                    token: token.to_string(),
-                    data: serde_json::json!({"summary": outcome.summary}),
-                })
+                .append_event(&compaction_summary(
+                    token.as_str(),
+                    &outcome.summary,
+                ))
                 .await?;
             let seq = writer
-                .append_event(&SessionEvent::Compaction {
-                    seq: 0,
-                    ts: String::new(),
-                    data: serde_json::json!({
-                        "summary": outcome.summary,
-                        "source_indices":
-                            plan.range.clone().collect::<Vec<_>>(),
-                        "shadowed_token_count": plan.shadowed_tokens,
-                        "provider": outcome.provider,
-                        "model": outcome.model,
-                        "usage": outcome.usage,
-                    }),
-                    surface_op: SurfaceOp::Replace {
+                .append_event(&compaction_row(
+                    &outcome.summary,
+                    plan.range.clone().collect::<Vec<_>>(),
+                    plan.shadowed_tokens,
+                    outcome.provider.as_deref(),
+                    outcome.model.as_deref(),
+                    outcome.usage.as_ref(),
+                    SurfaceOp::Replace {
                         start: plan.range.start,
                         end: plan.range.end,
                         source_event_seqs: plan.shadowed_seqs.clone(),
                     },
-                })
+                ))
                 .await?;
             writer
-                .append_event(&SessionEvent::CompactionEnd {
-                    seq: 0,
-                    ts: String::new(),
-                    token: token.to_string(),
-                    outcome: CompactionLifecycleOutcome::Committed
-                        .as_str()
-                        .to_string(),
-                    data: serde_json::json!({
-                        "shadowed_messages": plan.range.len(),
-                        "shadowed_tokens": plan.shadowed_tokens,
-                        "reason": reason,
-                    }),
-                })
+                .append_event(&compaction_end_committed(
+                    token.as_str(),
+                    plan.range.len(),
+                    plan.shadowed_tokens,
+                    reason,
+                ))
                 .await?;
             Some(seq)
         }
         CompactionPass::Failed { error, outcome } => {
             writer
-                .append_event(&SessionEvent::CompactionEnd {
-                    seq: 0,
-                    ts: String::new(),
-                    token: token.to_string(),
-                    outcome: outcome.as_str().to_string(),
-                    data: serde_json::json!({"error": error, "reason": reason}),
-                })
+                .append_event(&compaction_end_failed(
+                    token.as_str(),
+                    outcome,
+                    error,
+                    reason,
+                ))
                 .await?;
             None
         }

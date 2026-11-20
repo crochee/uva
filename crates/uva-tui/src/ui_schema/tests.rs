@@ -1,6 +1,7 @@
 use serde_json::json;
+use uva_app_server::ui::tree::Cardinality;
 
-use super::{Cardinality, UiSchemaResponse};
+use super::{UiSchemaResponse, unplaced_slots};
 
 fn response() -> serde_json::Value {
     json!({
@@ -23,8 +24,10 @@ fn response() -> serde_json::Value {
     })
 }
 
+/// The answer is the server's own type: the terminal decodes it in
+/// place, so the shape it reads is the shape the server publishes.
 #[test]
-fn the_wire_response_deserializes() {
+fn the_wire_response_decodes_into_the_servers_type() {
     let tree: UiSchemaResponse =
         serde_json::from_value(response()).expect("the wire shape parses");
     assert_eq!(tree.slots.len(), 3);
@@ -59,21 +62,23 @@ fn components_in_returns_registration_order() {
 fn unplaced_slots_names_only_unplaced() {
     let tree: UiSchemaResponse =
         serde_json::from_value(response()).expect("the wire shape parses");
-    assert_eq!(tree.unplaced_slots(), vec!["debug.dump".to_owned()]);
+    assert_eq!(unplaced_slots(&tree), vec!["debug.dump".to_owned()]);
 }
 
+/// The answer is the server's type, so it is the server's shape that
+/// counts: an answer missing a member is not an answer this build can
+/// read, and it says so instead of painting half a tree.
 #[test]
-fn a_missing_slots_member_defaults_to_empty() {
-    // An older server sends `schemas` only; the terminal still paints
-    // the components it understands.
-    let tree: UiSchemaResponse = serde_json::from_value(json!({
+fn an_answer_missing_a_member_is_not_readable() {
+    let wire = json!({
         "schemas": [{ "version": 1, "components": [
-            { "slot": "chat.sidebar", "kind": "panel" },
+            { "slot": "chat.sidebar", "kind": "panel", "props": null },
         ] }],
-    }))
-    .expect("a slots-less response parses");
-    assert!(tree.slots.is_empty());
-    assert_eq!(tree.components_in("chat.sidebar").len(), 1);
-    // A component without props answers null rather than failing.
-    assert_eq!(tree.components_in("chat.sidebar")[0].props, json!(null));
+    });
+    let error = serde_json::from_value::<UiSchemaResponse>(wire)
+        .expect_err("the server's shape wants every member");
+    assert!(
+        error.to_string().contains("slots"),
+        "the error names the missing member: {error}"
+    );
 }

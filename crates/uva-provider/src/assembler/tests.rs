@@ -18,6 +18,10 @@ fn reasoning_chunk(s: &str) -> StreamChunk {
     }))
 }
 
+fn signature_chunk(s: &str) -> StreamChunk {
+    StreamChunk::ReasoningSignature(s.to_string())
+}
+
 fn tool_start(id: &str, name: &str, args: serde_json::Value) -> StreamChunk {
     StreamChunk::ToolCallStart {
         id: id.to_string(),
@@ -97,6 +101,105 @@ fn deferred_signature_stamps_only_the_trailing_reasoning_run() {
     );
 }
 
+/// A stream that ends with a stop chunk — and no terminal `IsDone` —
+/// is a finished step, not a truncated one.
+///
+/// The decoders will emit exactly this shape once they stop
+/// constructing whole turns: content, reasoning, then the provider's
+/// stop reason. If the stop chunk only recorded the reason, every such
+/// step would finalize as incomplete.
+#[test]
+fn stop_chunk_finalizes_as_a_complete_turn() {
+    let mut a = BlockAssembler::new();
+    a.push(reasoning_chunk("weighing it up"));
+    a.push(text_chunk("the answer"));
+    a.push(StreamChunk::Stop("end_turn".to_string()));
+
+    let (result, parts, incomplete) = a.finalize_assistant();
+    assert!(!incomplete, "a stop chunk ends the step");
+    assert!(a.is_done());
+    assert_eq!(result.text, "the answer");
+    assert_eq!(result.reasoning, "weighing it up");
+    assert_eq!(result.stop_reason.as_deref(), Some("end_turn"));
+    assert_eq!(parts.len(), 2);
+}
+
+/// A stream that ends with a tool call and a stop chunk is complete
+/// too — the drained tool buffer must not flip the verdict back to
+/// incomplete.
+#[test]
+fn stop_chunk_after_tool_call_finalizes_as_a_complete_turn() {
+    let mut a = BlockAssembler::new();
+    a.push(tool_start("tc1", "shell", serde_json::json!("{}")));
+    a.push(tool_end("tc1"));
+    a.push(StreamChunk::Stop("tool_use".to_string()));
+
+    let (result, _, incomplete) = a.finalize_assistant();
+    assert!(!incomplete);
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.stop_reason.as_deref(), Some("tool_use"));
+}
+
+/// A signature delivered as its own chunk stamps the trailing
+/// contiguous reasoning run, exactly where the terminal chunk's
+/// signature goes today — including the run's edge rule that keeps
+/// an earlier block unsigned.
+#[test]
+fn signature_chunk_stamps_only_the_trailing_reasoning_run() {
+    let mut a = BlockAssembler::new();
+    a.push(reasoning_chunk("block one a"));
+    a.push(reasoning_chunk("block one b"));
+    a.push(text_chunk("answer"));
+    a.push(reasoning_chunk("block two a"));
+    a.push(reasoning_chunk("block two b"));
+    a.push(signature_chunk("sig_for_block_two"));
+    a.push(StreamChunk::Stop("end_turn".to_string()));
+
+    let (result, parts, _) = a.finalize_assistant();
+    let signatures: Vec<(&str, Option<&str>)> = parts
+        .iter()
+        .filter_map(|p| match p {
+            ContentPart::Reasoning(rc) => {
+                Some((rc.text.as_str(), rc.signature.as_deref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        signatures,
+        vec![
+            ("block one a", None),
+            ("block one b", None),
+            ("block two a", Some("sig_for_block_two")),
+            ("block two b", Some("sig_for_block_two")),
+        ],
+    );
+    assert_eq!(
+        result.reasoning_signature.as_deref(),
+        Some("sig_for_block_two")
+    );
+}
+
+/// A signature that arrives with no reasoning text at all is still
+/// retained: a provider may sign a block whose text was never
+/// streamed, and dropping the signature would break continuation.
+#[test]
+fn signature_chunk_without_reasoning_text_is_retained() {
+    let mut a = BlockAssembler::new();
+    a.push(text_chunk("just an answer"));
+    a.push(signature_chunk("sig_without_text"));
+    a.push(StreamChunk::Stop("end_turn".to_string()));
+
+    let (result, parts, incomplete) = a.finalize_assistant();
+    assert!(!incomplete);
+    assert_eq!(
+        result.reasoning_signature.as_deref(),
+        Some("sig_without_text")
+    );
+    assert_eq!(parts.len(), 1);
+    assert!(matches!(parts[0], ContentPart::Text(_)));
+}
+
 #[test]
 fn empty_stream_returns_empty_sampling_result() {
     let mut a = BlockAssembler::new();
@@ -147,6 +250,36 @@ fn tool_call_deltas_concatenate_arguments() {
     );
     assert_eq!(parts.len(), 1);
     assert!(matches!(parts[0], ContentPart::ToolUse(_)));
+}
+
+/// A tool name can arrive in a later fragment than the call's start
+/// (OpenAI streams `id` and `function.name` independently). The fold
+/// must patch the open block so the finished turn carries the later
+/// name, without disturbing the accumulated arguments.
+#[test]
+fn tool_call_name_update_reaches_the_finished_turn() {
+    let mut a = BlockAssembler::new();
+    a.push(tool_start("tc1", "unknown", serde_json::json!("")));
+    a.push(tool_delta("tc1", "{\"path\":\""));
+    a.push(tool_delta("tc1", "/tmp/x\"}"));
+    a.push(StreamChunk::ToolCallName {
+        id: "tc1".to_string(),
+        name: "read_file".to_string(),
+    });
+    a.push(tool_end("tc1"));
+    let (result, parts, _) = a.finalize_assistant();
+
+    assert_eq!(result.tool_calls.len(), 1);
+    assert_eq!(result.tool_calls[0].name, "read_file");
+    assert_eq!(
+        result.tool_calls[0].input,
+        serde_json::json!({"path": "/tmp/x"}),
+        "the name update must not touch the arguments"
+    );
+    let ContentPart::ToolUse(tool) = &parts[0] else {
+        panic!("the call is one tool part; got {parts:?}");
+    };
+    assert_eq!(tool.name, "read_file");
 }
 
 #[test]

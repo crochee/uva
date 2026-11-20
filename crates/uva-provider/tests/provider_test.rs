@@ -358,6 +358,8 @@ async fn test_openai_streaming() {
 
 data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
 
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
 data: [DONE]
 "#;
 
@@ -902,6 +904,8 @@ async fn test_openai_streaming_with_reasoning_split() {
 
 data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
 
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1234567890,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
 data: [DONE]
 "#;
 
@@ -981,60 +985,285 @@ async fn test_openai_streaming_tool_call_accumulation() {
             .with_api_key("test-key");
 
     let request = request_with_tools();
-    let tool_uses =
+    let collected =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::<StreamChunk>::new()));
-    let final_tool_calls =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::<ToolUse>::new()));
+    let sink = collected.clone();
 
     let _response = provider
         .complete_with_stream(
             request,
             None,
-            Box::new({
-                let tool_uses = tool_uses.clone();
-                let final_tool_calls = final_tool_calls.clone();
-                move |chunk| {
-                    if matches!(
-                        chunk,
-                        StreamChunk::Content(ContentPart::ToolUse(..))
-                    ) {
-                        tool_uses.lock().unwrap().push(chunk);
-                    } else if let StreamChunk::IsDone { result } = chunk {
-                        *final_tool_calls.lock().unwrap() =
-                            result.tool_calls.clone();
-                    }
-                }
-            }),
+            Box::new(move |chunk| sink.lock().unwrap().push(chunk)),
         )
         .await
         .expect("complete_with_stream should succeed");
 
-    // V2 processor collects tool calls in IsDone result
-    let tool_uses = tool_uses.lock().unwrap();
-    let final_tool_calls = final_tool_calls.lock().unwrap();
-    let has_tool_use = !tool_uses.is_empty() || !final_tool_calls.is_empty();
-    assert!(has_tool_use, "No tool uses received");
-
-    // Check the tool call from IsDone result (V2) or from tool_uses (legacy)
-    let (id, name, input) = if !final_tool_calls.is_empty() {
-        let tc = &final_tool_calls[0];
-        (tc.id.clone(), tc.name.clone(), tc.input.clone())
-    } else if let StreamChunk::Content(ContentPart::ToolUse(ToolUse {
-        id,
-        name,
-        input,
-    })) = &tool_uses[tool_uses.len() - 1]
-    {
-        (id.clone(), name.clone(), input.clone())
-    } else {
-        panic!("Expected ToolUse")
-    };
-
-    assert_eq!(id, "call_1");
-    assert_eq!(name, "bash");
+    // The decoder announces the call as chunks; the fold — the same
+    // one the adapter returns — turns them into the tool call.
+    let chunks = std::mem::take(&mut *collected.lock().unwrap());
     assert!(
-        input.to_string().contains("abc"),
-        "Expected 'abc' in input, got: {input:?}"
+        chunks
+            .iter()
+            .any(|c| matches!(c, StreamChunk::ToolCallStart { .. })),
+        "the call must be announced as it starts; chunks were {chunks:?}"
+    );
+    let mut assembler = uva_provider::BlockAssembler::new();
+    for chunk in chunks {
+        assembler.push(chunk);
+    }
+    let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+    assert_eq!(turn.tool_calls.len(), 1);
+    let tc = &turn.tool_calls[0];
+    assert_eq!(tc.id, "call_1");
+    assert_eq!(tc.name, "bash");
+    assert!(
+        tc.input.to_string().contains("abc"),
+        "Expected 'abc' in input, got: {:?}",
+        tc.input
+    );
+}
+
+/// Usage reported **after** the finish marker still reaches the turn.
+///
+/// The documented `include_usage` order puts `usage` on the same frame
+/// as `finish_reason`, but some OpenAI-compatible providers seal the
+/// choice first and send the usage frame afterwards. The decoder used
+/// to stop reading at the finish marker, so the step's usage row read
+/// zero. This drives the production chain — wire bytes → decoder →
+/// `on_delta` → the fold — and asserts the late count in both turns
+/// that exist: the response the call returns and the turn the agent
+/// loop folds from the same chunks.
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn openai_stream_late_usage_after_finish_reaches_the_turn() {
+    use parking_lot::Mutex;
+    use uva_provider::{BlockAssembler, StreamChunk};
+
+    let mock_server = MockServer::start().await;
+    let sse_data = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":41,\"completion_tokens\":7,\"total_tokens\":48}}\n\
+                    data: [DONE]\n";
+
+    Mock::given(matchers::path("/chat/completions"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let provider =
+        OpenAICompatibleProvider::new(mock_server.uri(), test_model_config())
+            .with_api_key("test-key");
+
+    let chunks = std::sync::Arc::new(Mutex::new(Vec::<StreamChunk>::new()));
+    let sink = chunks.clone();
+    let response = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(move |chunk: StreamChunk| {
+                sink.lock().push(chunk);
+            }),
+        )
+        .await
+        .expect("the streamed turn must complete");
+
+    assert_eq!(
+        response.usage.prompt_tokens, 41,
+        "the late usage frame must reach the returned turn; got {:?}",
+        response.usage
+    );
+    assert_eq!(response.usage.completion_tokens, 7);
+    assert_eq!(response.usage.total_tokens, 48);
+
+    let chunks = std::mem::take(&mut *chunks.lock());
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Stop(_)))
+            .count(),
+        1,
+        "the finish marker and the end-of-stream marker together must \
+         close the turn exactly once; chunks were: {chunks:?}"
+    );
+
+    let mut assembler = BlockAssembler::new();
+    for chunk in chunks {
+        assembler.push(chunk);
+    }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "the streamed turn is complete");
+    assert_eq!(
+        turn.usage.prompt_tokens, 41,
+        "the late usage frame must reach the folded turn; fold read {:?}",
+        turn.usage
+    );
+    assert_eq!(turn.usage.completion_tokens, 7);
+    assert_eq!(turn.usage.total_tokens, 48);
+    assert_eq!(turn.text, "Hi");
+    assert_eq!(turn.stop_reason.as_deref(), Some("stop"));
+}
+
+/// A stream that simply ends at EOF after the finish marker — no
+/// `[DONE]` — still finalizes exactly once, and the usage frame that
+/// followed the marker still reaches the turn.
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn openai_stream_eof_after_finish_finalizes_once_with_late_usage() {
+    use parking_lot::Mutex;
+    use uva_provider::{BlockAssembler, StreamChunk};
+
+    let mock_server = MockServer::start().await;
+    let sse_data = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2,\"total_tokens\":11}}\n";
+
+    Mock::given(matchers::path("/chat/completions"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let provider =
+        OpenAICompatibleProvider::new(mock_server.uri(), test_model_config())
+            .with_api_key("test-key");
+
+    let chunks = std::sync::Arc::new(Mutex::new(Vec::<StreamChunk>::new()));
+    let sink = chunks.clone();
+    let response = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(move |chunk: StreamChunk| {
+                sink.lock().push(chunk);
+            }),
+        )
+        .await
+        .expect("a stream cut at EOF after the finish marker must complete");
+
+    assert_eq!(
+        (
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            response.usage.total_tokens,
+        ),
+        (9, 2, 11),
+        "the usage frame before EOF must reach the returned turn"
+    );
+
+    let chunks = std::mem::take(&mut *chunks.lock());
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Stop(_)))
+            .count(),
+        1,
+        "EOF after the finish marker must not close the turn a second \
+         time; chunks were: {chunks:?}"
+    );
+
+    let mut assembler = BlockAssembler::new();
+    for chunk in chunks {
+        assembler.push(chunk);
+    }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "the turn is complete at the finish marker");
+    assert_eq!(
+        (
+            turn.usage.prompt_tokens,
+            turn.usage.completion_tokens,
+            turn.usage.total_tokens,
+        ),
+        (9, 2, 11)
+    );
+    assert_eq!(turn.text, "Hi");
+}
+
+/// The before-finish order is unchanged: a usage frame that arrives
+/// ahead of the finish marker still reaches both turns exactly as it
+/// did before late usage was kept.
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn openai_stream_usage_before_finish_reaches_the_turn_unchanged() {
+    use parking_lot::Mutex;
+    use uva_provider::{BlockAssembler, StreamChunk};
+
+    let mock_server = MockServer::start().await;
+    let sse_data = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
+                    data: [DONE]\n";
+
+    Mock::given(matchers::path("/chat/completions"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let provider =
+        OpenAICompatibleProvider::new(mock_server.uri(), test_model_config())
+            .with_api_key("test-key");
+
+    let chunks = std::sync::Arc::new(Mutex::new(Vec::<StreamChunk>::new()));
+    let sink = chunks.clone();
+    let response = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(move |chunk: StreamChunk| {
+                sink.lock().push(chunk);
+            }),
+        )
+        .await
+        .expect("the streamed turn must complete");
+
+    assert_eq!(
+        (
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            response.usage.total_tokens,
+        ),
+        (12, 3, 15)
+    );
+
+    let chunks = std::mem::take(&mut *chunks.lock());
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|c| matches!(c, StreamChunk::Stop(_)))
+            .count(),
+        1,
+        "both markers must close the turn exactly once"
+    );
+
+    let mut assembler = BlockAssembler::new();
+    for chunk in chunks {
+        assembler.push(chunk);
+    }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete);
+    assert_eq!(
+        (
+            turn.usage.prompt_tokens,
+            turn.usage.completion_tokens,
+            turn.usage.total_tokens,
+        ),
+        (12, 3, 15)
     );
 }
 
@@ -1220,9 +1449,9 @@ async fn test_anthropic_complete_with_stream_emits_v2_chunks() {
         .iter()
         .filter(|c| matches!(c, StreamChunk::ToolCallEnd { .. }))
         .collect();
-    let is_done: Vec<_> = chunks
+    let stops: Vec<_> = chunks
         .iter()
-        .filter(|c| matches!(c, StreamChunk::IsDone { .. }))
+        .filter(|c| matches!(c, StreamChunk::Stop(_)))
         .collect();
     let text_chunks: usize = chunks
         .iter()
@@ -1234,21 +1463,23 @@ async fn test_anthropic_complete_with_stream_emits_v2_chunks() {
     assert_eq!(tool_starts.len(), 1, "expected exactly one ToolCallStart");
     assert_eq!(tool_deltas.len(), 2, "expected two ToolCallDeltas");
     assert_eq!(tool_ends.len(), 1, "expected exactly one ToolCallEnd");
-    assert_eq!(is_done.len(), 1, "expected exactly one IsDone");
+    assert_eq!(stops.len(), 1, "expected exactly one Stop");
     assert_eq!(text_chunks, 2, "expected two text content chunks");
 
-    // Verify the IsDone payload
-    match &is_done[0] {
-        StreamChunk::IsDone { result } => {
-            assert_eq!(result.text, "The weather in Beijing is sunny.");
-            assert_eq!(result.tool_calls.len(), 1);
-            let tc = &result.tool_calls[0];
-            assert_eq!(tc.id, "t1");
-            assert_eq!(tc.name, "get_weather");
-            assert_eq!(tc.input, serde_json::json!({"location": "Beijing"}));
-        }
-        _ => unreachable!(),
+    // The fold the adapter returns produces the finished turn from
+    // exactly these chunks.
+    let mut assembler = uva_provider::BlockAssembler::new();
+    for chunk in chunks.iter() {
+        assembler.push(chunk.clone());
     }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "the stop chunk finished the turn");
+    assert_eq!(turn.text, "The weather in Beijing is sunny.");
+    assert_eq!(turn.tool_calls.len(), 1);
+    let tc = &turn.tool_calls[0];
+    assert_eq!(tc.id, "t1");
+    assert_eq!(tc.name, "get_weather");
+    assert_eq!(tc.input, serde_json::json!({"location": "Beijing"}));
 }
 
 #[cfg(feature = "anthropic")]
@@ -1402,9 +1633,9 @@ async fn test_openai_complete_with_stream_emits_v2_chunks() {
         .iter()
         .filter(|c| matches!(c, StreamChunk::Content(ContentPart::Text(TextContent { text, .. })) if !text.is_empty()))
         .collect();
-    let is_done: Vec<_> = chunks
+    let stops: Vec<_> = chunks
         .iter()
-        .filter(|c| matches!(c, StreamChunk::IsDone { .. }))
+        .filter(|c| matches!(c, StreamChunk::Stop(_)))
         .collect();
 
     // Two text deltas ("Hello" and ", world!") plus the role-only delta
@@ -1415,17 +1646,18 @@ async fn test_openai_complete_with_stream_emits_v2_chunks() {
         2,
         "expected exactly two text content chunks"
     );
-    assert_eq!(is_done.len(), 1, "expected exactly one IsDone");
+    assert_eq!(stops.len(), 1, "expected exactly one Stop");
 
-    // Verify the assembled IsDone payload.
-    match &is_done[0] {
-        StreamChunk::IsDone { result } => {
-            assert_eq!(result.text, "Hello, world!");
-            assert!(result.tool_calls.is_empty());
-            assert!(result.reasoning.is_empty());
-        }
-        _ => unreachable!(),
+    // The fold the adapter returns produces the finished turn.
+    let mut assembler = uva_provider::BlockAssembler::new();
+    for chunk in chunks.iter() {
+        assembler.push(chunk.clone());
     }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "the stop chunk finished the turn");
+    assert_eq!(turn.text, "Hello, world!");
+    assert!(turn.tool_calls.is_empty());
+    assert!(turn.reasoning.is_empty());
 }
 
 #[cfg(feature = "openai")]
@@ -1490,28 +1722,73 @@ async fn test_openai_complete_with_stream_tool_call_incremental() {
         .iter()
         .filter(|c| matches!(c, StreamChunk::ToolCallEnd { .. }))
         .collect();
-    let is_done: Vec<_> = chunks
+    let stops: Vec<_> = chunks
         .iter()
-        .filter(|c| matches!(c, StreamChunk::IsDone { .. }))
+        .filter(|c| matches!(c, StreamChunk::Stop(_)))
         .collect();
 
     assert_eq!(tool_starts.len(), 1, "expected exactly one ToolCallStart");
     assert_eq!(tool_deltas.len(), 1, "expected exactly one ToolCallDelta");
     assert_eq!(tool_ends.len(), 1, "expected exactly one ToolCallEnd");
-    assert_eq!(is_done.len(), 1, "expected exactly one IsDone");
+    assert_eq!(stops.len(), 1, "expected exactly one Stop");
 
-    // Verify the assembled IsDone payload.
-    match &is_done[0] {
-        StreamChunk::IsDone { result } => {
-            assert_eq!(result.text, "");
-            assert_eq!(result.tool_calls.len(), 1);
-            let tc = &result.tool_calls[0];
-            assert_eq!(tc.id, "call_1");
-            assert_eq!(tc.name, "get_weather");
-            assert_eq!(tc.input, serde_json::json!({"location": "Beijing"}));
-        }
-        _ => unreachable!(),
+    // The fold the adapter returns produces the finished turn.
+    let mut assembler = uva_provider::BlockAssembler::new();
+    for chunk in chunks.iter() {
+        assembler.push(chunk.clone());
     }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "the stop chunk finished the turn");
+    assert_eq!(turn.text, "");
+    assert_eq!(turn.tool_calls.len(), 1);
+    let tc = &turn.tool_calls[0];
+    assert_eq!(tc.id, "call_1");
+    assert_eq!(tc.name, "get_weather");
+    assert_eq!(tc.input, serde_json::json!({"location": "Beijing"}));
+}
+
+/// OpenAI can stream a tool call's `id` before its `function.name`.
+/// The later fragment must reach the returned turn, or the harness
+/// dispatches a call named `unknown`.
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn test_openai_stream_tool_name_from_a_later_fragment_reaches_the_turn() {
+    let mock_server = MockServer::start().await;
+    let sse_data = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"/tmp/x\\\"}\"}}]},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\
+                    data: [DONE]\n";
+    Mock::given(matchers::path("/chat/completions"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let provider =
+        OpenAICompatibleProvider::new(mock_server.uri(), test_model_config())
+            .with_api_key("test-key");
+    let turn = provider
+        .complete_with_stream(
+            request_with_tools(),
+            None,
+            Box::new(|_chunk: StreamChunk| {}),
+        )
+        .await
+        .expect("a finished stream is Ok");
+
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(
+        turn.tool_calls[0].name, "read_file",
+        "the later fragment's name must reach the finished turn"
+    );
+    assert_eq!(
+        turn.tool_calls[0].input,
+        serde_json::json!({"path": "/tmp/x"})
+    );
 }
 
 #[cfg(feature = "openai")]
@@ -1577,20 +1854,21 @@ async fn test_openai_complete_with_stream_reasoning_passthrough() {
         "reasoning chunk must pass <think> verbatim"
     );
 
-    let is_done: Vec<_> = chunks
+    let stops: Vec<_> = chunks
         .iter()
-        .filter(|c| matches!(c, StreamChunk::IsDone { .. }))
+        .filter(|c| matches!(c, StreamChunk::Stop(_)))
         .collect();
-    assert_eq!(is_done.len(), 1);
-    match &is_done[0] {
-        StreamChunk::IsDone { result } => {
-            // Reasoning must contain the raw <think> markers (no sniffing).
-            assert!(result.reasoning.contains("<think>"));
-            assert!(result.reasoning.contains("</think>"));
-            assert_eq!(result.text, "Answer.");
-        }
-        _ => unreachable!(),
+    assert_eq!(stops.len(), 1);
+    let mut assembler = uva_provider::BlockAssembler::new();
+    for chunk in chunks.iter() {
+        assembler.push(chunk.clone());
     }
+    let (turn, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "the stop chunk finished the turn");
+    // Reasoning must contain the raw <think> markers (no sniffing).
+    assert!(turn.reasoning.contains("<think>"));
+    assert!(turn.reasoning.contains("</think>"));
+    assert_eq!(turn.text, "Answer.");
 }
 
 #[cfg(feature = "openai")]
@@ -2021,6 +2299,163 @@ async fn test_anthropic_streaming_empty_terminal_completion_errors() {
     assert!(uva_provider::is_empty_response_error(&err), "got: {err:?}");
 }
 
+/// A stream that ends before OpenAI's finish marker is truncated, not
+/// a successful partial turn: the harness would otherwise dispatch the
+/// half-parsed tool call that produced the text on the wire. The
+/// rejection must name the truncation, not reuse the empty-completion
+/// error.
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn test_openai_stream_truncated_before_finish_is_an_error() {
+    let mock_server = MockServer::start().await;
+    let sse_data = "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"partial answer\"},\"finish_reason\":null}]}\n\
+                    data: [DONE]\n";
+    Mock::given(matchers::path("/chat/completions"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let provider =
+        OpenAICompatibleProvider::new(mock_server.uri(), test_model_config())
+            .with_api_key("test-key");
+    let err = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(|_chunk: StreamChunk| {}),
+        )
+        .await
+        .expect_err("a stream cut before the finish marker must be Err");
+
+    assert!(
+        !uva_provider::is_empty_response_error(&err),
+        "a truncated stream is not an empty completion; got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("terminal event"),
+        "the error must name the truncation; got: {err:?}"
+    );
+}
+
+/// The same stream with its finish marker still succeeds: the fold
+/// reports the partial text as a complete turn.
+#[cfg(feature = "openai")]
+#[tokio::test]
+async fn test_openai_stream_with_finish_marker_stays_ok() {
+    let mock_server = MockServer::start().await;
+    let sse_data = "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"whole answer\"},\"finish_reason\":null}]}\n\
+                    data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
+                    data: [DONE]\n";
+    Mock::given(matchers::path("/chat/completions"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let provider =
+        OpenAICompatibleProvider::new(mock_server.uri(), test_model_config())
+            .with_api_key("test-key");
+    let turn = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(|_chunk: StreamChunk| {}),
+        )
+        .await
+        .expect("a stream with its finish marker is complete");
+
+    assert_eq!(turn.text, "whole answer");
+    assert_eq!(turn.stop_reason.as_deref(), Some("stop"));
+}
+
+/// An Anthropic stream that closes without `message_stop` is
+/// truncated. The adapter must not hand the caller a partial turn.
+#[cfg(feature = "anthropic")]
+#[tokio::test]
+async fn test_anthropic_stream_truncated_before_terminal_event_is_an_error() {
+    let mock_server = MockServer::start().await;
+    let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":0}}}
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial answer"}}
+"#;
+    Mock::given(matchers::path("/v1/messages"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let provider = AnthropicProvider::new(test_model_config())
+        .with_api_key("test-key")
+        .with_base_url(&mock_server.uri());
+    let err = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(|_chunk: StreamChunk| {}),
+        )
+        .await
+        .expect_err("a stream cut before message_stop must be Err");
+
+    assert!(
+        !uva_provider::is_empty_response_error(&err),
+        "a truncated stream is not an empty completion; got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("terminal event"),
+        "the error must name the truncation; got: {err:?}"
+    );
+}
+
+/// The same Anthropic stream with `message_stop` still succeeds.
+#[cfg(feature = "anthropic")]
+#[tokio::test]
+async fn test_anthropic_stream_with_terminal_event_stays_ok() {
+    let mock_server = MockServer::start().await;
+    let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"usage":{"input_tokens":5,"output_tokens":0}}}
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"whole answer"}}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}
+data: {"type":"message_stop"}
+"#;
+    Mock::given(matchers::path("/v1/messages"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let provider = AnthropicProvider::new(test_model_config())
+        .with_api_key("test-key")
+        .with_base_url(&mock_server.uri());
+    let turn = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(|_chunk: StreamChunk| {}),
+        )
+        .await
+        .expect("a stream with its terminal event is complete");
+
+    assert_eq!(turn.text, "whole answer");
+    assert_eq!(turn.stop_reason.as_deref(), Some("end_turn"));
+}
+
 /// A truncation stop (`length`) with zero content is NOT the empty
 /// case: the caller needs the length signal, so the call stays Ok.
 #[cfg(feature = "openai")]
@@ -2360,12 +2795,14 @@ async fn openai_stream_retries_a_transient_open_failure() {
 ///
 /// This drives the whole chain a real run takes — wire bytes →
 /// `StreamProcessor` → streamed chunks → `BlockAssembler` → the
-/// assistant parts the agent commits to history — because the
-/// signature is the one piece a chunk-at-a-time fold cannot see: the
-/// `signature_delta` arrives *after* the `thinking_delta`s that carried
-/// the text, so the streamed `Content(Reasoning)` chunks are stamped
-/// with `None` and the value only shows up on `IsDone`. Every step
-/// here is the production one; nothing is hand-built.
+/// assistant parts the agent commits to history. The signature
+/// arrives as its own `ReasoningSignature` chunk (not on `IsDone`),
+/// so a chunk reader sees it; what is deferred is when it is
+/// *stamped*: the `signature_delta` comes after the `thinking_delta`s
+/// that carried the text, so the streamed `Content(Reasoning)`
+/// chunks are already published with `None` and only the fold can
+/// attach it to the parts. Every step here is the production one;
+/// nothing is hand-built.
 ///
 /// Without the deferred-signature fold the final part comes back
 /// `signature: None`, and Anthropic refuses to continue a turn whose
@@ -2459,6 +2896,142 @@ data: {"type":"message_stop"}
         "and the terminal result must report it too"
     );
     assert_eq!(result.reasoning, "step one step two");
+}
+
+/// A streamed Anthropic step reports the tokens the wire spent.
+///
+/// The real wire splits the report: `message_start.message.usage` has
+/// the prompt-side counts (and the output count so far), the terminal
+/// `message_delta.usage` the final output count. Both frames used to be
+/// decoded away, so every streamed step wrote `0 in / 0 out`. The
+/// buckets must equal the non-streaming mapping, and the decoder must
+/// report them as a usage chunk so the fold — and every chunk reader —
+/// sees the same number.
+#[cfg(feature = "anthropic")]
+#[tokio::test]
+async fn anthropic_stream_reports_the_usage_the_wire_carried() {
+    use parking_lot::Mutex;
+    use uva_provider::{BlockAssembler, StreamChunk};
+
+    let mock_server = MockServer::start().await;
+    let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":120,"output_tokens":1,"cache_read_input_tokens":80,"cache_creation_input_tokens":20}}}
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+data: {"type":"content_block_stop","index":0}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":30}}
+data: {"type":"message_stop"}
+"#;
+
+    Mock::given(matchers::path("/v1/messages"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let provider = AnthropicProvider::new(test_model_config())
+        .with_api_key("test-key")
+        .with_base_url(&mock_server.uri());
+
+    let chunks = std::sync::Arc::new(Mutex::new(Vec::<StreamChunk>::new()));
+    let sink = std::sync::Arc::clone(&chunks);
+    let resp = provider
+        .complete_with_stream(
+            simple_request(),
+            None,
+            Box::new(move |chunk: StreamChunk| {
+                sink.lock().push(chunk);
+            }),
+        )
+        .await
+        .expect("the streamed turn must complete");
+
+    // The streaming call reports the real number: prompt from the
+    // opening frame, completion from the terminal delta.
+    assert_eq!(resp.usage.prompt_tokens, 120);
+    assert_eq!(resp.usage.completion_tokens, 30);
+    assert_eq!(resp.usage.total_tokens, 150);
+    assert_eq!(resp.usage.cached_prompt_tokens, Some(80));
+    assert_eq!(resp.usage.cache_read_tokens, Some(80));
+    assert_eq!(resp.usage.cache_write_tokens, Some(20));
+    assert_eq!(resp.usage.reasoning_tokens, None);
+
+    let chunks = chunks.lock().clone();
+    // It is a usage chunk, so the fold and every other chunk reader
+    // see it too; the last emission is the complete, merged report.
+    let streamed_usage = chunks
+        .iter()
+        .rev()
+        .find_map(|chunk| match chunk {
+            StreamChunk::Usage(usage) => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("the decoder must report the wire usage as a chunk");
+    assert_eq!(streamed_usage.prompt_tokens, 120);
+    assert_eq!(streamed_usage.completion_tokens, 30);
+    assert_eq!(streamed_usage.total_tokens, 150);
+    assert_eq!(streamed_usage.cache_read_tokens, Some(80));
+
+    // Folding the same chunks independently lands the same buckets.
+    let mut assembler = BlockAssembler::new();
+    for chunk in chunks {
+        assembler.push(chunk);
+    }
+    let (folded, _parts, incomplete) = assembler.finalize_assistant();
+    assert!(!incomplete, "message_stop completed the turn");
+    assert_eq!(folded.usage.prompt_tokens, 120);
+    assert_eq!(folded.usage.completion_tokens, 30);
+    assert_eq!(folded.usage.total_tokens, 150);
+    assert_eq!(folded.usage.cache_read_tokens, Some(80));
+    assert_eq!(folded.usage.cache_write_tokens, Some(20));
+}
+
+/// A stream whose usage object never appears still yields the zero
+/// default: the call succeeds, nothing panics, and a turn that produced
+/// text is not rejected as an empty completion.
+#[cfg(feature = "anthropic")]
+#[tokio::test]
+async fn anthropic_stream_without_usage_yields_the_zero_default() {
+    let mock_server = MockServer::start().await;
+    let sse_data = r#"data: {"type":"message_start","message":{"id":"msg_01","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":null,"stop_sequence":null}}
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+data: {"type":"content_block_stop","index":0}
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}
+data: {"type":"message_stop"}
+"#;
+
+    Mock::given(matchers::path("/v1/messages"))
+        .and(matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(sse_data)
+                .append_header("content-type", "text/event-stream"),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let provider = AnthropicProvider::new(test_model_config())
+        .with_api_key("test-key")
+        .with_base_url(&mock_server.uri());
+
+    let resp = provider
+        .complete_with_stream(simple_request(), None, Box::new(|_| {}))
+        .await
+        .expect("a text-producing stream is not an empty completion");
+
+    assert_eq!(resp.usage.prompt_tokens, 0);
+    assert_eq!(resp.usage.completion_tokens, 0);
+    assert_eq!(resp.usage.total_tokens, 0);
+    assert_eq!(resp.usage.cache_read_tokens, None);
+    assert_eq!(resp.usage.cache_write_tokens, None);
+    assert_eq!(resp.usage.reasoning_tokens, None);
+    assert_eq!(resp.text, "hi");
 }
 
 /// A cancelled run does not retry — cancellation is checked before

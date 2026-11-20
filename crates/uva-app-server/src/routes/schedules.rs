@@ -15,7 +15,7 @@
 //! default snake_case. The frontend types in
 //! `uva-web/src/api/types.ts` mirror them.
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,22 +24,12 @@ use uva::{
     scheduler::{Job, JobId, JobKind, JobStatus},
 };
 
-use super::helpers::paginate;
+use super::list::{Direction, SortKey};
 use crate::{
-    api::{
-        List,
-        PageQuery,
-        ResolvedPage,
-        resolve_page,
-        validate_resource_name,
-        validate_sort,
-    },
+    api::{List, PageQuery, validate_resource_name},
     rpc::RpcError,
     state::AppState,
 };
-
-/// Sortable fields for the schedules list endpoint.
-const SCHEDULE_SORT_WHITELIST: &[&str] = &["id", "name", "next_fire_at"];
 
 /// `GET /api/v1/schedules` — list row.
 #[derive(Serialize, JsonSchema)]
@@ -101,19 +91,50 @@ pub struct JobInfo {
     pub payload: serde_json::Value,
 }
 
-/// `GET /api/v1/schedules` — list jobs with cursor pagination.
+/// The schedule list's sort vocabulary: three keys, declared once.
+///
+/// The old handler sorted all three and then never read the resolved
+/// direction, so `?sort=-name` (and `-id`, and `-next_fire_at`)
+/// validated, resolved to descending, and came back ascending. The
+/// direction is applied by the recipe now, once, for every key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScheduleSort {
+    Id,
+    Name,
+    NextFireAt,
+}
+
+impl SortKey<ScheduleInfo> for ScheduleSort {
+    const ALL: &'static [Self] = &[Self::Id, Self::Name, Self::NextFireAt];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Id => "id",
+            Self::Name => "name",
+            Self::NextFireAt => "next_fire_at",
+        }
+    }
+
+    fn compare(self, a: &ScheduleInfo, b: &ScheduleInfo) -> Ordering {
+        match self {
+            Self::Id => a.id.cmp(&b.id),
+            Self::Name => a.name.cmp(&b.name),
+            Self::NextFireAt => a.next_fire_at.cmp(&b.next_fire_at),
+        }
+    }
+
+    fn default_sort() -> (Self, Direction) {
+        (Self::Name, Direction::Ascending)
+    }
+}
+
+/// `GET /api/v1/schedules` — list (cursor-paginated).
 pub async fn list_schedules(
     state: Arc<AppState>,
     page: PageQuery,
 ) -> Result<List<ScheduleInfo>, RpcError> {
-    validate_sort(
-        page.sort.as_deref().unwrap_or("name"),
-        SCHEDULE_SORT_WHITELIST,
-    )?;
-    let resolved: ResolvedPage = resolve_page(&page)?;
-
     let jobs = state.schedules.list();
-    let mut infos: Vec<ScheduleInfo> = jobs
+    let infos: Vec<ScheduleInfo> = jobs
         .iter()
         .map(|j| ScheduleInfo {
             id: j.id.to_string(),
@@ -123,18 +144,9 @@ pub async fn list_schedules(
             next_fire_at: j.next_fire_at,
         })
         .collect();
-    match resolved.sort_field.as_deref() {
-        Some("id") => infos.sort_by(|a, b| a.id.cmp(&b.id)),
-        Some("next_fire_at") => infos.sort_by_key(|a| a.next_fire_at),
-        _ => infos.sort_by(|a, b| a.name.cmp(&b.name)),
-    }
-    let total = infos.len() as u64;
-    let page_out = paginate(infos, &resolved, |s| s.id.as_str());
-    Ok(List {
-        data: page_out.data,
-        next_cursor: page_out.next_cursor,
-        total: Some(total),
-    })
+    Ok(ScheduleSort::sort_and_page(infos, &page, |s| {
+        s.id.as_str()
+    })?)
 }
 
 /// `GET /api/v1/schedules/{id}` — single job detail.
@@ -251,4 +263,127 @@ pub async fn tick_schedule(
         })
         .collect();
     Ok(ScheduleTickResponse { fired: job_infos })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::DateTime;
+
+    use super::*;
+
+    async fn test_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        let sessions = uva::session::manager::SessionRegistry::new(
+            dir.path().join("sessions"),
+        );
+        let state =
+            AppState::for_test(sessions, dir.path().to_path_buf()).await;
+        (Arc::new(state), dir)
+    }
+
+    fn at(seconds: i64) -> DateTime<chrono::Utc> {
+        DateTime::from_timestamp(seconds, 0).expect("a valid instant")
+    }
+
+    fn job(name: &str, next_fire_at: DateTime<chrono::Utc>) -> Job {
+        Job::new(name, JobKind::Once, serde_json::Value::Null, next_fire_at)
+    }
+
+    fn names(list: &List<ScheduleInfo>) -> Vec<&str> {
+        list.data.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Seed three jobs whose name order and fire order are different,
+    /// so a key that silently sorts by the wrong thing is visible.
+    async fn seeded() -> (Arc<AppState>, tempfile::TempDir) {
+        let (state, dir) = test_state().await;
+        state.schedules.add(job("charlie", at(10))).expect("adds");
+        state.schedules.add(job("alpha", at(30))).expect("adds");
+        state.schedules.add(job("bravo", at(20))).expect("adds");
+        (state, dir)
+    }
+
+    /// Every declared key sorts, and a `-` prefix turns it.
+    ///
+    /// The direction used to be dropped entirely: all three keys
+    /// validated a `-` prefix, resolved to descending, and answered
+    /// ascending.
+    #[tokio::test]
+    async fn every_declared_key_sorts_and_a_minus_prefix_turns_it() {
+        let (state, _dir) = seeded().await;
+
+        let defaulted = list_schedules(Arc::clone(&state), PageQuery::new())
+            .await
+            .expect("the default list");
+        assert_eq!(
+            names(&defaulted),
+            ["alpha", "bravo", "charlie"],
+            "the default is name ascending"
+        );
+
+        let cases = [
+            ("name", ["alpha", "bravo", "charlie"]),
+            ("-name", ["charlie", "bravo", "alpha"]),
+            ("next_fire_at", ["charlie", "bravo", "alpha"]),
+            ("-next_fire_at", ["alpha", "bravo", "charlie"]),
+        ];
+        for (sort, expected) in cases {
+            let listed = list_schedules(
+                Arc::clone(&state),
+                PageQuery::new().with_sort(sort),
+            )
+            .await
+            .expect("the list");
+            assert_eq!(names(&listed), expected, "`{sort}`");
+        }
+    }
+
+    /// The id key orders by id and turns — the same declaration, not a
+    /// separate arm the old `match` could forget.
+    #[tokio::test]
+    async fn the_id_key_sorts_and_turns() {
+        let (state, _dir) = seeded().await;
+
+        let up = list_schedules(
+            Arc::clone(&state),
+            PageQuery::new().with_sort("id"),
+        )
+        .await
+        .expect("the list");
+        let mut ids: Vec<String> =
+            up.data.iter().map(|s| s.id.clone()).collect();
+        let mut ascending = ids.clone();
+        ascending.sort();
+        assert_eq!(ids, ascending, "`id` orders by id ascending");
+
+        let down = list_schedules(
+            Arc::clone(&state),
+            PageQuery::new().with_sort("-id"),
+        )
+        .await
+        .expect("the list");
+        ids = down.data.iter().map(|s| s.id.clone()).collect();
+        ascending.reverse();
+        assert_eq!(ids, ascending, "`-id` turns it");
+    }
+
+    #[tokio::test]
+    async fn a_sort_the_route_does_not_declare_is_refused() {
+        let (state, _dir) = seeded().await;
+        for refused in ["kind", "-kind", ""] {
+            let err = list_schedules(
+                Arc::clone(&state),
+                PageQuery::new().with_sort(refused),
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("`{refused}` should be refused"));
+            let expected = if refused.is_empty() {
+                "validation"
+            } else {
+                "invalid_item"
+            };
+            assert_eq!(err.code, expected, "`{refused}` answered {err:?}");
+        }
+    }
 }

@@ -32,6 +32,9 @@ uva-tool-plugins = { path = "../../../crates/uva-tool-plugins", features = [
   "todo",
 ] }
 uva-steering = { path = "../../../crates/uva-steering" }
+# The deployment's one interception table: `Host::default_policy` takes
+# it, so the consumer names the contract crate explicitly (ADR 0028).
+uva-hook = { path = "../../../crates/uva-hook" }
 uva-session = { path = "../../../crates/uva-session" }
 uva-core = { path = "../../../crates/uva-core" }
 uva-attachment = { path = "../../../crates/uva-attachment" }

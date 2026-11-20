@@ -47,11 +47,7 @@ export interface ProjectionPosition {
  */
 function turnBoundary(row: SessionTurn): string {
   if (row.type !== 'turn') return '';
-  const data = row.data;
-  if (data === null || data === undefined || typeof data !== 'object' || Array.isArray(data)) {
-    return '';
-  }
-  return boundaryKind(data as Record<string, unknown>);
+  return boundaryKind(row);
 }
 
 /**

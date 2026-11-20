@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use validator::Validate;
 
-use super::{parse, parse_raw};
+use super::{names, parse, parse_raw};
 use crate::{
     api::SessionPageQuery,
     routes::{
@@ -74,60 +74,60 @@ struct ApprovalRespondParams {
 }
 /// Register the session methods.
 pub fn register(router: &mut RpcRouter) {
-    router.register("sessions/list", |state, raw| async move {
+    router.register(names::SESSIONS_LIST, |state, raw| async move {
         let query: SessionPageQuery = parse(raw)?;
         encode(sessions::list_sessions(state, query).await?)
     });
-    router.register("sessions/get", |state, raw| async move {
+    router.register(names::SESSIONS_GET, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         encode(sessions::get_session(state, params.id).await?)
     });
-    router.register("sessions/delete", |state, raw| async move {
+    router.register(names::SESSIONS_DELETE, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         encode(sessions::delete_session(state, params.id).await?)
     });
-    router.register("sessions/export", |state, raw| async move {
+    router.register(names::SESSIONS_EXPORT, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         encode(sessions::export_session(state, params.id).await?)
     });
-    router.register("sessions/fork", |state, raw| async move {
+    router.register(names::SESSIONS_FORK, |state, raw| async move {
         let params = ForkParams::parse(raw)?;
         encode(sessions::fork_session(state, params.id, params.request).await?)
     });
-    router.register("sessions/events", |state, raw| async move {
+    router.register(names::SESSIONS_EVENTS, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         encode(sessions::list_session_events(state, params.id).await?)
     });
-    router.register("sessions/status", |state, raw| async move {
+    router.register(names::SESSIONS_STATUS, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         encode(sessions::session_status(state, params.id).await?)
     });
-    router.register("sessions/follow", |state, raw| async move {
+    router.register(names::SESSIONS_FOLLOW, |state, raw| async move {
         let params: FollowParams = parse(raw)?;
         encode(follow::follow(state, params.session_id, params.query).await?)
     });
-    router.register("session/unfollow", |state, raw| async move {
+    router.register(names::SESSION_UNFOLLOW, |state, raw| async move {
         let params: SessionIdParams = parse(raw)?;
         state.rpc.follows().stop(&params.session_id);
         Ok(serde_json::json!({ "stopped": true }))
     });
-    router.register("sessions/resume", |state, raw| async move {
+    router.register(names::SESSIONS_RESUME, |state, raw| async move {
         let params = ResumeParams::parse(raw)?;
         encode(follow::resume(state, params.session_id, params.request).await?)
     });
-    router.register("approval/respond", |state, raw| async move {
+    router.register(names::APPROVAL_RESPOND, |state, raw| async move {
         let params: ApprovalRespondParams = parse(raw)?;
         encode(approval_respond(state, params).await?)
     });
-    router.register("sessions/compact", |state, raw| async move {
+    router.register(names::SESSIONS_COMPACT, |state, raw| async move {
         let params: SessionIdParams = parse(raw)?;
         encode(follow::compact(state, params.session_id).await?)
     });
-    router.register("sessions/usage", |state, raw| async move {
+    router.register(names::SESSIONS_USAGE, |state, raw| async move {
         let params: SessionIdParams = parse(raw)?;
         encode(follow::usage(state, params.session_id).await?)
     });
-    router.register("sessions/search", |state, raw| async move {
+    router.register(names::SESSIONS_SEARCH, |state, raw| async move {
         let params: SearchParams = parse(raw)?;
         let user_id = state.default_user_id().to_string();
         encode(

@@ -12,7 +12,7 @@ pub mod chat;
 pub mod evals;
 pub mod follow;
 pub mod health;
-pub mod helpers;
+pub(crate) mod list;
 pub(crate) mod messages;
 pub mod schedules;
 pub mod search;

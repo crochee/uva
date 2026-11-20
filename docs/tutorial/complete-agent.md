@@ -521,16 +521,18 @@ tail -n +2 "$LOG" | jq -r '.seq' | awk 'NR>1 && $1!=p+1 {print "gap:", p, "->", 
 
 ## 5. 第三方 crate 装插件：不改 harness
 
-`Host` 是 per-agent 的注册表；一个插件实现 `Plugin::install`
-把自己的工具/观察者/gate/transformer/prompt section 注册进去，
-返回的 `PluginHandle` 持有这些注册。**handle 存活期间插件生效，
-drop 或 `uninstall()` 就撤销**（只影响后续 dispatch，不打断在途调用）。
+`Host` 是 per-agent 的 typed 策略表；拦截注册（hook / gate / 请求与结果
+transformer / prompt section）走部署唯一的 `uva_hook::HookRegistry`，host
+持有它（`Host::hook_registry()`）。一个第三方 crate 导出自己的 `Tool` /
+`Hook` / `Gate` 实现，再加一个把它们注册进去的函数；每次注册返回一个
+可撤销句柄。**句柄存活期间插件生效，drop 就撤销**（只影响后续 dispatch，
+不打断在途调用）。
 
 `Cargo.toml`：
 
 ```toml
 [dependencies]
-uva = { version = "0.1", features = ["provider", "tool", "harness"] }
+uva = { version = "0.1", features = ["provider", "tool", "harness", "hook"] }
 serde_json = "1"
 ```
 
@@ -538,7 +540,17 @@ serde_json = "1"
 use std::sync::Arc;
 
 use uva::async_trait;
-use uva::harness::{Host, Plugin, PluginHandle, ReActAgent};
+use uva::harness::{Host, ReActAgent};
+use uva::hook::{
+    Hook,
+    HookContext,
+    HookDecision,
+    HookEvent,
+    HookRegistration,
+    HookRegistry,
+    MountPoint,
+    RegistrationOrigin,
+};
 use uva::tool::{
     Context, ExecutionMode, Risk, Tool, ToolAnnotations, ToolOutput,
     ToolRegistry,
@@ -591,53 +603,84 @@ impl Tool for LookupTool {
     }
 }
 
-struct LookupPlugin;
+/// 一个观察者：每条工具结果打一行日志。
+struct LookupAudit;
 
-impl Plugin for LookupPlugin {
+#[async_trait]
+impl Hook for LookupAudit {
     fn name(&self) -> &str {
-        "lookup-plugin"
+        "lookup-audit"
     }
 
-    fn install(&self, host: &mut Host) -> PluginHandle {
-        // 每个注册方法返回 Registration；handle 拥有它们。
-        PluginHandle::new(vec![host.tool(Arc::new(LookupTool))])
+    async fn observe(
+        &self,
+        event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> HookDecision {
+        if let HookEvent::AfterTool { tool_name, .. } = event {
+            println!("tool {tool_name} returned");
+        }
+        HookDecision::Allow
     }
+}
+
+/// 插件 crate 的注册面：一张表加一个 host，各自返回可撤销句柄。
+pub fn register(
+    registry: &HookRegistry,
+    host: &mut Host,
+) -> (HookRegistration, uva::harness::Registration) {
+    let audit = registry.register_hook_at(
+        MountPoint::ToolPost,
+        Arc::new(LookupAudit),
+        RegistrationOrigin::Plugin,
+    );
+    let tool = host.tool(Arc::new(LookupTool));
+    (audit, tool)
 }
 
 fn assemble(
     provider: Arc<dyn uva::provider::ModelProvider>,
-) -> (ReActAgent, PluginHandle) {
-    let mut host = Host::new();
-    // 绑定到 agent 时，host 里已经注册的工具进入同一个 registry；
-    // 句柄必须活到 agent 结束，否则 Drop 会把工具从 registry 撤销。
-    let installed = host.install(&LookupPlugin);
+) -> (ReActAgent, (HookRegistration, uva::harness::Registration)) {
+    let registry = HookRegistry::new();
+    // host 持有部署的那一张表；运行里的 seam 层只向它派发。
+    let mut host = Host::new_with_registry(registry.clone());
+    // 句柄必须活到 agent 结束，否则 Drop 会撤销注册。
+    let installed = register(&registry, &mut host);
 
-    let registry = Arc::new(ToolRegistry::new());
-    let agent = ReActAgent::new(provider, registry).with_host(host);
+    let tool_registry = Arc::new(ToolRegistry::new());
+    let agent = ReActAgent::new(provider, tool_registry)
+        .with_host(host)
+        .expect("the fresh host binds");
     (agent, installed)
 }
 ```
 
 要点：
 
-- `Host` 的方法：`observe` / `gate` / `request_transformer` /
-  `result_transformer` / `prompt_section` / `tool`，
-  全部返回可撤销的 `Registration`；`install` 把它们打成一个 `PluginHandle`。
+- 拦截注册方法全在 `HookRegistry`：
+  `register_hook_at` / `register_gate_at` /
+  `register_request_transformer_at` / `register_result_transformer_at` /
+  `register_prompt_section`，每个都带 `MountPoint` 与
+  `RegistrationOrigin`，返回可撤销的 `HookRegistration`。
+- `Host` 只留 registry 表达不了的表：`tool` / `guard` / `hint` /
+  `tracker` / `output_transformer`，返回 `Registration`。
+  `Host::hook_registry()` 是循环的读取口；`hooks` 行把同一实例发布成服务。
 - 名字与核心工具冲突的工具会被拒绝并记一条 `DiagnosticKind::ToolNameConflict`，
   不会覆盖核心工具。
 - **进程内动态加载（`.so` / WASM）不在本仓范围**：自写的插件是编译期依赖，
-  宿主（例如你自己的服务）在组装 agent 时安装它。需要不重编就能上线的第三方
+  宿主（例如你自己的服务）在组装 agent 时注册它。需要不重编就能上线的第三方
   工具，走 §7 的 **MCP** 通道——那不是加载 `.so`，而是起一个进程说 MCP。
-- 同一个 crate 也可以只做宿主侧的观察：`host.observe(...)` 拿到
-  `BeforeTool` / `AfterTool` / `BeforeRequest` 等事件，看到的是只读视图；
+- 同一个 crate 也可以只做观察：在 `MountPoint::ToolPost` /
+  `BeforeRequest` 等挂载点注册 `Hook`，看到的是只读事件；
   审批由循环内的 `ApprovalPolicy` 强制执行，插件不能把 `Ask` 降级为 `Allow`。
 
 ---
 
 ## 6. 写一个静态插件（编译进宿主）
 
-§5 讲的是宿主侧的接缝：`Host` 收注册，`PluginHandle` 拥有它们。本节从
-**空目录**写一个真正的插件 crate，然后把它装进 `uva-app-server`。
+§5 讲的是注册面的分工：`Host` 收 typed 策略表，`HookRegistry` 收拦截，
+句柄拥有生命周期。本节从**空目录**写一个真正的插件 crate，然后把它装进
+`uva-app-server`。
 
 自写插件是编译期依赖：换插件要重编宿主。换来的是零 IPC、零握手——工具的
 每次调用都是进程内直调，插件与宿主共享同一个 registry 与同一个错误类型。
@@ -663,7 +706,7 @@ edition = "2021"
 # 本仓尚未发布到 crates.io。指向本仓的一份 checkout：
 uva = { path = "/path/to/uva/crates/uva" }
 # 发布后写成：
-# uva = { version = "0.1", features = ["provider", "tool", "harness"] }
+# uva = { version = "0.1", features = ["provider", "tool", "harness", "hook"] }
 serde_json = "1"
 ```
 
@@ -673,7 +716,17 @@ serde_json = "1"
 use std::sync::Arc;
 
 use uva::async_trait;
-use uva::harness::{Host, Plugin, PluginHandle};
+use uva::harness::{Host, Registration};
+use uva::hook::{
+    Hook,
+    HookContext,
+    HookDecision,
+    HookEvent,
+    HookRegistration,
+    HookRegistry,
+    MountPoint,
+    RegistrationOrigin,
+};
 use uva::tool::{Context, Risk, Tool, ToolAnnotations, ToolOutput};
 
 /// 一个只读工具：按 id 查一条记录。
@@ -718,48 +771,67 @@ impl Tool for LookupTool {
     }
 }
 
-/// 插件本体：install 把注册交给 host，handle 拥有它们。
-pub struct LookupPlugin;
+/// 一个观察者：每条工具结果打一行日志。
+pub struct LookupAudit;
 
-impl Plugin for LookupPlugin {
+#[async_trait]
+impl Hook for LookupAudit {
     fn name(&self) -> &str {
-        "lookup-plugin"
+        "lookup-audit"
     }
 
-    fn install(&self, host: &mut Host) -> PluginHandle {
-        PluginHandle::new(vec![host.tool(Arc::new(LookupTool))])
+    async fn observe(
+        &self,
+        event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> HookDecision {
+        if let HookEvent::AfterTool { tool_name, .. } = event {
+            println!("tool {tool_name} returned");
+        }
+        HookDecision::Allow
     }
 }
 
-/// 插件 crate 对外只暴露一个工厂函数，宿主（app-server）的内核原生工厂用它。
-pub fn factory() -> Arc<dyn Plugin> {
-    Arc::new(LookupPlugin)
+/// 插件 crate 对外只暴露注册函数：宿主（app-server）的工厂在装配时调它。
+pub fn register(
+    registry: &HookRegistry,
+    host: &mut Host,
+) -> (HookRegistration, Registration) {
+    let audit = registry.register_hook_at(
+        MountPoint::ToolPost,
+        Arc::new(LookupAudit),
+        RegistrationOrigin::Plugin,
+    );
+    let tool = host.tool(Arc::new(LookupTool));
+    (audit, tool)
 }
 ```
 
 三个约束决定这段代码的形状：
 
-- `Plugin` 只有两个方法：`name()` 与 `install(&self, host) -> PluginHandle`。
-  `install` 不返回 `Result`——装不上不是"插件坏了"，而是部署侧的选择：
-  装进 app-server 时由内核原生工厂的 `build` 承担，失败会报成
+- 插件 crate 只导出实现与一个 `register` 函数；它**不构造 `Host`**——
+  host 由宿主拥有，插件只往传进来的表与 host 里注册。
+- `register` 不返回 `Result`：挂载点由 `MountPoint` 给定，注册接口不拒绝；
+  装进 app-server 时的装配失败由内核原生工厂的 `build` 承担，报成
   `ProfileError::BuildFailed`（点名那个 id），不是一次静默跳过。
-- 每个 `host.tool(...)` / `host.observe(...)` 返回一个 `Registration`，
-  `PluginHandle` 把它们打包。**handle 就是插件的生命周期**：drop 掉它，
-  注册全部撤销（只影响后续 dispatch，不打断在途调用）。
-- 插件 crate 不应该自己构造 `Host`。`Host` 由宿主拥有——一个部署一个 host，
-  每个 agent 拿到它的 clone。插件只往传进来的 host 里注册。
+- 每个注册返回一个句柄（拦截是 `HookRegistration`，host 的 typed 表是
+  `Registration`）。**句柄就是插件的生命周期**：drop 掉它，注册撤销
+  （只影响后续 dispatch，不打断在途调用）。
+- 宿主拥有 `Host`——一个部署一个 host，每个 agent 拿到它的 clone。
 
 ### 6.2 宿主侧：安装与撤销
 
 在同一个 crate 里加一个 demo 二进制（`src/main.rs`）：
 
 ```rust,ignore
-use lookup_plugin::factory;
+use lookup_plugin::register;
 use uva::harness::Host;
+use uva::hook::{HookRegistry, MountPoint};
 
 fn main() {
-    let mut host = Host::new();
-    let handle = host.install(factory().as_ref());
+    let registry = HookRegistry::new();
+    let mut host = Host::new_with_registry(registry.clone());
+    let (audit, tool) = register(&registry, &mut host);
 
     let names: Vec<String> = host
         .tools()
@@ -768,17 +840,22 @@ fn main() {
         .collect();
     assert_eq!(names, vec!["lookup".to_string()]);
     println!("installed tools : {names:?}");
+    assert!(registry.has_entries_at(MountPoint::ToolPost));
+    println!("registered hooks: 1");
 
-    // Dropping the handle withdraws every registration it owns.
-    drop(handle);
+    // Dropping the handles withdraws every registration they own.
+    drop(tool);
+    drop(audit);
     println!("tools after drop: {}", host.tools().len());
     assert_eq!(host.tools().len(), 0);
+    assert!(!registry.has_entries_at(MountPoint::ToolPost));
 }
 ```
 
 ```bash
 cargo run -q
 # installed tools : ["lookup"]
+# registered hooks: 1
 # tools after drop: 0
 ```
 
@@ -874,8 +951,9 @@ boot 走 `register_configured_mcp_servers`
 ### 7.3 MCP 不承载什么
 
 MCP 是**工具**通道，不是权限通道：它不承载结果改写（transformer）、不承载
-gate 裁决、不承载 authority 分级——那些是宿主侧 `Host` 注册的能力。想要一个
-观察者或一个 gate，写自写插件（§5 / §6）。
+gate 裁决、不承载 authority 分级——那些是宿主装配时注册的能力：观察者与
+gate 走 `HookRegistry`，typed 策略（guard / hint / tracker / transformer /
+tool 绑定）走 `Host`。想要一个观察者或一个 gate，写自写插件（§5 / §6）。
 
 ---
 
@@ -1045,17 +1123,20 @@ cargo tree --manifest-path docs/examples/harness-only-consumer/Cargo.toml \
 
 公开面分两层：
 
-- **精选面**：crate 根上 re-export 出来的 61 个名字 —— 这是承诺过的稳定面，
+- **精选面**：crate 根上 re-export 出来的 59 个名字 —— 这是承诺过的稳定面，
   依赖它就不会被下一次发布挪走。
 - **深路径**：`uva_harness::agent::…`、`uva_harness::events::…`
   （`uva-events` 词汇的 re-export）与 `uva_harness::seams::…`
-  （`uva-hook` 的挂载点键）底下只能靠完整的模块路径够到。rustdoc 在
-  `agent` 模块下记录了 36 条公开路径，其中 22 条是门面名字在它们定义处的
-  路径（例如 `AgentDescriptor` 定义在 `uva-core`），剩下 14 项；再加从
-  `uva-hook` re-export 进 `uva_harness::seams` 的七个挂载点键（跨 crate、
-  不上 crate 根），深路径名字共 21 项。审批词汇整体搬去了 `uva-approval`、
-  事件词汇搬去了 `uva-events`、agent 词汇搬去了 `uva-agent`，都经 crate
-  根的 use 树抵达本 crate。
+  （循环的接缝层）底下只能靠完整的模块路径够到。rustdoc 在
+  `agent` 模块下记录了 28 条公开路径，其中 17 条是门面名字在它们定义处的
+  路径（例如 `AgentDescriptor` 定义在 `uva-core`），剩下 11 项，深路径
+  名字共 11 项。两路 host 面（`Plugin`、`PluginHandle`、旧的
+  `agent::host::Arbitration` 与 delegation 词汇）随 ADR 0028 的收口移除，
+  不再有 harness 内的路径。原先从 `uva-hook` re-export 进
+  `uva_harness::seams` 的七个挂载点键已随 ADR 0028 收进 `uva-hook` 的
+  `MountPoint` 枚举，不再构成跨 crate 的深路径名字。审批词汇整体搬去了
+  `uva-approval`、事件词汇搬去了 `uva-events`、agent 词汇搬去了
+  `uva-agent`，都经 crate 根的 use 树抵达本 crate。
   深路径上的名字不在承诺内，将来可动。
 
 ---

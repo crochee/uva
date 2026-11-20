@@ -333,7 +333,7 @@ pub(super) async fn panicking_provider_still_reports_session_end() {
             _request: uva_provider::CompletionRequest,
             _cancel: Option<Arc<dyn uva_core::CancelToken>>,
             _on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-        ) -> Result<uva_provider::CompletionResponse, uva_core::Error> {
+        ) -> Result<uva_provider::SamplingResult, uva_core::Error> {
             panic!("provider blew up");
         }
     }

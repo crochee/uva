@@ -30,15 +30,17 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //!
-//! use uva_hook::{HookRegistry, seam};
+//! use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 //! use uva_hook_plugins::redact::RedactTransformer;
-//! use uva_tool::registry::ToolRegistry;
 //!
-//! let mut host = uva_harness::Host::new();
-//! # let registry = ToolRegistry::new();
-//! let _registration = host.result_transformer(Arc::new(
-//!     RedactTransformer::default(),
-//! ));
+//! let registry = HookRegistry::new();
+//! let _registration = registry
+//!     .register_result_transformer_at(
+//!         MountPoint::ToolPost,
+//!         Arc::new(RedactTransformer::default()),
+//!         RegistrationOrigin::InProcess,
+//!     )
+//!     .expect("a result transformer belongs on `tool/post-execute`");
 //! ```
 
 #[cfg(feature = "redact")]

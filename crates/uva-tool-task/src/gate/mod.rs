@@ -28,7 +28,7 @@
 //!
 //! A single [`run_gate`] call produces a single [`GateVerdict`]:
 //! the verdict is set by whichever exit path is taken first
-//! (clean exit, non-zero exit, timeout, killed by the parent
+//! (clean exit, non-zero exit, killed by the parent
 //! cancellation). The verdict is `Clone` so callers can route it
 //! to multiple sinks (parent result, structured log, telemetry)
 //! without re-running the gate.
@@ -63,26 +63,18 @@ use uva_core::CancelToken;
 /// metacharacters are NOT interpreted (no `sh -c` wrapping), so
 /// callers that need shell expansion must pass
 /// `["sh", "-c", "..."]` themselves.
-///
-/// `timeout` bounds the gate's wall-clock lifetime; on expiry the
-/// running child is killed and the verdict becomes
-/// [`GateVerdict::Timeout`]. A `None` timeout means "no limit" —
-/// the gate runs until it exits or the parent cancels.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GateSpec {
     /// Full argv (program + arguments).
     pub command: Vec<String>,
-    /// Wall-clock budget. `None` ⇒ unlimited.
-    pub timeout: Option<Duration>,
 }
 
 impl GateSpec {
     /// Convenience constructor for a single-arg gate (no
-    /// arguments, no timeout).
+    /// arguments).
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             command: vec![program.into()],
-            timeout: None,
         }
     }
 
@@ -90,13 +82,6 @@ impl GateSpec {
     #[must_use]
     pub fn arg(mut self, a: impl Into<String>) -> Self {
         self.command.push(a.into());
-        self
-    }
-
-    /// Builder: set the timeout.
-    #[must_use]
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
         self
     }
 
@@ -110,10 +95,7 @@ impl GateSpec {
 
 impl From<Vec<String>> for GateSpec {
     fn from(command: Vec<String>) -> Self {
-        Self {
-            command,
-            timeout: None,
-        }
+        Self { command }
     }
 }
 
@@ -142,7 +124,14 @@ pub enum GateVerdict {
         /// Exit status code reported by the OS.
         status: i32,
     },
-    /// The gate exceeded its wall-clock budget.
+    /// The gate exceeded a wall-clock budget.
+    ///
+    /// [`run_gate`] does not produce this verdict today: the gate
+    /// carries no budget, so the runner waits for the command to
+    /// exit or for the parent's cancellation. The variant stays for
+    /// a host that applies a budget of its own and reports the
+    /// outcome through [`apply_gate_to_output`] /
+    /// [`verdict_summary`].
     Timeout {
         /// Partial stdout captured before the kill.
         stdout: String,
@@ -249,7 +238,7 @@ pub enum CommandStopReason {
     /// The process exited on its own.
     Exited,
     /// The process was killed because the cancellation token
-    /// fired (or the gate exceeded its timeout).
+    /// fired.
     Killed,
 }
 

@@ -33,6 +33,7 @@ use uva_provider::{
     ModelConfig,
     ModelProvider,
     ProviderConfig,
+    SamplingResult,
     StreamChunk,
     TextContent,
 };
@@ -87,23 +88,30 @@ impl ModelProvider for ScriptedProvider {
         _request: CompletionRequest,
         _cancel: Option<Arc<dyn CancelToken>>,
         mut on_chunk: Box<dyn FnMut(StreamChunk) + Send + 'static>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         // One content delta with the whole answer, then the
         // completion result — the shape a real stream ends with.
-        on_chunk(StreamChunk::Content(uva_provider::ContentPart::Text(
-            TextContent {
-                text: COT_ANSWER.to_string(),
-                cache_control: None,
+        let chunks = [
+            StreamChunk::Content(uva_provider::ContentPart::Text(
+                TextContent {
+                    text: COT_ANSWER.to_string(),
+                    cache_control: None,
+                },
+            )),
+            StreamChunk::IsDone {
+                result: Box::new(SamplingResult {
+                    text: COT_ANSWER.to_string(),
+                    ..Default::default()
+                }),
             },
-        )));
-        let response = self.complete(CompletionRequest::default()).await?;
-        on_chunk(StreamChunk::IsDone {
-            result: Box::new(uva_provider::SamplingResult {
-                text: COT_ANSWER.to_string(),
-                ..Default::default()
-            }),
-        });
-        Ok(response)
+        ];
+        let mut assembler = uva_provider::BlockAssembler::new();
+        for chunk in chunks {
+            assembler.push(chunk.clone());
+            on_chunk(chunk);
+        }
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 

@@ -17,7 +17,7 @@ use uva::{
         PluginManifest,
         RuntimeKind,
     },
-    tool::{KEY_TOOLS, RegistrationToken, ToolRegistry},
+    tool::{KEY_TOOLS, ToolProvenance, ToolRegistry, register_tool_entries},
 };
 
 use super::{SearchService, SearchSources, SharedSessionSearch};
@@ -88,30 +88,12 @@ impl KernelPlugin for SearchServicePlugin {
             clock: self.clock.clone(),
         });
         let provided = ctx.provide_arc(KEY_SEARCH, Arc::clone(&service))?;
-        let Some(token): Option<RegistrationToken> =
-            uva::tool_search::register_search_tool_with_token(
-                &tools,
-                service.registry(),
-            )
-        else {
-            return Err(PluginError::new(
-                "the `tools` registry refused the `search` tool: a core \
-                 tool already owns the name",
-            ));
-        };
-        let rollback = token.clone();
-        let registry = Arc::clone(&tools);
-        let unregister = ctx.effect(SEARCH_TOOL_EFFECT, move || {
-            registry.unregister_by_token(token);
-            Ok(())
-        });
-        let effect = match unregister {
-            Ok(effect) => effect,
-            Err(error) => {
-                tools.unregister_by_token(rollback);
-                return Err(error);
-            }
-        };
+        let effect = register_tool_entries(
+            ctx,
+            vec![uva::tool_search::search_tool_entry(service.registry())],
+            ToolProvenance::Dynamic,
+            SEARCH_TOOL_EFFECT,
+        )?;
         Ok(vec![provided, effect])
     }
 }

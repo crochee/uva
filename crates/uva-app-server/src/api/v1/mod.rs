@@ -19,7 +19,7 @@
 //!   for keyset pagination. Encodes the last resource ID of a
 //!   page so the next page can resume via `WHERE id > last_id`.
 //! - [`validation`]: request-parameter validation helpers —
-//!   resource-name regex, sort whitelist enforcement, and API
+//!   resource-name regex, and API
 //!   key masking.
 //! - [`profile`]: [`profile::ProfileRow`] and
 //!   [`profile::ProfileChange`] — the profile seam's wire shapes,
@@ -34,13 +34,7 @@ pub mod profile;
 pub mod session_view;
 pub mod validation;
 
-pub use cursor::{
-    ResolvedPage,
-    decode_cursor,
-    encode_cursor,
-    next_cursor,
-    resolve_page,
-};
+pub use cursor::{decode_cursor, encode_cursor};
 pub use list::List;
 pub use page_query::{DEFAULT_LIMIT, MAX_LIMIT, PageQuery, SessionPageQuery};
 pub use profile::{
@@ -49,4 +43,4 @@ pub use profile::{
     ProfileRow,
     ProfileSegment,
 };
-pub use validation::{api_key_mask, validate_resource_name, validate_sort};
+pub use validation::{api_key_mask, validate_resource_name};

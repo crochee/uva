@@ -159,7 +159,7 @@ fn a_plugin_row_replays_but_never_enters_the_history() {
     // The durable half of the plugin escape hatch: the row is a
     // log row like any other, and it is log-only — the model
     // history is exactly the surface-eligible rows around it.
-    let plugin = row(SessionEvent::plugin(
+    let plugin = row(crate::typed_event_builders::plugin_row(
         2,
         "2026-10-26T00:00:00Z",
         "acme.span",

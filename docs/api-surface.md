@@ -6,7 +6,7 @@ promise runs, and names the process that changes it. This page is
 the map for someone arriving new — what each crate hands you,
 which names belong in your `use` lines, and which corners of the
 tree are not part of the promise at all. Both pages describe the
-same 422 curated names. The gate compares the **live curated surface**
+same 447 curated names. The gate compares the **live curated surface**
 against `scripts/frozen-api/baseline` — it does not read either page;
 keeping the page and the baseline in step is the review convention
 `docs/api-frozen.md` describes.
@@ -17,11 +17,11 @@ keeping the page and the baseline in step is the review convention
 |---|---|---|
 | `uva-core` | the runtime seams without a runtime: clock, cancellation, ids, sleep, plus shared registries and text helpers | 41 |
 | `uva-context` | the context window: managers and the memory tiers | 19 |
-| `uva-harness` | the agent loop: strategies, approval/resume, the host registry, events | 61 |
+| `uva-harness` | the agent loop: strategies, approval/resume, the host's typed tables and its one interception registry, events | 59 |
 | `uva-provider` | a model provider and everything around a completion: request/response types, credentials, retry classification, cache policy, JSON repair | 93 |
-| `uva-session` | the durable ledger: the sink and its version header, the log contract, events, history fold, compaction, search, token metering | 128 |
+| `uva-session` | the durable ledger: the sink and its version header, the log contract, events, history fold, compaction, search, token metering | 154 |
 | `uva-steering` | the vocabulary of policy: guards, hints, trackers, output transformers, hook events | 36 |
-| `uva-tool` | the tool paradigm: registry, traits, annotations, restriction, surface projection | 44 |
+| `uva-tool` | the tool paradigm: registry, traits, annotations, restriction, surface projection | 45 |
 
 The full, sorted lists live in
 [the frozen names](api-frozen.md#the-frozen-names).

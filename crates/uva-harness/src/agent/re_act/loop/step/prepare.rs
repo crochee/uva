@@ -598,16 +598,22 @@ mod tests {
         let provider: Arc<dyn uva_provider::ModelProvider> =
             Arc::new(uva_test_support::FakeProvider::new(Vec::new()));
         let mut caps = AgentCaps::for_provider(provider);
-        let mut host = Host::new();
-        // The registration handle withdraws on drop, so keep each one
+        let host = Host::new();
+        // The registration handles withdraw on drop, so keep each one
         // alive until the snapshot has been built.
         let _registrations: Vec<_> = sections
             .iter()
             .map(|(title, body)| {
-                host.prompt_section(PromptSection {
-                    title: (*title).to_string(),
-                    body: (*body).to_string(),
-                })
+                host.hook_registry()
+                    .register_prompt_section(
+                        uva_hook::MountPoint::PromptSections,
+                        PromptSection {
+                            title: (*title).to_string(),
+                            body: (*body).to_string(),
+                        },
+                        uva_hook::RegistrationOrigin::InProcess,
+                    )
+                    .expect("the collection point carries a section")
             })
             .collect();
         caps.control.seams = crate::seams::Seams::new(host);

@@ -7,6 +7,7 @@
 //! | `assembly` | The `Assembly` sub-state: the mounted tree, the two read models, and the one change path that moves them. |
 //! | `boot` | `AppState::new` / `with_server_config`: resolve configs, build the registry, wire every field. |
 //! | `for_test` | The `test-utils` constructor with in-memory components and a fake provider. |
+//! | `session_resolution` | The named `must_exist` / `create_on_demand` policies, the transcript-location knowledge (`transcript_path`, `user_sessions_dir`), and the durable-transcript line readers (`transcript_events`, `transcript_lines`): one owner for where a session's log lives, what a resolve may create, and how the log's lines are read. |
 //! | `sessions` | `get_or_create_session_controller`: the per-`(user, session)` controller cache. |
 //! | `usage` | `UsageMetrics` counters + `UsageSnapshot`. |
 //! | `tools` | The default plugin tool surface + the `AppliedToolSurface` record. |
@@ -34,6 +35,7 @@ mod mcp;
 mod profile_apply;
 mod schedules;
 pub(crate) mod self_mcp;
+pub(crate) mod session_resolution;
 mod sessions;
 pub(crate) mod tasks;
 mod tools;
@@ -52,6 +54,7 @@ pub use eval_agent::HarnessEvalAgent;
 pub use evals::EvalsState;
 pub use mcp::McpRuntime;
 pub use schedules::SchedulesState;
+pub(crate) use session_resolution::MustExistError;
 #[cfg(test)]
 pub(crate) use sessions::PARKED_PROMPT_WINDOW;
 pub use tools::AppliedToolSurface;
@@ -243,12 +246,15 @@ pub struct AppState {
     /// [`Host::default_policy`](uva::harness::Host::default_policy)
     /// (the steering policy) and shared with every agent.
     ///
-    /// The host owns the registrations (observers, gates,
-    /// transformers, prompt sections, tools) the mounted rows made.
-    /// Every agent construction hands this clone to
-    /// `ReActAgent::with_host`, so a registered tool is callable
-    /// from the boot agent and from the per-run agents that serve
-    /// chat alike. A clone shares the registrations, so there is one
+    /// The host owns the typed policy tables (guards, hints, trackers,
+    /// output transformers, tool bindings) the mounted rows made, plus
+    /// the deployment's one interception table
+    /// ([`hook_registry`](uva::harness::Host::hook_registry)) — the
+    /// same instance the `hooks` row publishes. Every agent
+    /// construction hands this clone to `ReActAgent::with_host`, so a
+    /// registered tool is callable from the boot agent and from the
+    /// per-run agents that serve chat alike, and a registration on the
+    /// table reaches every run. A clone shares both, so there is one
     /// policy, not one per agent.
     pub plugin_host: uva::harness::Host,
     /// Test-utils override for the default provider (see

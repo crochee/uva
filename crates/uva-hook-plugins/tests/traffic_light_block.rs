@@ -11,8 +11,8 @@ use std::sync::Arc;
 use futures::StreamExt;
 use serde_json::Value;
 use uva_core::{AtomicCancelToken, SystemClock};
-use uva_harness::{Agent, AgentInput, ReActAgent};
-use uva_hook::{HookRegistry, seam};
+use uva_harness::{Agent, AgentInput, Host, ReActAgent};
+use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 use uva_hook_plugins::traffic_light::TrafficLight;
 use uva_provider::{
     ContentPart,
@@ -97,19 +97,19 @@ async fn a_high_risk_call_is_blocked_and_logged() {
     })));
 
     let registry = HookRegistry::new();
-    let _registration = registry
-        .register_gate(
-            seam::TOOL_PRE,
-            Arc::new(TrafficLight::new(tools.clone())),
-        )
-        .expect("the gate registers");
+    let _registration = registry.register_gate_at(
+        MountPoint::ToolPre,
+        Arc::new(TrafficLight::new(tools.clone())),
+        RegistrationOrigin::Plugin,
+    );
 
     let provider = Arc::new(ReplayProvider::new(vec![
         tool_call_script("danger"),
         final_script("noted"),
     ])) as Arc<dyn ModelProvider>;
     let agent = ReActAgent::new(provider, tools)
-        .with_hook_registry(registry)
+        .with_host(Host::new_with_registry(registry))
+        .expect("bind the host")
         .with_log_writer(writer);
 
     let mut stream = agent

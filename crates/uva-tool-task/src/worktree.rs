@@ -35,15 +35,20 @@
 //! that a fresh value per spawn avoids the "branch already
 //! exists" retry dance the TS code pays on every commit.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use serde_json::Value;
 use thiserror::Error;
 use ulid::Ulid;
 
 #[cfg(test)]
 use crate::gate::CommandOutcome;
-use crate::gate::{CommandRunner, CommandStopReason};
+use crate::{
+    gate::{CommandRunner, CommandStopReason},
+    round::Isolation,
+};
 
 /// Marker the parent sets on a [`crate::TaskSpec`]
 /// to ask for git-worktree isolation.
@@ -76,6 +81,49 @@ pub struct WorktreeInfo {
     pub branch: String,
     /// Commit SHA that the worktree was created from.
     pub base_sha: String,
+}
+
+/// A worktree as the round module's isolation.
+///
+/// The round asks its isolation two things: where the child runs, and
+/// what the round changed. The worktree's lifecycle — creating it,
+/// committing its branch, removing its directory — stays here, with
+/// the rest of the worktree's own business; the round only borrows
+/// the two answers.
+pub(crate) struct WorktreeIsolation {
+    info: WorktreeInfo,
+    runner: Arc<dyn CommandRunner>,
+}
+
+impl WorktreeIsolation {
+    /// The worktree `info` describes, read through `runner`.
+    pub(crate) fn new(
+        info: WorktreeInfo,
+        runner: Arc<dyn CommandRunner>,
+    ) -> Self {
+        Self { info, runner }
+    }
+
+    /// The worktree this isolation runs in.
+    pub(crate) fn info(&self) -> &WorktreeInfo {
+        &self.info
+    }
+
+    /// This isolation as the round module's seam.
+    pub(crate) fn as_isolation(self: &Arc<Self>) -> Arc<dyn Isolation> {
+        let worktree: Arc<WorktreeIsolation> = Arc::clone(self);
+        worktree
+    }
+}
+
+impl crate::round::Isolation for WorktreeIsolation {
+    fn path(&self) -> &Path {
+        &self.info.path
+    }
+
+    fn patch(&self) -> Option<String> {
+        worktree_patch(&self.info, self.runner.as_ref())
+    }
 }
 
 /// Outcome of [`cleanup_worktree`].
@@ -468,28 +516,6 @@ pub fn cleanup_worktree(
         branch: if has_changes { created_branch } else { None },
         path: Some(info.path.display().to_string()),
         base_sha: info.base_sha.clone(),
-    }
-}
-
-/// Parse a `Value` shape `{ "worktree": <spec> }` into a
-/// [`WorktreeSpec`]. Used by
-/// [`crate::TaskSpec::from_value`] to wire
-/// the JSON schema into the TaskSpec.
-pub(crate) fn parse_worktree_field(
-    value: Option<&Value>,
-) -> Result<Option<WorktreeSpec>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    match value {
-        Value::Null | Value::Bool(false) => Ok(None),
-        // `true` and an object are the two shapes the schema
-        // advertises; anything else is a caller typo and is
-        // refused instead of silently isolated.
-        Value::Bool(true) | Value::Object(_) => Ok(Some(WorktreeSpec)),
-        other => Err(format!(
-            "`isolation` must be `true`, `false`, null or an object;              got {other}"
-        )),
     }
 }
 

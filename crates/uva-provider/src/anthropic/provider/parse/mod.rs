@@ -13,7 +13,6 @@ use crate::types::{
     Content,
     ContentPart,
     TextContent,
-    TokenUsage,
     ToolUse,
 };
 
@@ -104,19 +103,12 @@ impl AnthropicProvider {
             id: resp.id.clone(),
             model: model.to_string(),
             content,
-            usage: TokenUsage {
-                prompt_tokens: resp.usage.input_tokens,
-                completion_tokens: resp.usage.output_tokens,
-                total_tokens: resp.usage.input_tokens
-                    + resp.usage.output_tokens,
-                cached_prompt_tokens: resp.usage.cache_read_input_tokens,
-                cache_read_tokens: resp.usage.cache_read_input_tokens,
-                cache_write_tokens: resp.usage.cache_creation_input_tokens,
-                // Anthropic bills thinking blocks as output
-                // tokens and does not report a separate
-                // reasoning count in `message.usage`.
-                reasoning_tokens: None,
-            },
+            usage: super::super::usage::token_usage(
+                resp.usage.input_tokens,
+                resp.usage.output_tokens,
+                resp.usage.cache_read_input_tokens,
+                resp.usage.cache_creation_input_tokens,
+            ),
             // `cached` means "cache HIT" — a positive number
             // of tokens served from cache. Anthropic reports
             // `cache_read_input_tokens = Some(0)` for a cache

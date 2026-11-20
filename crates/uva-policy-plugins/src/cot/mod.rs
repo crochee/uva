@@ -12,6 +12,7 @@ use uva_harness::{
     agent::strategy::{AgentRuntime, single_shot_request},
 };
 use uva_provider::{
+    BlockAssembler,
     CompletionRequest,
     Content,
     ContentPart,
@@ -90,6 +91,11 @@ impl ChainOfThoughtStrategy {
         let answer = Arc::new(parking_lot::Mutex::new(String::new()));
         let answer_slot = Arc::clone(&answer);
         let stream_sink = sink.clone();
+        let done_sink = sink.clone();
+        // The provider's decoders emit chunks only; the finished turn
+        // comes from folding exactly the chunks this pass forwards.
+        let fold = Arc::new(parking_lot::Mutex::new(BlockAssembler::new()));
+        let fold_slot = Arc::clone(&fold);
         // The prompt (and everything queued before it) lands before
         // the model sees it.
         if let Err(error) = sink.flush_log().await {
@@ -103,39 +109,64 @@ impl ChainOfThoughtStrategy {
             .complete_with_stream(
                 request,
                 Some(runtime.cancel.clone()),
-                Box::new(move |chunk| match chunk {
-                    StreamChunk::Content(part) => {
-                        // The cot offers no tools: a tool call in
-                        // the answer is ignored (and warned about),
-                        // and it must not reach the log, where it
-                        // would be an unanswered call.
-                        if !matches!(part, ContentPart::ToolUse(_)) {
-                            parts_slot.lock().push(part.clone());
+                Box::new(move |chunk| {
+                    fold_slot.lock().push(chunk.clone());
+                    match chunk {
+                        StreamChunk::Content(part) => {
+                            // The cot offers no tools: a tool call in
+                            // the answer is ignored (and warned about),
+                            // and it must not reach the log, where it
+                            // would be an unanswered call.
+                            if !matches!(part, ContentPart::ToolUse(_)) {
+                                parts_slot.lock().push(part.clone());
+                            }
+                            stream_sink.emit(AgentEvent::Model(part));
                         }
-                        stream_sink.emit(AgentEvent::Model(part));
+                        // Usage is published once, from the finished
+                        // turn (below): the decoders emit one chunk
+                        // per wire frame, each carrying the merge so
+                        // far, so forwarding them would count the
+                        // same tokens once per frame.
+                        StreamChunk::Usage(_)
+                        // Neither the stop reason nor the tool-call
+                        // boundaries shape the answer. A reasoning
+                        // signature would sign a block this plugin keeps
+                        // unsigned, and an unsigned block is omitted by
+                        // the adapter rather than sent invalid.
+                        | StreamChunk::Stop(_)
+                        | StreamChunk::ReasoningSignature(_)
+                        | StreamChunk::IsDone { .. }
+                        | StreamChunk::ToolCallStart { .. }
+                        | StreamChunk::ToolCallDelta { .. }
+                        | StreamChunk::ToolCallName { .. }
+                        | StreamChunk::ToolCallEnd { .. } => {}
                     }
-                    StreamChunk::Usage(usage) => {
-                        stream_sink.emit(AgentEvent::usage(
-                            usage.prompt_tokens,
-                            usage.completion_tokens,
-                            usage.cache_read_tokens,
-                            usage.cache_write_tokens,
-                        ));
-                    }
-                    StreamChunk::IsDone { result } => {
-                        if let Some(first) = result.tool_calls.first() {
-                            *slot.lock() = Some(first.name.clone());
-                        }
-                        *answer_slot.lock() = result.text.clone();
-                        stream_sink.emit(AgentEvent::ModelDone(*result));
-                    }
-                    StreamChunk::Stop(_)
-                    | StreamChunk::ToolCallStart { .. }
-                    | StreamChunk::ToolCallDelta { .. }
-                    | StreamChunk::ToolCallEnd { .. } => {}
                 }),
             )
             .await;
+        let (turn, _folded_parts, _incomplete) =
+            fold.lock().finalize_assistant();
+        if let Some(first) = turn.tool_calls.first() {
+            *slot.lock() = Some(first.name.clone());
+        }
+        *answer_slot.lock() = turn.text.clone();
+        if outcome.is_ok() {
+            // The one usage report for this pass, from the fold's
+            // finished turn (the chunk readers above see the raw
+            // frames, not the merged total). Published next to
+            // `ModelDone`, exactly as the ReAct loop does.
+            let usage = &turn.usage;
+            done_sink.emit(AgentEvent::usage(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+            ));
+            // `ModelDone` carries the tool calls the fold saw; the
+            // published parts deliberately drop them (see the parts
+            // filter above), so they never reach the log.
+            done_sink.emit(AgentEvent::ModelDone(turn));
+        }
         let attempted = attempt.lock().clone();
         let mut parts = std::mem::take(&mut *parts.lock());
         if !parts.iter().any(|part| {

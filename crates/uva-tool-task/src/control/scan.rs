@@ -281,8 +281,14 @@ pub fn head_records(head: &[Value], session_id: &str) -> Vec<ChildRecord> {
                 .delegation_agent()
                 .unwrap_or("unknown")
                 .to_string(),
-            depth: u32::try_from(event.delegation_depth().unwrap_or(1))
-                .unwrap_or(1),
+            // A header that carries no depth names a first-level child:
+            // the depth rule owns that default.
+            depth: u32::try_from(
+                event
+                    .delegation_depth()
+                    .unwrap_or(crate::round::depth::FIRST_CHILD_DEPTH as u64),
+            )
+            .unwrap_or(crate::round::depth::FIRST_CHILD_DEPTH as u32),
             started_at,
             finished: None,
             source: if child == session_id {

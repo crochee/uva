@@ -21,9 +21,9 @@
 //! | [`parallel_unsafe`]        | Sequential bucket for unsafe tools                          |
 //! | [`tool_projection_memo`]   | Tool projection memoization across iterations               |
 //! | [`tool_restriction`]       | Per-agent `denied_tools` / `allow_list`                     |
+//! | [`tool_metrics`]           | The Prometheus tool counters the loop's dispatch feeds      |
 //! | [`compaction_wiring`]      | Which context manager / compactor a run uses                |
 //! | [`host_wiring`]            | Host registrations reaching the loop's decision points      |
-//! | [`host_snapshot`]          | The host's immutable dispatch view and its invalidation     |
 //! | [`steering_guards`]        | Guard pipeline + sanitising rewrites                        |
 //! | [`steering_hints`]         | Hints                                                       |
 //! | [`steering_hooks`]         | Hook dispatch                                               |
@@ -50,7 +50,6 @@ mod compaction;
 mod compaction_wiring;
 mod compose_pipeline_tests;
 mod end_to_end_runtime;
-mod host_snapshot;
 mod host_wiring;
 mod hot_path_costs;
 mod multi_agent_panel;
@@ -68,5 +67,6 @@ mod steering_transformers;
 mod lifecycle;
 mod log_read_count;
 pub(crate) mod support;
+mod tool_metrics;
 mod tool_projection_memo;
 mod tool_restriction;

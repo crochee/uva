@@ -4,7 +4,7 @@
 //!
 //! - [`v1`]: list response envelope, page query params, opaque
 //!   cursor encoding, request-parameter validation helpers
-//!   (resource-name regex, sort whitelist, API-key masking).
+//!   (resource-name regex, API-key masking).
 //!   `uva::core::Error` — [`crate::rpc::RpcError`] (the
 //!   boundary struct handlers return). The `From<uva::core::Error>
 //!   for RpcError` impl owns the variant → machine-code mapping
@@ -21,13 +21,9 @@ pub use v1::{
     List,
     MAX_LIMIT,
     PageQuery,
-    ResolvedPage,
     SessionPageQuery,
     api_key_mask,
     decode_cursor,
     encode_cursor,
-    next_cursor,
-    resolve_page,
     validate_resource_name,
-    validate_sort,
 };

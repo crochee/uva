@@ -146,7 +146,12 @@ impl Registry for AgentRegistry {
         out.sort_by(|a, b| a.name().cmp(b.name()));
         // Sort is applied above; cursor + limit + envelope come
         // from the shared pagination primitive.
-        paginate_registry_list(out, cursor.as_deref(), limit)
+        paginate_registry_list(
+            out,
+            cursor.as_deref(),
+            limit,
+            |entry: &AgentEntry| entry.name(),
+        )
     }
 }
 

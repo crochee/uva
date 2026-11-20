@@ -525,27 +525,21 @@ impl ModelProvider for ToolCapturingProvider {
         request: uva::provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn uva::core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(uva::provider::StreamChunk) + Send>,
-    ) -> Result<uva::provider::CompletionResponse, uva::core::Error> {
+    ) -> Result<uva::provider::SamplingResult, uva::core::Error> {
         self.captured.lock().push(request.tools.clone());
-        on_delta(uva::provider::StreamChunk::IsDone {
+        let chunk = uva::provider::StreamChunk::IsDone {
             result: Box::new(uva::provider::SamplingResult {
                 text: "done".to_string(),
                 usage: uva::provider::TokenUsage::default(),
+                stop_reason: Some("end_turn".to_string()),
                 ..Default::default()
             }),
-        });
-        Ok(uva::provider::CompletionResponse {
-            id: "captured-1".to_string(),
-            model: "fake".to_string(),
-            content: Content::Single(ContentPart::Text(TextContent {
-                text: "done".to_string(),
-                cache_control: None,
-            })),
-            usage: uva::provider::TokenUsage::default(),
-            cached: false,
-            replay_state: None,
-            stop_reason: Some("end_turn".to_string()),
-        })
+        };
+        on_delta(chunk.clone());
+        let mut assembler = uva::provider::BlockAssembler::new();
+        assembler.push(chunk);
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 
@@ -611,26 +605,14 @@ impl ModelProvider for ScriptedStreamProvider {
         _request: uva::provider::CompletionRequest,
         _cancel_token: Option<Arc<dyn uva::core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(uva::provider::StreamChunk) + Send>,
-    ) -> Result<uva::provider::CompletionResponse, uva::core::Error> {
+    ) -> Result<uva::provider::SamplingResult, uva::core::Error> {
         let chunks = self.take_next();
-        let mut sampling = uva::provider::SamplingResult::default();
+        let mut assembler = uva::provider::BlockAssembler::new();
         for chunk in chunks {
-            if let uva::provider::StreamChunk::IsDone { result } = &chunk {
-                sampling = (**result).clone();
-            }
+            assembler.push(chunk.clone());
             on_delta(chunk);
         }
-        Ok(uva::provider::CompletionResponse {
-            id: "resp-1".to_string(),
-            model: "fake".to_string(),
-            content: Content::Single(ContentPart::Text(TextContent {
-                text: sampling.text.clone(),
-                cache_control: None,
-            })),
-            usage: sampling.usage.clone(),
-            cached: false,
-            replay_state: None,
-            stop_reason: sampling.stop_reason.clone(),
-        })
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }

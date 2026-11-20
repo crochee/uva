@@ -2,14 +2,16 @@
 #
 # The React/Vite frontend serves the static SPA bundle via nginx.
 # The nginx config (`nginx/default.conf.template`) reverse-proxies
-# `/api/*` to the uva-server Service so the SPA and the API
-# share one origin in production (avoids CORS, keeps cookies
-# first-party).
+# the server's HTTP surface — `/rpc` (the JSON-RPC websocket),
+# `/livez`, `/readyz`, `/version` and `/metrics` — to the
+# uva-server Service, so the SPA and the API share one origin in
+# production (avoids CORS, keeps cookies first-party).
 #
 # Design points:
 #   1. Deployment, 1 replica minimum; HPA is downstream.
-#   2. SecurityContext: non-root, read-only root filesystem, only
-#      port 80 open.
+#   2. SecurityContext: non-root (65532), read-only root filesystem,
+#      only port 8080 open. The port is above 1024, so the container
+#      needs no capability and no privileged port.
 #   3. Service: ClusterIP; an Ingress (out of scope for this
 #      reference manifest) terminates TLS in front of it.
 #   4. Probes: HTTP `/` against the served index.html — the
@@ -58,7 +60,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 80
+              containerPort: 8080
               protocol: TCP
           livenessProbe:
             httpGet:
@@ -77,14 +79,15 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 3
           env:
-            # `VITE_*` env are baked at build time, but the runtime
-            # here is plain nginx so this is informational. The web
-            # image's nginx.conf can read these to drive proxy_pass
-            # upstream selection in dev vs prod.
-            - name: UVA_HOST
-              value: "0.0.0.0"
+            # The address the server is reachable at: the API surface
+            # (`/rpc`, `/livez`, `/readyz`, `/version`, `/metrics`) is
+            # proxied to it, so the SPA and the API share one origin.
+            - name: UVA_UPSTREAM
+              value: "http://uva-server:8080"
+            # The port nginx listens on. Above 1024, so the container
+            # needs no capability and no privileged port.
             - name: UVA_PORT
-              value: "80"
+              value: "8080"
           resources:
             requests:
               cpu: 50m
@@ -98,6 +101,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+          volumeMounts:
+            # nginx writes its pid file, its temporary paths and the
+            # rendered site configuration under /tmp; the root
+            # filesystem is read-only.
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

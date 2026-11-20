@@ -121,7 +121,7 @@ pub struct ControlSurface {
     registry: Arc<ControlRegistry>,
     peers: Arc<AgentRegistry>,
     index: RwLock<Option<Arc<dyn SessionIndex>>>,
-    state: RwLock<Option<Arc<crate::tool::TaskState>>>,
+    depths: Arc<crate::round::depth::DepthLedger>,
     park: RwLock<Option<ParkSeams>>,
     /// Where an abandoned round's writer half is detached. The default
     /// is the runtime-free [`InlineSpawner`](uva_core::spawn::InlineSpawner);
@@ -147,7 +147,7 @@ impl ControlSurface {
             )),
             peers,
             index: RwLock::new(None),
-            state: RwLock::new(None),
+            depths: Arc::new(crate::round::depth::DepthLedger::new()),
             park: RwLock::new(None),
             spawner: RwLock::new(Arc::new(uva_core::spawn::InlineSpawner)),
             usage: RwLock::new(None),
@@ -164,25 +164,15 @@ impl ControlSurface {
         self
     }
 
-    /// Share the tool's depth table with this surface.
+    /// The depth table the round module owns.
     ///
-    /// The tool records a child's depth when it dispatches it; a round
-    /// the surface wakes (or follows up) runs at the depth the handle
-    /// table remembers, so it records it back into the same table — a
-    /// nested `task` call from that round then sees the depth it runs
-    /// at instead of starting over at zero.
-    #[must_use]
-    pub(crate) fn with_task_state(
-        self,
-        state: Arc<crate::tool::TaskState>,
-    ) -> Self {
-        *self.state.write() = Some(state);
-        self
-    }
-
-    /// The tool's depth table, when the tool wired one in.
-    pub(crate) fn task_state(&self) -> Option<Arc<crate::tool::TaskState>> {
-        self.state.read().clone()
+    /// The `task` tool records a child's depth when it dispatches it;
+    /// a round the surface wakes (or follows up) runs at the depth the
+    /// handle table remembers, so it records it back into the same
+    /// table — a nested `task` call from that round then sees the
+    /// depth it runs at instead of starting over at zero.
+    pub(crate) fn depth_ledger(&self) -> Arc<crate::round::depth::DepthLedger> {
+        Arc::clone(&self.depths)
     }
 
     /// Install the host's session index.
@@ -278,10 +268,8 @@ impl ControlSurface {
     pub fn tick(self: &Arc<Self>) -> usize {
         self.ensure_parking();
         let parked = self.registry.tick();
-        if let Some(state) = self.task_state() {
-            for (_, child) in &parked {
-                state.forget_depth(child);
-            }
+        for (_, child) in &parked {
+            crate::round::depth::forget(&self.depths, child);
         }
         parked.len()
     }
@@ -349,7 +337,7 @@ impl ControlSurface {
         agent: &str,
         depth: usize,
         status: &str,
-        patch: Option<String>,
+        patch: Option<&str>,
     ) {
         let Some(index) = self.index() else {
             return;
@@ -385,6 +373,23 @@ impl ControlSurface {
                 "control: the child's artefact set could not be written"
             ),
         }
+    }
+
+    /// Hard-terminate a child: the terminal state.
+    ///
+    /// The child's handles are released with the move, and so is its
+    /// depth entry: a terminal child will never run another round, so
+    /// nothing reads its depth again. The depth table is cleaned where
+    /// the handles are released — here and in [`tick`](Self::tick).
+    ///
+    /// # Errors
+    ///
+    /// Refused when this session has no such child, or when the child
+    /// is already terminal.
+    pub fn kill(&self, parent: &str, child: &str) -> Result<(), ControlError> {
+        self.registry.kill(parent, child)?;
+        crate::round::depth::forget(&self.depths, child);
+        Ok(())
     }
 
     /// The `agents_list` tool.

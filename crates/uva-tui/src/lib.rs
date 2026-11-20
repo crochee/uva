@@ -18,13 +18,19 @@
 //!   method, row pointer, columns, operations); the single place a
 //!   new directory domain is added;
 //! - [`render`] — ratatui drawing only;
-//! - [`ui_schema`] — the terminal's copy of the deployment's UI tree
-//!   (the `ui/schema` wire, read with this crate's own DTOs);
+//! - [`ui_schema`] — the terminal's reading of the deployment's UI
+//!   tree (the `ui/schema` wire, read with the server's own type,
+//!   `uva_app_server::routes::ui::UiSchemaResponse`);
 //! - [`views`] — the §6.1 skeleton's region painters (sidebar,
 //!   conversation, todo, composer, settings) that [`render`]
 //!   dispatches to;
 //! - `main` — clap, the terminal guard, and the `tokio::select!` loop
 //!   over crossterm events, transport events and a render tick.
+//!
+//! The wire types those layers decode are the **server's own**
+//! (`uva_app_server`): the follow baseline, the schema tree and the
+//! method names all come from there, so a shape has one owner
+//! instead of two (ADR-0025).
 //!
 //! # Wire contract
 //!

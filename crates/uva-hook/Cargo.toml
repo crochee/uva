@@ -1,6 +1,6 @@
 [package]
 name = "uva-hook"
-description = "The interception contract under the agent loop: the Hook/Gate/transformer traits, the seven mount-point keys, the decoupled HookContext and the HookPayload waterfall payload"
+description = "The interception contract under the agent loop: the Hook/Gate/transformer traits, the twelve mount points, the decoupled HookContext and the one HookRegistry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,10 @@ futures.workspace = true
 # The `LoggingHook` adapter impl (the orphan rule puts it here) logs
 # its observations at debug level.
 tracing.workspace = true
+# The prompt-section vocabulary belongs to the prompt manifest, one
+# layer down in `uva-agent`; the registry collects those sections but
+# does not define a second section type.
+uva-agent.workspace = true
 uva-context.workspace = true
 uva-core.workspace = true
 uva-kernel.workspace = true

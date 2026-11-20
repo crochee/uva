@@ -410,8 +410,12 @@ pub(super) async fn resume_retries_a_low_idempotent_dispatched_call() {
     let registry = build_registry(vec![read]);
     let writer = logged_writer().await;
     let first = scripted(vec![call("c1", "read")]);
-    let mut host = Host::new();
-    let _gate = host.gate(Arc::new(AskGate));
+    let host = Host::new();
+    let _gate = host.hook_registry().register_gate_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(AskGate),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
     let agent = ReActAgent::new(first, Arc::clone(&registry))
         .with_log_writer(writer.clone())
         .with_host(host)
@@ -453,7 +457,11 @@ pub(super) async fn a_host_ask_approves_the_guarded_arguments() {
     let registry = build_registry(vec![tool("echo", true, &runs)]);
     let writer = logged_writer().await;
     let mut host = Host::new();
-    let _gate = host.gate(Arc::new(AskGate));
+    let _gate = host.hook_registry().register_gate_at(
+        uva_hook::MountPoint::ToolPre,
+        Arc::new(AskGate),
+        uva_hook::RegistrationOrigin::InProcess,
+    );
     let _guard = host.guard(Arc::new(RewriteArgs));
     let first = scripted(vec![call("c1", "echo")]);
     let agent = ReActAgent::new(first, Arc::clone(&registry))

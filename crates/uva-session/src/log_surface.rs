@@ -77,6 +77,12 @@ use crate::{
         fold::{RowKind, SurfaceFold, SurfaceRow, calls_of},
         fold_surface,
     },
+    typed_event_builders::{
+        projected_assistant_message,
+        projected_compaction,
+        projected_tool_result,
+        projected_user_message,
+    },
 };
 
 /// One raw log row projected onto the surface vocabulary.
@@ -434,45 +440,16 @@ fn surface_events_from_log(rows: &[Value]) -> Vec<SessionEvent> {
             continue;
         };
         events.push(match kind {
-            // `source` is a row annotation, not part of the model
-            // surface: the fold projects what the model saw, and
-            // what the model saw is the message.
-            RowKind::User => SessionEvent::UserMessage {
-                seq,
-                ts,
-                data: payload,
-                source: None,
-                surface_op: Some(op),
-                // The projection carries the surface payload, not
-                // the row's envelope annotations: attachment refs
-                // ride the log row for a transcript reader, and the
-                // model never saw them.
-                attachments: Vec::new(),
-            },
-            RowKind::Assistant => SessionEvent::AssistantMessage {
-                seq,
-                ts,
-                data: payload,
-                surface_op: Some(op),
-            },
-            RowKind::Tool => SessionEvent::ToolResult {
-                seq,
-                ts,
-                data: payload,
-                // The fold projects the message, and the message
-                // carries no failure flag: the surface a resumed
-                // run reads back is the transcript, not the row's
-                // metadata.
-                is_error: false,
-                tool_call_id: None,
-                surface_op: Some(op),
-            },
-            RowKind::Compaction => SessionEvent::Compaction {
-                seq,
-                ts,
-                data: payload,
-                surface_op: op,
-            },
+            // The projection builds rows, so it asks the constructor
+            // module for their shape instead of spelling the
+            // variants here — the same discipline every other row
+            // producer follows.
+            RowKind::User => projected_user_message(seq, ts, payload, op),
+            RowKind::Assistant => {
+                projected_assistant_message(seq, ts, payload, op)
+            }
+            RowKind::Tool => projected_tool_result(seq, ts, payload, op),
+            RowKind::Compaction => projected_compaction(seq, ts, payload, op),
         });
     }
     events

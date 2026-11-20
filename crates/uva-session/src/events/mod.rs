@@ -51,7 +51,7 @@ fn is_empty_str(value: &str) -> bool {
 /// the ref the store hands back — without depending on that crate:
 /// this one stays a leaf, and the log's row shape is the contract
 /// both sides share.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AttachmentRefRow {
     /// The composer's own vocabulary: `"image"`, `"audio"` or
     /// `"file"`.
@@ -225,7 +225,7 @@ impl SurfaceRole {
 /// `Value` so the wire shape stays decoupled from
 /// `uva_provider::Message`'s exact serialization (which may
 /// grow new content-part variants over time).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
     /// User-role message.
@@ -994,7 +994,7 @@ fn cap_json_string_tail(text: &str, max_bytes: usize) -> String {
 }
 
 /// Bound one plugin payload, reporting the encoded size it had.
-fn bound_plugin_payload(payload: Value) -> (Value, Option<u64>) {
+pub(crate) fn bound_plugin_payload(payload: Value) -> (Value, Option<u64>) {
     let Ok(encoded) = serde_json::to_string(&payload) else {
         // A `Value` cannot fail to serialise; keep it verbatim if
         // one ever does rather than dropping the row's content.
@@ -1009,7 +1009,7 @@ fn bound_plugin_payload(payload: Value) -> (Value, Option<u64>) {
 }
 
 /// Bound one plugin kind, naming an empty one.
-fn bound_plugin_kind(kind: String) -> String {
+pub(crate) fn bound_plugin_kind(kind: String) -> String {
     let kept = cap_json_string(&kind, MAX_PLUGIN_KIND_BYTES);
     if kept.is_empty() {
         UNNAMED_PLUGIN_KIND.to_string()
@@ -1022,9 +1022,9 @@ fn bound_plugin_kind(kind: String) -> String {
 ///
 /// The writer runs this on every typed ingress, before the one
 /// serialization, so the cap holds for a row built through the
-/// variant literal as well as through [`SessionEvent::plugin`]:
-/// variant fields are public, and a bound that only a constructor
-/// enforces is advisory.
+/// variant literal as well as through the constructors in
+/// [`crate::typed_event_builders`]: variant fields are public, and a
+/// bound that only a constructor enforces is advisory.
 ///
 /// Returns `None` for a row that needs no bounding — the common row
 /// serialises as the caller's own reference, and only the two capped
@@ -1146,16 +1146,34 @@ fn payload_boundary(data: &Value) -> Option<&str> {
         .or_else(|| data.get("phase").and_then(Value::as_str))
 }
 
-/// Join the two views of a row's payload: the typed fields and the
-/// keys inside `data`.
+/// Complete the typed fields of a row written before the typed layer
+/// existed.
 ///
-/// The typed fields are the reader-facing truth — a reader asks the
-/// event for a value and never spells a key. The `data` bag still
+/// This is the **read side's** leniency, and the whole of it. The
+/// typed fields are the reader-facing truth — a reader asks the event
+/// for a value and never spells a key — while the `data` bag still
 /// carries the same keys, because the raw-row readers (the TUI folds
-/// rows it never deserializes) read it there. A row written before
-/// the typed fields existed has the keys only in `data`, so this is
-/// where the two views meet — once, at the seam, instead of at every
-/// read site.
+/// rows it never deserializes) read it there. The two views meet
+/// here, once, at the seam ([`SessionEvent::from_value`]), instead of
+/// at every read site.
+///
+/// **What it fills**: a typed field that is *empty* takes the value
+/// the payload bag carries under the same name — `turn` from
+/// `data.turn`, the boundary kind from `data.kind` (or `data.phase`,
+/// the spelling a suspension's rows used), a tool result's call id
+/// from `data.tool_call_id` or `data.call_id`.
+///
+/// **What it does not do**: it never overwrites a typed field that is
+/// already there, and it never rewrites the payload bag. A row whose
+/// two views contradict each other therefore keeps its contradiction
+/// — the reader does not excuse a writer that wrote one.
+///
+/// A row the vocabulary writes today needs none of this: the
+/// constructors in [`crate::typed_event_builders`] write the payload
+/// bag and the typed fields together, so the reader has nothing to
+/// complete and the row comes back byte for byte as it went in. The
+/// constructors are the one owner of a row's shape, and their own
+/// tests are where a shape that drifts fails.
 fn normalize(mut event: SessionEvent) -> SessionEvent {
     /// The payload's `key`, as a string.
     fn string(data: &Value, key: &str) -> Option<String> {
@@ -1438,30 +1456,6 @@ impl SessionEvent {
         match self {
             Self::SubagentExit { status, .. } => status.as_deref(),
             _ => None,
-        }
-    }
-
-    /// Build a [`SessionEvent::Plugin`] row with a bounded payload.
-    ///
-    /// The writer enforces the same bound on every append path, so
-    /// this is the ergonomic entry point rather than the enforcement
-    /// point. A payload over [`MAX_PLUGIN_PAYLOAD_BYTES`] (encoded)
-    /// becomes a JSON string of its leading bytes, and the size it
-    /// had lands in `original_bytes`.
-    #[must_use]
-    pub fn plugin(
-        seq: u64,
-        ts: impl Into<String>,
-        kind: impl Into<String>,
-        payload: Value,
-    ) -> Self {
-        let (payload, original_bytes) = bound_plugin_payload(payload);
-        Self::Plugin {
-            seq,
-            ts: ts.into(),
-            kind: bound_plugin_kind(kind.into()),
-            payload,
-            original_bytes,
         }
     }
 

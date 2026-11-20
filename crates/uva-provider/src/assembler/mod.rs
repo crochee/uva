@@ -4,18 +4,19 @@
 //!
 //! ## Purpose
 //!
-//! Uva's `ModelProvider::complete_with_stream` returns a
-//! `Stream<Result<StreamChunk, Error>>`. The agent loop needs to
-//! fold that stream into a final [`SamplingResult`] (text +
-//! tool_calls + usage + stop reason) **and** a canonical list of
-//! [`ContentPart`]s to feed the prompt builder. The previous
-//! version of this folding logic lived inline in
-//! `ReActLoop::sample_once` and `handle_chunk` (≈200 lines of
-//! stream-state plumbing).
+//! Uva's `ModelProvider::complete_with_stream` hands every
+//! [`StreamChunk`] to a callback. The agent loop needs to fold those
+//! chunks into a final [`SamplingResult`] (text + tool_calls + usage +
+//! stop reason) **and** a canonical list of [`ContentPart`]s to feed
+//! the prompt builder. The previous version of this folding logic
+//! lived inline in `ReActLoop::sample_once` and `handle_chunk` (≈200
+//! lines of stream-state plumbing).
 //!
-//! [`BlockAssembler`] pulls that logic into a single
-//! testable unit. Producers feed chunks; the loop reads
-//! [`BlockAssembler::finalize_assistant`] once the stream ends.
+//! [`BlockAssembler`] pulls that logic into a single testable unit.
+//! Producers feed chunks; the loop reads
+//! [`BlockAssembler::finalize_assistant`] once the stream ends. The
+//! adapters fold the same chunks through the same unit and return its
+//! turn, so a chunk reader and the returned turn cannot disagree.
 //!
 //! ## Why not just use `SamplingResult` from `IsDone`?
 //!
@@ -98,16 +99,22 @@ pub struct BlockAssembler {
     saw_streamed_text: bool,
     /// Same logic for reasoning.
     saw_streamed_reasoning: bool,
-    /// The most recent `signature_delta` for the reasoning block.
+    /// The most recent reasoning signature observed in this turn.
     ///
     /// It arrives **after** the `thinking_delta`s that carried the text
     /// (that is the Anthropic event order), so the streamed
     /// [`ContentPart::Reasoning`] chunks cannot carry it — see
     /// `streaming::anthropic::processor`, which stamps them with
-    /// whatever it has at that moment, i.e. `None`. It therefore reaches
-    /// us on the terminal `IsDone` and is applied to the already-built
-    /// parts in [`BlockAssembler::finalize_assistant`], where the parts
-    /// are still ours to patch.
+    /// whatever it has at that moment, i.e. `None`. It reaches the fold
+    /// either as its own [`StreamChunk::ReasoningSignature`] chunk or on
+    /// the terminal [`StreamChunk::IsDone`] of a provider that hands
+    /// over an assembled turn, and is applied to the already-built parts
+    /// in [`BlockAssembler::finalize_assistant`], where the parts are
+    /// still ours to patch.
+    ///
+    /// The last observation wins: a provider may emit several signature
+    /// chunks in one turn, and the one that belongs to the trailing
+    /// reasoning block is the latest.
     ///
     /// Dropping it would silently break interleaved extended thinking:
     /// Anthropic rejects a re-sent thinking block without its signature,
@@ -124,8 +131,11 @@ pub struct BlockAssembler {
     usage: Option<TokenUsage>,
     /// Provider-reported stop reason.
     stop_reason: Option<String>,
-    /// Has `IsDone` arrived? After `finalize_assistant` returns,
-    /// the loop expects this to be `true`.
+    /// Has the stream delivered its terminal fact? Either a
+    /// [`StreamChunk::Stop`] (a decoder's stop reason ends the step) or
+    /// an [`StreamChunk::IsDone`] (a provider handing over an assembled
+    /// turn) sets it. After `finalize_assistant` returns, the loop
+    /// expects this to be `true`.
     is_done: bool,
     /// Final assembled content parts in wire order.
     parts: Vec<ContentPart>,
@@ -139,8 +149,8 @@ impl BlockAssembler {
     }
 
     /// Feed one chunk from the provider stream. Safe to call
-    /// before, between, or after `IsDone` — `finalize_assistant`
-    /// pins the ordering invariants.
+    /// before, between, or after the terminal chunk —
+    /// `finalize_assistant` pins the ordering invariants.
     pub fn push(&mut self, chunk: StreamChunk) {
         match chunk {
             StreamChunk::Content(part) => match part {
@@ -164,9 +174,21 @@ impl BlockAssembler {
                 self.usage = Some(usage);
             }
             StreamChunk::Stop(reason) => {
+                // The stop reason is a terminal fact: a stream that
+                // ends with one is a finished step, not a truncated
+                // one. `finalize_assistant`'s `incomplete` verdict
+                // reads this flag.
+                self.is_done = true;
                 if self.stop_reason.is_none() {
                     self.stop_reason = Some(reason);
                 }
+            }
+            StreamChunk::ReasoningSignature(signature) => {
+                // The signature signs the reasoning block that just
+                // ended; it is stamped onto the trailing reasoning run
+                // in `finalize_assistant`, and kept even when no
+                // reasoning text arrived at all.
+                self.reasoning_signature = Some(signature);
             }
             StreamChunk::ToolCallStart {
                 id,
@@ -198,6 +220,16 @@ impl BlockAssembler {
                     self.partials.get_mut(&id)
                 {
                     arguments.push_str(&arguments_delta);
+                }
+            }
+            StreamChunk::ToolCallName { id, name } => {
+                // The name arrived in a later fragment than the start;
+                // patch the still-open block. A closed block has already
+                // become a part, which is not ours to rewrite.
+                if let Some(PartialBlock::ToolUse { name: current, .. }) =
+                    self.partials.get_mut(&id)
+                {
+                    *current = name;
                 }
             }
             StreamChunk::ToolCallEnd { id } => {
@@ -232,7 +264,8 @@ impl BlockAssembler {
         }
     }
 
-    /// True once [`StreamChunk::IsDone`] has been pushed.
+    /// True once the stream's terminal fact has been pushed: either
+    /// [`StreamChunk::Stop`] or [`StreamChunk::IsDone`].
     #[must_use]
     pub fn is_done(&self) -> bool {
         self.is_done
@@ -278,12 +311,12 @@ impl BlockAssembler {
     /// canonical [`ContentPart`] vec (consumed by the history
     /// builder).
     ///
-    /// Calling `finalize_assistant` before `IsDone` is allowed;
-    /// the assembler returns the partial state it has so the
-    /// loop can publish a cancellation message. The
-    /// `incomplete` flag on the returned tuple signals the
-    /// caller that the provider stream ended without a clean
-    /// `IsDone`.
+    /// Calling `finalize_assistant` before the terminal chunk (a
+    /// [`StreamChunk::Stop`] or an [`StreamChunk::IsDone`]) is
+    /// allowed; the assembler returns the partial state it has so the
+    /// loop can publish a cancellation message. The `incomplete` flag
+    /// on the returned tuple signals the caller that the provider
+    /// stream ended without one.
     #[must_use]
     pub fn finalize_assistant(
         &mut self,

@@ -6,12 +6,11 @@
 //! [`SkillPlugin`] builds the file-backed [`SkillRegistry`] from its
 //! [`SkillPluginConfig`] inside `apply`, provides it to the spine under
 //! [`KEY_SKILLS`], and registers [`SkillTool`] into the injected `tools`
-//! registry. The tool registration is token-scoped: `apply` keeps the
-//! [`RegistrationToken`](uva_tool::RegistrationToken) that
-//! `register_entry_with_token` returned and returns a
-//! [`ctx.effect`](uva_kernel::Context::effect) that calls
-//! `unregister_by_token`, so unloading the plugin removes exactly the
-//! entry it filed — never a same-named entry another registrant owns.
+//! registry. The tool registration is token-scoped, and the lifecycle
+//! lives in [`register_tool_entries`]:
+//! the effect `apply` returns calls `unregister_by_token`, so unloading
+//! the plugin removes exactly the entry it filed — never a same-named
+//! entry another registrant owns.
 //!
 //! # The prompt section belongs to the consumer
 //!
@@ -23,11 +22,13 @@
 //!
 //! # Refusal is loud
 //!
-//! The `skill` name is a shipped tool: when a Core tool already owns
-//! it, [`ToolRegistry::register_entry_with_token`] refuses the
-//! registration. `apply` turns that `None` into a [`PluginError`]
-//! naming the tool and the core owner instead of mounting a plugin
-//! whose flagship tool silently never appeared.
+//! The `skill` tool's lifetime is the profile row's, so it registers
+//! as a `Dynamic` entry: the name is the row's to give away. When a
+//! Core tool already owns it, the registry refuses the registration —
+//! [`uva_tool::ToolRegistry::register_entry_with_token`] answers
+//! `None` — and `apply` turns that into a [`PluginError`] naming the
+//! tool and the core owner instead of mounting a plugin whose
+//! flagship tool silently never appeared.
 //!
 //! # The service value's shape
 //!
@@ -56,12 +57,9 @@ use uva_kernel::{
     PluginManifest,
     RuntimeKind,
 };
-use uva_tool::{KEY_TOOLS, ToolEntry, ToolRegistry};
+use uva_tool::{KEY_TOOLS, ToolEntry, ToolProvenance, register_tool_entries};
 
-use crate::{
-    SkillRegistry,
-    builtin::skill_tool::{SKILL_TOOL_NAME, SkillTool},
-};
+use crate::{SkillRegistry, builtin::skill_tool::SkillTool};
 
 /// The service key the `skills` service is registered under.
 ///
@@ -134,30 +132,12 @@ impl KernelPlugin for SkillPlugin {
             self.config.workspace_root.as_path(),
         ));
         let service = ctx.provide_arc(KEY_SKILLS, registry)?;
-        let tools = ctx.require::<ToolRegistry>(KEY_TOOLS)?;
-        let entry = ToolEntry::new(Arc::new(SkillTool::new()));
-        let Some(token) = tools.register_entry_with_token(entry) else {
-            return Err(PluginError::new(format!(
-                "the `{KEY_TOOLS}` registry refused to register the \
-                 `{SKILL_TOOL_NAME}` tool: a core tool already owns the \
-                 name `{SKILL_TOOL_NAME}`"
-            )));
-        };
-        // The closure owns one token clone; `rollback` covers the case
-        // where the framework refuses to file the effect at all.
-        let rollback = token.clone();
-        let tool_registry = Arc::clone(&tools);
-        let unregister = ctx.effect(SKILL_TOOL_EFFECT, move || {
-            tool_registry.unregister_by_token(token);
-            Ok(())
-        });
-        let effect = match unregister {
-            Ok(effect) => effect,
-            Err(error) => {
-                tools.unregister_by_token(rollback);
-                return Err(error);
-            }
-        };
+        let effect = register_tool_entries(
+            ctx,
+            vec![ToolEntry::new(Arc::new(SkillTool::new()))],
+            ToolProvenance::Dynamic,
+            SKILL_TOOL_EFFECT,
+        )?;
         Ok(vec![service, effect])
     }
 }

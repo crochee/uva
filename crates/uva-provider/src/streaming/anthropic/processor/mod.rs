@@ -1,51 +1,48 @@
 //! The [`StreamProcessor`] used by `complete_with_stream`.
+//!
+//! Decode only: it turns Anthropic wire events into [`StreamChunk`]s
+//! and keeps nothing about the turn itself. The fold
+//! ([`crate::assembler::BlockAssembler`]) owns the finished turn —
+//! text, reasoning, tool calls, usage and the stop reason all come
+//! from the chunk sequence.
+//!
 //! Emits incremental
-//! `ToolCallStart { id, name, arguments }`,
-//! `ToolCallDelta { id, arguments_delta }`, `ToolCallEnd { id }`,
-//! and a terminal `IsDone { result: SamplingResult }` on
-//! `message_stop`.
+//! - `Content(Text)` / `Content(Reasoning)` for deltas,
+//! - `ToolCallStart { id, name, arguments }`,
+//!   `ToolCallDelta { id, arguments_delta }` and
+//!   `ToolCallEnd { id }` for tool blocks,
+//! - `Usage(...)` whenever the wire reports usage,
+//! - `ReasoningSignature(...)` on `signature_delta`,
+//! - `Stop(reason)` when the terminal delta reports the stop reason.
+//!
+//! The only state left is decode scratch: the wire index → tool
+//! buffer map, the think extractor, the usage frames merged so far
+//! (the wire splits one report across two frames), and the guard that
+//! stops a second `Stop` from being emitted.
 
 use std::collections::HashMap;
 
 use tracing::warn;
 
-use super::events::AnthropicStreamEvent;
+use super::events::{AnthropicStreamEvent, AnthropicStreamUsage};
 use crate::{
-    json_repair::parse_tool_input_logged,
     streaming::{ThinkExtractor, ToolUseBuffer},
-    types::{
-        ContentPart,
-        ReasoningContent,
-        SamplingResult,
-        StreamChunk,
-        TokenUsage,
-        ToolUse,
-    },
+    types::{ContentPart, ReasoningContent, StreamChunk},
 };
 
-/// Stream processor that emits the chunk model required by
-/// `complete_with_stream`:
-/// - `Content(Text)` for `text_delta`
-/// - `Content(Reasoning)` for `thinking_delta`
-/// - `ToolCallStart { id, name, arguments }` on `content_block_start` (tool_use)
-/// - `ToolCallDelta { id, arguments_delta }` on `input_json_delta`
-/// - `ToolCallEnd { id }` on `content_block_stop`
-/// - `Usage(...)` and `IsDone { result }` on `message_delta` / `message_stop`
+/// Stream processor that turns Anthropic SSE events into chunks.
 pub struct StreamProcessor {
+    /// Wire `index` → the tool block being accumulated. Kept only so
+    /// a `content_block_stop` can name the call it closes and so a
+    /// truncated stream can warn about the buffer it never saw close.
     tool_buffers: HashMap<usize, ToolUseBuffer>,
-    /// Per-turn accumulators for the final `SamplingResult`.
-    text: String,
-    reasoning: String,
-    /// Latest Anthropic `signature_delta` observed during this turn
-    /// (if any). Folded into the final `SamplingResult.reasoning_signature`
-    /// so the agent layer can preserve reasoning continuity across turns.
-    last_reasoning_signature: Option<String>,
-    tool_calls: Vec<ToolUse>,
-    /// Usage is optional; Anthropic emits it on a `message_delta` event.
-    usage: Option<TokenUsage>,
-    /// Stop reason captured from `message_delta.stop_reason` or
-    /// `message_stop`.
-    stop_reason: Option<String>,
+    /// The usage frames seen so far.
+    ///
+    /// Anthropic splits one report across the turn: `message_start`
+    /// has the prompt-side counts, the terminal `message_delta` the
+    /// final output count. Each emitted `Usage` chunk carries the
+    /// merge so far, because the fold keeps the last one.
+    usage: AnthropicStreamUsage,
     /// Per-turn extractor that splits `<think>…</think>` markers out
     /// of `text_delta` deltas. Anthropic's native `thinking_delta`
     /// events are routed through `ContentPart::Reasoning` directly,
@@ -54,19 +51,19 @@ pub struct StreamProcessor {
     /// text block; this extractor handles that case so the frontend
     /// still sees a clean separation.
     think: ThinkExtractor,
+    /// Whether the terminal `Stop` chunk has been emitted. A stream
+    /// reports its stop reason once; `message_stop` only supplies the
+    /// `end_turn` default when the terminal delta did not carry one.
+    saw_stop: bool,
 }
 
 impl StreamProcessor {
     pub fn new() -> Self {
         Self {
             tool_buffers: HashMap::with_capacity(4),
-            text: String::new(),
-            reasoning: String::new(),
-            last_reasoning_signature: None,
-            tool_calls: Vec::new(),
-            usage: None,
-            stop_reason: None,
+            usage: AnthropicStreamUsage::default(),
             think: ThinkExtractor::new(),
+            saw_stop: false,
         }
     }
 
@@ -86,7 +83,8 @@ impl StreamProcessor {
             "content_block_stop" => {
                 self.handle_content_block_stop(event, &mut chunks)
             }
-            "message_delta" => self.handle_message_delta(event),
+            "message_start" => self.handle_message_start(event, &mut chunks),
+            "message_delta" => self.handle_message_delta(event, &mut chunks),
             "message_stop" => self.handle_message_stop(&mut chunks),
             _ => {}
         }
@@ -144,22 +142,19 @@ impl StreamProcessor {
             }
             "thinking" => {
                 if let Some(thinking) = &block.thinking {
-                    self.reasoning.push_str(thinking);
                     chunks.push(StreamChunk::Content(ContentPart::Reasoning(
                         ReasoningContent {
                             text: thinking.clone(),
-                            signature: self.last_reasoning_signature.clone(),
+                            signature: None,
                         },
                     )));
                 }
             }
             "redacted_thinking" => {
-                let marker = "[Redacted by safety filter]".to_string();
-                self.reasoning.push_str(&marker);
                 chunks.push(StreamChunk::Content(ContentPart::Reasoning(
                     ReasoningContent {
-                        text: marker,
-                        signature: self.last_reasoning_signature.clone(),
+                        text: "[Redacted by safety filter]".to_string(),
+                        signature: None,
                     },
                 )));
             }
@@ -191,40 +186,28 @@ impl StreamProcessor {
                     // this path; this handles upstreams
                     // (e.g. MiniMax-M2.7) that embed
                     // reasoning inside the text block.
-                    let mut extracted = self.think.process_text(text);
-                    for chunk in &extracted {
-                        if let StreamChunk::Content(ContentPart::Text(t)) =
-                            chunk
-                        {
-                            self.text.push_str(&t.text);
-                        } else if let StreamChunk::Content(
-                            ContentPart::Reasoning(r),
-                        ) = chunk
-                        {
-                            self.reasoning.push_str(&r.text);
-                        }
-                    }
-                    chunks.append(&mut extracted);
+                    chunks.append(&mut self.think.process_text(text));
                 }
             }
             "thinking_delta" => {
                 if let Some(thinking) = &delta.thinking {
-                    self.reasoning.push_str(thinking);
                     chunks.push(StreamChunk::Content(ContentPart::Reasoning(
                         ReasoningContent {
                             text: thinking.clone(),
-                            signature: self.last_reasoning_signature.clone(),
+                            signature: None,
                         },
                     )));
                 }
             }
             "signature_delta" => {
-                // The signature folds into the most recent
-                // reasoning block on finalize; we do not emit a
-                // stream chunk here because the agent will
-                // read the signature off `SamplingResult`.
+                // The signature signs the reasoning block that just
+                // ended. It cannot ride the Reasoning chunks (it
+                // arrives after them), so it is its own chunk and the
+                // fold stamps it onto the trailing reasoning run.
                 if let Some(signature) = &delta.signature {
-                    self.last_reasoning_signature = Some(signature.clone());
+                    chunks.push(StreamChunk::ReasoningSignature(
+                        signature.clone(),
+                    ));
                 }
             }
             "input_json_delta" => {
@@ -251,117 +234,111 @@ impl StreamProcessor {
         if let Some(index) = event.index
             && let Some(buffer) = self.tool_buffers.remove(&index)
         {
-            // Parse the accumulated JSON once, here, so callers
-            // don't have to re-parse the raw string at the end.
-            // The shared finalizer repairs the malformations
-            // providers actually emit and logs a salvage.
-            let parsed = parse_tool_input_logged(&buffer.input, &buffer.name);
-            let tool_use = ToolUse {
-                id: buffer.id.clone(),
-                name: buffer.name.clone(),
-                input: parsed,
-            };
-            self.tool_calls.push(tool_use);
-            chunks.push(StreamChunk::ToolCallEnd {
-                id: buffer.id.clone(),
-            });
+            chunks.push(StreamChunk::ToolCallEnd { id: buffer.id });
         }
     }
 
-    fn handle_message_delta(&mut self, event: &AnthropicStreamEvent) {
-        // Note: `message_delta` carries the turn-level
-        // `usage` block, but `AnthropicStreamDelta` (the
-        // streaming delta struct) doesn't model it. Usage
-        // tracking is deferred to the PR2 provider-level
-        // work; for now only the stop reason is propagated.
-        //
-        // The real wire nests it in `delta.stop_reason`; the top-level
-        // field is only ever set by synthetic events (tests, gateways that
-        // hoist it), so it is the fallback rather than the primary.
-        if let Some(reason) = event
-            .delta
-            .as_ref()
-            .and_then(|d| d.stop_reason.as_ref())
-            .or(event.stop_reason.as_ref())
+    /// The opening frame reports the prompt-side usage (and the output
+    /// count so far). Report it as a usage chunk.
+    fn handle_message_start(
+        &mut self,
+        event: &AnthropicStreamEvent,
+        chunks: &mut Vec<StreamChunk>,
+    ) {
+        let Some(usage) = event.message.as_ref().and_then(|m| m.usage.as_ref())
+        else {
+            return;
+        };
+        self.absorb_usage(usage, chunks);
+    }
+
+    /// The terminal frame carries the turn's stop reason and the final
+    /// output count. Both the usage object and the stop reason are
+    /// optional and are only reported when present.
+    fn handle_message_delta(
+        &mut self,
+        event: &AnthropicStreamEvent,
+        chunks: &mut Vec<StreamChunk>,
+    ) {
+        if let Some(usage) = event.usage.as_ref() {
+            self.absorb_usage(usage, chunks);
+        }
+        // The real wire nests the stop reason inside `delta`; the
+        // top-level field is only ever set by synthetic events (tests,
+        // gateways that hoist it), so it is the fallback rather than
+        // the primary.
+        if !self.saw_stop
+            && let Some(reason) = event
+                .delta
+                .as_ref()
+                .and_then(|d| d.stop_reason.as_ref())
+                .or(event.stop_reason.as_ref())
         {
-            self.stop_reason = Some(reason.clone());
+            self.saw_stop = true;
+            // Release the extractor's carry before the terminal chunk:
+            // a consumer that stops at `Stop` must still see the tail
+            // this delta just made final.
+            chunks.append(&mut self.think.flush());
+            chunks.push(StreamChunk::Stop(reason.clone()));
         }
     }
 
-    fn handle_message_stop(&mut self, chunks: &mut Vec<StreamChunk>) {
-        let _ = self.drain_orphan_buffers();
-        self.flush_think_extractor(chunks);
-        let result = self.build_sampling_result();
-        let stop = result.stop_reason.clone().unwrap_or_default();
-        tracing::debug!(
-            target: "uva_provider::anthropic::stream",
-            stop_reason = %stop,
-            text_len = result.text.len(),
-            tool_calls = result.tool_calls.len(),
-            "anthropic stream complete"
-        );
-        chunks.push(StreamChunk::IsDone {
-            result: Box::new(result),
-        });
+    /// Merge one usage frame into the report so far and emit it as a
+    /// usage chunk. The fold keeps the last usage chunk, so each
+    /// emission carries the merge-so-far, never just the frame that
+    /// arrived.
+    ///
+    /// The opening frame's output count is provisional (typically `1`,
+    /// the opening token), so a stream cut before the terminal
+    /// `message_delta` would report that provisional count. That is
+    /// acceptable because the adapters now reject a truncated stream
+    /// outright, so no consumer ever sees the provisional turn.
+    fn absorb_usage(
+        &mut self,
+        usage: &AnthropicStreamUsage,
+        chunks: &mut Vec<StreamChunk>,
+    ) {
+        self.usage.merge(usage);
+        chunks.push(StreamChunk::Usage(self.usage.to_token_usage()));
     }
 
-    fn drain_orphan_buffers(&self) -> Vec<String> {
+    /// Close the decode: drain the think extractor's carry as content
+    /// chunks, warn about buffers the stream never closed, and emit the
+    /// terminal stop chunk when the wire never reported a reason.
+    ///
+    /// The carry has to travel as content: it is the tail the extractor
+    /// withheld while it waited for a marker to complete, and folding it
+    /// into a terminal result is what used to drop it whenever text had
+    /// already streamed.
+    fn handle_message_stop(&mut self, chunks: &mut Vec<StreamChunk>) {
+        self.warn_orphan_buffers();
+        chunks.append(&mut self.think.flush());
+        if !self.saw_stop {
+            self.saw_stop = true;
+            chunks.push(StreamChunk::Stop("end_turn".to_string()));
+        }
+    }
+
+    /// Warn about tool buffers the stream never closed, without
+    /// touching them: the decoder does not own the turn, so the fold
+    /// is the one that drains them when it finalizes.
+    fn warn_orphan_buffers(&self) {
+        if self.tool_buffers.is_empty() {
+            return;
+        }
         let orphaned: Vec<String> = self
             .tool_buffers
             .values()
             .map(|b| format!("{}:{}", b.id, b.name))
             .collect();
-        if !orphaned.is_empty() {
-            warn!(
-                target: "uva.provider",
-                count = orphaned.len(),
-                tools = ?orphaned,
-                "anthropic stream ended with orphan tool_use buffers; \
-                 the matching content_block_stop events were missing \
-                 (truncated SSE, network drop, or malformed upstream)"
-            );
-        }
-        orphaned
-    }
-
-    fn flush_think_extractor(&mut self, _chunks: &mut Vec<StreamChunk>) {
-        // The drained chunks update the per-turn accumulators
-        // (self.text / self.reasoning) so the aggregated
-        // `SamplingResult` matches the streaming output, but
-        // they are intentionally NOT pushed into the outgoing
-        // chunk vector — only the terminal `IsDone` is emitted
-        // on `message_stop`.
-        let drained = self.think.flush();
-        for chunk in &drained {
-            if let StreamChunk::Content(ContentPart::Text(t)) = chunk {
-                self.text.push_str(&t.text);
-            } else if let StreamChunk::Content(ContentPart::Reasoning(r)) =
-                chunk
-            {
-                self.reasoning.push_str(&r.text);
-            }
-        }
-    }
-
-    fn build_sampling_result(&mut self) -> SamplingResult {
-        let usage = self.usage.clone().unwrap_or_default();
-        let stop = self
-            .stop_reason
-            .clone()
-            .unwrap_or_else(|| "end_turn".to_string());
-        let reasoning = std::mem::take(&mut self.reasoning);
-        let text = std::mem::take(&mut self.text);
-        let tool_calls = std::mem::take(&mut self.tool_calls);
-        let reasoning_signature =
-            std::mem::take(&mut self.last_reasoning_signature);
-        SamplingResult {
-            text,
-            tool_calls,
-            reasoning,
-            reasoning_signature,
-            usage,
-            stop_reason: Some(stop),
-        }
+        warn!(
+            target: "uva.provider",
+            count = orphaned.len(),
+            tools = ?orphaned,
+            "anthropic stream ended with orphan tool_use buffers; \
+             the matching content_block_stop events were missing \
+             (truncated SSE, network drop, or malformed upstream)"
+        );
     }
 }
 

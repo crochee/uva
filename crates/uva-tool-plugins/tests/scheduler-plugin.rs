@@ -26,6 +26,7 @@ use uva_scheduler::{
 use uva_tool::{
     Context as ToolContext,
     ToolEntry,
+    ToolProvenance,
     ToolRegistry,
     plugin::{KEY_TOOLS, ToolRegistryPlugin},
 };
@@ -51,6 +52,17 @@ async fn schedule_tool_is_registered_and_unload_removes_only_its_entry() {
         "the fixture files a foreign `schedule` entry"
     );
     assert_eq!(tools.name_occupants(SCHEDULE_TOOL_NAME), 1);
+    // A profile-row-scoped tool is `Dynamic`: the name is the row's to give away, so a later `Core` registration may take it.
+    let record = tools
+        .snapshot_with_provenance()
+        .into_iter()
+        .find(|record| record.metadata.name == "schedule")
+        .expect("the brick's tool is registered");
+    assert_eq!(
+        record.provenance,
+        ToolProvenance::Dynamic,
+        "the `schedule` tool is the profile row's to give away"
+    );
 
     let tools_mount = mount_all(
         &ctx,

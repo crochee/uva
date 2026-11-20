@@ -21,7 +21,7 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //!
-//! use uva_hook::{HookRegistry, seam};
+//! use uva_hook::{HookRegistry, MountPoint, RegistrationOrigin};
 //! use uva_hook_plugins::traffic_light::{TrafficLight, TrafficPolicy};
 //! use uva_tool::{Risk, registry::ToolRegistry};
 //!
@@ -31,8 +31,11 @@
 //!     TrafficPolicy::blocking([Risk::High, Risk::Unknown]),
 //! );
 //! let registry = HookRegistry::new();
-//! let _registration =
-//!     registry.register_gate(seam::TOOL_PRE, Arc::new(gate));
+//! let _registration = registry.register_gate_at(
+//!     MountPoint::ToolPre,
+//!     Arc::new(gate),
+//!     RegistrationOrigin::InProcess,
+//! );
 //! ```
 
 use std::sync::Arc;

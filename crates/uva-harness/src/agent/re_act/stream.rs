@@ -23,6 +23,11 @@ struct ChunkState(Arc<parking_lot::Mutex<ChunkStateInner>>);
 struct ChunkStateInner {
     assembler: BlockAssembler,
     published: usize,
+    /// Whether the turn's finish (`System(Usage)` + `ModelDone`) has
+    /// been published. The decoders report the terminal fact as a
+    /// `Stop` chunk, not as a pre-built `IsDone`, so the finish is
+    /// published from the fold when the pass ends — exactly once.
+    done_published: bool,
 }
 
 /// `Clone` shares the pass-local fold state (an `Arc`) so the provider's
@@ -57,6 +62,21 @@ impl ChunkAssembler {
         // The drain above can append tool calls the stream never
         // closed; publish whatever is new before returning.
         publish_parts(&parts, &mut guard.published, sink);
+        // A stream that reports its terminal fact as `Stop` never hands
+        // over a pre-built turn, so the finish is published here from
+        // the fold. `IsDone` providers get the same treatment, which
+        // keeps the two paths on one rule and still publishes once.
+        if !guard.done_published {
+            guard.done_published = true;
+            let usage = &result.usage;
+            sink.emit(AgentEvent::usage(
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+            ));
+            sink.emit(AgentEvent::ModelDone(result.clone()));
+        }
         let message = Transcript::assistant_message(coalesce_parts(parts));
         let assistant_seq = sink.write_assistant_turn(&message);
         SampleOutcome {
@@ -86,32 +106,15 @@ fn handle_chunk(
     state: &mut ChunkStateInner,
     sink: &EventSink,
 ) {
-    let done = match &chunk {
-        StreamChunk::IsDone { result } => Some((**result).clone()),
-        _ => None,
-    };
     state.assembler.push(chunk);
-    {
-        // Split the borrow so the slice read and the cursor write do
-        // not both go through `state`.
-        let ChunkStateInner {
-            assembler,
-            published,
-            ..
-        } = state;
-        publish_parts(assembler.parts(), published, sink);
-    }
-    let Some(result) = done else {
-        return;
-    };
-    let usage = &result.usage;
-    sink.emit(AgentEvent::usage(
-        usage.prompt_tokens,
-        usage.completion_tokens,
-        usage.cache_read_tokens,
-        usage.cache_write_tokens,
-    ));
-    sink.emit(AgentEvent::ModelDone(result));
+    // Split the borrow so the slice read and the cursor write do not
+    // both go through `state`.
+    let ChunkStateInner {
+        assembler,
+        published,
+        ..
+    } = state;
+    publish_parts(assembler.parts(), published, sink);
 }
 
 #[cfg(test)]

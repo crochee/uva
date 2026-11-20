@@ -25,10 +25,15 @@
 //! the session sink — falling back to the transcript on disk when the
 //! registry has no record of the id — so the frontend's
 //! `SessionDetailPage` can render the full JSONL transcript.
+//!
+//! The listing's row type ([`SessionSummary`]) is the wire contract's
+//! owner: a client decodes the listing into that type itself, so the
+//! shape the server publishes and the shape a client reads cannot
+//! drift apart.
 
 use std::{
+    cmp::Ordering,
     collections::HashSet,
-    io::{BufRead as _, BufReader},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -46,15 +51,13 @@ use uva::{
     tool_task::{HEAD_ROWS, RecordSource, head_records},
 };
 
-use super::helpers::paginate;
+use super::list::{Direction, SortKey};
 use crate::{
     api::{
         List,
         SessionPageQuery,
-        resolve_page,
         v1::session_view::{SessionArtifact, SessionTurn},
         validate_resource_name,
-        validate_sort,
     },
     rpc::RpcError,
     session::{
@@ -62,15 +65,16 @@ use crate::{
         controller::SessionController,
         status::{self, SessionState, SessionStatus, StatusFacts},
     },
-    state::AppState,
+    state::{
+        AppState,
+        session_resolution::{
+            transcript_events,
+            transcript_lines,
+            transcript_path,
+            user_sessions_dir,
+        },
+    },
 };
-
-/// Sortable fields for the sessions list endpoint. The historical
-/// `updated_at` field is no longer produced (the session sink has
-/// no notion of update timestamps), so we accept only `created_at`
-/// and `status` and silently drop `updated_at` if a client sends
-/// it.
-const SESSION_SORT_WHITELIST: &[&str] = &["created_at", "status"];
 
 /// How many rows of a session's log the listing reads: one head row
 /// for the whole-log facts (creation time, sub-agent attribution)
@@ -81,7 +85,7 @@ const SESSION_SORT_WHITELIST: &[&str] = &["created_at", "status"];
 pub const SESSION_LIST_TAIL_WINDOW: usize = 512;
 
 /// Frontend-facing session summary.
-#[derive(Serialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSummary {
     pub id: String,
     /// The session status — one of the five the status module
@@ -234,101 +238,6 @@ fn subagent_attribution(
         None => (None, None),
     }
 }
-/// `<sessions_root>/<user_id>/<session_id>/events.jsonl`.
-///
-/// Refuses anything that is not a single directory entry, so a
-/// hand-built path can never climb out of the sessions root:
-/// `session_id` must match the resource-name regex the route path
-/// parameter is already validated against (no `.`, `..`, `/` or `\`),
-/// and `user_id` must be one path component.
-pub(crate) fn transcript_path(
-    sessions_root: &Path,
-    user_id: &str,
-    session_id: &str,
-) -> Option<PathBuf> {
-    if !is_path_component(user_id) {
-        return None;
-    }
-    validate_resource_name(session_id).ok()?;
-    Some(
-        sessions_root
-            .join(user_id)
-            .join(session_id)
-            .join("events.jsonl"),
-    )
-}
-
-/// Whether `name` can only ever address one directory entry:
-/// non-empty, neither `.` nor `..`, and free of separators and NUL.
-pub(crate) fn is_path_component(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains(['/', '\\', '\0'])
-}
-
-/// The parseable events of a durable transcript, in order.
-///
-/// Blank lines and lines that are not JSON are skipped — the same
-/// tolerance [`uva::session::JsonlSessionSearch`] applies when it
-/// folds a log, so a torn tail left behind by a crash cannot hide the
-/// conversation in front of it. An unreadable or empty log yields no
-/// events at all, which is what makes both callers read "no
-/// transcript" as "unknown session" rather than "empty session".
-///
-/// The sink's metadata header is **not** an event and is dropped here,
-/// not at the call sites: both callers project *events*
-/// (`legacy_window` slices the list into the scan's opening row and
-/// tail window; `get_session` folds
-/// the whole list into `history`), so a header left in would report a
-/// disk-only session with no `created_at`, no subagent attribution,
-/// and a phantom first history entry. A log holding only a header
-/// yields no events, which reads as "unknown session" — correct, since
-/// a session that never wrote an event has nothing to render.
-///
-/// Blocking `std::fs` IO: callers on the async runtime route this
-/// through `spawn_blocking`.
-pub(crate) fn transcript_events(
-    path: &Path,
-) -> Box<dyn Iterator<Item = Value>> {
-    let Ok(file) = std::fs::File::open(path) else {
-        return Box::new(std::iter::empty());
-    };
-    Box::new(
-        BufReader::new(file)
-            .lines()
-            .map_while(Result::ok)
-            .filter_map(|line| serde_json::from_str::<Value>(&line).ok())
-            .filter(|row| !is_metadata_header_row(row)),
-    )
-}
-
-/// The raw JSONL rows of a durable transcript, in append order, with
-/// blank and unparseable lines dropped.
-///
-/// Unlike [`transcript_events`] this keeps each line's original text
-/// **and** the sink's metadata header. An export is an archival
-/// artifact whose point is to reproduce the file: re-serialising the
-/// parsed value (which may reorder keys) would not be faithful, and
-/// dropping the header would strip the on-disk schema version the
-/// artifact is supposed to carry. The caller gets the bytes the sink
-/// wrote, minus a torn tail.
-///
-/// Blocking `std::fs` IO: callers on the async runtime route this
-/// through `spawn_blocking`.
-fn transcript_lines(path: &Path) -> Vec<String> {
-    let Ok(file) = std::fs::File::open(path) else {
-        return Vec::new();
-    };
-    BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter(|line| {
-            !line.trim().is_empty()
-                && serde_json::from_str::<Value>(line).is_ok()
-        })
-        .collect()
-}
 
 /// One durable session the disk scan found: id, creation time,
 /// and sub-agent attribution when the log opens with the
@@ -358,10 +267,10 @@ pub(crate) fn unregistered_session_ids(
     registered: &HashSet<String>,
 ) -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
-    if !is_path_component(user_id) {
+    let Some(user_dir) = user_sessions_dir(sessions_root, user_id) else {
         return found;
-    }
-    let Ok(entries) = std::fs::read_dir(sessions_root.join(user_id)) else {
+    };
+    let Ok(entries) = std::fs::read_dir(user_dir) else {
         // No directory yet (fresh deployment) or unreadable: there is
         // nothing durable to add, which is not an error.
         return found;
@@ -494,17 +403,53 @@ async fn legacy_window(path: &std::path::Path) -> (Vec<Value>, Vec<Value>) {
     (head, tail)
 }
 
+/// The session list's sort vocabulary: two keys, declared once.
+///
+/// The route's documentation has always claimed a newest-first default
+/// (`-created_at`) — and the `SessionSummary` field doc says the same —
+/// but the default was substituted into the whitelist check while the
+/// ordering read a different value, so a sortless request came back
+/// **oldest first**. Declaring the default and the comparator together
+/// is what makes the claim true.
+///
+/// `updated_at` is not a key: the session sink has no notion of update
+/// timestamps, so it was never produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSort {
+    CreatedAt,
+    Status,
+}
+
+impl SortKey<SessionSummary> for SessionSort {
+    const ALL: &'static [Self] = &[Self::CreatedAt, Self::Status];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CreatedAt => "created_at",
+            Self::Status => "status",
+        }
+    }
+
+    fn compare(self, a: &SessionSummary, b: &SessionSummary) -> Ordering {
+        match self {
+            Self::CreatedAt => a.created_at.cmp(&b.created_at),
+            // The order is the **wire spelling's**, not the enum's: the
+            // listing has always sorted by the label the client reads,
+            // and the labels are not in the enum's order.
+            Self::Status => a.status.as_wire().cmp(b.status.as_wire()),
+        }
+    }
+
+    fn default_sort() -> (Self, Direction) {
+        (Self::CreatedAt, Direction::Descending)
+    }
+}
+
 /// GET /api/v1/sessions - List sessions with cursor pagination + filters.
 pub async fn list_sessions(
     state: Arc<AppState>,
     query: SessionPageQuery,
 ) -> Result<List<SessionSummary>, RpcError> {
-    validate_sort(
-        query.page.sort.as_deref().unwrap_or("-created_at"),
-        SESSION_SORT_WHITELIST,
-    )?;
-    let resolved = resolve_page(&query.page)?;
-
     let status_filter = match query.status.as_deref() {
         None | Some("") => None,
         Some(s) => Some(status::parse_status_filter(s)?),
@@ -637,41 +582,9 @@ pub async fn list_sessions(
         });
     }
 
-    let field = resolved.sort_field.as_deref().unwrap_or("created_at");
-    match field {
-        "status" => {
-            // The `id` tiebreaker keeps the merged set's order stable
-            // across requests: without it a page of equally-labelled
-            // sessions (usually every row) has no defined order, and
-            // the cursor could repeat or skip entries.
-            //
-            // The order is the **wire spelling's**, not the enum's:
-            // the listing has always sorted by the label the client
-            // reads, and the labels are not in the enum's order.
-            rows.sort_by(|a, b| {
-                a.status
-                    .as_wire()
-                    .cmp(b.status.as_wire())
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            if resolved.descending {
-                rows.reverse();
-            }
-        }
-        _ => {
-            rows.sort_by(|a, b| {
-                a.created_at
-                    .cmp(&b.created_at)
-                    .then_with(|| a.id.cmp(&b.id))
-            });
-            if resolved.descending {
-                rows.reverse();
-            }
-        }
-    }
-
-    let list = paginate(rows, &resolved, |r: &SessionSummary| r.id.as_str());
-    Ok(list)
+    Ok(SessionSort::sort_and_page(rows, &query.page, |r| {
+        r.id.as_str()
+    })?)
 }
 
 /// GET /api/v1/sessions/{id} - Get a single session with history.
@@ -733,10 +646,6 @@ pub async fn get_session(
         });
     }
 
-    // Read the log straight off disk: `SessionRegistry::sink` would
-    // create the directory for whatever id the client sent, turning a
-    // lookup into a write. `transcript_path` is what keeps the path
-    // inside the sessions root.
     let Some(path) =
         transcript_path(state.session_manager.sessions_root(), &user_id, &id)
     else {
@@ -1235,7 +1144,7 @@ pub async fn fork_session(
 
     let child_id = Uuid::new_v4().to_string();
     state
-        .get_or_create_session_controller(&user_id, &child_id)
+        .create_on_demand_session_controller(&user_id, &child_id)
         .await?;
     let child = state.session_manager.writer(&user_id, &child_id);
     if let Err(e) = child.append_copied(inherited).await {

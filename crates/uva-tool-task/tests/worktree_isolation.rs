@@ -48,12 +48,23 @@ fn base_dir() -> PathBuf {
 /// would create.
 struct FakeGit {
     runs: Mutex<Vec<Vec<String>>>,
+    dirty: bool,
 }
 
 impl FakeGit {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             runs: Mutex::new(Vec::new()),
+            dirty: false,
+        })
+    }
+
+    /// A `git` that reports a dirty tree, so the cleanup commits the
+    /// child's work on a branch of its own.
+    fn dirty() -> Arc<Self> {
+        Arc::new(Self {
+            runs: Mutex::new(Vec::new()),
+            dirty: true,
         })
     }
 }
@@ -74,6 +85,11 @@ impl CommandRunner for FakeGit {
             // What an isolated round that changed something looks
             // like: the tool reads this into the `.patch` artefact.
             stdout = DIFF.to_string();
+        }
+        if self.dirty && argv.get(1).map(String::as_str) == Some("status") {
+            // A tree with changes in it: the cleanup commits them on
+            // a branch of their own.
+            stdout = " M src/x.rs\n".to_string();
         }
         if argv.get(1).map(String::as_str) == Some("worktree")
             && argv.get(2).map(String::as_str) == Some("add")
@@ -329,4 +345,58 @@ async fn an_isolated_round_leaves_its_diff_in_the_artefact_set() {
     );
     assert!(artifacts.join("id-0.md").is_file());
     assert!(artifacts.join("id-0.jsonl").is_file());
+}
+
+/// An isolated round tells the model where its changes are, and still
+/// ends with the handle line.
+///
+/// The round moved into its own module; the model's view of an
+/// isolated round did not move with it.
+#[tokio::test]
+async fn an_isolated_round_still_reports_its_branch_and_its_handle_line() {
+    let probe = Arc::new(ProbeAgent::new());
+    let registry = AgentRegistry::new();
+    registry
+        .put(uva_agent::AgentEntry::new(probe))
+        .await
+        .expect("register the peer");
+    let tool = TaskTool::new(Arc::new(registry))
+        .with_command_runner(FakeGit::dirty())
+        .with_id_gen(uva_core::SharedIdGen::sequence());
+
+    let context = Context::new("parent".to_string(), base_dir());
+    let output = tool
+        .call(
+            serde_json::json!({
+                "agent": "peer",
+                "prompt": "do the work",
+                "isolation": true,
+            }),
+            &context,
+        )
+        .await;
+    assert!(!output.is_error.unwrap_or(false), "{output:?}");
+    let text = output
+        .content
+        .iter()
+        .filter_map(|part| part.text())
+        .collect::<String>();
+
+    let handle = "\n\n[subagent session: id-0]";
+    assert!(
+        text.ends_with(handle),
+        "the handle line still ends the result: {text}"
+    );
+    let body = text.strip_suffix(handle).expect("the handle line");
+    let branch_line = body
+        .strip_prefix(&format!("{CHILD_ANSWER}\n\n"))
+        .expect("the child's answer comes first");
+    assert!(
+        branch_line.starts_with("[worktree: branch `uva/agent-"),
+        "the branch line names the reserved branch: {branch_line}"
+    );
+    assert!(
+        branch_line.ends_with(&format!(", base {BASE_SHA}]")),
+        "the branch line names the base sha: {branch_line}"
+    );
 }

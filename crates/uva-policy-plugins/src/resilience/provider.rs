@@ -14,6 +14,7 @@ use uva_provider::{
     ModelConfig,
     ModelProvider,
     ProviderConfig,
+    SamplingResult,
     StreamChunk,
 };
 
@@ -326,7 +327,7 @@ impl ModelProvider for ResilientProvider {
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn uva_core::CancelToken>>,
         on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> core::result::Result<CompletionResponse, uva_core::Error> {
+    ) -> core::result::Result<SamplingResult, uva_core::Error> {
         // Streaming path is policy-free; the cache / breaker
         // decisions all happen on `complete`.
         self.inner

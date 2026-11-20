@@ -113,9 +113,9 @@ fn flush_ignores_the_window() {
     let feed = L1Feed::default();
     let start = Instant::now();
     assert!(feed.flush(start).is_none(), "nothing pending");
-    feed.record("id-0", ChildStatus::Idle, "finished");
+    feed.record("id-0", ChildStatus::Idle, "completed");
     let output = feed.flush(start).expect("the terminal summary emits");
-    assert_eq!(text_of(&output), "[id-0] idle: finished\n");
+    assert_eq!(text_of(&output), "[id-0] idle: completed\n");
     assert!(
         feed.flush(start).is_none(),
         "an emission drains the pending set"
@@ -212,7 +212,7 @@ fn tool_calls_and_outcomes_are_reported() {
 
     observer.finish(RoundOutcome::Completed);
     let output = feed.flush(Instant::now()).expect("pending");
-    assert_eq!(text_of(&output), "[id-0] idle: finished\n");
+    assert_eq!(text_of(&output), "[id-0] idle: completed\n");
 }
 
 #[test]

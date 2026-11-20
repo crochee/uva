@@ -3,11 +3,13 @@
 //!
 //! - the handler reads the tool name, the call id and the arguments;
 //! - a `Block` short-circuits the tool and leaves a `hook_block` row;
-//! - dropping the registration withdraws it.
+//! - dropping the registration withdraws it;
+//! - an out-of-tree observer receives the `before_run` point.
 
 use std::{
     sync::{
         Arc,
+        Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     thread,
@@ -22,7 +24,15 @@ use uva_core::{
     spawn::{BoxFuture, Spawner},
 };
 use uva_harness::{Agent, AgentEvent, AgentInput, Host, ReActAgent};
-use uva_hook::HookRegistry;
+use uva_hook::{
+    Hook,
+    HookContext,
+    HookDecision,
+    HookEvent,
+    HookRegistry,
+    MountPoint,
+    RegistrationOrigin,
+};
 use uva_hook_only_consumer::{CallGate, CallLog, SeenCall, install};
 use uva_provider::{
     CompletionRequest,
@@ -142,6 +152,37 @@ impl Tool for EchoTool {
     }
 }
 
+/// Records every event this registration receives, so the test can
+/// assert the payload a real run hands an out-of-tree observer rather
+/// than just that *something* fired.
+#[derive(Default)]
+struct BeforeRunProbe(Mutex<Vec<HookEvent>>);
+
+impl BeforeRunProbe {
+    fn events(&self) -> Vec<HookEvent> {
+        self.0.lock().expect("the observation log").clone()
+    }
+}
+
+#[uva_hook::async_trait]
+impl Hook for BeforeRunProbe {
+    fn name(&self) -> &str {
+        "sample-before-run"
+    }
+
+    async fn observe(
+        &self,
+        event: &HookEvent,
+        _ctx: &HookContext<'_>,
+    ) -> HookDecision {
+        self.0
+            .lock()
+            .expect("the observation log")
+            .push(event.clone());
+        HookDecision::Allow
+    }
+}
+
 fn provider() -> Arc<dyn ModelProvider> {
     Arc::new(ScriptedProvider {
         calls: Arc::new(AtomicUsize::new(0)),
@@ -165,9 +206,8 @@ fn agent(
     tools: Arc<ToolRegistry>,
 ) -> ReActAgent {
     ReActAgent::new(provider, tools)
-        .with_host(Host::default_policy("."))
+        .with_host(Host::default_policy(".", registry))
         .expect("the empty host binds")
-        .with_hook_registry(registry)
         .with_spawner(Arc::new(ThreadSpawner))
 }
 
@@ -199,11 +239,7 @@ fn answer(events: &[AgentEvent]) -> String {
 fn the_handler_reads_the_tool_call_and_the_tool_runs() {
     let log = Arc::new(CallLog::new());
     let registry = HookRegistry::new();
-    let _registration = install(
-        &registry,
-        CallGate::allowing(Arc::clone(&log)),
-    )
-    .expect("`tool/pre-execute` is a mount point");
+    let _registration = install(&registry, CallGate::allowing(Arc::clone(&log)));
     let (tools, executions) = tool_registry();
 
     let events = run(&agent(registry, provider(), tools));
@@ -235,8 +271,7 @@ fn a_block_short_circuits_the_tool_and_leaves_a_hook_block_row() {
     let log = Arc::new(CallLog::new());
     let registry = HookRegistry::new();
     let _registration =
-        install(&registry, CallGate::denying(Arc::clone(&log), "echo"))
-            .expect("`tool/pre-execute` is a mount point");
+        install(&registry, CallGate::denying(Arc::clone(&log), "echo"));
     let (tools, executions) = tool_registry();
 
     let events = run(
@@ -273,11 +308,8 @@ fn a_block_short_circuits_the_tool_and_leaves_a_hook_block_row() {
 fn dropping_the_registration_withdraws_it() {
     let log = Arc::new(CallLog::new());
     let registry = HookRegistry::new();
-    let registration = install(
-        &registry,
-        CallGate::denying(Arc::clone(&log), "echo"),
-    )
-    .expect("`tool/pre-execute` is a mount point");
+    let registration =
+        install(&registry, CallGate::denying(Arc::clone(&log), "echo"));
     drop(registration);
     let (tools, executions) = tool_registry();
 
@@ -291,6 +323,56 @@ fn dropping_the_registration_withdraws_it() {
         executions.load(Ordering::SeqCst),
         1,
         "with no registration the call proceeds"
+    );
+    assert_eq!(answer(&events), "done");
+}
+
+/// The point this ticket makes reachable: an out-of-tree observer
+/// registers `before_run` through `uva-hook` alone and receives it
+/// from a real run (ADR 0028).
+#[test]
+fn an_out_of_tree_observer_receives_before_run() {
+    let registry = HookRegistry::new();
+    let observer = Arc::new(BeforeRunProbe::default());
+    let probe = Arc::clone(&observer);
+    let probe: Arc<dyn Hook> = probe;
+    let _observer = registry.register_hook_at(
+        MountPoint::BeforeRun,
+        probe,
+        RegistrationOrigin::Plugin,
+    );
+    let (tools, executions) = tool_registry();
+    let agent = agent(registry, provider(), tools);
+
+    let events = run(&agent);
+
+    // The assertion is on the received event, not a counter: only the
+    // loop's `before_run` dispatch constructs this variant, and its
+    // payload is the run's own agent name and ordinal. A registration
+    // somewhere else, or an unwired observation point, yields an empty
+    // log and fails here.
+    let observed = observer.events();
+    let [
+        HookEvent::BeforeRun {
+            agent_name,
+            run_idx,
+        },
+    ] = observed.as_slice()
+    else {
+        panic!(
+            "the out-of-tree observer must receive exactly one \
+             `HookEvent::BeforeRun`, got {observed:#?}"
+        );
+    };
+    assert_eq!(
+        (agent_name.as_str(), *run_idx),
+        ("agent", 0),
+        "the event carries the run's own identity, not a placeholder"
+    );
+    assert_eq!(
+        executions.load(Ordering::SeqCst),
+        1,
+        "observing the run start does not change the turn"
     );
     assert_eq!(answer(&events), "done");
 }

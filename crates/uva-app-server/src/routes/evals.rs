@@ -12,25 +12,24 @@ use std::sync::Arc;
 
 use uva::eval::{EvalReport, EvalSuite};
 
-use crate::{
-    api::{List, PageQuery, resolve_page},
-    rpc::RpcError,
-    state::AppState,
-};
+use crate::{api::List, rpc::RpcError, state::AppState};
 
 /// `GET /api/v1/evals` — list suites.
+///
+/// Not paginated: the suite set is small and bounded (one row per
+/// stored suite), so the response is the whole set with `total`
+/// filled and `next_cursor` absent. The method therefore takes no
+/// page parameters — accepting `limit` / `cursor` / `sort` and
+/// silently ignoring them would be an interface that promises what
+/// it does not keep.
 pub async fn list_evals(
     state: Arc<AppState>,
-    page: PageQuery,
 ) -> Result<List<EvalSuite>, RpcError> {
-    let _ = resolve_page(&page)?;
     let suites = state.evals.list().await;
     let total = suites.len() as u64;
-    Ok(List {
-        data: suites,
-        next_cursor: None,
-        total: Some(total),
-    })
+    // No page: the constructors carry no cursor, which is the fact
+    // this route reports.
+    Ok(List::new(suites).with_total(total))
 }
 
 /// `GET /api/v1/evals/{name}` — single suite detail.

@@ -173,9 +173,11 @@ impl ReActAgent {
 
     /// Install the agent's plugin host.
     ///
-    /// The host is per agent: it holds the registrations a plugin
-    /// installed (observers, gates, transformers, prompt sections,
-    /// tools) and the arbitration they run through.
+    /// The host is per agent: its typed tables hold the registrations
+    /// a plugin installed (guards, hints, trackers, output
+    /// transformers, tools), and its `hook_registry()` carries the
+    /// interception table the seam layer dispatches — observers,
+    /// gates, request and result transformers, and prompt sections.
     ///
     /// The host is bound to the agent's tool registry here, so the
     /// host's tools are callable — and withdrawing a tool
@@ -219,31 +221,6 @@ impl ReActAgent {
         } else {
             Err(refused)
         }
-    }
-
-    /// Install the deployment's external hook registry.
-    ///
-    /// The registry is the contract crate's revocable external
-    /// surface: registers on one of the seven mount points, returns a
-    /// handle, and dropping the handle withdraws the registration.
-    /// Its registrations dispatch *before* the host's typed ones on
-    /// every pass, through the same arbitration — the first `Block`
-    /// short-circuits, `Ask`s collect from both surfaces, and a
-    /// `Block` at `tool/pre-execute` still makes the loop write the
-    /// durable `hook_block` row.
-    ///
-    /// A deployment normally reaches this method through the
-    /// `agentLoop` factory, which resolves the mounted `hooks`
-    /// service; a consumer assembling the agent by hand installs the
-    /// registry here.
-    #[must_use]
-    pub fn with_hook_registry(
-        mut self,
-        registry: uva_hook::HookRegistry,
-    ) -> Self {
-        self.caps.control.seams =
-            self.caps.control.seams.clone().with_hook_registry(registry);
-        self
     }
 
     #[must_use]

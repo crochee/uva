@@ -12,6 +12,482 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Changed (一步的回合归一次折叠)
+
+- **一步的回合只有一个主人**：Anthropic 与 OpenAI 的流处理器退回纯解码——正文、工具调用、
+  停止原因与 usage 不再在解码器里累计，也不再由解码器构造完整回合；`BlockAssembler`
+  是唯一折叠。词汇新增两块：推理签名块，与工具更名块（OpenAI 兼容网关把工具名放在
+  后续分片时，名字现在能抵达回合）；停止块成为终止标记。
+  `ModelProvider::complete_with_stream` 返回折叠的产物，流式路径不再复制非流式响应
+  形状；`SamplingResult::into_completion_response` 删除。
+- **流式 Anthropic 的 usage 变成真实值**：解码类型建模 `message_start.message.usage`
+  与 `message_delta.usage`，映射与非流式路径逐桶一致（缓存读同时进 `cached_prompt`
+  与 `cache_read`，缓存创建进 `cache_write`，provider 报零则保留零值）。在此之前，
+  流式 Anthropic 步的 usage 读作零，用量接口、上下文压力锚点、压缩续跑门、Anthropic
+  兼容响应与浏览器用量条都读这个零；历史行不补写。
+- **OpenAI 兼容 provider 在完成标记之后到达的 usage 不再丢弃**：解码继续消费到流结束
+  标记或 EOF，晚到的 usage 照常折进，且仍只终结一次。
+- **think 抽取器的残余正文进入活动投影与回合**：此前它只塞进终态结果，而折叠在已有
+  流式文本时忽略终态文本，于是通常情形下被丢弃。
+- **在终止事件之前结束的流仍是错误**：错误类型从「空响应」改为点名的流协议错误；
+  半个工具调用不会被派发。思维链在 Anthropic 上也不再逐帧累加用量——它按折叠后的
+  末次合并值发布一次。
+
+见 `docs/adr/0029-the-stream-fold-owns-one-step-s-turn.md`。
+
+### Changed (拦截只有一张表)
+
+- **一次运行只向一张拦截表派发**：`uva_hook::HookRegistry` 现在是唯一的注册与
+  派发面。`MountPoint` 声明十二个挂载点（六个 pass、五个观察点、
+  `prompt/sections`），`RegistrationOrigin` 决定来源车道与 panic 策略；一个派发
+  入口服务 pass 与观察点。旧的七个字符串键、`HookPayload` 与链/残差三条派发路
+  删除，不留别名。
+- **五个观察点第一次对仓外注册可见**：`before_run` / `after_run` /
+  `before_provider_call` / `on_error` / `on_compaction` 现在与 pass 点走同一张表；
+  只依赖 `uva-hook` 的插件即可注册（`docs/examples/hook-only-consumer` 有断言）。
+- **`Host` 退回 typed 策略表**：保留 guards、hints、trackers、output
+  transformers 与 tool 绑定的组合点，并持有部署唯一的 registry
+  （`hook_registry()`）。删除 `Host::{hook, gate, request_transformer,
+  result_transformer, prompt_section}`、`Host::install`、`host::Plugin` 与
+  `PluginHandle`；`Host::default_policy` 改为
+  `default_policy(workspace, registry)`。
+- **一个部署一个实例**：boot 先建 registry，默认策略写进它，`hooks` 行发布同一
+  实例（热重挂复用），`Seams` 从 `Host` 读它。没有 `hooks` 行的部署仍有完整默认
+  策略；没有部署表的嵌入方拿到一张空表。冻结基线随之移除
+  `uva-harness::Plugin` / `uva-harness::PluginHandle`。
+
+见 `docs/adr/0028-one-interception-table.md`。
+
+### Changed (会话列表的默认顺序与页面校验)
+
+- **`sessions/list` 省略 `sort` 时现在是「最新在前」** —— 这正是它自己的文档与 `SessionSummary`
+  一直写着的默认（`-created_at`）。此前默认值只代入了白名单校验、没有代入排序，所以实际返回
+  **最旧在前**；同一个应用的两个面因此打架：工作区树显式传 `-created_at`（最新在前），命令面板
+  不传（最旧在前）。现在默认由键声明给出，两个面一致。
+- **`sessions/list` 的空 cursor 现在是校验错误**：它的内层页面参数此前没有嵌套校验，所以
+  `cursor: ""` 在这一条上返回第一页、在其余六条列表方法上返回 invalid-params。现在七条一致。
+
+两条都记在 `docs/adr/0027-the-list-recipe-lives-in-one-module.md`。
+
+### Changed (列表配方：代理、定时任务与技能的排序)
+
+- **`agents` 不再接受 `sort=kind`**：白名单声明了它、排序代码从不读它，所以 `?sort=kind` 返回
+  200 并按 name 排——一个在接口上承诺、在实现上撒手的键。现在它是校验错误（`invalid_item`），
+  与其余未声明的键一致。
+- **`schedules` 开始兑现方向**：三条键（`id` / `name` / `next_fire_at`）的 `-` 前缀此前通过
+  校验、解析成降序、然后返回升序。现在 `?sort=-name`、`-id`、`-next_fire_at` 真的倒序；
+  键相等的两行按 id 定序，翻页不再有重复或漏行的窗口。
+- **`skills` 的 `created_at` 键有了 tiebreaker**：`created_at` 其实是定义文件的 mtime，同一
+  毫秒写入的技能此前没有确定的顺序，页边界可能落在它们之间。现在按 name 定序。排序键不在线上
+  行上，所以这一条路由排「(行, mtime)」再投影——信封为此新增 `List::map`（保留游标与总数）。
+
+三条都记在 `docs/adr/0027-the-list-recipe-lives-in-one-module.md`。
+
+### Changed (评测列表不再接受分页参数)
+
+- **`evals/list` 不再假装分页**：它此前解析 `limit` / `cursor` / `sort` 之后把整页扔掉——
+  三个参数全部无效，而带垃圾 cursor 的请求会 400。客户端本来一个参数都不传（前端发的是
+  无参数请求），所以把分页参数从它的签名上摘掉：诚实地返回全量，`next_cursor` 恒空。
+  唯一可观测的变化是带垃圾 cursor 的请求从 400 变成被忽略，与「这条路由不分页」一致。
+  记在 `docs/adr/0027-the-list-recipe-lives-in-one-module.md`。
+
+### Changed (uva-core 的分页原语收取键闭包)
+
+- **列表的切片算术只剩一份实现**：`uva_core::registry::paginate_registry_list` 以前被
+  `RegistryItem` 约束拴住，只为了取 `item.name()` 当游标键；现在改收一个取键闭包、对行类型
+  无约束。于是「行是线上类型、没有 registry 元数据」的列表（会话摘要、定时任务行）可以复用
+  同一份游标算术，而不是各自抄一份。两个生产 registry 传 `|entry| entry.name()`，行为逐字节
+  不变（游标、`next_cursor`、`total`、被删游标的空页）。名字与导入路径不动，`uva-core` 的
+  冻结面计数不变；形状变更记在 `docs/api-frozen.md` 的 *Recorded shape changes*。见
+  `docs/adr/0027-the-list-recipe-lives-in-one-module.md`。
+
+### Changed (开发手册：MCP 浏览器已在本机)
+
+- **别再重下 playwright**：`~/.cache/ms-playwright/` 里已经躺着 `chromium-1252`
+  （由 `@playwright/mcp@0.0.84` 注册），而本机到 Chrome for Testing 的 CDN 不通——
+  `install-browser` 必然失败，浏览器本来就在盘上。MCP 报的 revision 与盘上的不一致时
+  （换过 MCP 版本就会变），把已缓存的 revision 软链成它要的名字即可。AGENTS.md §4.2
+  写下了这几条。
+
+### Changed (published row 的线上形状)
+
+- **行的线上形状归一个主人**：published row 此前**没有主人**——路由写的是裸
+  `serde_json::Value`，契约靠一份手写的 flat 9 成员 `SessionTurnEnvelope` 去描述它，
+  而行词汇的 33 个变体一共能写 **51 个** 成员。差的那 42 个**都在线上**（它们本来
+  就是类型化字段），于是浏览器只能去读 payload 包里的**第二份拼写**
+  （`data.kind` / `data.step` / `data.child_session_id` …）。现在：
+  - envelope 补成 published row 的**完整超集**（全 optional），成员清单**从词汇派生**
+    ——`SessionEvent` / `AttachmentRefRow` / `UsageBuckets` 派生 `JsonSchema`
+    （`uva-session` 早就依赖 `schemars`），由一条契约测试断言 envelope 覆盖全部变体的
+    字段名。没有第二份手写清单要维持，只有一处比较。
+  - 浏览器读**顶层类型化成员**，payload 里的同名键只作**旧行兜底**（这些字段是后加的，
+    早于它们的行只在 payload 袋里带着一份）。
+  - `publish` **不**归一旧行：published row 仍是原始行。
+  - 记在 `docs/adr/0026-the-row-envelope-covers-every-member-the-vocabulary-writes.md`。
+- **插件事件在浏览器里不再显示成 `unnamed`**：`Plugin` 变体**没有 `data` 字段**（只有
+  `kind` / `payload` / `original_bytes`），而浏览器读的是 `entry.data`——于是**每一个
+  插件事件都渲染成「插件事件 \*\*unnamed\*\*」且没有正文**。现在读行自己的字段。
+
+### Changed (工具砖块的注册生命周期)
+
+- **工具砖块的注册生命周期归一个主人**：九处砖块各自手写同一段「解析服务 → 注册 →
+  拒绝要响 → 克隆 token 回滚 → file 一个撤下 effect」，`read` / `write` / `todo` /
+  `web` / `shell` 五处**逐字节相同**；`search` 的拒绝措辞还漏了工具名。现在这段生命周期
+  归 `uva_tool::register_tool_entries`（`uva-kernel` 不能放——`check-kernel-deps` 禁它
+  依赖 `uva-tool`），各砖块只声明自己的 manifest 与来源（Core / Dynamic）。**部分回滚**
+  这条路径此前一个测试都没有，现在有了。
+- **GLOSSARY 收了「砖块（brick）」**：装配里负责把一样东西变成可调用的一行——挂载时登记，
+  卸载时撤干净；一个插件可以既当砖块又提供服务。
+
+### Fixed (web 镜像缺失；生产 compose 缺失)
+
+- **web 镜像回来了**：`Dockerfile.web` 在 `19d0cf54`（一个讲委派 id 的无关提交）里被
+  删掉，但 `Makefile` 的 `image-build-web`、`scripts/images.sh` 与 `k8s/web.yaml` 一直
+  引用它——`make image-build` / `make image-push` 必然失败。现在镜像重建：node 构建
+  前端静态包，nginx 运行时提供静态资源并反代服务端的 HTTP 面（`/rpc` 的 websocket、
+  `/livez`、`/readyz`、`/version`、`/metrics`）。镜像以非 root（65532）跑、只读根
+  文件系统、监听 8080（>1024，故无需任何 capability 或特权端口），nginx 要写的路径
+  全在 `/tmp` 下；`k8s/web.yaml` 与 `docker-compose.prod.yml` 都挂了可写的 `/tmp`。
+- **`docker-compose.prod.yml` 补回来了**：`make docker-prod-up` 指向的文件不存在，
+  该目标必然失败。现在是两个服务：`app-server`（服务端镜像）与 `web`（nginx 镜像）。
+- **文档与现实对齐**：`DEPLOYMENT.md` 的 nginx 例子、生产拓扑、Anthropic 客户端小节
+  与 compose 表此前描述的是一套已经不存在的 REST 面（`/api/*`、`/v1/messages`）——
+  服务端今天只有 `/rpc`（websocket）与四个探针/观测路径，Anthropic 兼容面是
+  `anthropic/messages` 这个 RPC 方法。
+
+### Fixed (`/metrics` 恒空；e2e 脚本时好时坏）
+
+- **`/metrics` 不再是空的**：Prometheus 的 RED 计数此前没有任何喂数方——HTTP 家族
+  （`http_requests_total` / `http_requests_duration_seconds`）全仓没有写入点，工具家族
+  （`tool_executions_total` 等）只在 `uva-tool` 的注册表分发里 +1，而 agent loop 自己
+  直接抽 `Tool::stream`、绕开了那条路。于是运行中的服务端 `/metrics` 永远返回 200 +
+  空 body。现在两端都记账、再合流：
+  - **网关**加了一层中间件，把每个请求按 **method + 匹配的路由模板** 记进两个 HTTP
+    家族（模板而非原始 URI，免得每个 session id 自成一串；前端静态资源走 fallback，
+    统一记在 `unmatched` 一串下）；
+  - **内核**（agent loop 所在的那个进程）由 loop 的工具分发补记工具计数与耗时
+    （ok / error / panic，与注册表那条路同义），两条路各记各的，同一次调用不会被数
+    两次；
+  - **网关**用新增的 `metrics/gather` 方法向内核要它那份 exposition 并拼进
+    `/metrics`——两个进程的家族互不重叠（内核没有 HTTP 面），拼接仍是合法的
+    exposition。
+- **`scripts/verify-harness-e2e.sh` 不再时好时坏**：它只从 assistant 行的 `Multi`
+  形状里取答复，而模型的答复有时是 `Single`（单段文本）——那几次它会把答复读成空串并
+  误报失败。它等的回合结束键也是错的（`phase`，实际是 `kind`），于是每跑一次都要空等
+  45 秒的读超时。两处都改了：两种形状都读，结束键按 `kind` 判。
+
+### Fixed (两份过期的 lockfile)
+
+- **`docs/examples/hook-only-consumer/Cargo.lock` 与 `desktop/Cargo.lock` 都不再匹配
+  各自的清单**：`cargo build --locked` 直接失败（`cannot update the lock file …
+  because --locked was passed`），而任何不带 `--locked` 的 cargo 命令都会顺手把
+  工作树弄脏。刷新后 `--locked` 可构建，树保持干净。
+
+### Fixed (三处门禁红：范式基线、公开文档计数、私有注释预算)
+
+- **`check-pub-surface-strict` 红了**：`crates/uva-hook/src/lib.rs` 有 8 条 `pub use`，
+  基线是 7。第 8 条是 `bc4c8138` 加的 `pub use arbitration::{…}`——拦截裁决的公开词汇，
+  属有意为之。按门禁自带的处方把基线提到 8（而不是删掉那条 re-export）。
+- **`check-public-docs` 红了**：`uva-session` 有 182 个未文档化 pub 项，基线 173。多出
+  的 10 个都在 `typed_event_builders.rs`——它们**本来就有 doc**，但 `#[must_use]` 卡在
+  doc 块与声明之间，门禁的分类器看不到。把属性移到 doc 块之上（该文件较新的 6 处写法
+  就是这样，也已是仓内 25 个文件的既有惯例），计数降到 172。
+- **`check-harness-docs` 红了**：`crates/uva-harness/src/agent/host/tests.rs` 有 1 行
+  私有项 doc，预算 0。降级为 `//`——与该文件其它私有项注释一致。
+
+### Changed (行载荷形状归一个主人：载荷包与类型化字段由构造保证一致)
+
+- **一行的载荷包与类型化字段由一个构造器写下**：助手轮结束行的构造器
+  `uva_session::turn_end` 现在接受一个可选的失败原因（`Option<&str>`），一次写出载荷包与
+  类型化字段；harness 改从构造器要那一行，不再在行归属的 crate 之外事后补
+  `data["message"]`——那一处改载荷曾让「类型化字段与载荷包可以不一致」成为可能。同一裁定
+  下，修理器与压缩器不再手拼变体字面量，改问构造器；表面投影（`log_surface`）补齐出来的
+  四行同样改问构造器——六个标签的构造器模块是行形状唯一的主人，两个主人文件之外无人
+  拼变体。
+- **公开面移除**：`uva_session::SessionEvent::plugin`（`events/mod.rs` 里的那个公开关联
+  函数）已删除；插件行改由 `uva_session::plugin_row` 构造——同签名同语义（同样的载荷裁剪
+  与 `original_bytes` 规则）。
+- **新增六个公开构造器**：`compaction_start` / `compaction_summary` / `compaction_row` /
+  `compaction_end_committed` / `compaction_end_failed` / `plugin_row`（`tool_result_interrupted`
+  是 crate 私有的）。另一个常量随后补进 crate 根：`STEP_INTERRUPTED`——崩溃补齐的步结束行
+  写进载荷的 `action` 值，仓外读者按根级名字匹配它。冻结面 `uva-session` 一共
+  147 → 154 names，`docs/api-frozen.md` 与基线已同步。
+- **行为变更一：崩溃补齐出来的步结束行多一个 `action` 键**（值 `interrupted`），与正常写出
+  的步结束行同载荷；既有日志不受影响（新写的才有），旧日志照旧可读。
+- **行为变更二：`interrupted_turn_closers`（公开 API）返回的 closer 不再带最后一条事件的
+  时间戳**——`ts` 为空串、`seq` 为 0；落盘时 writer 本来就重盖 `ts` 与 `seq`，落盘字节
+  不受影响。
+- **轮结束行的线上字节不变**：带原因的载荷仍是 `kind` / `turn` / `reason` / `message`
+  四个键（顺序不变），不带原因时仍只有 `kind` / `turn` / `reason` 三个键；插件行的字段、
+  裁剪与序号语义逐字保留；既有会话日志继续按今天的形状读。
+- **门禁多守一条并收窄**：`check-row-vocabulary` 新增「载荷扫描」半张——除构造器模块外，
+  任何生产文件（`uva-session` 内部也在内）不得把键写进一行的载荷包（`data[...] =` /
+  `payload[...] =` 这类索引赋值）；构造判别同时认得跨行的 match 臂与 **match 臂体里的**
+  构造（收尾行带 `=>` 才算 match 臂）。例外表与棘轮照旧，只许变短。
+- **破坏性变更（项目未到 1.0）**：`turn_end` 的签名从 `(u32, &str)` 变为
+  `(u32, &str, Option<&str>)`；冻结基线按名字比较，名字未变。
+- 决策记录见 docs/adr/0021-row-payload-shape-in-one-owner.md。
+
+### Changed (一轮子会话归一个模块)
+
+- **名册与进度行的结局词归一（行为变更）**：一轮子会话的结局只有一套词——名册的活动
+  行、L1 进度行的收尾摘要、子会话的 `subagent_exit` 脚写同一个词，词表由
+  `RoundOutcome::as_str()` 一处给出。名册与进度行原先写 `finished` / `failed`，现在写
+  `completed` / `error`（`cancelled` 不变）。原因轴不动：模型可见的失败文案说的仍是
+  原因（`max_iterations` / `suspended` / …），不是结局词。
+- **唤醒路径也会问上限了（行为变更）**：`agents_message` 在**发起轮次的那一方**（调用
+  方）坐在上限层时拒绝新起一轮，文案逐字是「cannot start another round: maximum
+  sub-agent depth (3) reached; the `agents_message` tool is disabled at this nesting
+  level」——唤醒路径原先根本不问上限。拒绝只覆盖**要起轮次**的分支（追问、冷唤醒）：
+  steer 不起轮次，不被这条规则拒。被拒的行原样留在原地，同伴一次都不被叫醒。
+- **两条路的结果同形（行为变更）**：委派路径与唤醒路径的结果都带
+  `[subagent session: <id>]` 句柄行，失败文案逐字相同。委派路径的失败文案里句柄行前
+  **由单换行变双换行**：委派路径原先自己拼那句（一个 `\n`），现在两条路共用轮次模块
+  拼的 `\n\n`。
+- **失败文案带上失败详情（行为变更）**：结束原因自带的详情（例如 `the peer gave up`）
+  现在出现在模型读到的失败文案里——原先只知道「失败」，不知道「为什么」。原因词本身
+  不换：它是比结局细的一根轴。
+- 深度规则的主体是**发起轮次的那一方**（`task` 的调用方 / `agents_message` 的调用
+  方），不是孩子：已在上限层的子会话被唤醒时**不被拒**（树没有变深），调用方在上限层
+  时被拒，即使它要唤醒的孩子也在上限层。
+- 公开面：`ControlRegistry::kill` 收进 crate 内，公开的 `ControlSurface::kill` 是唯一
+  的 kill 入口——它顺带清掉终态子会话的深度条目（原先那条条目留到进程结束）。
+  `uva-tool-task` 的 `pub use` 计数不变（7），模型面（`task` 工具的 JSON 形状）不变。
+- 决策记录见 docs/adr/0022-one-module-owns-a-child-round.md。
+
+### Changed (工具参数词汇归一个主人)
+
+- **`task` 的四个模型可见形状事实（schema 变更）**：`task` 工具的每个参数
+  由一份声明拥有（`uva-tool-task` 的 `args` 模块），模型读到的 schema 与解析器
+  都是它的投影。模型读到的 schema 因此多出四句实话：`prompt` 是必填字符串
+  （缺失 / 非字符串的调用**被拒**，文案 `task tool requires a string \`prompt\`
+  field`——解析器过去把缺失与非字符串静默当成空串）；`agent` 写明
+  `minLength: 1`（空名解析器早就拒）；`gate.command` 数组写明 `minItems: 1`
+  （空数组早就拒）；`gate` 与 `isolation` 写明 `oneOf`——命令对象或**一条裸
+  命令**（一个程序名，不做 shell 拆分）、布尔或**一个不带成员的对象**，两者
+  都含 `null`。裸命令与对象形态本就被收着，schema 只是如实说出来；`prompt`
+  那条是唯一的解析端行为变更（变严，落在 schema 一直许下的承诺范围内）。
+- **被删字段被拒即硬失败（行为变更）**：`trace_context` 与
+  `gate.timeout_secs` 从声明里消失（它们被解析了整个存在期，却没有读者）。
+  旧 schema 明确广告过 `gate.timeout_secs`——照旧 schema 缓存的模型会撞上：
+  带它们的调用现在**整次委派失败**，文案说明理由（「`gate.timeout_secs` is
+  no longer an argument of the `task` tool: …」），不再是「解析进来然后静默
+  无效」。其它从未声明过的键照旧被丢掉。
+- **显式 `null` 按「没带」处理**：`"trace_context": null` 或
+  `"gate": {"timeout_secs": null}` 的调用**不**触发上面的拒绝——`null` 没有
+  信息量，旧解析遇到它也返回「没有」，拒绝它只会把一次成功的调用变成硬失败。
+- **公开面**：`TaskTraceContext` 与 `TaskSpec::trace_context` 删除；
+  `task_tool_definition` / `task_tool_definition_with_features` 导出删除；
+  `GateSpec::timeout` 字段与 `with_timeout` 构造器删除（生产代码永远填不上
+  它、`run_gate` 也不执行它）；`uva-tool-task` 的 `pub use` 计数 7 → 6
+  （基线同步）。
+- 决策记录见 docs/adr/0023-one-owner-for-the-tool-arguments.md。
+
+### Changed (一轮子会话归一个模块)
+
+- **名册与进度行的结局词归一（行为变更）**：一轮子会话的结局只有一套词——名册的活动
+  行、L1 进度行的收尾摘要、子会话的 `subagent_exit` 脚写同一个词，词表由
+  `RoundOutcome::as_str()` 一处给出。名册与进度行原先写 `finished` / `failed`，现在写
+  `completed` / `error`（`cancelled` 不变）。原因轴不动：模型可见的失败文案说的仍是
+  原因（`max_iterations` / `suspended` / …），不是结局词。
+- **唤醒路径也会问上限了（行为变更）**：`agents_message` 在**发起轮次的那一方**（调用
+  方）坐在上限层时拒绝新起一轮，文案逐字是「cannot start another round: maximum
+  sub-agent depth (3) reached; the `agents_message` tool is disabled at this nesting
+  level」——唤醒路径原先根本不问上限。拒绝只覆盖**要起轮次**的分支（追问、冷唤醒）：
+  steer 不起轮次，不被这条规则拒。被拒的行原样留在原地，同伴一次都不被叫醒。
+- **两条路的结果同形（行为变更）**：委派路径与唤醒路径的结果都带
+  `[subagent session: <id>]` 句柄行，失败文案逐字相同。委派路径的失败文案里句柄行前
+  **由单换行变双换行**：委派路径原先自己拼那句（一个 `\n`），现在两条路共用轮次模块
+  拼的 `\n\n`。
+- **失败文案带上失败详情（行为变更）**：结束原因自带的详情（例如 `the peer gave up`）
+  现在出现在模型读到的失败文案里——原先只知道「失败」，不知道「为什么」。原因词本身
+  不换：它是比结局细的一根轴。
+- 深度规则的主体是**发起轮次的那一方**（`task` 的调用方 / `agents_message` 的调用
+  方），不是孩子：已在上限层的子会话被唤醒时**不被拒**（树没有变深），调用方在上限层
+  时被拒，即使它要唤醒的孩子也在上限层。
+- 公开面：`ControlRegistry::kill` 收进 crate 内，公开的 `ControlSurface::kill` 是唯一
+  的 kill 入口——它顺带清掉终态子会话的深度条目（原先那条条目留到进程结束）。
+  `uva-tool-task` 的 `pub use` 计数不变（7），模型面（`task` 工具的 JSON 形状）不变。
+- 决策记录见 docs/adr/0022-one-module-owns-a-child-round.md。
+
+### Changed (会话解析归一个模块)
+
+- **regenerate / feedback 的 miss 路径从「意外目录」变为「显式完整创建」（行为变更）**：
+  「按需创建」成为状态层会话解析模块的有名策略（`create_on_demand`），聊天面按名字
+  要它；miss 路径（查不到可重放的 user turn / 可评分的目标行）的副作用从「sink 顺手
+  `create_dir_all` 出一个没人认领的目录」变为策略的全部契约——目录、登记条目、控制器
+  一起 mint。直接答复不变：regenerate 仍答 404 `no user turn to regenerate in this
+  session`，feedback 仍答 `feedback_target_unknown`。**边界**：miss 之后该 id 已被建出，
+  `sessions/status` 与 `sessions/events` 对它从 404 变为可见（status 可能仍答 404，理由
+  变为「尚无快照」）。
+- **两种失败共存时赢家变了（行为变更）**：「日志 schema 不支持 + 无 user turn」的
+  regenerate 从答 404 no-user-turn 变为答 schema Session 错误——控制器**先开**，日志后
+  读，拒绝先到。新的优先级更诚实：「这个 build 打不开这份日志」是关于会话的事实。
+- **路径知识与行解析归一**：`transcript_path` / `user_sessions_dir` /
+  `is_path_component` 与行解析原语 `transcript_events` / `transcript_lines` 的唯一住所在
+  会话解析模块；路由不再拼路径，follow 不再跨模块调会话路由，`session_index` 改问模块。
+  磁盘布局本身仍是 `uva-session` 的财产，本次只搬「位置在哪、行怎么读」的知识。
+- **读面的拒绝绝不 mint**：「必须存在」同样是有名策略（`must_exist`，登记表或转录目录
+  任一即为存在）；follow / resume / compact 对未知会话仍逐字答 `not found: session
+  '<id>'`，且不建目录。
+- 决策记录见 docs/adr/0024-session-resolution-in-one-module.md。
+
+### Changed (工具参数词汇归一个主人)
+
+- **`task` 的四个模型可见形状事实（schema 变更）**：`task` 工具的每个参数
+  由一份声明拥有（`uva-tool-task` 的 `args` 模块），模型读到的 schema 与解析器
+  都是它的投影。模型读到的 schema 因此多出四句实话：`prompt` 是必填字符串
+  （缺失 / 非字符串的调用**被拒**，文案 `task tool requires a string \`prompt\`
+  field`——解析器过去把缺失与非字符串静默当成空串）；`agent` 写明
+  `minLength: 1`（空名解析器早就拒）；`gate.command` 数组写明 `minItems: 1`
+  （空数组早就拒）；`gate` 与 `isolation` 写明 `oneOf`——命令对象或**一条裸
+  命令**（一个程序名，不做 shell 拆分）、布尔或**一个不带成员的对象**，两者
+  都含 `null`。裸命令与对象形态本就被收着，schema 只是如实说出来；`prompt`
+  那条是唯一的解析端行为变更（变严，落在 schema 一直许下的承诺范围内）。
+- **被删字段被拒即硬失败（行为变更）**：`trace_context` 与
+  `gate.timeout_secs` 从声明里消失（它们被解析了整个存在期，却没有读者）。
+  旧 schema 明确广告过 `gate.timeout_secs`——照旧 schema 缓存的模型会撞上：
+  带它们的调用现在**整次委派失败**，文案说明理由（「`gate.timeout_secs` is
+  no longer an argument of the `task` tool: …」），不再是「解析进来然后静默
+  无效」。其它从未声明过的键照旧被丢掉。
+- **显式 `null` 按「没带」处理**：`"trace_context": null` 或
+  `"gate": {"timeout_secs": null}` 的调用**不**触发上面的拒绝——`null` 没有
+  信息量，旧解析遇到它也返回「没有」，拒绝它只会把一次成功的调用变成硬失败。
+- **公开面**：`TaskTraceContext` 与 `TaskSpec::trace_context` 删除；
+  `task_tool_definition` / `task_tool_definition_with_features` 导出删除；
+  `GateSpec::timeout` 字段与 `with_timeout` 构造器删除（生产代码永远填不上
+  它、`run_gate` 也不执行它）；`uva-tool-task` 的 `pub use` 计数 7 → 6
+  （基线同步）。
+- 决策记录见 docs/adr/0023-one-owner-for-the-tool-arguments.md。
+
+### Changed (一轮子会话归一个模块)
+
+- **名册与进度行的结局词归一（行为变更）**：一轮子会话的结局只有一套词——名册的活动
+  行、L1 进度行的收尾摘要、子会话的 `subagent_exit` 脚写同一个词，词表由
+  `RoundOutcome::as_str()` 一处给出。名册与进度行原先写 `finished` / `failed`，现在写
+  `completed` / `error`（`cancelled` 不变）。原因轴不动：模型可见的失败文案说的仍是
+  原因（`max_iterations` / `suspended` / …），不是结局词。
+- **唤醒路径也会问上限了（行为变更）**：`agents_message` 在**发起轮次的那一方**（调用
+  方）坐在上限层时拒绝新起一轮，文案逐字是「cannot start another round: maximum
+  sub-agent depth (3) reached; the `agents_message` tool is disabled at this nesting
+  level」——唤醒路径原先根本不问上限。拒绝只覆盖**要起轮次**的分支（追问、冷唤醒）：
+  steer 不起轮次，不被这条规则拒。被拒的行原样留在原地，同伴一次都不被叫醒。
+- **两条路的结果同形（行为变更）**：委派路径与唤醒路径的结果都带
+  `[subagent session: <id>]` 句柄行，失败文案逐字相同。委派路径的失败文案里句柄行前
+  **由单换行变双换行**：委派路径原先自己拼那句（一个 `\n`），现在两条路共用轮次模块
+  拼的 `\n\n`。
+- **失败文案带上失败详情（行为变更）**：结束原因自带的详情（例如 `the peer gave up`）
+  现在出现在模型读到的失败文案里——原先只知道「失败」，不知道「为什么」。原因词本身
+  不换：它是比结局细的一根轴。
+- 深度规则的主体是**发起轮次的那一方**（`task` 的调用方 / `agents_message` 的调用
+  方），不是孩子：已在上限层的子会话被唤醒时**不被拒**（树没有变深），调用方在上限层
+  时被拒，即使它要唤醒的孩子也在上限层。
+- 公开面：`ControlRegistry::kill` 收进 crate 内，公开的 `ControlSurface::kill` 是唯一
+  的 kill 入口——它顺带清掉终态子会话的深度条目（原先那条条目留到进程结束）。
+  `uva-tool-task` 的 `pub use` 计数不变（7），模型面（`task` 工具的 JSON 形状）不变。
+- 决策记录见 docs/adr/0022-one-module-owns-a-child-round.md。
+
+### Changed (TUI 的 wire 形状归一个主人)
+
+- **页大小 50 → 服务端默认（20）（行为变更）**：目录域列表与侧栏会话列表
+  都改问服务端自己的默认（`api::v1::DEFAULT_LIMIT` 与
+  `routes::search::DEFAULT_LIMIT`），终端不再有自己的页大小。终端此前
+  每页要 50 行——服务端从没见过这个数。
+- **活动投影里的工具调用现在入屏（行为变更）**：服务端活动投影里的
+  `tool_calls` 不再被终端丢弃。此前终端抄的 live 帧没有这一项，跑着的
+  工具调用在终端上不可见，而浏览器看得见。
+- **漂移的 follow 帧从「半应用」变为「整帧不应用 + 状态行」（行为变更）**：
+  解不开的帧整个不应用，状态行写明「unreadable」；目录列表的信封解不开
+  也一样**报出来**，不再静默显示 0 行（无游标、无总数）——「形状漂了」
+  与「这个域没有东西」不再长得一模一样。
+- **终端新增对 `uva-app-server` 的直接依赖**：wire 形状归服务端一个主人
+  ——follow 基线、活动投影、schema 树、方法名都用服务端的类型，终端不留
+  副本。这条边**只链接 wire 类型**（实测：二进制里 `uva_app_server` 符号
+  1116 个，`axum::routing` / `reqwest::` / `AppState` 各 0 个——服务端的
+  运行时没有被拉进来），代价是 wire 类型自己的代码（release 二进制
+  +2.2%）。
+- **删掉的死路径 `sessions/events`**：终端那一侧的读法与服务端从不对上
+  （服务端答的是对象，终端当数组读），也没有调用点——路径连同它唯一的
+  DTO 一起删净。
+- 决策记录见 docs/adr/0025-the-tui-uses-the-server-wire-types.md。
+
+### Changed (会话解析归一个模块)
+
+- **regenerate / feedback 的 miss 路径从「意外目录」变为「显式完整创建」（行为变更）**：
+  「按需创建」成为状态层会话解析模块的有名策略（`create_on_demand`），聊天面按名字
+  要它；miss 路径（查不到可重放的 user turn / 可评分的目标行）的副作用从「sink 顺手
+  `create_dir_all` 出一个没人认领的目录」变为策略的全部契约——目录、登记条目、控制器
+  一起 mint。直接答复不变：regenerate 仍答 404 `no user turn to regenerate in this
+  session`，feedback 仍答 `feedback_target_unknown`。**边界**：miss 之后该 id 已被建出，
+  `sessions/status` 与 `sessions/events` 对它从 404 变为可见（status 可能仍答 404，理由
+  变为「尚无快照」）。
+- **两种失败共存时赢家变了（行为变更）**：「日志 schema 不支持 + 无 user turn」的
+  regenerate 从答 404 no-user-turn 变为答 schema Session 错误——控制器**先开**，日志后
+  读，拒绝先到。新的优先级更诚实：「这个 build 打不开这份日志」是关于会话的事实。
+- **路径知识与行解析归一**：`transcript_path` / `user_sessions_dir` /
+  `is_path_component` 与行解析原语 `transcript_events` / `transcript_lines` 的唯一住所在
+  会话解析模块；路由不再拼路径，follow 不再跨模块调会话路由，`session_index` 改问模块。
+  磁盘布局本身仍是 `uva-session` 的财产，本次只搬「位置在哪、行怎么读」的知识。
+- **读面的拒绝绝不 mint**：「必须存在」同样是有名策略（`must_exist`，登记表或转录目录
+  任一即为存在）；follow / resume / compact 对未知会话仍逐字答 `not found: session
+  '<id>'`，且不建目录。
+- 决策记录见 docs/adr/0024-session-resolution-in-one-module.md。
+
+### Changed (工具参数词汇归一个主人)
+
+- **`task` 的四个模型可见形状事实（schema 变更）**：`task` 工具的每个参数
+  由一份声明拥有（`uva-tool-task` 的 `args` 模块），模型读到的 schema 与解析器
+  都是它的投影。模型读到的 schema 因此多出四句实话：`prompt` 是必填字符串
+  （缺失 / 非字符串的调用**被拒**，文案 `task tool requires a string \`prompt\`
+  field`——解析器过去把缺失与非字符串静默当成空串）；`agent` 写明
+  `minLength: 1`（空名解析器早就拒）；`gate.command` 数组写明 `minItems: 1`
+  （空数组早就拒）；`gate` 与 `isolation` 写明 `oneOf`——命令对象或**一条裸
+  命令**（一个程序名，不做 shell 拆分）、布尔或**一个不带成员的对象**，两者
+  都含 `null`。裸命令与对象形态本就被收着，schema 只是如实说出来；`prompt`
+  那条是唯一的解析端行为变更（变严，落在 schema 一直许下的承诺范围内）。
+- **被删字段被拒即硬失败（行为变更）**：`trace_context` 与
+  `gate.timeout_secs` 从声明里消失（它们被解析了整个存在期，却没有读者）。
+  旧 schema 明确广告过 `gate.timeout_secs`——照旧 schema 缓存的模型会撞上：
+  带它们的调用现在**整次委派失败**，文案说明理由（「`gate.timeout_secs` is
+  no longer an argument of the `task` tool: …」），不再是「解析进来然后静默
+  无效」。其它从未声明过的键照旧被丢掉。
+- **显式 `null` 按「没带」处理**：`"trace_context": null` 或
+  `"gate": {"timeout_secs": null}` 的调用**不**触发上面的拒绝——`null` 没有
+  信息量，旧解析遇到它也返回「没有」，拒绝它只会把一次成功的调用变成硬失败。
+- **公开面**：`TaskTraceContext` 与 `TaskSpec::trace_context` 删除；
+  `task_tool_definition` / `task_tool_definition_with_features` 导出删除；
+  `GateSpec::timeout` 字段与 `with_timeout` 构造器删除（生产代码永远填不上
+  它、`run_gate` 也不执行它）；`uva-tool-task` 的 `pub use` 计数 7 → 6
+  （基线同步）。
+- 决策记录见 docs/adr/0023-one-owner-for-the-tool-arguments.md。
+
+### Changed (一轮子会话归一个模块)
+
+- **名册与进度行的结局词归一（行为变更）**：一轮子会话的结局只有一套词——名册的活动
+  行、L1 进度行的收尾摘要、子会话的 `subagent_exit` 脚写同一个词，词表由
+  `RoundOutcome::as_str()` 一处给出。名册与进度行原先写 `finished` / `failed`，现在写
+  `completed` / `error`（`cancelled` 不变）。原因轴不动：模型可见的失败文案说的仍是
+  原因（`max_iterations` / `suspended` / …），不是结局词。
+- **唤醒路径也会问上限了（行为变更）**：`agents_message` 在**发起轮次的那一方**（调用
+  方）坐在上限层时拒绝新起一轮，文案逐字是「cannot start another round: maximum
+  sub-agent depth (3) reached; the `agents_message` tool is disabled at this nesting
+  level」——唤醒路径原先根本不问上限。拒绝只覆盖**要起轮次**的分支（追问、冷唤醒）：
+  steer 不起轮次，不被这条规则拒。被拒的行原样留在原地，同伴一次都不被叫醒。
+- **两条路的结果同形（行为变更）**：委派路径与唤醒路径的结果都带
+  `[subagent session: <id>]` 句柄行，失败文案逐字相同。委派路径的失败文案里句柄行前
+  **由单换行变双换行**：委派路径原先自己拼那句（一个 `\n`），现在两条路共用轮次模块
+  拼的 `\n\n`。
+- **失败文案带上失败详情（行为变更）**：结束原因自带的详情（例如 `the peer gave up`）
+  现在出现在模型读到的失败文案里——原先只知道「失败」，不知道「为什么」。原因词本身
+  不换：它是比结局细的一根轴。
+- 深度规则的主体是**发起轮次的那一方**（`task` 的调用方 / `agents_message` 的调用
+  方），不是孩子：已在上限层的子会话被唤醒时**不被拒**（树没有变深），调用方在上限层
+  时被拒，即使它要唤醒的孩子也在上限层。
+- 公开面：`ControlRegistry::kill` 收进 crate 内，公开的 `ControlSurface::kill` 是唯一
+  的 kill 入口——它顺带清掉终态子会话的深度条目（原先那条条目留到进程结束）。
+  `uva-tool-task` 的 `pub use` 计数不变（7），模型面（`task` 工具的 JSON 形状）不变。
+- 决策记录见 docs/adr/0022-one-module-owns-a-child-round.md。
+
 ### Changed (拦截裁决归一个主人：一条规则，三个 adapter)
 
 - **fail-closed 在 host 路径成立（行为变更）**：「一个注册在挂载点上的决定意味着什么」

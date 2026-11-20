@@ -25,8 +25,9 @@ if grep -Eq '^uva-harness( |$)' <<<"$tree"; then
 fi
 
 # The behavioral half: the fixture's tests drive one real tool call and
-# assert the handler saw it, a Block short-circuits it, and a dropped
-# registration stops firing.
+# assert the handler saw it, a Block short-circuits it, a dropped
+# registration stops firing, and an out-of-tree `before_run` observer
+# receives the observation point (ADR 0028).
 cargo test --manifest-path "$fixture/Cargo.toml" --quiet
 
 echo "OK: hook-only consumer's normal tree has no uva-harness; its" \

@@ -10,6 +10,7 @@ use super::{
     types::{OpenAIEmbeddingRequest, OpenAIEmbeddingResponse, OpenAIResponse},
 };
 use crate::{
+    BlockAssembler,
     openai_streaming::OpenAIStreamProcessor,
     streaming::{DEFAULT_STREAM_IDLE_TIMEOUT, pump_sse},
     traits::ModelProvider,
@@ -18,7 +19,6 @@ use crate::{
         CompletionResponse,
         ModelConfig,
         ProviderConfig,
-        SamplingResult,
         StreamChunk,
     },
 };
@@ -208,7 +208,7 @@ impl ModelProvider for OpenAICompatibleProvider {
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<crate::types::SamplingResult, Error> {
         use crate::retry::retry_with_classification;
 
         // 1) Establish the stream. This phase — and only this phase — is
@@ -293,7 +293,12 @@ impl ModelProvider for OpenAICompatibleProvider {
         //    5s body-drain grace, plus the per-read idle watchdog that
         //    bounds every outstanding byte-stream read.
         let mut processor = OpenAIStreamProcessor::new();
-        let mut final_sampling: Option<SamplingResult> = None;
+        // The decoder emits chunks only; this fold owns the turn it
+        // returns. It folds exactly the chunks it forwards, so a chunk
+        // reader and the returned response can never disagree — a
+        // usage frame that lands after the finish marker reaches both
+        // through the same last-usage-wins fold.
+        let mut assembler = BlockAssembler::new();
         {
             let mut on_line = |line: &str| {
                 // OpenAI uses both `data: ` (with space) and the bare
@@ -304,9 +309,7 @@ impl ModelProvider for OpenAICompatibleProvider {
                     return;
                 };
                 for chunk in processor.process_line(data) {
-                    if let StreamChunk::IsDone { result } = &chunk {
-                        final_sampling = Some((**result).clone());
-                    }
+                    assembler.push(chunk.clone());
                     on_delta(chunk);
                 }
             };
@@ -319,13 +322,22 @@ impl ModelProvider for OpenAICompatibleProvider {
             .await?;
         }
 
-        // 3) Finalize: reconstruct a CompletionResponse so callers that
-        //    still want a "response" struct get the assembled view. A
-        //    terminal stop that produced no content at all is rejected
-        //    as an empty completion (dsh `EMPTY_RESPONSE` parity).
-        final_sampling
-            .unwrap_or_default()
-            .into_completion_response(request.model)
+        // 3) Finalize: the call reports the fold's turn. A stream that
+        //    ends before the provider's finish marker is truncated —
+        //    the partial turn would let the harness dispatch a
+        //    half-parsed tool call, so it is rejected. A terminal stop
+        //    that produced no content at all is rejected as an empty
+        //    completion (dsh `EMPTY_RESPONSE` parity).
+        let (turn, _parts, incomplete) = assembler.finalize_assistant();
+        if incomplete {
+            return Err(Error::StreamProtocolError {
+                message: "openai stream ended before the provider's \
+                          terminal event (finish_reason); the turn is \
+                          incomplete"
+                    .to_string(),
+            });
+        }
+        turn.ensure_durable_content(&request.model)
     }
 
     async fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f64>>, Error> {

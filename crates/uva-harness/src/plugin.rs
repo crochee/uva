@@ -157,8 +157,14 @@ impl RunConfig {
             spawner,
         } = self;
 
-        let host = host
-            .unwrap_or_else(|| Host::default_policy(workspace_root.clone()));
+        let host = host.unwrap_or_else(|| {
+            // No deployment table reached this run: the embedder gets
+            // the production policy over an empty registry.
+            Host::default_policy(
+                workspace_root.clone(),
+                uva_hook::HookRegistry::new(),
+            )
+        });
         report_refusals(host.bind(Arc::clone(&tool_registry)));
 
         let agent = ReActAgent::with_descriptor(

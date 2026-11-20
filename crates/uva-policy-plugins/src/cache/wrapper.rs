@@ -9,6 +9,7 @@ use uva_provider::{
     ModelConfig,
     ModelProvider,
     ProviderConfig,
+    SamplingResult,
     StreamChunk,
 };
 use uva_search::Embedder;
@@ -213,7 +214,7 @@ impl ModelProvider for SemanticCacheProvider {
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn uva_core::CancelToken>>,
         on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, uva_core::Error> {
+    ) -> Result<SamplingResult, uva_core::Error> {
         // Cache decision lives on `complete`. Streaming calls go
         // straight through to the inner provider; the wrapper
         // therefore participates in the cache as a write-only

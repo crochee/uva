@@ -143,7 +143,7 @@ impl ModelProvider for RecordingProvider {
         request: CompletionRequest,
         _cancel_token: Option<Arc<dyn uva_core::CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<SamplingResult, Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let transcript = request
             .messages
@@ -168,39 +168,27 @@ impl ModelProvider for RecordingProvider {
                 scripted.remove(0)
             }
         };
-        let text = match turn {
-            Turn::ToolCall { id, name, input } => {
-                on_delta(StreamChunk::ToolCallStart {
+        let mut assembler = uva_provider::BlockAssembler::new();
+        let chunks = match turn {
+            Turn::ToolCall { id, name, input } => vec![
+                StreamChunk::ToolCallStart {
                     id: id.to_string(),
                     name: name.to_string(),
                     arguments: serde_json::Value::String(input.to_string()),
-                });
-                on_delta(StreamChunk::ToolCallEnd { id: id.to_string() });
-                String::new()
-            }
+                },
+                StreamChunk::ToolCallEnd { id: id.to_string() },
+                Self::done_chunk(),
+            ],
             Turn::Text(text) => {
-                on_delta(Self::text_chunk(text));
-                text.to_string()
+                vec![Self::text_chunk(text), Self::done_chunk()]
             }
         };
-        on_delta(Self::done_chunk());
-        Ok(CompletionResponse {
-            id: format!("resp-{}", self.calls.load(Ordering::SeqCst)),
-            model: "fake".to_string(),
-            content: Content::Single(ContentPart::Text(TextContent {
-                text,
-                cache_control: None,
-            })),
-            usage: TokenUsage {
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-                ..Default::default()
-            },
-            cached: false,
-            replay_state: None,
-            stop_reason: None,
-        })
+        for chunk in chunks {
+            assembler.push(chunk.clone());
+            on_delta(chunk);
+        }
+        let (turn, _parts, _incomplete) = assembler.finalize_assistant();
+        Ok(turn)
     }
 }
 

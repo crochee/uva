@@ -85,7 +85,7 @@ fn session_dir() -> tempfile::TempDir {
 }
 
 /// The record a dispatched child writes.
-fn record<'a>(patch: Option<String>) -> RoundRecord<'a> {
+fn record<'a>(patch: Option<&'a str>) -> RoundRecord<'a> {
     RoundRecord {
         id: "child-1",
         agent: "scout",
@@ -143,11 +143,8 @@ fn the_artefact_set_lands_in_the_sessions_artefacts_directory() {
 #[test]
 fn a_patch_artefact_is_written_only_when_the_round_produced_one() {
     let dir = session_dir();
-    let paths = write(
-        dir.path(),
-        &record(Some("diff --git a/x.rs b/x.rs\n".to_string())),
-    )
-    .expect("the set is written");
+    let paths = write(dir.path(), &record(Some("diff --git a/x.rs b/x.rs\n")))
+        .expect("the set is written");
     let patch = paths.patch.expect("an isolated round has a patch");
     assert_eq!(patch, dir.path().join("artifacts/child-1.patch"));
     assert_eq!(
@@ -156,8 +153,7 @@ fn a_patch_artefact_is_written_only_when_the_round_produced_one() {
     );
 
     let dir = session_dir();
-    let paths =
-        write(dir.path(), &record(Some("   \n".to_string()))).expect("written");
+    let paths = write(dir.path(), &record(Some("   \n"))).expect("written");
     assert_eq!(paths.patch, None, "an empty patch is not a claim");
     assert!(!dir.path().join("artifacts/child-1.patch").exists());
 }

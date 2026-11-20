@@ -3690,6 +3690,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "uuid",
@@ -3876,6 +3877,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "uva-agent",
  "uva-context",
  "uva-core",
  "uva-kernel",
@@ -4278,10 +4280,13 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "uva-app-server",
+ "uva-approval",
  "uva-core",
  "uva-gateway",
  "uva-provider",
  "uva-session",
+ "uva-tool",
 ]
 
 [[package]]

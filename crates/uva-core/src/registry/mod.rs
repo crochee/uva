@@ -140,13 +140,20 @@ fn encode_registry_cursor(id: &str) -> String {
 /// hands the result here for the cursor arithmetic + envelope
 /// construction.
 ///
+/// `id_of` names each row's key — the value the cursor encodes and
+/// resumes after. A registry passes its [`RegistryItem::name`]; a
+/// caller whose rows are wire types with no registry metadata
+/// passes whichever field the wire calls the row's identity. The
+/// primitive has no opinion about the row beyond that one key, so
+/// it needs no bound on `T`.
+///
 /// # Cursor
 ///
 /// The cursor is the opaque base64 encoding of the last
-/// resource's [`RegistryItem::name`] on the previous page.
-/// Decode failures return [`Error::InvalidItem`]. A cursor that
-/// points to a deleted resource yields an empty page (per spec:
-/// `data: [], next_cursor: null`). An empty-string cursor is
+/// resource's key (whatever `id_of` returns) on the previous
+/// page. Decode failures return [`Error::InvalidItem`]. A cursor
+/// that points to a deleted resource yields an empty page (per
+/// spec: `data: [], next_cursor: null`). An empty-string cursor is
 /// treated as "no cursor" (first page).
 ///
 /// # Limit
@@ -158,10 +165,11 @@ fn encode_registry_cursor(id: &str) -> String {
 /// Callers that don't need pagination can pass `limit = u64::MAX`
 /// — they get the full set back with `total` populated, or call
 /// [`Registry::list`] for the unpaginated convenience.
-pub fn paginate_registry_list<T: RegistryItem>(
+pub fn paginate_registry_list<T>(
     items: Vec<T>,
     cursor: Option<&str>,
     limit: u64,
+    id_of: impl Fn(&T) -> &str,
 ) -> Result<RegistryList<T>, Error> {
     let total = items.len() as u64;
 
@@ -181,7 +189,7 @@ pub fn paginate_registry_list<T: RegistryItem>(
         None => 0,
         Some(cursor_id) => items
             .iter()
-            .position(|item| item.name() == cursor_id.as_str())
+            .position(|item| id_of(item) == cursor_id.as_str())
             .map(|p| p + 1)
             .unwrap_or(items.len()),
     };
@@ -198,7 +206,7 @@ pub fn paginate_registry_list<T: RegistryItem>(
     let page: Vec<T> =
         items.into_iter().skip(start_idx).take(take_count).collect();
 
-    let last_id = page.last().map(|item| item.name()).unwrap_or("");
+    let last_id = page.last().map(&id_of).unwrap_or("");
     let next = if has_more {
         Some(encode_registry_cursor(last_id))
     } else {

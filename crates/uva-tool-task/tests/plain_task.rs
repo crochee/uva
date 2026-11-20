@@ -28,7 +28,7 @@ use uva_session::{
     user_message,
 };
 use uva_test_support::ReplayProvider;
-use uva_tool::{Tool, ToolRegistry};
+use uva_tool::{Tool, ToolProvenance, ToolRegistry};
 use uva_tool_task::{TaskTool, TaskToolPlugin};
 
 fn text(text: &str) -> Vec<StreamChunk> {
@@ -190,6 +190,14 @@ async fn a_task_call_runs_a_child_session_and_leaves_only_tool_rows_parent() {
         result.to_string().contains(child_id),
         "the result carries the child id: {result}"
     );
+    // The model reads the child's text and the handle line — and
+    // nothing else. The round moved into its own module; what the
+    // model sees did not move with it.
+    assert_eq!(
+        result["data"]["content"]["Single"]["text"],
+        format!("child reply\n\n[subagent session: {child_id}]"),
+        "the model's view of the round is unchanged: {result}"
+    );
 }
 
 #[tokio::test]
@@ -209,6 +217,18 @@ async fn the_task_tool_definition_is_registered_like_any_other_tool() {
     )
     .expect("the brick mounts");
     let entry = registry.get("task").expect("the brick files the tool");
+    // A shipped tool is `Core`: once it is registered, no later registration may take the name.
+    let record = registry
+        .snapshot_with_provenance()
+        .into_iter()
+        .find(|record| record.metadata.name == "task")
+        .expect("the brick's tool is registered");
+    assert_eq!(
+        record.provenance,
+        ToolProvenance::Core,
+        "the `task` tool owns its name"
+    );
+
     let parameters = entry.tool_instance().parameters();
     assert_eq!(
         parameters["required"],

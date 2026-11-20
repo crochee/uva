@@ -7,6 +7,7 @@ use uva_core::{CancelToken, Error, RegistryItem};
 
 use super::{provider::AnthropicProvider, types::AnthropicResponse};
 use crate::{
+    BlockAssembler,
     streaming::{
         AnthropicStreamEvent,
         DEFAULT_STREAM_IDLE_TIMEOUT,
@@ -19,7 +20,6 @@ use crate::{
         CompletionResponse,
         ModelConfig,
         ProviderConfig,
-        SamplingResult,
         StreamChunk,
     },
 };
@@ -211,7 +211,7 @@ impl ModelProvider for AnthropicProvider {
         request: CompletionRequest,
         cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
-    ) -> Result<CompletionResponse, Error> {
+    ) -> Result<crate::types::SamplingResult, Error> {
         use crate::retry::retry_with_classification;
 
         // 1) Establish the stream. This phase — and only this phase — is
@@ -289,7 +289,10 @@ impl ModelProvider for AnthropicProvider {
         //    5s body-drain grace, plus the per-read idle watchdog that
         //    bounds every outstanding byte-stream read.
         let mut processor = StreamProcessor::new();
-        let mut final_sampling: Option<SamplingResult> = None;
+        // The decoder emits chunks only; this fold owns the turn it
+        // returns. It folds exactly the chunks it forwards, so a chunk
+        // reader and the returned response can never disagree.
+        let mut assembler = BlockAssembler::new();
         {
             let mut on_line = |line: &str| {
                 if let Some(data) = line.strip_prefix("data: ")
@@ -297,9 +300,7 @@ impl ModelProvider for AnthropicProvider {
                         serde_json::from_str::<AnthropicStreamEvent>(data)
                 {
                     for chunk in processor.process_event(&event) {
-                        if let StreamChunk::IsDone { result } = &chunk {
-                            final_sampling = Some((**result).clone());
-                        }
+                        assembler.push(chunk.clone());
                         on_delta(chunk);
                     }
                 }
@@ -313,16 +314,22 @@ impl ModelProvider for AnthropicProvider {
             .await?;
         }
 
-        // 3) Finalize: reconstruct a CompletionResponse so callers that
-        //    still want a "response" struct get the assembled view. If
-        //    the upstream never emitted IsDone (network cut-off
-        //    mid-stream), we fall back to the assembled partial
-        //    sampling result. A terminal stop that produced no
-        //    content at all is rejected as an empty completion (dsh
-        //    `EMPTY_RESPONSE` parity).
-        final_sampling
-            .unwrap_or_default()
-            .into_completion_response(request.model)
+        // 3) Finalize: the call reports the fold's turn. A stream that
+        //    ends before the provider's terminal event is truncated —
+        //    the partial turn would let the harness dispatch a
+        //    half-parsed tool call, so it is rejected. A terminal stop
+        //    that produced no content at all is rejected as an empty
+        //    completion (dsh `EMPTY_RESPONSE` parity).
+        let (turn, _parts, incomplete) = assembler.finalize_assistant();
+        if incomplete {
+            return Err(Error::StreamProtocolError {
+                message: "anthropic stream ended before the provider's \
+                          terminal event (message_stop); the turn is \
+                          incomplete"
+                    .to_string(),
+            });
+        }
+        turn.ensure_durable_content(&request.model)
     }
 }
 

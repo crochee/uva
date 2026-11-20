@@ -21,7 +21,7 @@
 | # | 设计文档说法 | 仓库事实 | 矩阵采用 |
 | --- | --- | --- | --- |
 | 1 | §6.1：模型分区内容来源 `.agents/providers` 目录 | 无此目录；provider 来自 `model-adapter` 行 config → `.agents/config.toml` 的 `[providers]` → 环境变量 | 仓库事实（§4.3 模型节） |
-| 2 | §6.1：Hooks 内容来源「plugin 排布」 | `.agents` 布局无 hooks 目录；hook 是挂载的插件行在 harness `Host` 上的注册 | 仓库事实（§4.8 Hooks 节） |
+| 2 | §6.1：Hooks 内容来源「plugin 排布」 | `.agents` 布局无 hooks 目录；hook 是 `uva_hook::HookRegistry` 上的注册，`hooks` 行发布 `Host` 携带的同一张表 | 仓库事实（§4.8 Hooks 节） |
 | 3 | §6.1：设置分区含「命令」 | 无独立命令数据源与方法域；命令是技能的 slash-command 扩展位 | 并入「技能与命令」分区，现状标注（§4.6 命令节） |
 | 4 | §6.1：自动化分区含「模板」 | 无任何模板数据源（设计期概念） | 模板区记「现状无数据源，空态」（§4.9 计划节附注） |
 
@@ -44,7 +44,7 @@
 | `context-compactor` | 支撑（对话上下文） | 无直接界面 | provides compaction · inject llm.default | 不挂载，能力与界面同消（D32） |
 | `approval` | 对话（审批在对话流应答） | 主界面 · 对话流 | provides approval · inject — | 不挂载，能力与界面同消（D32） |
 | `skills` | 技能（+ 命令） | 设置 · 技能与命令 | provides skills · inject tools | 不挂载，能力与界面同消（D32） |
-| `hooks` | Hooks | 设置 · Hooks | provides hooks · inject — | 不挂载，外部拦截注册表缺席（循环仍跑 harness `Host` 的 typed 链，D32） |
+| `hooks` | Hooks | 设置 · Hooks | provides hooks · inject — | 不挂载，外部拦截注册服务缺席（默认策略仍在 `Host` 的同一张表上，D32） |
 | `agent-loop` | 对话（+ 内置默认 agent，D22） | 主界面 · 对话流 | provides agentLoop · inject llm, llm.default, tools, sessions | boot 失败（`src/state/app_state/boot.rs:445-450`） |
 | `mcp` | MCP | 设置 · MCP | provides mcp · inject — | 不挂载，能力与界面同消（D32） |
 | `eval` | 评测 | 设置 · 自动化 | provides eval · inject — | 不挂载，能力与界面同消（D32） |
@@ -147,20 +147,24 @@
 ### 4.8 Hooks（hooks）
 
 - **宿主界面落点**：设置 · Hooks（运行方式 + 运行日志；不从别处导入，D24）。
-- **数据来源**：**无目录约定**——两个来源经同一仲裁折叠：①`hooks` 行发布的
-  `HookRegistry` 服务（外部/插件 crate 的注册，句柄 drop 即撤）；②harness `Host`
-  上 steering 面的注册（六条 pass 链上的中间件 + 五个观察点的残余 hooks 表：
-  `before_run` / `after_run` / `before_provider_call` / `on_error` /
-  `on_compaction`）。
-- **谁拥有它**：`hooks` 行（provides hooks；`agent-loop` 注入它）与各提供 hook 的
-  插件行（steering 面）。
-- **缺行时的行为**：无注册 → 分区空态；`hooks` 行缺 → 外部注册表缺席，循环只跑
-  `Host` 的 typed 链；行禁用 → 其 hook 随 `Registration` / `HookRegistration` 撤销
-  （Drop 句柄同时退出链与表，`host/mod.rs:644-674`）。
-- **现状证据**：`crates/uva-hook/src/plugin.rs:48-90`、
-  `crates/uva-app-server/src/composition/kernel/mod.rs:769-780`、
-  `crates/uva-harness/src/seams/mod.rs:28-60`、
-  `crates/uva-harness/src/agent/host/mod.rs:14-22`、`:644-674`。
+- **数据来源**：**无目录约定**——只有一张表（ADR 0028）：部署的
+  `uva_hook::HookRegistry` 承载四条拦截 trait 与 prompt sections，十二个挂载点
+  （六个 pass 点、五个观察点 `before_run` / `after_run` /
+  `before_provider_call` / `on_error` / `on_compaction`、`prompt/sections`）。
+  boot 先建它，`Host::default_policy(workspace, registry)` 把默认策略的 logging
+  hook 以 `InProcess` 写进去，`hooks` 行把同一实例发布为服务（外部/插件 crate 的
+  注册，句柄 drop 即撤）。没有第二个注册面。
+- **谁拥有它**：`Host`（`hook_registry()` 是循环的读取口）与 `hooks` 行
+  （provides hooks，发布同一实例；`agent-loop` 不注入它，表随 host 到达每次运行）。
+- **缺行时的行为**：无注册 → 分区空态；`hooks` 行缺 → 外部注册服务缺席，但默认
+  策略仍在（表随 host 进入运行）；行禁用 → 只撤下 `hooks` 服务（外部注册的入口
+  消失），表仍归 `Host` 所有并随 host 进入每次运行，表内各行各自跟随自己的句柄，
+  不随本行禁用而撤销。
+- **现状证据**：`crates/uva-hook/src/registry.rs:141-165`、
+  `crates/uva-hook/src/plugin.rs:63-94`、
+  `crates/uva-app-server/src/composition/kernel/mod.rs:575-578`、`:983-995`、
+  `crates/uva-harness/src/seams/mod.rs:494-544`、
+  `crates/uva-harness/src/agent/host/mod.rs:194-215`、`:382-425`。
 
 ### 4.9 计划（schedules）
 
@@ -261,7 +265,7 @@
 
 | 域 | TUI 状态 | 说明 | 证据 |
 | --- | --- | --- | --- |
-| 会话（`sessions`） | adapted | 目录面板：`list` / `get` / `usage` / `status` / `export` / `fork` / `resume` / `compact` / `delete`；写操作先确认。`sessions/search` 由「搜索」域承载（`search/all`）；`sessions/events` 由 reducer 既有的 `sessions/events` 路径承载 | `crates/uva-tui/src/domains.rs`（`sessions` 条目）、`crates/uva-tui/src/views/tests.rs` |
+| 会话（`sessions`） | adapted | 目录面板：`list` / `get` / `usage` / `status` / `export` / `fork` / `resume` / `compact` / `delete`；写操作先确认。`sessions/search` 由「搜索」域承载（`search/all`）；`sessions/events` 无界面落点（`sessions/follow` 已给全量行） | `crates/uva-tui/src/domains.rs`（`sessions` 条目）、`crates/uva-tui/src/views/tests.rs` |
 | 对话（`chat`） | adapted | `chat/session/create` / `chat/message/send` / `chat/cancel` 走 reducer 既有路径；`chat/regenerate` / `chat/feedback` 在命令面板；`chat/usage` / `chat/operation` 未接（无界面落点） | `crates/uva-tui/src/app/tests.rs`、`crates/uva-tui/src/views/tests.rs` |
 | Agent（`agents`） | full | `list` / `get` / `delete`（确认）；`create` 经 `:json` 通用门（无表单） | `crates/uva-tui/src/domains.rs`、`crates/uva-tui/src/domains/tests.rs` |
 | 技能（`skills`） | full | `list` / `get` / `delete`（确认）/ `reload`（确认）；`create` 经 `:json` | 同上 |
@@ -272,14 +276,15 @@
 | 模型（`models`） | full | `list`（取项 `/models`）+ 行摊详情；只读 | 同上 |
 | 搜索（`search`） | full | `search/all`（`q` 必填）+ 行摊详情；侧栏 `s` 与 `:search <词>` 两个入口 | 同上 |
 | UI 扩展（`ui`） | full | `ui/schema`（取项 `/schemas`）+ 行摊详情；只读 | 同上 |
-| 配置（`profile`） | adapted | `profile/list` / `profile/get` / `profile/set` / `profile/create` / `profile/delete` 经 `:json` 通用门可达（写入走事务与四态回执）；**未**接目录面板（`profile/list` 的返回不是 `List<T>` 信封，需要取项适配） | `crates/uva-tui/src/domains.rs`（`KNOWN_METHODS` 的 profile 段）、`crates/uva-app-server/src/rpc/methods/profile.rs` |
+| 配置（`profile`） | adapted | `profile/list` / `profile/get` / `profile/set` / `profile/create` / `profile/delete` 经 `:json` 通用门可达（写入走事务与四态回执）；**未**接目录面板（`profile/list` 的返回不是 `List<T>` 信封，需要取项适配） | `crates/uva-app-server/src/rpc/methods/names.rs`（profile 段，`:json` 通用门按它放行）、`crates/uva-app-server/src/rpc/methods/profile.rs` |
 
 缺口说明：`create` / `patch` / `replace` / `register` 是多字段写，TUI 不提供表单，经
 `:json` 通用门可达（R-10 允许先只读）；若评审认为该降级，把对应行改 `adapted` 即可。本文
 §6 是刀 5 / 刀 6 的落地记录，profile 或方法面变化后随 §5 的再核对一起更新。
 
 刀 7 新增 `profile/list|get|set|create|delete` 方法面与自管 MCP 的 `profile`
-工具。TUI 侧：`KNOWN_METHODS` 已收录这五个方法（`:json` 通用门可放行），但
+工具。TUI 侧：方法名表（`crates/uva-app-server/src/rpc/methods/names.rs`）已收录
+这五个方法（`:json` 通用门按它放行），但
 `profile/list` 的返回不是 `List<T>` 信封，未接目录面板——因此本表的 `profile`
 行是 `adapted`（可达但无专用视图）。设置页的写回交互由浏览器侧承担
 （`uva-web/src/api/settings-profile.ts` 绑同一组方法）。

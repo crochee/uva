@@ -62,23 +62,12 @@ impl std::fmt::Debug for ChildCancel {
     }
 }
 
-/// Drive one child run to its end and retain the last assistant text.
-pub(crate) async fn drain_child(
-    peer: Arc<dyn Agent>,
-    input: AgentInput,
-    cancel: Arc<dyn CancelToken>,
-    usage: Option<&dyn SubagentUsage>,
-    child_id: &str,
-) -> (SessionEndReason, Option<String>) {
-    drain_child_observed(peer, input, cancel, None, usage, child_id).await
-}
-
 /// Drive one child run to its end, reporting its activity to
 /// `observer` when one is installed and its consumption to `usage`.
 ///
 /// The dispatch that streams progress installs an
-/// [`L1Observer`](crate::progress::L1Observer); the control surface's
-/// follow-up rounds pass `None` — their progress belongs to the
+/// [`L1Observer`](crate::progress::L1Observer); a round without a
+/// progress feed passes `None` — the wake's progress belongs to the
 /// `agents_message` call, not to the original `task` block.
 ///
 /// `usage` is the deployment's account: the child runs on its own

@@ -36,15 +36,6 @@ use uva_session::{SessionLog, subagent_exit};
 
 use crate::control::{ControlSurface, RoundOutcome};
 
-/// The footer status a round reports for `outcome`.
-fn status_of(outcome: RoundOutcome) -> &'static str {
-    match outcome {
-        RoundOutcome::Completed => "completed",
-        RoundOutcome::Cancelled => "cancelled",
-        RoundOutcome::Failed => "error",
-    }
-}
-
 /// One round's tail: armed when the child is filed, landed when the
 /// round ends, run from `Drop` when the dispatch future is discarded.
 pub(crate) struct RoundTail {
@@ -94,11 +85,14 @@ impl RoundTail {
     /// Land the round's tail: the roster settle first (the row the
     /// model reads), then the exit footer, then the artefact set.
     ///
+    /// The patch is borrowed: the artefact set takes its own copy,
+    /// and the round keeps the diff it read.
+    ///
     /// A second call is a no-op: the first one took the payload.
     pub(crate) async fn land(
         &mut self,
         outcome: RoundOutcome,
-        patch: Option<String>,
+        patch: Option<&str>,
     ) {
         let Some(pending) = self.pending.take() else {
             return;
@@ -134,8 +128,8 @@ impl Pending {
     }
 
     /// The writer half: the exit footer and the artefact set.
-    async fn record(self, outcome: RoundOutcome, patch: Option<String>) {
-        let status = status_of(outcome);
+    async fn record(self, outcome: RoundOutcome, patch: Option<&str>) {
+        let status = outcome.as_str();
         if let Some(log) = self.log.as_ref() {
             let footer = subagent_exit(
                 &self.child,

@@ -671,3 +671,169 @@ async fn a_hung_summariser_times_out() {
         "got {error:?}"
     );
 }
+
+// --- the rows the pass writes ---------------------------------------
+
+/// The compaction module asks the constructors for its rows: every
+/// payload it writes is the constructor's shape, and the six keys of
+/// the compaction row are the constructor's six keys.
+///
+/// The row is read back from the log, so this is the write→read
+/// round trip: what the pass wrote is what a reader sees.
+#[tokio::test]
+async fn the_compaction_rows_carry_the_constructors_payloads() {
+    let sink = Arc::new(crate::in_memory::InMemorySessionSink::new("s1"));
+    let writer = crate::LogWriter::new(sink, Arc::new(uva_core::SystemClock));
+    let plan = CompactionPlan {
+        range: 1..3,
+        shadowed_seqs: vec![4, 5],
+        keep_recent: 1,
+        shadowed: Vec::new(),
+        shadowed_tokens: 42,
+    };
+
+    let token = begin_compaction(&writer, &plan, "context_pressure")
+        .await
+        .expect("the start row is written");
+    let outcome = CompactionOutcome {
+        summary: "the summary".to_string(),
+        shadowed_seqs: plan.shadowed_seqs.clone(),
+        shadowed_tokens: plan.shadowed_tokens,
+        provider: Some("summariser".to_string()),
+        model: Some("summariser".to_string()),
+        usage: None,
+    };
+    let seq = finish_compaction(
+        &writer,
+        &token,
+        "context_pressure",
+        &plan,
+        CompactionPass::Committed(&outcome),
+    )
+    .await
+    .expect("the pass is written");
+    assert!(seq.is_some(), "the pass committed");
+
+    let rows = writer.read().await.expect("read");
+    let tags: Vec<&str> = rows
+        .iter()
+        .map(|row| row["type"].as_str().expect("a tag"))
+        .collect();
+    assert_eq!(
+        tags,
+        vec![
+            "compaction_start",
+            "compaction_summary",
+            "compaction",
+            "compaction_end"
+        ],
+        "the pass writes the four rows, in order"
+    );
+
+    let start = &rows[0];
+    assert_eq!(start["token"], token.as_str());
+    assert_eq!(start["data"]["reason"], "context_pressure");
+    assert_eq!(start["data"]["start"], 1);
+    assert_eq!(start["data"]["end"], 3);
+    assert_eq!(start["data"]["shadowed_token_count"], 42);
+
+    let summary = &rows[1];
+    assert_eq!(summary["token"], token.as_str());
+    assert_eq!(summary["data"]["summary"], "the summary");
+
+    let compaction = &rows[2];
+    let keys: Vec<&str> = compaction["data"]
+        .as_object()
+        .expect("a payload")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            "summary",
+            "source_indices",
+            "shadowed_token_count",
+            "provider",
+            "model",
+            "usage",
+        ],
+        "the compaction row reads back with the same six keys"
+    );
+    assert_eq!(compaction["data"]["summary"], "the summary");
+    assert_eq!(
+        compaction["data"]["source_indices"],
+        serde_json::json!([1, 2])
+    );
+    assert_eq!(compaction["data"]["shadowed_token_count"], 42);
+    assert_eq!(compaction["data"]["provider"], "summariser");
+    assert_eq!(compaction["data"]["model"], "summariser");
+    assert!(compaction["data"]["usage"].is_null());
+    assert_eq!(compaction["surface_op"]["start"], 1);
+    assert_eq!(compaction["surface_op"]["end"], 3);
+    assert_eq!(
+        compaction["surface_op"]["source_event_seqs"],
+        serde_json::json!([4, 5])
+    );
+
+    let end = &rows[3];
+    assert_eq!(end["token"], token.as_str());
+    assert_eq!(end["outcome"], "committed");
+    assert_eq!(end["data"]["shadowed_messages"], 2);
+    assert_eq!(end["data"]["shadowed_tokens"], 42);
+    assert_eq!(end["data"]["reason"], "context_pressure");
+}
+
+/// A pass that failed still ends: the end row names the failure,
+/// and the start row is never left orphaned.
+#[tokio::test]
+async fn a_failed_pass_ends_with_the_end_row() {
+    let sink = Arc::new(crate::in_memory::InMemorySessionSink::new("s1"));
+    let writer = crate::LogWriter::new(sink, Arc::new(uva_core::SystemClock));
+    let plan = CompactionPlan {
+        range: 1..3,
+        shadowed_seqs: vec![4, 5],
+        keep_recent: 1,
+        shadowed: Vec::new(),
+        shadowed_tokens: 42,
+    };
+
+    let token = begin_compaction(&writer, &plan, "context_pressure")
+        .await
+        .expect("the start row is written");
+    let seq = finish_compaction(
+        &writer,
+        &token,
+        "context_pressure",
+        &plan,
+        CompactionPass::Failed {
+            error: "the summariser refused",
+            outcome: CompactionLifecycleOutcome::Failed,
+        },
+    )
+    .await
+    .expect("the end row is written");
+    assert!(seq.is_none(), "a failed pass commits nothing");
+
+    let rows = writer.read().await.expect("read");
+    assert_eq!(rows.len(), 2, "the start row and the end row");
+    let end = &rows[1];
+    assert_eq!(end["type"], "compaction_end");
+    assert_eq!(end["token"], token.as_str());
+    assert_eq!(end["outcome"], "failed");
+    assert_eq!(end["data"]["error"], "the summariser refused");
+    assert_eq!(end["data"]["reason"], "context_pressure");
+}
+
+/// The compaction module does not hand-build its rows: the payload of
+/// every compaction row is the constructor's, so the shape lives in
+/// one place.
+#[test]
+fn the_compaction_module_does_not_hand_build_its_rows() {
+    let source = include_str!("mod.rs");
+    assert!(
+        !source.contains("SessionEvent::"),
+        "the compaction module names no row variant: the constructors \
+         own the shapes"
+    );
+}

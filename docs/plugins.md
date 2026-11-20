@@ -51,7 +51,8 @@ facade 之所以多一层，是为了让**可选性**与**依赖隔离**留在�
 ## 3. hook 插件（`uva-hook-plugins`）
 
 接缝是 [`uva-hook`](../crates/uva-hook/README.md) 的四个拦截 trait；
-每个插件经 `HookRegistry` 或 harness `Host` 注册，不经过本族 crate。
+每个插件经部署唯一的 `HookRegistry` 注册（`Host` 携带同一实例），
+不经过本族 crate。
 默认构建（`default = []`）不拉起任何 hook。
 
 | 插件 | facade feature | 模块 | 主要类型 | 专属依赖 | 用途 |

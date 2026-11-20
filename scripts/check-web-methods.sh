@@ -13,8 +13,16 @@
 #
 # The server's method table is the oracle, and it is one table:
 #
-#   - the RPC methods the router registers —
-#     `router.register("…")` in `crates/uva-app-server/src/rpc/methods/`;
+#   - the RPC methods the router registers — the registration sites
+#     (`router.register(names::…)` under
+#     `crates/uva-app-server/src/rpc/methods/`), one per method, with
+#     their spellings in the names table
+#     (`crates/uva-app-server/src/rpc/methods/names.rs`). The
+#     registrations are the oracle: a constant the router never
+#     registers is a spelling with no method behind it, and the
+#     server's own test (`rpc/methods/tests.rs`) pins the table
+#     against the router in both directions, so the table and the
+#     registrations cannot drift apart;
 #   - the notification methods the server pushes —
 #     `crates/uva-app-server/src/rpc/notify.rs` and the Anthropic
 #     compatibility event (`crates/uva-app-server/src/routes/messages/`).
@@ -78,7 +86,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-METHODS_GLOB="crates/uva-app-server/src/rpc/methods/*.rs"
+METHOD_NAMES="crates/uva-app-server/src/rpc/methods/names.rs"
+METHODS_DIR="crates/uva-app-server/src/rpc/methods"
 NOTIFY_FILES=(
   crates/uva-app-server/src/rpc/notify.rs
   crates/uva-app-server/src/routes/messages/mod.rs
@@ -109,17 +118,52 @@ fi
 
 # Every method the server serves.
 #
-# The router's registrations are the requests; the notification
-# constants are the pushes. Both are string literals in the sources
-# above, and the router's own `method_names()` reads the same
-# literals, so the two cannot disagree about a spelling.
+# The **registrations** are the requests: the router's `register` call
+# sites are the methods the process answers, and the names table is
+# where their spellings live — a constant the router never registers
+# is a spelling with no method behind it, and the gate must not
+# report it as one. The notification constants are the pushes; they
+# have no registry to read, so their declarations are the pushes.
+#
+# The server's own test (`rpc/methods/tests.rs`) pins the table
+# against the router in both directions, so the registrations and the
+# table cannot disagree about a spelling.
 server_methods() {
   {
-    grep -ho 'router\.register("[^"]*"' $METHODS_GLOB \
-      | sed 's/router\.register("//; s/"$//'
+    registered_methods
     grep -ho 'pub const [A-Z_]*: &str = "[^"]*"' "${NOTIFY_FILES[@]}" \
       | sed 's/.*= "//; s/"$//'
   } | sort -u
+}
+
+# The registered request methods, with their spellings.
+#
+# The registrations are read first, then the names table is asked for
+# each registered constant's value. A registration the table cannot
+# spell is a defect the gate names rather than drops.
+registered_methods() {
+  local registered
+  registered="$(grep -rho 'router\.register(names::[A-Z_]*' "$METHODS_DIR" \
+    | sed 's/.*names:://' \
+    | sort -u \
+    | tr '\n' ' ' || true)"
+  grep -ho 'pub const [A-Z_]*: &str = "[^"]*"' "$METHOD_NAMES" \
+    | sed -E 's/pub const ([A-Z_]+): &str = "([^"]*)"/\1 \2/' \
+    | awk -v wanted="$registered" '
+        BEGIN {
+          n = split(wanted, names, " ")
+          for (i = 1; i <= n; i++) if (names[i] != "") want[names[i]] = 1
+        }
+        $1 in want { print $2; seen[$1] = 1 }
+        END {
+          missing = 0
+          for (name in want) if (!(name in seen)) {
+            printf "the router registers %s but the names table does not spell it\n", name > "/dev/stderr"
+            missing = 1
+          }
+          if (missing) exit 1
+        }
+      '
 }
 
 # Every method the contract catalog names, one per line. The catalog's

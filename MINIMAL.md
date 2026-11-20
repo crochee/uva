@@ -199,7 +199,7 @@ re-enters that feature set.
 | Durable run log | `uva::session::LogWriter::new(sink, clock)` + `.with_log_writer(writer)` — the session's one writer stamps each row's ordinal, buffers it, and flushes at the step boundary |
 | Structured output schema | `.with_output_schema(json!({...}))` |
 | LLM-driven compaction | `SummaryCompactor::new(provider, model).with_settings(settings)` + `.with_compactor(...)`: the session crate owns the one compaction engine, and a context manager only projects the request |
-| The defensive policy | `Host::default_policy(workspace)` instead of `Host::new()` — five guards, three hints, the adaptive tracker and the logging hook |
+| The defensive policy | `Host::default_policy(workspace, registry)` instead of `Host::new()` — five guards, three hints, the adaptive tracker on the host, and the logging hook written into the deployment's `HookRegistry` |
 | Skills | `SkillRegistry::new()` + `reg.register(FileSkillProvider::discover(dir))` for the catalog; surface them with `PromptContext::with_skill(name, description)` and register the `skill` tool with `register_skill_tool(&registry)` |
 | Multi-agent delegation | `uva-tool-task` (`task`): register `TaskTool::new(peers)` in the tool registry — the model then calls `task(agent, prompt)` and the tool runs the peer as a child run |
 | Plugin kernel | add the `kernel` feature and mount a manifest group: `let ctx = uva::kernel::Context::new(); let mounted = uva::kernel::mount_all(&ctx, &[Arc::new(MyPlugin)])?;` — `mounted.dispose_plugin("my-id")` unloads one plugin and parks its consumers; UI extensions are `[ui]` profile rows the frontend renders from `ui/schema`, never remote code |

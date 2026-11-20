@@ -17,6 +17,7 @@
 //! (now deleted); all loaded skills are considered enabled.
 
 use std::{
+    cmp::Ordering,
     io::{ErrorKind, Write},
     path::Path as StdPath,
     sync::Arc,
@@ -27,22 +28,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uva::core::Error;
 
-use super::helpers::paginate;
+use super::list::{Direction, SortKey};
 use crate::{
-    api::{
-        List,
-        PageQuery,
-        ResolvedPage,
-        resolve_page,
-        validate_resource_name,
-        validate_sort,
-    },
+    api::{List, PageQuery, validate_resource_name},
     rpc::RpcError,
     state::AppState,
 };
-
-/// Sortable fields for the skills list endpoint.
-const SKILL_SORT_WHITELIST: &[&str] = &["name", "created_at"];
 
 #[derive(Serialize, JsonSchema)]
 pub struct SkillInfo {
@@ -147,17 +138,50 @@ pub(crate) fn invalidate_skill_cache() {
     DETAIL_CACHE.write().clear();
 }
 
-/// GET /api/skills - List all skills with cursor pagination.
+/// The skill list's sort vocabulary: two keys, declared once.
+///
+/// `created_at` sorts by the definition file's mtime — a fact the wire
+/// row does not carry, which is why the route sorts a
+/// `(SkillInfo, SystemTime)` pair and projects the row afterwards. A
+/// filesystem that cannot report an mtime reports `UNIX_EPOCH`, so the
+/// skill sorts oldest rather than vanishing from the order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkillSort {
+    Name,
+    CreatedAt,
+}
+
+impl SortKey<(SkillInfo, std::time::SystemTime)> for SkillSort {
+    const ALL: &'static [Self] = &[Self::Name, Self::CreatedAt];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::CreatedAt => "created_at",
+        }
+    }
+
+    fn compare(
+        self,
+        a: &(SkillInfo, std::time::SystemTime),
+        b: &(SkillInfo, std::time::SystemTime),
+    ) -> Ordering {
+        match self {
+            Self::Name => a.0.name.cmp(&b.0.name),
+            Self::CreatedAt => a.1.cmp(&b.1),
+        }
+    }
+
+    fn default_sort() -> (Self, Direction) {
+        (Self::Name, Direction::Ascending)
+    }
+}
+
+/// GET /api/v1/skills - List all skills with cursor pagination.
 pub async fn list_skills(
     state: Arc<AppState>,
     page: PageQuery,
 ) -> Result<List<SkillInfo>, RpcError> {
-    validate_sort(
-        page.sort.as_deref().unwrap_or("name"),
-        SKILL_SORT_WHITELIST,
-    )?;
-    let resolved = resolve_page(&page)?;
-
     // The list is the four-source layout's answer, not one
     // directory's: project direct, project bundles, global direct,
     // global bundles, in precedence order (`discover_skills` merges
@@ -165,7 +189,7 @@ pub async fn list_skills(
     // + parse block the worker thread: a slow filesystem must not
     // stall the reactor.
     let workspace_root = state.workspace_root.clone();
-    let mut skills = tokio::task::spawn_blocking(move || {
+    let skills = tokio::task::spawn_blocking(move || {
         let mut skills: Vec<(SkillInfo, std::time::SystemTime)> = Vec::new();
         for skill in uva::skill::discover_skills(&workspace_root) {
             // The sort key is the definition file's mtime; a
@@ -189,11 +213,13 @@ pub async fn list_skills(
         RpcError::from(Error::internal(format!("skill scan task failed: {e}")))
     })?;
 
-    sort_skills(&mut skills, &resolved);
-
-    let skills: Vec<SkillInfo> = skills.into_iter().map(|(s, _)| s).collect();
-    let list = paginate(skills, &resolved, |s: &SkillInfo| s.name.as_str());
-    Ok(list)
+    // Cut the page over the pair (the sort key is not on the wire
+    // row), then project it: the cursor names the row by name, which
+    // the projection keeps.
+    Ok(SkillSort::sort_and_page(skills, &page, |(skill, _)| {
+        skill.name.as_str()
+    })?
+    .map(|(skill, _)| skill))
 }
 
 /// Extract the SKILL.md content as `(frontmatter_json_map, body)`.
@@ -250,29 +276,7 @@ pub(crate) fn skill_description(content: &str) -> String {
         .unwrap_or_else(|| "Skill directory".to_string())
 }
 
-/// Sort the skills vector in place according to the resolved page.
-fn sort_skills(
-    skills: &mut [(SkillInfo, std::time::SystemTime)],
-    resolved: &ResolvedPage,
-) {
-    let field = resolved.sort_field.as_deref().unwrap_or("name");
-    match field {
-        "created_at" => {
-            skills.sort_by_key(|a| a.1);
-            if resolved.descending {
-                skills.reverse();
-            }
-        }
-        _ => {
-            skills.sort_by(|a, b| a.0.name.cmp(&b.0.name));
-            if resolved.descending {
-                skills.reverse();
-            }
-        }
-    }
-}
-
-/// GET /api/skills/:id - Get a single skill.
+/// GET /api/v1/skills/{name} - Get a single skill.
 pub async fn get_skill(
     state: Arc<AppState>,
     name: String,
@@ -540,81 +544,66 @@ mod tests {
         )
     }
 
-    fn resolved(sort_field: Option<&str>, descending: bool) -> ResolvedPage {
-        ResolvedPage {
-            last_seen_id: None,
-            effective_limit: 100,
-            sort_field: sort_field.map(String::from),
-            descending,
+    fn page(sort: Option<&str>) -> PageQuery {
+        match sort {
+            Some(raw) => PageQuery::new().with_sort(raw),
+            None => PageQuery::new(),
         }
     }
 
-    fn names(skills: &[(SkillInfo, SystemTime)]) -> Vec<&str> {
-        skills.iter().map(|(s, _)| s.name.as_str()).collect()
+    /// The route's observable answer for one page: the names, in order.
+    /// Nothing here touches the filesystem — the pair's mtime is the
+    /// fixture's.
+    fn sorted(
+        skills: Vec<(SkillInfo, SystemTime)>,
+        sort: Option<&str>,
+    ) -> Vec<String> {
+        SkillSort::sort_and_page(skills, &page(sort), |(skill, _)| {
+            skill.name.as_str()
+        })
+        .expect("the list")
+        .data
+        .into_iter()
+        .map(|(skill, _)| skill.name)
+        .collect()
     }
 
-    #[test]
-    fn sort_skills_by_name_ascending() {
-        let mut skills = vec![
+    fn three() -> Vec<(SkillInfo, SystemTime)> {
+        vec![
             skill("zelda", UNIX_EPOCH + Duration::from_secs(30)),
             skill("alpha", UNIX_EPOCH + Duration::from_secs(10)),
             skill("mango", UNIX_EPOCH + Duration::from_secs(20)),
-        ];
-        sort_skills(&mut skills, &resolved(Some("name"), false));
-        assert_eq!(names(&skills), vec!["alpha", "mango", "zelda"]);
+        ]
     }
 
     #[test]
-    fn sort_skills_by_name_descending() {
-        let mut skills = vec![
-            skill("zelda", UNIX_EPOCH + Duration::from_secs(30)),
-            skill("alpha", UNIX_EPOCH + Duration::from_secs(10)),
-            skill("mango", UNIX_EPOCH + Duration::from_secs(20)),
-        ];
-        sort_skills(&mut skills, &resolved(Some("name"), true));
-        assert_eq!(names(&skills), vec!["zelda", "mango", "alpha"]);
+    fn name_sorts_both_ways() {
+        assert_eq!(sorted(three(), Some("name")), ["alpha", "mango", "zelda"]);
+        assert_eq!(sorted(three(), Some("-name")), ["zelda", "mango", "alpha"]);
     }
 
     #[test]
-    fn sort_skills_by_created_at_ascending() {
-        let mut skills = vec![
-            skill("zelda", UNIX_EPOCH + Duration::from_secs(30)),
-            skill("alpha", UNIX_EPOCH + Duration::from_secs(10)),
-            skill("mango", UNIX_EPOCH + Duration::from_secs(20)),
-        ];
-        sort_skills(&mut skills, &resolved(Some("created_at"), false));
-        // Order by mtime ascending: alpha(10), mango(20), zelda(30).
-        assert_eq!(names(&skills), vec!["alpha", "mango", "zelda"]);
+    fn created_at_sorts_by_mtime_both_ways() {
+        // alpha is the oldest definition file, zelda the newest.
+        assert_eq!(
+            sorted(three(), Some("created_at")),
+            ["alpha", "mango", "zelda"]
+        );
+        assert_eq!(
+            sorted(three(), Some("-created_at")),
+            ["zelda", "mango", "alpha"]
+        );
     }
 
     #[test]
-    fn sort_skills_by_created_at_descending() {
-        let mut skills = vec![
-            skill("zelda", UNIX_EPOCH + Duration::from_secs(30)),
-            skill("alpha", UNIX_EPOCH + Duration::from_secs(10)),
-            skill("mango", UNIX_EPOCH + Duration::from_secs(20)),
-        ];
-        sort_skills(&mut skills, &resolved(Some("created_at"), true));
-        // Order by mtime descending: zelda(30), mango(20), alpha(10).
-        assert_eq!(names(&skills), vec!["zelda", "mango", "alpha"]);
+    fn the_default_key_is_name_ascending() {
+        assert_eq!(sorted(three(), None), ["alpha", "mango", "zelda"]);
     }
 
     #[test]
-    fn sort_skills_default_field_is_name() {
-        // When sort_field is None, the default is "name".
-        let mut skills = vec![
-            skill("charlie", UNIX_EPOCH + Duration::from_secs(30)),
-            skill("alpha", UNIX_EPOCH + Duration::from_secs(10)),
-            skill("bravo", UNIX_EPOCH + Duration::from_secs(20)),
-        ];
-        sort_skills(&mut skills, &resolved(None, false));
-        assert_eq!(names(&skills), vec!["alpha", "bravo", "charlie"]);
-    }
-
-    #[test]
-    fn sort_skills_mixed_name_and_timestamp_order_differ() {
-        // Verifies that "name" and "created_at" produce different
-        // orders when names and timestamps are inversely related.
+    fn name_and_created_at_can_differ() {
+        // Names and mtimes are inversely related, so a key that
+        // silently sorted by the wrong field would be visible.
         let make = || {
             vec![
                 skill("c", UNIX_EPOCH + Duration::from_secs(10)),
@@ -622,21 +611,26 @@ mod tests {
                 skill("a", UNIX_EPOCH + Duration::from_secs(30)),
             ]
         };
-
-        let mut by_name = make();
-        sort_skills(&mut by_name, &resolved(Some("name"), false));
-        assert_eq!(names(&by_name), vec!["a", "b", "c"]);
-
-        let mut by_time = make();
-        sort_skills(&mut by_time, &resolved(Some("created_at"), false));
-        assert_eq!(names(&by_time), vec!["c", "b", "a"]);
+        assert_eq!(sorted(make(), Some("name")), ["a", "b", "c"]);
+        assert_eq!(sorted(make(), Some("created_at")), ["c", "b", "a"]);
     }
 
     #[test]
-    fn sort_skills_empty_input_is_noop() {
-        let mut skills: Vec<(SkillInfo, SystemTime)> = Vec::new();
-        sort_skills(&mut skills, &resolved(Some("name"), false));
-        assert!(skills.is_empty());
+    fn an_unknown_key_is_refused() {
+        // `mtime` names the fact the key is derived from, not the key.
+        let err = SkillSort::sort_and_page(
+            three(),
+            &page(Some("mtime")),
+            |(skill, _)| skill.name.as_str(),
+        )
+        .err()
+        .expect("`mtime` names the fact, not the key");
+        assert!(matches!(err, Error::InvalidItem { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn an_empty_input_is_an_empty_page() {
+        assert!(sorted(Vec::new(), Some("name")).is_empty());
     }
 
     #[test]

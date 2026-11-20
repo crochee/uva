@@ -40,8 +40,8 @@ uva-tool-plugins = { workspace = true, optional = true }
 uva-session = { workspace = true, optional = true }
 uva-steering = { workspace = true, optional = true }
 uva-harness = { workspace = true, optional = true }
-# The interception contract under the loop: the four traits, the seven
-# mount-point keys, the revocable `HookRegistry` and the `hooks`
+# The interception contract under the loop: the four traits, the
+# twelve mount points, the revocable `HookRegistry` and the `hooks`
 # kernel plugin. Exposed as its own module for a consumer that wants
 # the contract without the loop; `harness` requires it because the
 # harness's seam layer dispatches the registry.
@@ -211,7 +211,7 @@ harness = [
   "agent",
 ]
 # The interception contract on its own: the `Hook` / `Gate` /
-# transformer traits, the seven mount-point keys, the revocable
+# transformer traits, the twelve mount points, the revocable
 # `HookRegistry` and the `hooks` kernel plugin. `harness` requires it
 # because the loop's seam layer dispatches the registry first.
 hook = ["dep:uva-hook", "core", "context", "steering", "tool"]

@@ -5,7 +5,10 @@
 同一个 `/rpc` WebSocket、同一个网关监管者、同一份 JSON-RPC 2.0 契约。
 
 > 这是应用 crate（`publish = false`）：它依赖 `publish = false` 的
-> `uva-gateway`，不是 lib 消费者的入口。分层见
+> `uva-gateway`，不是 lib 消费者的入口。它还直接依赖 `uva-app-server`——
+> **只为 wire 类型**（follow 基线、schema 树、方法名都是服务端的类型，
+> 终端不留副本；见 [ADR-0025](../../docs/adr/0025-the-tui-uses-the-server-wire-types.md)）。
+> 分层见
 > [`src/transport.rs`](src/transport.rs)（网关客户端的领域适配：方法映射、
 > id 关联、全量通知订阅、重连后重发 follow、活性探针）、
 > [`src/app.rs`](src/app.rs)（纯 reducer）、[`src/render.rs`](src/render.rs)
@@ -85,8 +88,9 @@ TUI 显示网关不可达并持续重连，**不会**自己重启网关。
 多字段写操作（create / patch / register）走 `:json` 通用门：
 `Ctrl+k`（目录面板里也可直接 `:`）输入 `json <method> <params>`，例如
 `json schedules/create {"name":"nightly","kind":"cron",…}`。合法 JSON 才弹确认，
-`y` 发送；方法名必须在注册表白名单里（`src/domains.rs` 的 `KNOWN_METHODS`，
-与服务器 `router.register` 对账），未知名字本地拒绝、不发请求。
+`y` 发送；方法名必须在服务器的方法名表里（`uva-app-server` 的
+`rpc/methods/names.rs`，终端直接引用那些常量，不留副本），未知名字本地拒绝、
+不发请求。
 
 ## 目录域清单（波次 2）
 

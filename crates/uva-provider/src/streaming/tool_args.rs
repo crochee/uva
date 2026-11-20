@@ -22,7 +22,7 @@ pub use crate::json_repair::parse_tool_input;
 ///
 /// We keep the partial JSON as a raw `String` (not a parsed
 /// `serde_json::Value`) so the delta can be emitted verbatim and
-/// the parser runs once at the end inside `IsDone` / `message_stop`.
+/// the parser runs once at the end, when the fold closes the call.
 ///
 /// `salvaged` is `true` when the structural-close pass
 /// ([`crate::json_repair::repair_json`]) salvaged a

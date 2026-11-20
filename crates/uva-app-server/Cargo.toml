@@ -23,12 +23,12 @@ build = "build.rs"
 [features]
 # Only `test-utils` remains. Observability is not feature-gated on
 # this crate: OTel OTLP tracing, Prometheus RED metrics, the
-# `/metrics` endpoint, and the `track_metrics` middleware are all
-# always-on *for the server*, which is why both telemetry features are
-# named here explicitly — the server must not lose OTLP if the crate's
-# default set ever changes. The fallback to console tracing when
-# neither gRPC nor HTTP OTLP is configured lives inside
-# `uva_telemetry::init_tracing`.
+# `/metrics` endpoint, and the gateway's per-request metrics
+# middleware are all always-on *for the server*, which is why both
+# telemetry features are named here explicitly — the server must not
+# lose OTLP if the crate's default set ever changes. The fallback to
+# console tracing when neither gRPC nor HTTP OTLP is configured lives
+# inside `uva_telemetry::init_tracing`.
 #
 # `test-utils` forwards to the facade's `test-support` feature so
 # `uva::test_support::FakeProvider` is nameable from the
@@ -110,6 +110,10 @@ async-trait.workspace = true
 chrono.workspace = true
 axum.workspace = true
 tower-http = { workspace = true, features = ["fs"] }
+# `tower`'s `Layer` is how the metrics middleware is put around the
+# static front-end's service — that service sits outside the router's
+# own layer stack, so it needs the layer applied by hand.
+tower.workspace = true
 # The one application crate: `rt-multi-thread` (worker pool), `macros`
 # (`#[tokio::main]`, `select!`, tests), `net` (`TcpListener`),
 # `signal` (Ctrl-C), `sync` (broadcast / mpsc / RwLock), `time` (the
@@ -160,6 +164,9 @@ axum.workspace = true
 uva.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
+# The router tests drive a `Router` as a service (`oneshot`), which is
+# how a middleware's effect is asserted without binding a port.
+tower = { workspace = true, features = ["util"] }
 
 [dev-dependencies.uva-app-server]
 path = "."

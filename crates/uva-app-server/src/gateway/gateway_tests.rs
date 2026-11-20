@@ -58,6 +58,8 @@ fn app() -> Arc<AppServer> {
         connections: DashMap::new(),
         next_connection: AtomicU64::new(1),
         ready: Arc::new(AtomicBool::new(false)),
+        internal_pending: DashMap::new(),
+        next_internal_id: AtomicU64::new(1),
     })
 }
 
@@ -588,4 +590,72 @@ async fn restarts_core_and_keeps_socket_open() {
     assert!(app_server.connections.contains_key(&connection));
     assert!(!supervisor.is_finished(), "the supervisor keeps running");
     supervisor.abort();
+}
+
+/// Read one Content-Length frame from the core's wire.
+async fn read_frame_from(reader: &mut DuplexStream) -> String {
+    let mut header = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !header.ends_with(b"\r\n\r\n") {
+        reader.read_exact(&mut byte).await.expect("the wire reads");
+        header.push(byte[0]);
+    }
+    let header = String::from_utf8(header).expect("the header is UTF-8");
+    let length: usize = header
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .expect("the frame carries a length");
+    let mut body = vec![0_u8; length];
+    reader.read_exact(&mut body).await.expect("the body reads");
+    String::from_utf8(body).expect("the body is UTF-8")
+}
+
+/// The gateway asks the core for its exposition and merges it into
+/// `/metrics`: the tool counters live in the core's process, the HTTP
+/// counters in the gateway's.
+#[tokio::test]
+async fn the_gateway_fetches_the_core_s_exposition_over_the_rpc_channel() {
+    let app_server = app();
+    app_server.ready.store(true, Ordering::Relaxed);
+    let mut reader = attach_core_stdin(&app_server).await;
+
+    let fetcher = tokio::spawn({
+        let app_server = Arc::clone(&app_server);
+        async move { app_server.core_exposition().await }
+    });
+
+    // The core sees a `metrics/gather` request whose id carries the
+    // gateway's own prefix.
+    let request = read_frame_from(&mut reader).await;
+    let request: Value =
+        serde_json::from_str(&request).expect("the request is JSON");
+    assert_eq!(request["method"], json!("metrics/gather"));
+    let id = request["id"].as_str().expect("the request carries an id");
+    assert!(
+        id.starts_with("gateway:internal:"),
+        "the gateway's own id is namespaced: {id}"
+    );
+
+    // The core answers it.
+    let answer = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": { "text": "tool_executions_total{outcome=\"ok\",tool=\"read\"} 1\n" },
+    })
+    .to_string();
+    route(&app_server, &answer);
+
+    let exposition = fetcher
+        .await
+        .expect("the fetch finished")
+        .expect("the core answered");
+    assert!(
+        exposition.contains("tool_executions_total"),
+        "the core's exposition came back whole: {exposition}"
+    );
 }

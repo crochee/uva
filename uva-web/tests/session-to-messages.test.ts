@@ -1127,3 +1127,70 @@ describe('tool_output rows replay the streamed progress', () => {
     expect(state.messages).toEqual([]);
   });
 });
+
+describe("a row's own members are read from the row", () => {
+  it('renders a plugin event from the kind and payload the row declares', () => {
+    // The plugin row declares its own fields on the row's top level
+    // — it has no payload bag at all. Reading the bag found nothing,
+    // so every plugin event rendered as "unnamed" with no body.
+    const state = fold([
+      { type: 'plugin', seq: 3, kind: 'tool.executed', payload: { tool: 'read' } },
+    ]);
+
+    expect(outline(state.messages)).toEqual([
+      {
+        role: 'assistant',
+        segments: [{ type: 'notice', content: '插件事件 **tool.executed** · `{"tool":"read"}`' }],
+      },
+    ]);
+  });
+
+  it("reads a delegation marker from the row's typed members", () => {
+    const state = fold([
+      {
+        type: 'subagent_enter',
+        seq: 4,
+        child_session_id: 'child-1',
+        parent_session_id: 'sess-1',
+        agent_name: 'researcher',
+        depth: 1,
+      },
+    ]);
+
+    expect(outline(state.messages)).toEqual([
+      {
+        role: 'subagent',
+        segments: [
+          {
+            type: 'notice',
+            content: '已委派子代理 **researcher**。 [查看子会话 →](/chat/child-1)',
+          },
+        ],
+      },
+    ]);
+  });
+
+  it('still reads a delegation marker written before the members were typed', () => {
+    // The payload bag's copies are the older spelling, tolerated for
+    // a row written before the fields were typed.
+    const state = fold([
+      {
+        type: 'subagent_enter',
+        seq: 4,
+        data: { child_session_id: 'child-1', agent_name: 'researcher', depth: 1 },
+      },
+    ]);
+
+    expect(outline(state.messages)).toEqual([
+      {
+        role: 'subagent',
+        segments: [
+          {
+            type: 'notice',
+            content: '已委派子代理 **researcher**。 [查看子会话 →](/chat/child-1)',
+          },
+        ],
+      },
+    ]);
+  });
+});

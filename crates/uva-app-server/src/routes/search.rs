@@ -43,7 +43,11 @@ pub struct SearchParams {
 }
 
 /// Default hit cap when [`SearchParams::limit`] is absent.
-const DEFAULT_LIMIT: usize = 20;
+///
+/// Public so a client can ask for this route's own default instead
+/// of copying the number: the terminal references it the way it
+/// references the page query's default.
+pub const DEFAULT_LIMIT: usize = 20;
 /// Ceiling for `limit`.
 const MAX_LIMIT: usize = 50;
 

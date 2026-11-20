@@ -121,9 +121,18 @@ pub(crate) struct BootServices {
     /// own harness, so its events never reach a session controller and
     /// would otherwise vanish from `/api/v1/chat/usage`.
     pub usage: Arc<crate::state::UsageMetrics>,
+    /// The deployment's one interception table: the host below
+    /// carries it, the default policy writes its logging hook into it,
+    /// and the `hooks` row publishes this same instance so an
+    /// out-of-tree registration lands on the table every run
+    /// dispatches (ADR 0028).
+    ///
+    /// Taken from the host's read accessor at boot, so the two can
+    /// never name different tables.
+    pub hook_registry: HookRegistry,
     /// The deployment's host: the steering policy (guards / hints /
-    /// tracker / logging hook) every agent this server builds
-    /// receives.
+    /// tracker / output transformers / tool bindings) every agent this
+    /// server builds receives, over the registry above.
     ///
     /// This is the boot's one host clone: it shares every
     /// registration with the host the run assembly receives, so a
@@ -531,6 +540,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
         subagent_writers: Arc::new(SubagentWriterSlot::new()),
         session_index: Arc::new(SessionIndexSlot::new()),
         usage: Arc::new(crate::state::UsageMetrics::default()),
+        hook_registry: HookRegistry::new(),
         plugin_host: Host::default(),
     }))
 }
@@ -540,7 +550,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
 fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // Rows the boot constructs: their plugins build the capability in
     // `apply` from the boot context (config only — no containers).
-    const BOOT_SPECS: [(&str, BootMake); 16] = [
+    const BOOT_SPECS: [(&str, BootMake); 15] = [
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-shell", shell_tool_plugin),
@@ -551,7 +561,6 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
         ("context-compactor", compaction_plugin),
         ("approval", approval_plugin),
         ("skills", skill_plugin),
-        ("hooks", hooks_plugin),
         ("mcp", mcp_plugin),
         ("eval", eval_plugin),
         ("scheduler", scheduler_plugin),
@@ -560,10 +569,13 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     ];
     // Rows bound to the boot's containers: the shared tool registry,
     // the peer-agent registry the `task` tool resolves names through,
-    // and the host's child-session writer source.
-    const SPECS: [(&str, Make); 2] = [
+    // and the deployment's one interception table — the `hooks` row
+    // publishes the same registry the host carries, and a remount
+    // rebuilds the plugin over that same instance (ADR 0028).
+    const SPECS: [(&str, Make); 3] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-task", task_tool_plugin),
+        ("hooks", hooks_plugin),
     ];
     let mut factories = PluginFactories::new();
     for (id, make) in BOOT_SPECS {
@@ -968,18 +980,18 @@ fn approval_plugin(
     Ok(Arc::new(ApprovalPlugin::new(ApprovalPolicy::default())))
 }
 
-/// The `hooks` row's plugin: the deployment's external hook registry.
+/// The `hooks` row's plugin: the deployment's one interception table,
+/// published as `uva_hook::KEY_HOOKS`.
 ///
-/// The registry is the row's own object, published as
-/// `uva_hook::KEY_HOOKS`. The `agent-loop` row resolves it with
-/// `ctx.get` at mount — opportunistically, not as an `inject` edge —
-/// so a profile that omits this row or switches it off still boots.
-/// The table is shared, so a registration added after the row mounts
-/// is visible to every run the loop creates.
-fn hooks_plugin(
-    _boot: &BootContext,
-) -> Result<Arc<dyn KernelPlugin>, PluginError> {
-    Ok(Arc::new(HookPlugin::new(HookRegistry::new())))
+/// The plugin takes the boot's registry — the same instance the
+/// deployment's host carries — so an out-of-tree registration made
+/// through the service lands on the table every run dispatches, and a
+/// remount republishes that instance instead of swapping in a fresh
+/// one (ADR 0028). The row is optional and not an `inject` edge, so a
+/// profile that omits it or switches it off still boots with the full
+/// default policy.
+fn hooks_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    Arc::new(HookPlugin::new(services.hook_registry.clone()))
 }
 
 fn skill_plugin(
@@ -1068,12 +1080,9 @@ impl PluginFactory for AgentLoopFactoryEntry {
             // The stateless request-level projection, one instance.
             context_manager: Some(Arc::new(TruncatingContextManager)),
             // The deployment's plugin host: the container every
-            // `[plugins]` registration lives in.
+            // `[plugins]` registration lives in, and the carrier of
+            // the one interception table every run dispatches.
             host: Some(services.plugin_host.clone()),
-            // The `hooks` row publishes the external registry; the
-            // runtime resolves it with `ctx.get` at mount (optional —
-            // a profile without the row still boots).
-            hooks: None,
             // The server's spawner: a run's detached work executes on
             // the deployment's runtime.
             spawner: Some(crate::spawner::server_spawner()),
