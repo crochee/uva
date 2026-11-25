@@ -26,7 +26,7 @@
 //! | [`sensitive`] | [`Sensitive`] / [`SensitiveData`] redacting newtype, [`redact_partial`] for display | secret-bearing values stay out of `Debug` logs; the partial-redaction helper lets a log show `sk-1***def` for an API key without leaking it |
 //! | [`schema`] | JSON Schema validation helper | structured-output validation lives next to the wire types |
 //! | [`full_output`] | [`FullOutputStore`] (chunked full-output retention) | replaces eager string concatenation in long tool results |
-//! | [`judge_score`] | [`parse_judge_score`] | shared LLM-judge reply parser — `LlmJudgeMetric` and `LlmJudgeScorer` cannot drift |
+//! | [`judge_score`] | [`parse_judge_score`] | shared LLM-judge reply parser — every judge reads the reply through it, so they cannot drift |
 //! | [`layout`] | [`layout::sources`] — the two-layer `~/.agents/` definition layout and its precedence rules | every definition domain (skills, agents, tasks, MCP declarations) reads the same roots and the same precedence, so they cannot drift |
 //!
 //! ## What's deliberately **not** here

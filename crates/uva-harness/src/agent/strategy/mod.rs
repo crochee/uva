@@ -18,7 +18,7 @@ use crate::{
 /// assembled piece and the sink publishes what happens.
 #[async_trait]
 pub trait ReasoningStrategy: Send + Sync + 'static {
-    /// Stable label for logs and introspection (`"react"`, `"cot"`, …).
+    /// Stable label for logs and introspection (`"react"`, …).
     fn name(&self) -> &str;
 
     /// Drive one session to completion, publishing events through `sink`.

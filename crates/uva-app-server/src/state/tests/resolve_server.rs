@@ -70,7 +70,7 @@ async fn resolve_server_config_reads_the_named_file() {
     let named = elsewhere.path().join("deployment.yaml");
     std::fs::write(
         &named,
-        "version: \"1.0\"\nagents:\n  reviewer:\n    max_steps: 5\n    strategy: best-of-n\n",
+        "version: \"1.0\"\nagents:\n  reviewer:\n    max_steps: 5\n    strategy: re-act\n",
     )
     .unwrap();
 
@@ -86,7 +86,7 @@ async fn resolve_server_config_reads_the_named_file() {
         load_default_strategy_alias(Some(&cfg), Some("reviewer"))
             .expect("the named file's strategy must carry its alias");
     assert_eq!(
-        strategy_alias, "best-of-n",
+        strategy_alias, "re-act",
         "the named file must win over config.toml"
     );
     assert_eq!(

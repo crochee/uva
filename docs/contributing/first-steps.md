@@ -147,7 +147,7 @@ LIB-GRADE: OK
 
 `lib_grade` assembles an agent from independent pieces, registers
 a consumer-side strategy in `StrategyRegistry`, and swaps the
-loop (`react` → `chain-of-thought` → one you wrote) by changing
+loop (`react` → one you wrote) by changing
 one line — a good next file to read after `runtime_agnostic`.
 
 ## Where to go next

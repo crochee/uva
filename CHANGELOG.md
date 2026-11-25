@@ -139,6 +139,20 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 - **GLOSSARY 收了「砖块（brick）」**：装配里负责把一样东西变成可调用的一行——挂载时登记，
   卸载时撤干净；一个插件可以既当砖块又提供服务。
 
+### Removed (循环只有 react)
+
+- **删除三个推理模式**：`uva-policy-plugins` 的 `cot` / `plan_execute` /
+  `best_of_n` 模块、它们的 feature、facade 的 `strategy-cot` /
+  `strategy-plan-execute` / `strategy-best-of-n` 与三个 example 一并删除。
+  每一样都能用 react 组合出来——思维链是提示工程，计划-执行是 react + 计划
+  工具，多候选是 react 跑 n 次再评分——三份实现与三份测试换来的能力为零。
+- **`ReasoningStrategy` 范式保留**：`with_strategy` 与 `StrategyRegistry`
+  不动，仓外实现照常注册；内置解析表只剩 `react` / `re-act` / `re_act`，
+  别名无效时启动报点名的「未知策略」错误。
+- **`CandidateScorer` 随 `best_of_n` 删除**：它唯一的使用者是该策略。
+
+见 `docs/adr/0031-the-loop-is-react-composition-replaces-modes.md`。
+
 ### Fixed (web 镜像缺失；生产 compose 缺失)
 
 - **web 镜像回来了**：`Dockerfile.web` 在 `19d0cf54`（一个讲委派 id 的无关提交）里被

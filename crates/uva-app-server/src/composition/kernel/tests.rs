@@ -462,7 +462,7 @@ fn agent_loop_profile(config: serde_json::Value) -> crate::profile::Profile {
 #[test]
 fn the_agent_loop_row_config_drives_the_factory() {
     let config = serde_json::json!({
-        "strategy": "chain-of-thought",
+        "strategy": "react",
         "tool_restriction": { "allow": ["read"], "deny": ["write"] },
         "compaction": {
             "enabled": true,
@@ -477,7 +477,7 @@ fn the_agent_loop_row_config_drives_the_factory() {
     let strategy = defaults.strategy.expect("the alias resolves");
     assert_eq!(
         strategy.name(),
-        "chain-of-thought",
+        "react",
         "the row resolved the strategy the alias names"
     );
     let restriction =
@@ -541,7 +541,7 @@ async fn the_task_row_registers_the_task_tool_and_the_loop_mounts() {
     let (ctx, handle) = mount_profile(
         Arc::clone(&services),
         &agent_loop_profile(serde_json::json!({
-            "strategy": "chain-of-thought",
+            "strategy": "react",
         })),
         SharedClock::system(),
         extras,

@@ -89,9 +89,6 @@ uva = { workspace = true, features = [
   "semantic-cache",
   "tool-memo",
   "resilience",
-  "strategy-plan-execute",
-  "strategy-cot",
-  "strategy-best-of-n",
   "reflection",
   "budget",
   # The config-driven assembly layer behind the built-in native

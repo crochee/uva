@@ -24,7 +24,7 @@
 | 范式 | `uva-skill` | 技能注册表：斜杠命令 / prompt / 工具包 |
 | 插件 | `uva-tool-plugins` | 工具插件，一模块一 feature：`read` `write` `shell` `todo` `web` `scheduler` `search` `memo` |
 | 插件 | `uva-tool-task` | `task` 工具（普通 `Tool`）：解析同伴 agent、开子会话、内联驱动子 run；控制面三工具（`agents_list` / `agents_message` / `agents_interrupt`）管住本会话的子代理；依赖 agent/事件词汇，不依赖 harness |
-| 插件 | `uva-policy-plugins` | 策略插件，一模块一 feature：`cache` `resilience` `budget` `cot` `plan-execute` `best-of-n` |
+| 插件 | `uva-policy-plugins` | 策略插件，一模块一 feature：`cache` `resilience` `budget` |
 | 插件 | `uva-hook-plugins` | hook 实现族，一模块一 feature：`reflection` `redact` `traffic-light`；内建五 guard 仍住 `uva-steering` |
 | 装配 | `uva-kernel` | 插件内核：manifest、依赖序 `mount_all`、可逆 `EffectHandle`、per-plugin `dispose_plugin`、`ui.` 命名空间边界 |
 | 装配 | `uva-runtime` | 配置驱动的装配：provider catalogue、tier-1 包装链、agent-loop 工厂 |

@@ -11,7 +11,7 @@
 //! register a consumer-side
 //! [`StrategyRegistry`](uva_harness::StrategyRegistry)
 //! entry for custom reasoning, and turn the dial —
-//! `chain-of-thought` vs `react` vs a custom strategy — by
+//! `react` vs a custom strategy — by
 //! changing one line.
 
 use std::sync::Arc;

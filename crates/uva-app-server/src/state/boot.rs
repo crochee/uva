@@ -142,29 +142,15 @@ pub(crate) fn load_default_tool_restriction(
     }))
 }
 
-/// Resolve a strategy name through one [`StrategyRegistry`]: the plugin
-/// strategies this server's facade features enabled (`strategy-cot`,
-/// `strategy-best-of-n`) are registered under their config aliases, and the
-/// harness's built-in `react` resolves through the same call without a
-/// registration.
+/// Resolve a strategy name through one [`StrategyRegistry`]: the
+/// harness's built-in `react` (and its `re-act` / `re_act`
+/// spellings) resolves through the same call without a registration.
+/// The agent loop is ReAct only — no other paradigm is registered
+/// here.
 pub(crate) fn resolve_strategy(
     configured: &str,
 ) -> Result<Arc<dyn uva::harness::agent::ReasoningStrategy>, uva::core::Error> {
     let registry = uva::harness::agent::StrategyRegistry::new();
-    let cot = || {
-        Arc::new(uva::strategy_cot::ChainOfThoughtStrategy::default())
-            as Arc<dyn uva::harness::agent::ReasoningStrategy>
-    };
-    let bon = || {
-        Arc::new(uva::strategy_best_of_n::BestOfNStrategy::default())
-            as Arc<dyn uva::harness::agent::ReasoningStrategy>
-    };
-    for name in ["chain-of-thought", "cot", "chain_of_thought"] {
-        registry.register(name, cot());
-    }
-    for name in ["best-of-n", "bon", "best_of_n"] {
-        registry.register(name, bon());
-    }
     registry.resolve(configured)
 }
 
@@ -173,8 +159,7 @@ pub(crate) fn resolve_strategy(
 /// The `agent-loop` row's config carries the alias, not a strategy
 /// object: the row resolves it through [`resolve_strategy`] when it
 /// builds its loop, so the configuration keeps its own vocabulary
-/// (`chain-of-thought`, `best-of-n`, `react`, …) all the way to the
-/// row. `None` when unset.
+/// (`react`, …) all the way to the row. `None` when unset.
 pub(crate) fn load_default_strategy_alias(
     cfg: Option<&crate::config::ServerConfig>,
     default_agent_name: Option<&str>,

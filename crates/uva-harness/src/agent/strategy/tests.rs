@@ -265,7 +265,7 @@ fn a_registered_name_shadows_the_builtin() {
 #[test]
 fn resolve_names_the_registered_entries_on_a_miss() {
     let registry = StrategyRegistry::new();
-    registry.register("cot", Arc::new(CustomStrategy));
+    registry.register("custom", Arc::new(CustomStrategy));
     let err = registry
         .resolve("nope")
         .err()
@@ -273,7 +273,7 @@ fn resolve_names_the_registered_entries_on_a_miss() {
     let message = err.to_string();
     assert!(message.contains("nope"), "{message}");
     assert!(
-        message.contains("cot"),
+        message.contains("custom"),
         "the error must name the registered entries: {message}"
     );
 }

@@ -351,8 +351,8 @@ impl EventSink {
     ///
     /// The message arrives built. In ReAct that construction is the
     /// transcript module's `Transcript::assistant_message` (which
-    /// owns the part coalescing); another strategy — chain-of-thought —
-    /// builds its own parts and passes them here. Either way this
+    /// owns the part coalescing); another strategy builds its own
+    /// parts and passes them here. Either way this
     /// method constructs nothing: it persists the value it was handed,
     /// so the row and the caller's value carry the same bytes.
     ///

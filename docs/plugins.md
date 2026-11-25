@@ -36,17 +36,14 @@ facade 之所以多一层，是为了让**可选性**与**依赖隔离**留在�
 
 ## 2. 策略插件（`uva-policy-plugins`）
 
-接缝有两个：`uva_provider::ModelProvider`（包装一层 provider）与
-`uva_harness::agent::ReasoningStrategy`（换一种推理策略）。
+接缝是 `uva_provider::ModelProvider`（包装一层 provider），`resilience` 与
+`budget` 另有一层 `uva_tool::Tool`（包装一件工具）。
 
 | 插件 | facade feature | 模块 | 主要类型 | 专属依赖 | 用途 |
 |---|---|---|---|---|---|
 | cache | `semantic-cache` | `cache` | `SemanticCacheProvider` / `SemanticCacheConfig` | `uva-search` | 语义缓存：重复的补全直接从缓存出 |
 | resilience | `resilience` | `resilience` | `ResilientProvider` / `ResilientTool` / `retry_with_backoff` | `uva-tool` | 重试、退避、熔断；失败分类决定重试还是放弃 |
 | budget | `budget` | `budget` | `BudgetProvider` / `BudgetTool` / `PricingTable` | `uva-tool` | 封顶：token / 成本 / 时延三条预算，超限按策略处理 |
-| cot | `strategy-cot` | `cot` | `ChainOfThoughtStrategy` | `uva-harness`, `uva-session` | 思维链推理策略 |
-| plan-execute | `strategy-plan-execute` | `plan_execute` | `PlanExecuteStrategy` / `DefaultPlanGenerator` / `DefaultExecutor` / `DefaultRePlanner` | `uva-tool`, `uva-harness`, `uva-context`, `uva-steering` | 计划—执行—重规划 |
-| best-of-n | `strategy-best-of-n` | `best_of_n` | `BestOfNStrategy` / `LlmJudgeScorer` | `uva-harness`, `uva-session` | 采 N 份答案，按评分挑一份 |
 
 ## 3. hook 插件（`uva-hook-plugins`）
 

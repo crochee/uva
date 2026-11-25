@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
-description = "The shipped policy plugins: semantic cache, resilience, budget and the reasoning strategies — one module and one feature per policy."
+description = "The shipped policy plugins: semantic cache, resilience and budget — one module and one feature per policy."
 homepage.workspace = true
 documentation.workspace = true
 
@@ -15,9 +15,6 @@ default = []
 cache = ["dep:uva-search"]
 resilience = ["dep:uva-tool"]
 budget = ["dep:uva-tool"]
-cot = ["dep:uva-harness", "dep:uva-session"]
-plan-execute = ["dep:uva-tool", "dep:uva-harness", "dep:uva-context", "dep:uva-steering"]
-best-of-n = ["dep:uva-harness", "dep:uva-session"]
 
 [dependencies]
 uva-core.workspace = true
@@ -35,10 +32,6 @@ hex.workspace = true
 rand.workspace = true
 # --- per-policy, optional ---
 uva-tool = { workspace = true, optional = true }
-uva-harness = { workspace = true, optional = true }
-uva-context = { workspace = true, optional = true }
-uva-steering = { workspace = true, optional = true }
-uva-session = { workspace = true, optional = true }
 uva-search = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -53,8 +46,6 @@ tokio-util.workspace = true
 tracing-subscriber.workspace = true
 uva-test-support.workspace = true
 uva-tool.workspace = true
-uva-context.workspace = true
-uva-session.workspace = true
 chrono.workspace = true
 
 # An example needs its policy's feature: the family ships nothing
@@ -68,12 +59,3 @@ required-features = ["resilience"]
 [[example]]
 name = "budget_demo"
 required-features = ["budget"]
-[[example]]
-name = "chain_of_thought"
-required-features = ["cot"]
-[[example]]
-name = "plan_execute_demo"
-required-features = ["plan-execute"]
-[[example]]
-name = "best_of_n_demo"
-required-features = ["best-of-n"]

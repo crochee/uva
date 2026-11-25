@@ -18,7 +18,7 @@ async fn load_default_strategy_alias_reads_the_agent_table() {
         r#"{
             "version": "1.0",
             "agents": {
-                "reviewer": { "max_steps": 10, "strategy": "chain-of-thought" }
+                "reviewer": { "max_steps": 10, "strategy": "react" }
             }
         }"#,
     )
@@ -28,7 +28,7 @@ async fn load_default_strategy_alias_reads_the_agent_table() {
         .expect("the workspace config must parse");
     let alias = load_default_strategy_alias(Some(&cfg), Some("reviewer"))
         .expect("a configured strategy must carry its alias");
-    assert_eq!(alias, "chain-of-thought");
+    assert_eq!(alias, "react");
 
     std::fs::write(
         dir.path().join("config.toml"),
@@ -44,24 +44,16 @@ async fn load_default_strategy_alias_reads_the_agent_table() {
     assert!(load_default_strategy_alias(None, Some("reviewer")).is_none());
 }
 
-/// The plugin strategies register under their config aliases and resolve
-/// through the same registry call as the built-in `react` — one resolution
-/// path, no `.unwrap()` panic and no silent `warn`-and-fallback.
+/// The harness's built-in `react` family resolves through the same
+/// registry call — one resolution path, no `.unwrap()` panic and no
+/// silent `warn`-and-fallback. It is the only strategy this server
+/// knows.
 #[tokio::test]
-async fn resolve_strategy_resolves_every_config_alias() {
-    for (alias, expected) in [
-        ("chain-of-thought", "chain-of-thought"),
-        ("chain_of_thought", "chain-of-thought"),
-        ("cot", "chain-of-thought"),
-        ("best-of-n", "best-of-n"),
-        ("best_of_n", "best-of-n"),
-        ("bon", "best-of-n"),
-        ("react", "react"),
-        ("ReAct", "react"),
-    ] {
+async fn resolve_strategy_resolves_the_built_in_react_family() {
+    for alias in ["react", "re-act", "re_act", "ReAct"] {
         let strategy = crate::state::boot::resolve_strategy(alias)
             .unwrap_or_else(|e| panic!("{alias:?} must resolve: {e}"));
-        assert_eq!(strategy.name(), expected, "for {alias:?}");
+        assert_eq!(strategy.name(), "react", "for {alias:?}");
     }
     let err = crate::state::boot::resolve_strategy("mcts")
         .err()

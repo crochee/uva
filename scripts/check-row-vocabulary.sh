@@ -220,7 +220,6 @@ crates/uva-app-server/src/api/operation.rs|compaction|an OperationKind, not a se
 crates/uva-app-server/src/state/boot.rs|compaction|a run-config key, not a session row tag
 crates/uva-context/src/memory/file/entry.rs|feedback|a MemoryKind, not a session row tag
 crates/uva-events/src/events/mod.rs|Model|an AgentEvent kind, not a session row tag
-crates/uva-policy-plugins/src/cot/mod.rs|step|a heading label in chain-of-thought text, not a session row tag
 crates/uva-provider/src/anthropic/types.rs|tool_result|a provider content-block kind, not a session row tag
 crates/uva-provider/src/openai/types/mod.rs|tool_call|a provider content-block kind, not a session row tag
 crates/uva-provider/src/openai/types/mod.rs|tool_result|a provider content-block kind, not a session row tag

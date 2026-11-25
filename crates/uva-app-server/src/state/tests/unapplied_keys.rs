@@ -58,7 +58,7 @@ fn a_clean_agent_config_produces_no_keys() {
             "agents": {
                 "reviewer": {
                     "max_steps": 10,
-                    "strategy": "chain-of-thought",
+                    "strategy": "react",
                     "compaction": {
                         "enabled": true,
                         "reserve_tokens": 4096,

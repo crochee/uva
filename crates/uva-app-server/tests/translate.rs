@@ -34,7 +34,7 @@ default_agent: "default"
 agents:
   default:
     max_steps: 12
-    strategy: "chain-of-thought"
+    strategy: "react"
     allowed_tools: ["read", "write"]
     denied_tools: ["shell"]
     compaction:
@@ -144,7 +144,7 @@ fn the_translated_document_carries_the_whole_assembly() {
         .iter()
         .find(|entry| entry.id == "agent-loop")
         .expect("the agent-loop row is present");
-    assert_eq!(loop_row.config["strategy"], "chain-of-thought");
+    assert_eq!(loop_row.config["strategy"], "react");
     assert_eq!(
         loop_row.config["tool_restriction"]["allow"],
         serde_json::json!(["read", "write"])

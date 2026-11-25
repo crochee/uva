@@ -77,12 +77,11 @@
 //!
 //! The loop itself is a piece too: `ReActAgent::with_strategy(...)`
 //! picks the reasoning paradigm, `ReActStrategy` (the default) or a
-//! plugin strategy you supply as an `Arc<dyn ReasoningStrategy>`.
+//! strategy you supply yourself as an `Arc<dyn ReasoningStrategy>`.
 //! `uva::harness::StrategyRegistry` resolves names: the
 //! harness's own `"react"` / `"re-act"` / `"re_act"` built-ins
-//! resolve without a register call, every other paradigm is
-//! registered by name first — which is how `uva-app-server`
-//! exposes the choice as `agents.<name>.strategy`.
+//! resolve without a register call; any other paradigm is
+//! registered by name first.
 //!
 //! ### The whole assembly, using only the prelude
 //!
@@ -210,7 +209,6 @@
 //! | `semantic-cache` | [`semantic_cache`] | `uva-policy-plugins` | no |
 //! | `tool-memo` | [`tool_memo`] | `uva-tool-plugins` | no |
 //! | `resilience` | [`resilience`] | `uva-policy-plugins` | no |
-//! | `strategy-plan-execute` | [`strategy_plan_execute`] | `uva-policy-plugins` | no |
 //! | `reflection` | `uva::reflection` | `uva-hook-plugins` | no |
 //! | `redact` | `uva::redact` | `uva-hook-plugins` | no |
 //! | `traffic-light` | `uva::traffic_light` | `uva-hook-plugins` | no |
@@ -542,12 +540,6 @@ pub mod session;
 pub mod skill;
 #[cfg(feature = "steering")]
 pub mod steering;
-#[cfg(feature = "strategy-best-of-n")]
-pub mod strategy_best_of_n;
-#[cfg(feature = "strategy-cot")]
-pub mod strategy_cot;
-#[cfg(feature = "strategy-plan-execute")]
-pub mod strategy_plan_execute;
 #[cfg(feature = "telemetry")]
 pub mod telemetry;
 #[cfg(feature = "test-support")]

@@ -1,13 +1,12 @@
 //! Parse a `0.0..=1.0` score from a judge-model reply.
 //!
-//! Canonical location for the LLM-as-judge reply parser. Both
+//! Canonical location for the LLM-as-judge reply parser.
 //! [`uva_eval::LlmJudgeMetric`](https://docs.rs/uva_eval)
-//! and [`uva_strategy_best_of_n::LlmJudgeScorer`](https://docs.rs/uva_strategy_best_of_n)
-//! read judge replies through this function, so a change to the
+//! reads judge replies through this function, so a change to the
 //! shape of a score line (`Score: 0.85`, case-insensitive, with
 //! or without a space after the colon, clamped to the unit
 //! interval) cannot drift between the offline grading path and
-//! the in-loop scorer. Previously each crate had its own copy;
+//! any other judge. Previously each crate had its own copy;
 //! R76 collapsed them.
 //!
 //! # Contract
@@ -132,7 +131,7 @@ mod tests {
     fn handles_lowercase_and_mixed_case() {
         // The contract is case-insensitive; the original
         // `uva_eval::parse_score` did not honour it, so a judge
-        // that said "score: 0.5" used to work in `LlmJudgeScorer`
+        // that said "score: 0.5" used to work in one scorer
         // and silently score 0.0 in `LlmJudgeMetric`. The shared
         // parser collapses both.
         assert_eq!(parse_judge_score("score: 0.5"), 0.5);

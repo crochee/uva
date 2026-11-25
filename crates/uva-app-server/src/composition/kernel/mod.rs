@@ -930,17 +930,15 @@ fn task_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
             as Arc<dyn uva::agent::SubagentWriters>;
     let tool = TaskTool::new(Arc::clone(&services.agent_registry))
         .with_writers(writers)
-        .with_session_index(
-            Arc::clone(&services.session_index)
-                as Arc<dyn uva::tool_task::SessionIndex>,
-        )
+        .with_session_index(Arc::clone(&services.session_index)
+            as Arc<dyn uva::tool_task::SessionIndex>)
         // A child's tokens and turns are real consumption: the tool
         // reports them into the same counters `/api/v1/chat/usage`
         // reads, because the child's own events never reach a
         // controller.
-        .with_usage(Arc::new(crate::state::DelegatedUsage::new(
-            Arc::clone(&services.usage),
-        )))
+        .with_usage(Arc::new(crate::state::DelegatedUsage::new(Arc::clone(
+            &services.usage,
+        ))))
         // The round tail of a dispatch whose future the harness drops
         // (parent cancelled mid-call) detaches here: the child session
         // still gets its exit footer and artefact set.
@@ -1007,7 +1005,7 @@ fn skill_plugin(
 ///
 /// ```json
 /// {
-///   "strategy": "chain-of-thought",
+///   "strategy": "react",
 ///   "tool_restriction": { "allow": ["read"], "deny": ["write"] },
 ///   "compaction": { "enabled": true, "reserve_tokens": 16384,
 ///                   "keep_recent_tokens": 20000,
@@ -1023,8 +1021,8 @@ fn skill_plugin(
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct AgentLoopRowConfig {
-    /// The strategy alias (`chain-of-thought`, `best-of-n`, `react`,
-    /// …) the row resolves through the deployment's strategy registry.
+    /// The strategy alias (`react`, …) the row resolves through the
+    /// deployment's strategy registry.
     strategy: Option<String>,
     /// The allow/deny list the loop installs.
     tool_restriction: Option<ToolRestriction>,

@@ -677,9 +677,6 @@ examples: ## Run every example plus the standalone consumer binaries (each print
 	    [ "$$name" = "resilience_demo" ] && extra="--features resilience" || true; \
 	    [ "$$name" = "budget_demo" ] && extra="--features budget" || true; \
 	    [ "$$name" = "reflection_demo" ] && extra="--features reflection" || true; \
-	    [ "$$name" = "chain_of_thought" ] && extra="--features cot" || true; \
-	    [ "$$name" = "plan_execute_demo" ] && extra="--features plan-execute" || true; \
-	    [ "$$name" = "best_of_n_demo" ] && extra="--features best-of-n" || true; \
 	    echo "== $$pkg/$$name"; \
 	    cargo run -q -p $$pkg --example $$name $$extra > /dev/null; \
 	  done; \

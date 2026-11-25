@@ -37,28 +37,28 @@ fn build_panel_fixture() -> (
         tools_with("submit_vote", "Cast a panel vote."),
     ];
     let ctx = crate::prompt::PromptContext::default()
-            .with_skill("summarize", "Summarize text.")
-            .with_skill("audit", "Audit for safety.")
-            // "deprecated" was disabled in earlier revisions and
-            // is therefore not pushed in by the caller; see
-            // `PromptContext` doc § "skills".
-            .with_agent(&peer_descriptor(
-                "planner",
-                "Plan the work.",
-                Some("complex tasks"),
-            ))
-            .with_agent(&peer_descriptor(
-                "critic",
-                "Critique proposals.",
-                Some("after planner"),
-            ))
-            .with_agent(&peer_descriptor("redteam", "Break the candidate.", None))
-            .with_agent(&peer_descriptor("judge", "Aggregate votes.", None))
-            .with_agent(&peer_descriptor(
-                "formatter",
-                "Format final output.",
-                Some("after judge"),
-            ));
+        .with_skill("summarize", "Summarize text.")
+        .with_skill("audit", "Audit for safety.")
+        // "deprecated" was disabled in earlier revisions and
+        // is therefore not pushed in by the caller; see
+        // `PromptContext` doc § "skills".
+        .with_agent(&peer_descriptor(
+            "planner",
+            "Plan the work.",
+            Some("complex tasks"),
+        ))
+        .with_agent(&peer_descriptor(
+            "critic",
+            "Critique proposals.",
+            Some("after planner"),
+        ))
+        .with_agent(&peer_descriptor("redteam", "Break the candidate.", None))
+        .with_agent(&peer_descriptor("judge", "Aggregate votes.", None))
+        .with_agent(&peer_descriptor(
+            "formatter",
+            "Format final output.",
+            Some("after judge"),
+        ));
     (tools, ctx)
 }
 

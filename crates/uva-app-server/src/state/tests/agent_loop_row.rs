@@ -19,7 +19,7 @@ fn server_config() -> crate::config::ServerConfig {
         "default_agent": "reviewer",
         "agents": {
             "reviewer": {
-                "strategy": "chain-of-thought",
+                "strategy": "react",
                 "allowed_tools": ["read"],
                 "denied_tools": ["write"],
                 "compaction": {
@@ -53,7 +53,7 @@ fn the_row_config_carries_the_agent_table() {
 
     assert_eq!(
         row["strategy"],
-        json!("chain-of-thought"),
+        json!("react"),
         "the row carries the strategy alias, not a strategy object"
     );
     assert_eq!(
@@ -109,12 +109,12 @@ fn a_profile_row_config_wins_over_the_boot_defaults() {
         .iter_mut()
         .find(|entry| entry.id == "agent-loop")
         .expect("the native set has agent-loop");
-    row.config = json!({ "strategy": "best-of-n" });
+    row.config = json!({ "strategy": "react" });
 
     materialize_row_config(
         &mut profile,
         "agent-loop",
-        json!({ "strategy": "chain-of-thought" }),
+        json!({ "strategy": "re-act" }),
     );
 
     let row = profile
@@ -124,7 +124,7 @@ fn a_profile_row_config_wins_over_the_boot_defaults() {
         .expect("the native set has agent-loop");
     assert_eq!(
         row.config,
-        json!({ "strategy": "best-of-n" }),
+        json!({ "strategy": "react" }),
         "the profile's own config wins"
     );
 }
@@ -139,7 +139,7 @@ fn the_strategy_alias_is_read_raw() {
             Some(&config),
             Some("reviewer")
         ),
-        Some("chain-of-thought".to_owned()),
+        Some("react".to_owned()),
         "the alias is the configuration's own vocabulary"
     );
     assert!(

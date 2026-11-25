@@ -312,7 +312,7 @@ The agent table is read for five keys:
 |---|---|
 | `max_steps` | per-run iteration cap (clamped to `[1, 4096]`) |
 | `compaction` | the run's context manager (LLM summarisation policy) |
-| `strategy` | the reasoning loop: `react`, `chain-of-thought`, `best-of-n` |
+| `strategy` | the reasoning loop: `react` |
 | `allowed_tools` | allow-list: only these tools exist for this agent (empty = no allow-list) |
 | `denied_tools` | deny-list: these tools do not exist for this agent (it trims the allow-list) |
 

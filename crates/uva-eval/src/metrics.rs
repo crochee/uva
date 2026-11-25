@@ -134,12 +134,10 @@ impl<P: JudgeProvider> AsyncMetric for LlmJudgeMetric<P> {
 /// Parse a `0.0..=1.0` score from a judge reply.
 ///
 /// Re-export of [`uva_core::parse_judge_score`] so a single
-/// parser backs both the offline grader ([`LlmJudgeMetric`]) and
-/// the in-loop scorer (`uva_strategy_best_of_n::LlmJudgeScorer`). The
-/// previous local copy was case-sensitive on the `Score:`
-/// prefix; the shared one honours any case (matching the
-/// documented contract) and also handles the no-space variant
-/// `Score:0.5` that some models emit.
+/// parser backs every judge. The previous local copy was
+/// case-sensitive on the `Score:` prefix; the shared one honours
+/// any case (matching the documented contract) and also handles the
+/// no-space variant `Score:0.5` that some models emit.
 ///
 /// Recognises `Score: 0.85` (case-insensitive prefix, any line)
 /// and a standalone number line (`0.85`). The parsed value is

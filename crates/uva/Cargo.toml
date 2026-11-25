@@ -310,9 +310,9 @@ test-support = ["dep:uva-test-support", "core", "provider", "tool"]
 # keeps proving zero HTTP/OTel/DB deps for the seven-feature minimum.
 hnsw = ["search", "uva-search/hnsw"]
 
-# AI Agent Plugin Optimization Roadmap: six
-# opt-in surfaces (Tier 1 performance + concurrency, Tier 2
-# reasoning + quality). Each is its own small dependency that
+# AI Agent Plugin Optimization Roadmap: three
+# opt-in surfaces (Tier 1 performance + concurrency, plus
+# spend capping). Each is its own small dependency that
 # joins the offline tier—`make check-mvp-deps` proves no
 # HTTP/OTel/DB stack is dragged in. None is in the default set;
 # deployments opt in per `[agents.<name>]` config.
@@ -329,33 +329,6 @@ resilience = [
   "core",
   "provider",
   "tool",
-]
-strategy-plan-execute = [
-  "dep:uva-policy-plugins",
-  "uva-policy-plugins/plan-execute",
-  "harness",
-  "core",
-  "provider",
-  "tool",
-  "steering",
-]
-# The chain-of-thought strategy plugin. Default-NO (like
-# strategy-plan-execute): the harness itself ships only the
-# canonical ReAct loop; deployments that want CoT opt in.
-strategy-cot = [
-  "dep:uva-policy-plugins",
-  "uva-policy-plugins/cot",
-  "harness",
-  "core",
-  "provider",
-]
-# The best-of-N strategy plugin. Default-NO, same reasoning.
-strategy-best-of-n = [
-  "dep:uva-policy-plugins",
-  "uva-policy-plugins/best-of-n",
-  "harness",
-  "core",
-  "provider",
 ]
 # The reflection hook, now shipped by the hook family (it implements
 # the contract crate's `Hook`). The feature name is unchanged.

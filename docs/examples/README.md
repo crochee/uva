@@ -27,8 +27,6 @@ Two things are worth knowing before reading the code:
 | Example | Crate | Shows | Look at |
 |---|---|---|---|
 | `assemble_with_builder` | `uva-harness` | The same agent in one `ReActAgent` chain: tier steering, `.with_output_schema` auto-tool, LLM compaction, the session's log writer, `@agent` router | how small the happy path is |
-| `chain_of_thought` | `uva-policy-plugins` (`cot`) | The `ChainOfThoughtStrategy` plugin: one tool-free pass with a step-format instruction, the chain parsed from the answer | `COT: OK` |
-| `best_of_n_demo` | `uva-policy-plugins` (`best-of-n`) | The `BestOfNStrategy` plugin with `LlmJudgeScorer`: three candidates, one judge call per candidate, the highest-scoring candidate wins | `BON: OK`, plus the per-candidate progress events and the selection event |
 | `argument_validation` | `uva-tool` | The R74 opt-in: same `EchoTool`, two runs (off / on), the off path counts 2 tool bodies (default unchanged-by-R74 contract), the on path counts 1 (the malformed call is rejected at the registry with `is_error: true` and the dotted-path violation in the body) | `ARGUMENT-VALIDATION: OK`, and the tool's call counter (2 vs 1) |
 | `external-consumer` | `docs/examples/` | A **standalone crate** (not a workspace member) depending on uva by relative path — the real "use it as a library" test | `CONSUMER-PROOF: OK` |
 | `minimal-consumer` | `docs/examples/` | The **smallest** complete agent: one dependency (`uva`, `default-features = false`) and the seven-feature MVP subset from [`MINIMAL.md`](../../MINIMAL.md) — a scripted provider that asks for a tool, one hand-written `Tool`, and assertions that it really ran. Its tree carries no HTTP client at all | `MVP-OK`, and `make check-mvp-deps` for the dependency promise |

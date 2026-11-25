@@ -24,10 +24,10 @@ pub struct AgentConfig {
     /// context-manager selection.
     #[serde(default)]
     pub compaction: Option<uva::session::CompactionSettings>,
-    /// The reasoning loop this agent runs. One of `react`,
-    /// `chain-of-thought`, or `best-of-n` (the names
-    /// [`StrategyRegistry`](uva::harness::StrategyRegistry)
-    /// resolves); unset means ReAct. An unrecognised value is
+    /// The reasoning loop this agent runs. Only `react` (with its
+    /// `re-act` / `re_act` spellings) resolves through
+    /// [`StrategyRegistry`](uva::harness::StrategyRegistry);
+    /// unset means ReAct. An unrecognised value is
     /// logged at boot and the agent falls back to ReAct rather
     /// than refusing to start.
     #[serde(default)]
@@ -181,7 +181,7 @@ mod tests {
                 reserve_tokens: 8_192,
                 ..uva::session::CompactionSettings::default()
             }),
-            strategy: Some("chain-of-thought".to_string()),
+            strategy: Some("react".to_string()),
             sandbox: Some("read-only".to_string()),
         };
         let json = serde_json::to_string(&a).unwrap();
