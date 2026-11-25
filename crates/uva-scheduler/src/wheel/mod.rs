@@ -214,7 +214,7 @@ impl TimingWheel {
     pub fn next_deadline(&self) -> Option<DateTime<Utc>> {
         let mut best = self.overflow.keys().next().copied();
         let secs = self.cursor.timestamp();
-        for level in 0..LEVELS {
+        for (level, slots) in self.levels.iter().enumerate() {
             let start = secs.div_euclid(granularity(level)).rem_euclid(SLOTS);
             // Nearest non-empty slot *the cursor has yet to reach*. The
             // slot it is sitting on has just been serviced, so a deadline
@@ -227,9 +227,7 @@ impl TimingWheel {
             // as the final `off`, so a genuinely stale entry stays visible.
             for off in 0..SLOTS {
                 let slot = (start + 1 + off).rem_euclid(SLOTS) as usize;
-                if let Some(min) =
-                    self.levels[level][slot].iter().map(|(_, d)| *d).min()
-                {
+                if let Some(min) = slots[slot].iter().map(|(_, d)| *d).min() {
                     if best.is_none_or(|b| min < b) {
                         best = Some(min);
                     }
