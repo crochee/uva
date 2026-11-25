@@ -23,10 +23,10 @@ struct ChunkState(Arc<parking_lot::Mutex<ChunkStateInner>>);
 struct ChunkStateInner {
     assembler: BlockAssembler,
     published: usize,
-    /// Whether the turn's finish (`System(Usage)` + `ModelDone`) has
-    /// been published. The decoders report the terminal fact as a
-    /// `Stop` chunk, not as a pre-built `IsDone`, so the finish is
-    /// published from the fold when the pass ends — exactly once.
+    // Whether the turn's finish (`System(Usage)` + `ModelDone`) has
+    // been published. The decoders report the terminal fact as a
+    // `Stop` chunk, not as a pre-built `IsDone`, so the finish is
+    // published from the fold when the pass ends — exactly once.
     done_published: bool,
 }
 
