@@ -54,6 +54,7 @@
 //! See `DEPLOYMENT.md` for the deployment contract (config keys,
 //! variables, probes, Nginx notes).
 
+pub mod adapters;
 pub mod agent_run_config;
 pub mod agent_run_config_types;
 pub mod api;

@@ -282,6 +282,15 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "ReloadSkillsResponse",
             "ReloadSkillsResponse",
         ),
+        // The AG-UI projection: the web front-end's protocol-shaped
+        // door. The event travels on the `agui/event` notification,
+        // and its type is the protocol's own — the browser reads the
+        // same vocabulary the server publishes.
+        response::<crate::adapters::agui::AguiEvent>(
+            "agui/event",
+            "AguiEvent",
+            "AguiEvent",
+        ),
         response::<ToolInfo>("tools/list", "Tool", "ToolInfo"),
         response::<ToolDetail>("tools/get", "ToolDetail", "ToolDetail"),
         response::<AgentDetail>("agents/get", "AgentDetail", "AgentDetail"),

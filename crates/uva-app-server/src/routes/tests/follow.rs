@@ -2955,6 +2955,9 @@ async fn a_follow_connection_reads_only_the_rows_that_arrived() {
             let _ =
                 events_tx.send(event.payload().expect("the frame serializes"));
         },
+        // The AG-UI projection rides the same subscription: the test
+        // does not read it.
+        |_item| {},
     ));
 
     // Three rows arrive while the subscriber is connected.

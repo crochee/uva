@@ -1,17 +1,20 @@
 # uva-app-server
 
-参考 agent 运行时，一个二进制两种模式：`core` 是 stdio 上的无头
-JSON-RPC 2.0 内核，`serve` 是内核前面的 WebSocket 网关。内核持有全部
-agent 逻辑；网关不持有任何逻辑——只双向泵帧并看护子进程。
+参考 agent 运行时，一个二进制三种模式：`core` 是 stdio 上的无头
+JSON-RPC 2.0 内核，`serve` 是内核前面的 WebSocket 网关，`acp` 是
+面向编辑器的 Agent Client Protocol（ACP）面。内核持有全部 agent 逻辑；
+网关不持有任何逻辑——只双向泵帧并看护子进程；ACP 面也不持有 agent
+逻辑——它是同一套回合机器的协议投影。
 
 这是工作区**唯一**的应用 crate——`tokio` / `axum` 允许出现在公共签名
 的地方（stdio 二进制 `uva-mcp-server` 同款豁免）；其余 lib crate
 必须保持运行时中立（`make check-public-api-runtime`）。
 
 > 公开面与模块文档见 [`src/lib.rs`](src/lib.rs)；网关职责见
-> [`src/gateway.rs`](src/gateway.rs)；方法表与分帧见 [`src/rpc/`](src/rpc/)。
+> [`src/gateway.rs`](src/gateway.rs)；方法表与分帧见 [`src/rpc/`](src/rpc/)；
+> 协议适配层（ACP / AG-UI）见 [`src/adapters/`](src/adapters/)。
 
-## 两种模式
+## 三种模式
 
 ```sh
 # core（缺省子命令）：无头内核，stdin/stdout 上的 JSON-RPC 2.0
@@ -19,9 +22,12 @@ uva-app-server core --directory /srv/uva
 
 # serve：网关——spawn 一个 core 子进程并服务它
 uva-app-server serve --port 8080 --web-dir ./dist
+
+# acp：ACP v1 面，一行一条 JSON-RPC，给编辑器（Zed、IDE）驱动
+uva-app-server acp --directory /srv/uva
 ```
 
-不带子命令即 `core`；人类入口是 `serve`。两个子命令共享 `--directory`
+不带子命令即 `core`；人类入口是 `serve`。三个子命令共享 `--directory`
 （工作区根，会话 / 调度 / 工作流 / eval / attachment 的运行时状态都在
 这里）与 `--config`（部署配置，见下）。
 
@@ -100,6 +106,64 @@ follow 重建。
 `embed-web` feature 用 rust-embed 把 `uva-web/dist` 烤进二进制。
 旗标：`--bind`（env `UVA_HOST`，默认 `127.0.0.1`）、`--port`
 （env `UVA_PORT`，默认 `8080`）。
+
+## acp：Agent Client Protocol
+
+面向编辑器的第三个模式：ACP v1（agentclientprotocol.com），stdio 上
+**一行一条 JSON-RPC**（不是 core 的 Content-Length 帧）。它讲的协议是
+编辑器与 harness 之间真正流通的那一个（DeepSeek Harness 的 ACP 桥讲
+同一个），但回合机器是本部署自己的：prompt 仍然先落盘成
+`parked_prompt` 行，run 仍然在会话的 live 通道上发事件。
+
+协议的消息类型**不是手写的**：适配层依赖官方 Rust SDK
+`agent-client-protocol`（`features = ["stdio"]`），握手、会话、回合、
+`session/update`、`session/request_permission` 的线上形状都是 SDK 的
+schema 类型——客户端解的就是这个服务写的。仓内自己的映射只剩一处：
+核心事件 → SDK 的 `SessionUpdate`（`src/adapters/acp/projection.rs`）。
+
+| 方法 | 行为 |
+|---|---|
+| `initialize` | 版本 1、能力（`loadSession`、图片与内嵌上下文）、身份 |
+| `authenticate` | 拒绝——本部署没有认证方法 |
+| `session/new` | 开一个会话，opaque id |
+| `session/load` | 回放转录为 `session/update`，然后应答 |
+| `session/prompt` | 跑一个回合：增量以 `session/update` 流回，最后给停止理由 |
+| `session/cancel` | 取消在跑的回合 |
+
+服务端发给客户端的请求只有 `session/request_permission`：一个被持有的
+调用（高风险）变成一个问题，操作者的选择变成回合的继续或拒绝。被持有
+的调用**先结束回合**再问——控制器在 run 还活着的时候拒绝 resume，先问
+会让答案被丢弃。
+
+- **审批闸门**：`acp` 模式装上部署的 `approval` 策略（风险由工具自己
+  判定），其余界面保持现状。权限选项是一次性的两项：`allow-once` /
+  `reject-once`（与参考 harness 相同）。
+- **不委派**：客户端侧的文件系统、终端与每会话 MCP 服务器都不委派——
+  工具在进程内跑，与三个参考 harness 一致。
+- **工作目录**：工具跑在部署的工作区根，不是客户端给的 `cwd`（工具
+  注册表是开机时按部署根构造的）。
+
+### ACP 走两条传输
+
+| 传输 | 客户端 | 接法 |
+|---|---|---|
+| stdio | 编辑器 / 终端直接拉起进程 | SDK 的 `Stdio` transport |
+| WebSocket | 经网关 `/rpc` 连上来的 ACP 客户端 | 核心 JSON-RPC 通道上的 ACP 帧 |
+
+核心的 JSON-RPC 通道同时承载两套词汇：命中 ACP 方法名的帧归 ACP 适配
+层，「有 result 无 method」的应答（agent 自己问出去的问题的答案）也归
+适配层，其余归核心的 router。网关按会话路由：客户端开的会话归它
+（`session/update` 与 `session/request_permission` 都发给它），问题发出
+去时记下 id，答案原路回来。
+
+### agui：Web 前端的那扇门
+
+浏览器不说 ACP。服务端把同一套核心事件投影成 AG-UI 事件，以
+`agui/event` 通知发布，网关按 `session_id` 投给该会话的订阅者。词汇表
+在 `src/adapters/agui/event.rs`。
+
+设计文档：[`docs/design/2026-11-25-protocol-layers-design.md`](../../docs/design/2026-11-25-protocol-layers-design.md)；
+逆向证据：[`docs/reference-harnesses.md`](../../docs/reference-harnesses.md)。
 
 ## RPC 方法
 

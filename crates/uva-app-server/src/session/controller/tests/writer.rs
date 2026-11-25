@@ -294,7 +294,8 @@ async fn a_tool_result_row_is_on_disk_before_its_event_is_broadcast() {
             else {
                 continue;
             };
-            let AgentEvent::Model(ContentPart::ToolResult(result)) = &event
+            let AgentEvent::Model(ContentPart::ToolResult(result)) =
+                event.as_ref()
             else {
                 continue;
             };

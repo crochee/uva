@@ -207,9 +207,10 @@ async fn test_events_are_persisted_and_broadcast() {
     // by the factory).
     assert!(matches!(
         received,
-        crate::event_stream::BroadcastEvent::Run {
-            event: AgentEvent::Model(ContentPart::Text(_)),
-            ..
-        }
+        crate::event_stream::BroadcastEvent::Run { event, .. }
+            if matches!(
+                event.as_ref(),
+                AgentEvent::Model(ContentPart::Text(_))
+            )
     ));
 }

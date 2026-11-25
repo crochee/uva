@@ -93,6 +93,11 @@ uva-tui = { path = "crates/uva-tui", version = "0.1" }
 # and its WebSocket JSON-RPC client. `publish = false` — it consumes
 # the app server's CLI contract.
 uva-gateway = { path = "crates/uva-gateway", version = "0.1" }
+# The Agent Client Protocol SDK: the protocol's own message types, its
+# JSON-RPC machinery and its stdio transport. The ACP adapter is
+# built on it, so the wire shapes are the protocol's and not a copy
+# of them.
+agent-client-protocol = { version = "5.6", features = ["stdio"] }
 syn = "2.0"
 quote = "1.0"
 proc-macro2 = "1.0"

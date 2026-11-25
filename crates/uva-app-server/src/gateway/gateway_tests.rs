@@ -73,6 +73,7 @@ fn connect(app_server: &AppServer) -> (u64, mpsc::UnboundedReceiver<String>) {
             tx,
             pending: DashMap::new(),
             subscriptions: DashMap::new(),
+            owned: DashMap::new(),
         },
     );
     (connection, rx)
@@ -399,6 +400,72 @@ async fn forwards_approval_request_and_response() {
         frame(&respond.to_string()),
         "the decision is forwarded verbatim as one frame"
     );
+}
+
+/// The ACP surface's routing: the session a client opens is its own,
+/// so the session's updates and the questions about it go to that
+/// client — and the answer to a question finds its way back.
+#[tokio::test]
+async fn routes_the_acp_session_to_the_connection_that_opened_it() {
+    let app_server = app();
+    let _reader = attach_core_stdin(&app_server).await;
+    let (owner, mut owner_rx) = connect(&app_server);
+    let (_other, mut other_rx) = connect(&app_server);
+
+    // The client prompts the session it opened: the connection owns
+    // that session from now on.
+    let prompt = json!({
+        "jsonrpc": "2.0",
+        "id": "c1",
+        "method": "session/prompt",
+        "params": {
+            "sessionId": "s1",
+            "prompt": [{"type": "text", "text": "hi"}],
+        },
+    });
+    app_server
+        .forward_upstream(owner, &prompt.to_string())
+        .await
+        .expect("the prompt reaches the core");
+
+    // The session's update goes to the owner, not to everyone.
+    let update = json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "s1",
+            "update": {"sessionUpdate": "agent_message_chunk"},
+        },
+    });
+    route(&app_server, &update.to_string());
+    assert_eq!(owner_rx.recv().await, Some(update.to_string()));
+    assert!(
+        other_rx.try_recv().is_err(),
+        "a connection that did not open the session sees nothing"
+    );
+
+    // The core asks the client a question about that session: the
+    // question reaches the owner.
+    let question = json!({
+        "jsonrpc": "2.0",
+        "id": "uva-1",
+        "method": "session/request_permission",
+        "params": { "sessionId": "s1", "options": [] },
+    });
+    route(&app_server, &question.to_string());
+    assert_eq!(owner_rx.recv().await, Some(question.to_string()));
+    assert!(other_rx.try_recv().is_err());
+
+    // The answer comes back with the question's id: the gateway
+    // remembers which connection the question went to.
+    let answer = json!({
+        "jsonrpc": "2.0",
+        "id": "uva-1",
+        "result": { "outcome": { "outcome": "cancelled" } },
+    });
+    route(&app_server, &answer.to_string());
+    assert_eq!(owner_rx.recv().await, Some(answer.to_string()));
+    assert!(other_rx.try_recv().is_err());
 }
 
 /// Readiness is the parsed notification, not a substring of the

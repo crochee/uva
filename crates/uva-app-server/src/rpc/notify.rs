@@ -20,6 +20,7 @@
 use std::{future::Future, sync::Arc};
 
 use dashmap::DashMap;
+use serde_json::json;
 use tokio::task::JoinHandle;
 use uva::{harness::ApprovalRequest, tool::Risk};
 
@@ -40,6 +41,14 @@ pub const PROFILE_CHANGED: &str = "profile/changed";
 /// `sessions/resume`. `approval_id` correlates the two; it is never
 /// the JSON-RPC `id`.
 pub const APPROVAL_REQUEST: &str = "approval/request";
+/// The notification method the AG-UI projection travels on.
+///
+/// The web front-end's protocol-shaped door: the core's events are
+/// projected into AG-UI events and published here, so a browser
+/// reads AG-UI instead of the core's own rows. The ACP adapter is
+/// the other door — the headless control plane's — and the two
+/// never share a wire shape.
+pub const AGUI_EVENT: &str = "agui/event";
 
 /// The `approval/request` notification's payload.
 ///
@@ -144,6 +153,33 @@ impl FollowRegistry {
             );
         }
         self.outbound.notify(SESSION_EVENT, params);
+    }
+
+    /// Emit one AG-UI event for a session.
+    ///
+    /// The payload carries the session the event belongs to and the
+    /// event itself: the browser routes it by the session and
+    /// renders it by the event's own type.
+    pub fn emit_agui_event(
+        &self,
+        session_id: &str,
+        event: &crate::adapters::agui::AguiEvent,
+    ) {
+        let Ok(event) = serde_json::to_value(event) else {
+            // The event is a plain enum of strings and values:
+            // serialization cannot fail, and a `null` payload would
+            // tell every subscriber something false. The invariant,
+            // stated.
+            tracing::error!("the AG-UI event does not serialize");
+            return;
+        };
+        self.outbound.notify(
+            AGUI_EVENT,
+            json!({
+                "session_id": session_id,
+                "event": event,
+            }),
+        );
     }
 
     /// Emit the `approval/request` projection of one held call.

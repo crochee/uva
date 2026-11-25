@@ -38,7 +38,7 @@
 | 多模态 | `uva-attachment` | 内容寻址的多模态附件存储（图片 / 音频 / 文件字节） |
 | 观测 | `uva-telemetry` | console / file logging、Prometheus metrics、OTel 导出；日志与指标的唯一入口 |
 | 适配 | `uva-mcp` | MCP 客户端：stdio / HTTP / in-memory 传输、supervisor 重连，把远端工具注册进本机 `ToolRegistry` |
-| 宿主 | `uva-app-server` | 应用 crate：`core`（stdio 无头内核）+ `serve`（WebSocket 网关 + 探针 + 静态前端） |
+| 宿主 | `uva-app-server` | 应用 crate：`core`（stdio 无头内核）+ `serve`（WebSocket 网关 + 探针 + 静态前端）+ `acp`（Agent Client Protocol v1 面：同一套回合机器的协议投影） |
 | 宿主 | `uva-tui` | 终端投影：ratatui + crossterm，经 `uva-gateway` 驱动 `serve` 的 `/rpc`；wire 类型（follow 基线、活动投影、schema 树、方法名）直接取自 `uva-app-server`，终端不留副本（ADR-0025） |
 | 宿主 | `uva-gateway` | 两宿主共用的网关支撑：进程监管（拉起 / 探活 / 退避 / 回收）+ 网关 JSON-RPC client；公开面 runtime-free |
 | 宿主 | `uva-mcp-server` | stdio 上的 MCP 服务器，把插件砖块工具暴露给任意外部 MCP 客户端 |
@@ -76,6 +76,31 @@ AGENTS.md §3.7 列出全部不变量。下表是"为什么"与"哪道门禁在�
 - **tokio-bound 插件**：`uva-tool-plugins`（`tokio::fs` / `tokio::process`）、provider 的 HTTP adapter、JSONL session sink。消费方在别的运行时上不依赖它们，或自带 `Tool` / `ModelProvider` / `SessionSink`。
 - **应用 crate 是豁免的唯一位置**：`uva-app-server` 与 `uva-mcp-server` 的 `main()` 可以出现具体运行时类型。
 
-## 5. 组件替换点
+## 5. 一个核心，多协议适配器
+
+Harness 核心只维护**一套**内部事件流：会话、回合、工具调用、权限请求、取消
+（`uva-events` 的 `AgentEvent` / `SystemEvent` + 会话日志）。核心不认识任何
+协议——它发布事件，适配器翻译。
+
+| 层 | 谁在说话 | 对外形态 | 住在哪 |
+|---|---|---|---|
+| 核心 | — | 事件流 + 会话日志 | `uva-events` / `uva-harness` / `uva-session` |
+| ACP 适配 | 编辑器、TUI、任何 ACP-capable 客户端 | ACP v1（stdio + 网关 WebSocket） | `uva-app-server::adapters::acp` |
+| AG-UI 适配 | 浏览器 | AG-UI 事件流（`agui/event` 通知） | `uva-app-server::adapters::agui` |
+| 云边界 | SaaS / 调度器 | A2A（被调度）或 UHP（统一调度），按语义挂 | 声明位置，见设计文档 |
+
+三条规则：
+
+1. **适配器只读核心流、只写一种协议的帧**；核心永远不知道谁在看它。
+2. **ACP 是无头控制面的母语，不是通用语言**：浏览器不说 ACP，云调度器也不说；
+   它们各自挂自己的适配器。
+3. **协议词汇住在协议那一侧**：ACP 的消息类型来自官方 SDK
+   （`agent-client-protocol`），AG-UI 的事件类型是仓内自己的词汇表——
+   客户端解的就是这个服务写的。
+
+理由与证据：[`docs/design/2026-11-25-protocol-layers-design.md`](design/2026-11-25-protocol-layers-design.md)、
+[`docs/reference-harnesses.md`](reference-harnesses.md)。
+
+## 6. 组件替换点
 
 七大组件的 trait、默认实现与"装上你的"边界见 [`SEAMS.md`](../SEAMS.md)；facade 的 feature 与 `prelude` 见 [`crates/uva/README.md`](../crates/uva/README.md)；插件与装配形态见 [`docs/plugins.md`](plugins.md)。

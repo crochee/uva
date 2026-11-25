@@ -11,6 +11,141 @@
  */
 
 /**
+ * One AG-UI event.
+ */
+export type AguiEvent =
+  | {
+      /**
+       * The conversation the run belongs to.
+       */
+      threadId: string;
+      /**
+       * The run itself.
+       */
+      runId: string;
+      type: 'RUN_STARTED';
+    }
+  | {
+      /**
+       * The conversation the run belongs to.
+       */
+      threadId: string;
+      /**
+       * The run that ended.
+       */
+      runId: string;
+      type: 'RUN_FINISHED';
+    }
+  | {
+      /**
+       * What went wrong.
+       */
+      message: string;
+      /**
+       * The machine code, when the failure carries one.
+       */
+      code?: string | null;
+      type: 'RUN_ERROR';
+    }
+  | {
+      /**
+       * The message the chunks belong to.
+       */
+      messageId: string;
+      /**
+       * Who speaks the message.
+       */
+      role: string;
+      type: 'TEXT_MESSAGE_START';
+    }
+  | {
+      /**
+       * The message the chunk belongs to.
+       */
+      messageId: string;
+      /**
+       * The chunk itself — never the accumulated text.
+       */
+      delta: string;
+      type: 'TEXT_MESSAGE_CONTENT';
+    }
+  | {
+      /**
+       * The message that ended.
+       */
+      messageId: string;
+      type: 'TEXT_MESSAGE_END';
+    }
+  | {
+      type: 'REASONING_START';
+    }
+  | {
+      /**
+       * The message the chunk belongs to.
+       */
+      messageId: string;
+      /**
+       * The chunk itself.
+       */
+      delta: string;
+      type: 'REASONING_MESSAGE_CONTENT';
+    }
+  | {
+      type: 'REASONING_END';
+    }
+  | {
+      /**
+       * The call's id — the same one its result carries.
+       */
+      toolCallId: string;
+      /**
+       * The tool the call addresses.
+       */
+      toolCallName: string;
+      /**
+       * The message the call belongs to.
+       */
+      parentMessageId?: string | null;
+      type: 'TOOL_CALL_START';
+    }
+  | {
+      /**
+       * The call the chunk belongs to.
+       */
+      toolCallId: string;
+      /**
+       * The chunk itself.
+       */
+      delta: string;
+      type: 'TOOL_CALL_ARGS';
+    }
+  | {
+      /**
+       * The call that ended.
+       */
+      toolCallId: string;
+      type: 'TOOL_CALL_END';
+    }
+  | {
+      /**
+       * The message the result belongs to.
+       */
+      messageId: string;
+      /**
+       * The call the result answers.
+       */
+      toolCallId: string;
+      /**
+       * The result's content.
+       */
+      content: string;
+      /**
+       * Who produced the result.
+       */
+      role: string;
+      type: 'TOOL_CALL_RESULT';
+    };
+/**
  * How risky a tool call is.
  *
  * The approval policy asks about the risky calls and lets the rest

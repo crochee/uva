@@ -12,6 +12,74 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Added (一个核心，多协议适配器：ACP 母语面 + AG-UI 投影)
+
+- **核心只维护一套事件流**：会话、回合、工具调用、权限请求、取消。核心不
+  说 ACP、AG-UI 或 A2A——它发布事件，适配器翻译。新的
+  `uva-app-server::adapters` 模块是这一层的目录：`adapters/acp`（无头控制面
+  的母语）与 `adapters/agui`（浏览器的那扇门）。
+- **ACP 适配层改用官方 SDK**：协议的消息类型不再手写——依赖
+  `agent-client-protocol`（workspace 依赖，`features = ["stdio"]`），握手、
+  `session/new`、`session/load`、`session/prompt`、`session/cancel`、
+  `session/update`、`session/request_permission` 的线上形状都是 SDK 的
+  schema 类型。手写的 `wire.rs`（方法名常量、更新形状、stop reason、权限
+  选项）与 `framing.rs`（自写行协议）已删除；仓库自己的映射只剩一处：核心
+  事件 → SDK 的 `SessionUpdate`。
+- **ACP 走两条传输，一个 agent**：stdio（SDK 的 `Stdio`，编辑器 / 终端直接
+  拉起进程）与 WebSocket（经网关 `/rpc`）。后者的事实是：核心的 JSON-RPC
+  通道同时承载两套词汇——命中 ACP 方法名的帧归适配层，「有 result 无
+  method」的应答（agent 自己问出去的问题的答案）也归适配层，其余归核心
+  router。网关补三条路由：记住「连接 ↔ 会话」的所有权、核心发起的请求按
+  会话发给拥有它的连接、并记住该请求的 id 好让答案原路回来。
+- **AG-UI 投影**：服务端把同一套核心事件投影成 AG-UI 事件
+  （`RUN_STARTED` / `TEXT_MESSAGE_*` / `REASONING_*` / `TOOL_CALL_*` /
+  `RUN_FINISHED` / `RUN_ERROR`），以 `agui/event` 通知发布，网关按会话投给
+  订阅者。投影是有状态的（哪条消息开着、哪次运行活着），词汇表在
+  `adapters/agui/event.rs`，可选字段一律不发 `null`（AG-UI 的「缺席即缺席」）。
+- **云边界被声明而不是实现**：SaaS / 调度器按语义挂 A2A（把 Harness 当被
+  调度 Agent）或 UHP（把服务当统一调度平台），不让远端直接说 ACP。仓内
+  没有这两个协议的运行时依赖，本次也不实现——声明位置与理由见设计文档。
+- **逆向证据落档**：[`docs/reference-harnesses.md`](docs/reference-harnesses.md)
+  记录 dsh / pi / codex 的 ACP 行为与 dsh 插件树（entry 模型、group、mount、
+  三态审计、按 id 的 diff）的出处，并逐条对到本仓的落点。
+
+### Changed (ACP 面：无头 harness 的 agent harness protocol)
+
+- **`uva-app-server acp`**：第三个模式，讲 **Agent Client Protocol v1**
+  （agentclientprotocol.com），stdio 上一行一条 JSON-RPC。编辑器（Zed、
+  JetBrains IDE）用它驱动本部署的同一套回合机器：prompt 仍然先落盘成
+  `parked_prompt` 行，run 仍然在会话的 live 通道上发事件，审批仍然由
+  harness 的闸门持有、由 durable 行与 `ResumeToken` 结算——只有请求与
+  应答的形状是 ACP 的。
+- **方法**：`initialize`（版本 1、能力、身份）、`authenticate`（拒绝：本
+  部署没有认证方法）、`session/new`、`session/load`（回放转录为
+  `session/update`）、`session/prompt`（增量流回，最后给停止理由）、
+  `session/cancel`。服务端发给客户端的请求只有
+  `session/request_permission`。
+- **增量即 update**：模型的一小段文本是
+  `agent_message_chunk`，推理是 `agent_thought_chunk`，工具调用是
+  `tool_call`（pending）→ `tool_call_update`（in_progress / completed /
+  failed），用量帧与警告没有 ACP 形状（durable 行仍然记着）。
+- **被持有的调用变成一个问题**：ACP 面的客户端能回答权限问题，所以这个面
+  装上部署的 `approval` 闸门（风险由工具自己判定，`Tool::risk`）——此前
+  `approval` 行只发布策略、没有任何东西消费它，高风险调用从来不会被
+  持有。权限选项是一次性的两项（`allow-once` / `reject-once`），与参考
+  harness 相同；拒绝把工具错误交回模型，回合继续。
+- **顺序**：被持有的调用**先结束回合**再问操作者——控制器在 run 还活着
+  的时候拒绝 resume，先问会让答案被丢弃、回合永远不继续。
+- **id 命名空间**：本仓发给客户端的请求用字符串 id（`uva-1`…），客户端
+  在同一条会话上给自己的请求编号，共享数字计数器会让一边的应答被当成
+  另一边的。
+- **取消**：`session/cancel` 取消在跑的回合，停止理由是 `cancelled`；权限
+  问题开着时取消，问题按协议以 `cancelled` 应答，回合立刻结束（不会等一
+  个不会再来的事件）。
+
+逆向与对账写在 [`docs/design/2026-11-25-protocol-layers-design.md`](docs/design/2026-11-25-protocol-layers-design.md)
+与 [`docs/reference-harnesses.md`](docs/reference-harnesses.md)：DeepSeek
+Harness（ACP 桥是薄投影，权限是一次性选项，无 `session/load`）、pi（实验性
+harness 已删除，全仓没有 ACP）、codex（仓内没有 ACP；审批是服务端发起的
+请求/应答，拒绝后回合继续）。
+
 ### Added (无头内核的原生回合流)
 
 - **`chat/message/stream`**：无头内核（stdio JSON-RPC 2.0）第一次有了自己的流式门。

@@ -403,6 +403,14 @@ fn handle_frame(
     if handle_cancel(&frame, inflight, outbound) {
         return;
     }
+    // An ACP frame belongs to the ACP adapter, not to the core's
+    // router: the two vocabularies share this pipe, and the method
+    // names tell them apart. The adapter's answers travel back the
+    // same way.
+    if state.acp.answers(&frame) {
+        state.acp.offer(frame);
+        return;
+    }
     // Register before spawning: a `$/cancelRequest` for this id may be
     // the very next frame, and it must find the entry (or the token
     // race would let the request run as if it were never cancelled).

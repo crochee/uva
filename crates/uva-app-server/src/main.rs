@@ -58,16 +58,30 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("failed to init tracing: {e}"))?;
     let args = Args::parse();
     // stdout is the core's protocol channel: its help and version
-    // render on stderr, so a peer never reads them as frames.
-    if let Some(Mode::Core(core)) = &args.mode {
-        if core.version {
-            eprintln!("{}", build_info::LONG_VERSION);
-            return Ok(());
+    // render on stderr, so a peer never reads them as frames. The
+    // ACP face owns stdout the same way.
+    match &args.mode {
+        Some(Mode::Core(core)) => {
+            if core.version {
+                eprintln!("{}", build_info::LONG_VERSION);
+                return Ok(());
+            }
+            if core.help {
+                eprint!("{}", mode_help("core"));
+                return Ok(());
+            }
         }
-        if core.help {
-            eprint!("{}", core_help());
-            return Ok(());
+        Some(Mode::Acp(acp)) => {
+            if acp.version {
+                eprintln!("{}", build_info::LONG_VERSION);
+                return Ok(());
+            }
+            if acp.help {
+                eprint!("{}", mode_help("acp"));
+                return Ok(());
+            }
         }
+        _ => {}
     }
     let inputs = ProfileInputs {
         directory: args.directory.clone(),
@@ -107,19 +121,20 @@ async fn main() -> Result<()> {
             };
             gateway::serve(options, cancel_token).await
         }
+        Some(Mode::Acp(_)) => run_acp(inputs, cancel_token).await,
     }
 }
-/// The core's help text, rendered from the same command definition
-/// clap would print — the core renders it on stderr because stdout is
-/// its protocol channel.
-fn core_help() -> String {
+/// A mode's help text, rendered from the same command definition
+/// clap would print — the protocol-owning modes render it on stderr
+/// because stdout is their protocol channel.
+fn mode_help(mode: &str) -> String {
     let mut command = Args::command();
     // `build` is what propagates the global flags into the
-    // sub-commands; without it the core's help would list only its
+    // sub-commands; without it the mode's help would list only its
     // own two flags.
     command.build();
-    match command.find_subcommand_mut("core") {
-        Some(core) => core.render_long_help().to_string(),
+    match command.find_subcommand_mut(mode) {
+        Some(mode) => mode.render_long_help().to_string(),
         None => String::new(),
     }
 }
@@ -309,6 +324,53 @@ async fn run_core(
     // away) must leave the same terminal marker in every live session's
     // log — the marker that proves the controllers released their
     // leases and flushed before the process left.
+    uva_app_server::shutdown::drain_session_controllers(&shutdown_state).await;
+    Ok(())
+}
+/// The ACP face: boot the deployment, then speak the Agent Client
+/// Protocol on stdio.
+///
+/// The boot is the core's boot — the same profile, the same kernel,
+/// the same sessions — so an ACP client and the deployment's own
+/// surfaces drive the same agent.
+async fn run_acp(
+    inputs: ProfileInputs,
+    cancel_token: Arc<AtomicCancelToken>,
+) -> Result<()> {
+    inputs.warn_retired_document();
+    let profile = inputs.resolve()?;
+    info!(
+        core_entries = profile.core.len(),
+        ui_entries = profile.ui.len(),
+        hmr = profile.hmr,
+        "resolved the plugin profile"
+    );
+    let booted = boot_core(
+        inputs.directory.clone(),
+        inputs.config.as_ref(),
+        Some(profile.clone()),
+        BindOverrides::default(),
+        Some(inputs.store()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to boot the ACP face: {e}"))?;
+    let state = booted.state;
+    if profile.hmr {
+        tokio::spawn(run_profile_hmr(
+            Arc::clone(&state),
+            inputs,
+            Arc::clone(&cancel_token),
+        ));
+    }
+    let shutdown_state = Arc::clone(&state);
+    info!(
+        workspace_root = %state.workspace_root.display(),
+        "ACP face ready"
+    );
+    uva_app_server::adapters::acp::run(state, cancel_token).await?;
+    // The same teardown the core does: the kernel unloads its
+    // services, then every live session leaves its terminal marker.
+    shutdown_state.shutdown_kernel().await;
     uva_app_server::shutdown::drain_session_controllers(&shutdown_state).await;
     Ok(())
 }

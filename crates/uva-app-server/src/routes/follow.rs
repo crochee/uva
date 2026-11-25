@@ -302,36 +302,69 @@ pub async fn follow(
     registry.start(session_id, {
         let registry = Arc::clone(&registry);
         let outbound_session = notification_session;
+        // The AG-UI projection is stateful: it remembers which
+        // message is open, so the events it publishes come in pairs.
+        let mut projection =
+            crate::adapters::agui::AguiProjection::new(&outbound_session);
         async move {
-            follow_stream(controller, sink, rx, baseline, move |event| {
-                match event.payload() {
-                    Ok(payload) => {
-                        registry.emit_session_event(&outbound_session, payload);
+            follow_stream(
+                controller,
+                sink,
+                rx,
+                baseline,
+                {
+                    let registry = Arc::clone(&registry);
+                    let outbound_session = outbound_session.clone();
+                    move |event| {
+                        match event.payload() {
+                            Ok(payload) => {
+                                registry.emit_session_event(
+                                    &outbound_session,
+                                    payload,
+                                );
+                            }
+                            Err(error) => {
+                                // The frame's members cannot fail to serialize;
+                                // a frame that does is a bug, and dropping it
+                                // with a trace beats emitting a `null` frame
+                                // every subscriber would have to guess at.
+                                tracing::error!(
+                                    %error,
+                                    "the follow frame does not serialize"
+                                );
+                            }
+                        }
+                        // The interrupt set is also projected call by call as
+                        // `approval/request`, so a transport that speaks
+                        // approvals does not have to read the session
+                        // projection. The baseline's `pending_interrupts` is
+                        // a result, not a notification, and needs no second
+                        // copy: a reconnect re-reads it there.
+                        if let FollowEvent::Interrupts { pending_interrupts } =
+                            &event
+                        {
+                            for request in pending_interrupts {
+                                registry.emit_approval_request(
+                                    &outbound_session,
+                                    request,
+                                );
+                            }
+                        }
                     }
-                    Err(error) => {
-                        // The frame's members cannot fail to serialize;
-                        // a frame that does is a bug, and dropping it
-                        // with a trace beats emitting a `null` frame
-                        // every subscriber would have to guess at.
-                        tracing::error!(
-                            %error,
-                            "the follow frame does not serialize"
-                        );
+                },
+                {
+                    let registry = Arc::clone(&registry);
+                    let outbound_session = outbound_session.clone();
+                    move |item| {
+                        // The AG-UI projection: the web
+                        // front-end's door. The same core events,
+                        // read as the protocol the browser speaks.
+                        for event in projection.project(item) {
+                            registry.emit_agui_event(&outbound_session, &event);
+                        }
                     }
-                }
-                // The interrupt set is also projected call by call as
-                // `approval/request`, so a transport that speaks
-                // approvals does not have to read the session
-                // projection. The baseline's `pending_interrupts` is
-                // a result, not a notification, and needs no second
-                // copy: a reconnect re-reads it there.
-                if let FollowEvent::Interrupts { pending_interrupts } = &event {
-                    for request in pending_interrupts {
-                        registry
-                            .emit_approval_request(&outbound_session, request);
-                    }
-                }
-            })
+                },
+            )
             .await;
         }
     });
@@ -760,6 +793,7 @@ pub(crate) async fn follow_stream(
     rx: broadcast::Receiver<BroadcastEvent>,
     baseline: FollowSnapshot,
     mut emit: impl FnMut(FollowEvent) + Send,
+    mut project: impl FnMut(&BroadcastEvent) + Send,
 ) {
     {
         let mut cursor = baseline.cursor;
@@ -790,6 +824,11 @@ pub(crate) async fn follow_stream(
                         // A live event means the session is active: the
                         // durable poll keeps the fast rate.
                         poll_delay = FOLLOW_POLL;
+                        // The protocol projections see the raw item:
+                        // the follow's own frames are a projection of
+                        // the live snapshot, and the other protocols
+                        // project the events themselves.
+                        project(&item);
                         // The turn's end is not a run event: it says
                         // the turn is over, not that the session went
                         // idle. The projection has nothing to fold
@@ -1649,7 +1688,10 @@ impl From<MustExistError> for RpcError {
 
 /// The session's durable rows, from the live sink when the session is
 /// registered and from the transcript file when it is not.
-async fn session_rows(
+///
+/// The ACP face reads the same rows for its `session/load` replay, so
+/// a reload sees exactly what the follow projection sees.
+pub(crate) async fn session_rows(
     state: &Arc<AppState>,
     user_id: &str,
     session_id: &str,

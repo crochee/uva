@@ -817,7 +817,7 @@ impl SessionController {
     pub(crate) fn broadcast_event(&self, event: &uva::harness::AgentEvent) {
         let item = crate::event_stream::BroadcastEvent::Run {
             turn_id: None,
-            event: event.clone(),
+            event: Box::new(event.clone()),
         };
         if let Err(error) = self.broadcaster.send(item) {
             tracing::debug!(

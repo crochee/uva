@@ -91,7 +91,10 @@ async fn a_failed_call_reads_failed_in_the_live_projection_and_in_the_log() {
             else {
                 continue;
             };
-            if matches!(&event, AgentEvent::Model(ContentPart::ToolResult(_))) {
+            if matches!(
+                event.as_ref(),
+                AgentEvent::Model(ContentPart::ToolResult(_))
+            ) {
                 break;
             }
         }

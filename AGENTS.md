@@ -34,9 +34,9 @@
 
 ## 1.2 入口
 
-- `uva-app-server` 一个二进制两种模式：`core`（stdio JSON-RPC 2.0 无头内核，stdout 只承载协议帧，日志一律走 stderr）与 `serve`（网关：WebSocket `/rpc` + `/livez` `/readyz` `/version` `/metrics` + 静态前端）。
+- `uva-app-server` 一个二进制三种模式：`core`（stdio JSON-RPC 2.0 无头内核，stdout 只承载协议帧，日志一律走 stderr）、`serve`（网关：WebSocket `/rpc` + `/livez` `/readyz` `/version` `/metrics` + 静态前端）与 `acp`（Agent Client Protocol v1 面：一行一条 JSON-RPC，给编辑器驱动同一套回合机器）。
 - `uva-tui` 与桌面壳都经 `uva-gateway` 驱动 `serve`——与浏览器同一条宿主路径；进程监管（拉起、探活、退避重启、回收）在网关 crate。
-- 协议与配置项见 [`crates/uva-app-server/README.md`](crates/uva-app-server/README.md)。
+- **一个核心，多协议适配器**：核心只维护一套内部事件流（会话、回合、工具调用、权限请求、取消），不认识任何协议；`uva-app-server::adapters` 是适配层——`adapters/acp`（无头控制面的母语：stdio + 网关 WebSocket，协议类型来自官方 SDK `agent-client-protocol`，不自写线上形状）与 `adapters/agui`（服务端把核心事件投影成 AG-UI 给浏览器）。云服务按语义挂 A2A / UHP，不让远端直接说 ACP。协议与配置项见 [`crates/uva-app-server/README.md`](crates/uva-app-server/README.md)。
 
 ## 1.3 观测性
 

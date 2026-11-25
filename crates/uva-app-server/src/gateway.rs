@@ -132,6 +132,15 @@ struct ConnectionHandle {
     pending: DashMap<String, Value>,
     /// The sessions this connection follows.
     subscriptions: DashMap<String, ()>,
+    /// The sessions this connection *owns*: the ones it opened over
+    /// ACP (`session/new`) or prompted (`session/prompt`).
+    ///
+    /// A follower sees a session's events because it asked to follow
+    /// them; an owner sees them because the session is its own. The
+    /// two are different relations, and the ACP surface needs the
+    /// second: a session's updates and its permission questions go
+    /// to the connection that opened it, not to every follower.
+    owned: DashMap<String, ()>,
 }
 
 impl ConnectionHandle {
@@ -232,6 +241,13 @@ impl AppServer {
             }
             _ => {}
         }
+        // A session the connection names in a request is a session it
+        // owns: an ACP client prompts the session it opened, and the
+        // session's updates and its permission questions come back to
+        // that client.
+        if let Some(session) = session_of(&parsed) {
+            handle.owned.insert(session.to_string(), ());
+        }
         drop(handle);
         self.core.send(frame).await
     }
@@ -260,15 +276,52 @@ impl AppServer {
             }
             for handle in self.connections.iter() {
                 if handle.pending.remove(&id).is_some() {
+                    // The answer to `session/new` names the session it
+                    // opened: the connection owns it from now on.
+                    if let Some(session) = parsed
+                        .get("result")
+                        .and_then(|result| result.get("sessionId"))
+                        .and_then(Value::as_str)
+                    {
+                        handle.owned.insert(session.to_string(), ());
+                    }
                     handle.send(frame);
                     return;
                 }
             }
             return;
         }
+        // A server-originated request: the core asks the client
+        // something (ACP's `session/request_permission`). It names
+        // the session it is about, and it goes to the connection that
+        // owns that session — the answer must come back to the client
+        // that can decide.
+        if parsed.get("id").is_some()
+            && parsed.get("method").is_some()
+            && let Some(session) = session_of(parsed)
+        {
+            let id = parsed.get("id").and_then(id_key);
+            for handle in self.connections.iter() {
+                if handle.owned.contains_key(session) {
+                    if let Some(id) = &id {
+                        // The answer to this question comes back
+                        // with this id: remember which connection
+                        // asked, so the answer finds its way home.
+                        handle.pending.insert(id.clone(), id_value(parsed));
+                    }
+                    handle.send(frame);
+                    return;
+                }
+            }
+            // Nobody owns the session: the question has no one to
+            // answer it. Broadcasting keeps it visible rather than
+            // lost.
+            self.broadcast(frame);
+            return;
+        }
         // A notification: `ready` goes to everyone; the session-scoped
-        // ones — including the approval projection — go to that
-        // session's followers.
+        // ones — including the approval and the AG-UI projections —
+        // go to that session's followers.
         match parsed.get("method").and_then(Value::as_str) {
             Some("ready") => {
                 self.broadcast(frame);
@@ -278,18 +331,27 @@ impl AppServer {
                 "session/event"
                 | "anthropic/messages/event"
                 | "approval/request"
-                | "chat/turn/event",
+                | "chat/turn/event"
+                | "agui/event",
             ) => {}
             _ => {
+                // A protocol notification that names a session — ACP's
+                // `session/update` — goes to the connection that owns
+                // that session: the client that opened it is the one
+                // that renders the conversation.
+                if let Some(session) = session_of(parsed) {
+                    for handle in self.connections.iter() {
+                        if handle.owned.contains_key(session) {
+                            handle.send(frame);
+                            return;
+                        }
+                    }
+                }
                 self.broadcast(frame);
                 return;
             }
         }
-        let Some(session) = parsed
-            .get("params")
-            .and_then(|params| params.get("session_id"))
-            .and_then(Value::as_str)
-        else {
+        let Some(session) = session_of(parsed) else {
             // A session-scoped notification with no session cannot be
             // routed; broadcasting keeps it visible rather than lost.
             self.broadcast(frame);
@@ -308,6 +370,25 @@ impl AppServer {
             handle.send(frame);
         }
     }
+}
+
+/// The session a frame is about, if it names one.
+///
+/// The core's own frames spell the member `session_id`; ACP spells it
+/// `sessionId`. The gateway reads both: it is the one place that
+/// knows the two vocabularies, and it needs the session to route the
+/// frame.
+fn session_of(frame: &Value) -> Option<&str> {
+    let params = frame.get("params")?;
+    params
+        .get("session_id")
+        .or_else(|| params.get("sessionId"))
+        .and_then(Value::as_str)
+}
+
+/// The id a frame carries, in the form the request table keys on.
+fn id_value(frame: &Value) -> Value {
+    frame.get("id").cloned().unwrap_or(Value::Null)
 }
 
 /// The key a request id is tracked under on both sides of the pump.
@@ -696,6 +777,7 @@ async fn serve_connection(
             tx: outbound_tx,
             pending: DashMap::new(),
             subscriptions: DashMap::new(),
+            owned: DashMap::new(),
         },
     );
 

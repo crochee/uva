@@ -6,6 +6,21 @@
 //! network. Gated behind `test-utils` so a production build cannot
 //! select it by typo: without the feature the same `type` is reported
 //! as an unsupported type, exactly as any other unknown string.
+//!
+//! # The scripted tool call
+//!
+//! A message that starts with `!tool <name> <json-arguments>` asks
+//! the provider for a tool call instead of an answer:
+//!
+//! ```text
+//! !tool shell {"command": "echo hi > /tmp/out.txt"}
+//! ```
+//!
+//! The provider asks once: the round that follows the tool result
+//! answers with text again, so the loop ends where a real
+//! conversation would. The directive is what makes the approval path
+//! observable end to end — a held call, a permission question, a
+//! resume — without a real model in the loop.
 
 use std::sync::Arc;
 
@@ -23,6 +38,7 @@ use uva::{
         StreamChunk,
         TextContent,
         TokenUsage,
+        ToolUse,
         traits::ModelProvider,
     },
 };
@@ -30,6 +46,43 @@ use uva::{
 /// Stateless echo provider.
 #[derive(Debug, Default)]
 pub struct DemoEchoProvider;
+
+/// The prefix that asks the provider for a tool call.
+const TOOL_DIRECTIVE: &str = "!tool ";
+
+/// The call id the scripted tool call carries.
+const SCRIPTED_CALL_ID: &str = "demo-call-1";
+
+/// The tool call one message scripts, when it scripts one.
+fn scripted_call(request: &CompletionRequest) -> Option<ToolUse> {
+    // The round after the tool answered: the call already happened.
+    if request
+        .messages
+        .iter()
+        .any(|message| message.role == Role::Tool)
+    {
+        return None;
+    }
+    let text = request
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == Role::User)
+        .filter_map(|message| message.content.extract_text())
+        // The harness injects a "Current runtime context" snapshot as
+        // a user-role message each turn; the directive is the user's
+        // own words, not the snapshot's.
+        .find(|text| !text.contains("runtime-context snapshots"))?;
+    let rest = text.trim().strip_prefix(TOOL_DIRECTIVE)?;
+    let (name, arguments) = rest.split_once(' ')?;
+    let input =
+        serde_json::from_str::<serde_json::Value>(arguments.trim()).ok()?;
+    Some(ToolUse {
+        id: SCRIPTED_CALL_ID.to_string(),
+        name: name.trim().to_string(),
+        input,
+    })
+}
 
 fn echo_text(request: &CompletionRequest) -> String {
     // The harness injects a "Current runtime context" snapshot as a
@@ -105,6 +158,17 @@ impl ModelProvider for DemoEchoProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<CompletionResponse, Error> {
+        if let Some(call) = scripted_call(&request) {
+            return Ok(CompletionResponse {
+                id: "demo".to_string(),
+                model: "demo".to_string(),
+                content: Content::Single(ContentPart::ToolUse(call.clone())),
+                usage: TokenUsage::default(),
+                cached: false,
+                stop_reason: None,
+                replay_state: None,
+            });
+        }
         Ok(response(echo_text(&request)))
     }
 
@@ -114,6 +178,19 @@ impl ModelProvider for DemoEchoProvider {
         _cancel_token: Option<Arc<dyn CancelToken>>,
         mut on_delta: Box<dyn FnMut(StreamChunk) + Send>,
     ) -> Result<SamplingResult, Error> {
+        if let Some(call) = scripted_call(&request) {
+            let chunk =
+                StreamChunk::Content(ContentPart::ToolUse(call.clone()));
+            on_delta(chunk.clone());
+            return Ok(SamplingResult {
+                text: String::new(),
+                tool_calls: vec![call],
+                reasoning: String::new(),
+                reasoning_signature: None,
+                usage: TokenUsage::default(),
+                ..Default::default()
+            });
+        }
         let text = echo_text(&request);
         let chunks = [
             StreamChunk::Content(ContentPart::Text(TextContent {

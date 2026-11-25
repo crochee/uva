@@ -400,6 +400,11 @@ impl AppState {
         super::tasks::sync_task_declarations(&state);
         // The background scheduler tick: one leader per deployment.
         super::schedules::spawn_scheduler_driver(Arc::clone(&state));
+        // The ACP agent: the headless control plane's adapter. It
+        // answers the ACP frames the core's channel carries, so an
+        // editor or a terminal client reaches the same deployment
+        // over the same pipe the core's own clients use.
+        state.acp.start(Arc::clone(&state));
         Ok(state)
     }
 
@@ -752,6 +757,7 @@ impl AppState {
             schedules,
             evals,
             rpc: input.rpc,
+            acp: crate::adapters::acp::channel::AcpEndpoint::new(),
         })
     }
 }

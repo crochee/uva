@@ -131,7 +131,7 @@ One line per crate, the invariants behind the layering, and where the runtime bo
 
 ## Running
 
-One binary, two modes — `uva-app-server`:
+One binary, three modes — `uva-app-server`:
 
 ```bash
 # the gateway (the human entry point): spawns a core subprocess and
@@ -141,6 +141,10 @@ cargo run -p uva-app-server -- serve --port 8080
 # the headless core: JSON-RPC 2.0 on stdin/stdout (Content-Length
 # framed), for a TUI / desktop shell / any host that wants a sidecar
 cargo run -p uva-app-server -- core --directory .
+
+# the ACP face: the Agent Client Protocol (v1) on stdin/stdout, one
+# JSON-RPC message per line, for an editor (Zed, a JetBrains IDE)
+cargo run -p uva-app-server -- acp --directory .
 ```
 
 `make dev` boots the server and the front-end together (`:8080` and `:5173`). The terminal projection drives the same gateway: `UVA_APP_SERVER=target/debug/uva-app-server cargo run -p uva-tui -- --directory .`.

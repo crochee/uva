@@ -102,6 +102,9 @@ uva = { workspace = true, features = [
   # dependency (the single-facade rule above).
   "kernel",
 ] }
+# The Agent Client Protocol SDK: the ACP adapter's protocol layer —
+# the message types, the JSON-RPC machinery and the stdio transport.
+agent-client-protocol.workspace = true
 validator.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
@@ -181,6 +184,17 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "stdio_roundtrip"
+required-features = ["test-utils"]
+
+[[test]]
+name = "acp_stdio"
+required-features = ["test-utils"]
+
+# The ACP adapter over the core's own JSON-RPC channel: the frames a
+# client sends when it reaches the deployment through the gateway's
+# WebSocket.
+[[test]]
+name = "acp_over_rpc"
 required-features = ["test-utils"]
 
 # The transport hot-path benchmarks: the Content-Length codec, the typed

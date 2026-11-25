@@ -68,7 +68,7 @@ impl ControllerInner {
     ) {
         let item = BroadcastEvent::Run {
             turn_id: turn_id.map(str::to_string),
-            event: event.clone(),
+            event: Box::new(event.clone()),
         };
         self.broadcast_event(&item, outer_kind, system_kind);
         // The cluster frame carries the same item the local

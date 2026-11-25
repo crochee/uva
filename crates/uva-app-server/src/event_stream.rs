@@ -44,7 +44,12 @@ pub enum BroadcastEvent {
         /// parked prompt to name.
         turn_id: Option<String>,
         /// The event itself.
-        event: AgentEvent,
+        ///
+        /// Boxed: an [`AgentEvent`] is a few hundred bytes, and the
+        /// turn-ended variant next to it is a handful — one
+        /// unboxed event would make every item of the channel (and
+        /// of the cluster bus frame it travels on) carry that size.
+        event: Box<AgentEvent>,
     },
     /// The turn's run ended.
     TurnEnded {
@@ -152,7 +157,7 @@ impl EventBroadcaster {
             BroadcastEvent::Run { event, .. } => (
                 event.size_hint(),
                 event.kind(),
-                match event {
+                match event.as_ref() {
                     AgentEvent::System(sys) => Some(sys.kind()),
                     _ => None,
                 },
@@ -218,7 +223,7 @@ mod tests {
     fn run(event: AgentEvent) -> BroadcastEvent {
         BroadcastEvent::Run {
             turn_id: None,
-            event,
+            event: Box::new(event),
         }
     }
 
@@ -243,12 +248,13 @@ mod tests {
         let received = rx.recv().await.unwrap();
         assert!(matches!(
             received,
-            BroadcastEvent::Run {
-                event: AgentEvent::System(
-                    uva::harness::SystemEvent::SessionStarted { .. }
-                ),
-                ..
-            }
+            BroadcastEvent::Run { event, .. }
+                if matches!(
+                    event.as_ref(),
+                    AgentEvent::System(
+                        uva::harness::SystemEvent::SessionStarted { .. }
+                    )
+                )
         ));
     }
 

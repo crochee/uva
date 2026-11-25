@@ -107,6 +107,28 @@ pub enum Mode {
     /// Migrate a legacy config.yaml into a profile TOML's
     /// `model-adapter` row, then exit.
     Translate(crate::translate::TranslateArgs),
+    /// The ACP face: the Agent Client Protocol on stdin/stdout.
+    ///
+    /// An editor launches the binary in this mode and speaks ACP to
+    /// it. stdout carries the protocol and nothing else, exactly as
+    /// in `core` mode.
+    Acp(AcpArgs),
+}
+
+/// The ACP face's own flags.
+///
+/// clap's automatic `--help` / `--version` are disabled here for the
+/// same reason the core's are: they print on stdout, and stdout is
+/// the protocol channel. The binary renders both to stderr instead.
+#[derive(clap::Args, Debug)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct AcpArgs {
+    /// Print this help on stderr and exit.
+    #[arg(short, long, action = clap::ArgAction::SetTrue)]
+    pub help: bool,
+    /// Print the version on stderr and exit.
+    #[arg(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    pub version: bool,
 }
 
 /// The core's own flags.

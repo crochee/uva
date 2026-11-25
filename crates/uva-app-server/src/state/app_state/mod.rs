@@ -150,6 +150,15 @@ pub struct AppState {
     /// `tokio::sync::broadcast::Receiver` via
     /// [`SessionController::subscribe`](crate::session::controller::SessionController::subscribe).
     pub active_sessions: Arc<crate::state::ActiveSessions>,
+    /// The ACP agent's endpoint on the core's channel.
+    ///
+    /// The headless control plane's adapter: it answers the ACP
+    /// frames this process's JSON-RPC channel carries, so an editor,
+    /// a terminal client or any ACP-capable program reaches the same
+    /// deployment as the core's own clients. The endpoint holds the
+    /// channel, not the agent — the agent starts once the state
+    /// exists.
+    pub acp: crate::adapters::acp::channel::AcpEndpoint,
     /// One gate per `(user_id, session_id)` for the cold-open path.
     ///
     /// Opening a session for the first time is a read-modify-write of
