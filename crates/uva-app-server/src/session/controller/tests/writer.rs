@@ -289,7 +289,11 @@ async fn a_tool_result_row_is_on_disk_before_its_event_is_broadcast() {
     let sink = manager.sink("alice", "s1");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let event = rx.recv().await.expect("the broadcast is live");
+            let item = rx.recv().await.expect("the broadcast is live");
+            let crate::event_stream::BroadcastEvent::Run { event, .. } = item
+            else {
+                continue;
+            };
             let AgentEvent::Model(ContentPart::ToolResult(result)) = &event
             else {
                 continue;

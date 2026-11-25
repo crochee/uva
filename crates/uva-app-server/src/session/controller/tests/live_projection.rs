@@ -86,7 +86,11 @@ async fn a_failed_call_reads_failed_in_the_live_projection_and_in_the_log() {
     // arrives.
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let event = events.recv().await.expect("the broadcast is live");
+            let item = events.recv().await.expect("the broadcast is live");
+            let crate::event_stream::BroadcastEvent::Run { event, .. } = item
+            else {
+                continue;
+            };
             if matches!(&event, AgentEvent::Model(ContentPart::ToolResult(_))) {
                 break;
             }

@@ -1,20 +1,71 @@
-//! Shared event broadcaster for agent events.
+//! Shared event broadcaster for a session's live channel.
 //!
 //! Provides a shared broadcast channel that allows multiple
-//! subscribers to receive agent events from a single source.
+//! subscribers to receive a session's live items from a single
+//! source.
 //!
 //! Every send / subscribe / drop on this broadcaster is
-//! `tracing`-instrumented so the lifetime of an `AgentEvent`
-//! stream can be reconstructed from log output. The logs are
-//! intentionally structured (`event.kind`,
-//! `subscriber_count`, `session_id`-like fields) so they can be
-//! filtered by observability tooling without free-form regex
-//! matching.
+//! `tracing`-instrumented so the lifetime of a live stream can be
+//! reconstructed from log output. The logs are intentionally
+//! structured (`event.kind`, `subscriber_count`, `session_id`-like
+//! fields) so they can be filtered by observability tooling without
+//! free-form regex matching.
+//!
+//! # What the channel carries
+//!
+//! [`BroadcastEvent`] — a run's event, or the turn's end. Every item
+//! names the turn it belongs to, so a subscriber that asked for one
+//! turn's stream can tell that turn's events from the tail of an
+//! earlier one. The turn id is the *same* id the turn's durable
+//! `parked_prompt` row carries, so a client correlates the live
+//! stream and the transcript with one id.
 
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uva::harness::AgentEvent;
+
+/// One item on a session's live channel.
+///
+/// The channel is the app-server's own wire shape: it crosses the
+/// cluster bus between nodes, so it is serialised — and the row
+/// payloads that travel on the same bus are not, which is what tells
+/// the two apart on the receiving side.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BroadcastEvent {
+    /// A run's event.
+    Run {
+        /// The turn the event belongs to, when the run had one.
+        ///
+        /// `None` for a run that no prompt started — a resumed
+        /// turn, a compaction pass — because those turns have no
+        /// parked prompt to name.
+        turn_id: Option<String>,
+        /// The event itself.
+        event: AgentEvent,
+    },
+    /// The turn's run ended.
+    TurnEnded {
+        /// The turn that ended, when the run had one.
+        turn_id: Option<String>,
+        /// Why the turn ended (`completed`, `cancelled`, …).
+        reason: String,
+    },
+}
+
+impl BroadcastEvent {
+    /// The turn this item belongs to.
+    #[must_use]
+    pub fn turn_id(&self) -> Option<&str> {
+        match self {
+            Self::Run { turn_id, .. } | Self::TurnEnded { turn_id, .. } => {
+                turn_id.as_deref()
+            }
+        }
+    }
+}
 
 /// Default capacity for the event broadcast channel.
 ///
@@ -25,10 +76,10 @@ use uva::harness::AgentEvent;
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// A shared event broadcaster that allows multiple subscribers to receive
-/// agent events from a single source.
+/// a session's live items from a single source.
 #[derive(Clone)]
 pub struct EventBroadcaster {
-    tx: Arc<broadcast::Sender<AgentEvent>>,
+    tx: Arc<broadcast::Sender<BroadcastEvent>>,
     /// Optional logical id attached to the broadcaster so logs from
     /// a controller's `persist_and_broadcast` can be correlated with
     /// the broadcaster's own send logs.
@@ -64,12 +115,12 @@ impl EventBroadcaster {
         &self.label
     }
 
-    /// Subscribes to the event stream, returning a new receiver.
+    /// Subscribes to the live channel, returning a new receiver.
     ///
     /// Each subscription is logged at `debug` with the new total
-    /// subscriber count so the open / close pattern of SSE clients
+    /// subscriber count so the open / close pattern of live clients
     /// is observable.
-    pub fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<BroadcastEvent> {
         let rx = self.tx.subscribe();
         let total = self.tx.receiver_count();
         tracing::debug!(
@@ -81,29 +132,34 @@ impl EventBroadcaster {
         rx
     }
 
-    /// Sends an event to all subscribers.
+    /// Sends one item to all subscribers.
     ///
     /// Emits a structured `tracing::debug!` line carrying the
-    /// top-level `event.kind`, an inner `SystemEvent::kind` when
-    /// applicable, the payload byte size, and the resulting
-    /// subscriber count. Errors are logged at `warn` so a dropped
-    /// event is never silent.
+    /// event's kind, an inner `SystemEvent::kind` when applicable,
+    /// the payload byte size, and the resulting subscriber count.
+    /// Errors are logged at `warn` so a dropped item is never
+    /// silent.
     pub fn send(
         &self,
-        event: AgentEvent,
-    ) -> Result<usize, Box<broadcast::error::SendError<AgentEvent>>> {
+        item: BroadcastEvent,
+    ) -> Result<usize, Box<broadcast::error::SendError<BroadcastEvent>>> {
         // Use the cheap O(payload) size helper rather than
         // re-serializing here — the controller path already has
         // a serialized copy for the disk write, and a second
         // serialize just for a log line is wasted work on every
         // streaming chunk.
-        let byte_size = event.size_hint();
-        let outer_kind = event.kind();
-        let inner_kind = match &event {
-            AgentEvent::System(sys) => Some(sys.kind()),
-            _ => None,
+        let (byte_size, outer_kind, inner_kind) = match &item {
+            BroadcastEvent::Run { event, .. } => (
+                event.size_hint(),
+                event.kind(),
+                match event {
+                    AgentEvent::System(sys) => Some(sys.kind()),
+                    _ => None,
+                },
+            ),
+            BroadcastEvent::TurnEnded { .. } => (0, "TurnEnded", None),
         };
-        match self.tx.send(event) {
+        match self.tx.send(item) {
             Ok(receivers) => {
                 tracing::debug!(
                     target: "uva.event_stream",
@@ -112,7 +168,7 @@ impl EventBroadcaster {
                     system_kind = inner_kind.unwrap_or("-"),
                     payload_bytes = byte_size,
                     receivers,
-                    "Broadcast AgentEvent"
+                    "Broadcast session event"
                 );
                 Ok(receivers)
             }
@@ -123,7 +179,7 @@ impl EventBroadcaster {
                     event_kind = outer_kind,
                     system_kind = inner_kind.unwrap_or("-"),
                     error = %e,
-                    "Failed to broadcast AgentEvent (no subscribers)"
+                    "Failed to broadcast session event (no subscribers)"
                 );
                 Err(Box::new(e))
             }
@@ -158,6 +214,14 @@ mod tests {
 
     use super::*;
 
+    /// The channel's item for a run's event, with no turn.
+    fn run(event: AgentEvent) -> BroadcastEvent {
+        BroadcastEvent::Run {
+            turn_id: None,
+            event,
+        }
+    }
+
     #[test]
     fn test_broadcaster_creation() {
         let broadcaster = EventBroadcaster::new();
@@ -173,15 +237,18 @@ mod tests {
             AgentEvent::System(uva::harness::SystemEvent::SessionStarted {
                 session_id: "test-1".to_string(),
             });
-        let sent = broadcaster.send(event.clone()).unwrap();
+        let sent = broadcaster.send(run(event)).unwrap();
         assert_eq!(sent, 1);
 
         let received = rx.recv().await.unwrap();
         assert!(matches!(
             received,
-            AgentEvent::System(
-                uva::harness::SystemEvent::SessionStarted { .. }
-            )
+            BroadcastEvent::Run {
+                event: AgentEvent::System(
+                    uva::harness::SystemEvent::SessionStarted { .. }
+                ),
+                ..
+            }
         ));
     }
 
@@ -256,7 +323,7 @@ mod tests {
             // active producer keeps writing into the
             // ring buffer; the receiver sees them as
             // Lagged.
-            let _ = broadcaster.send(event.clone());
+            let _ = broadcaster.send(run(event.clone()));
         }
 
         let result = rx.recv().await;
@@ -310,12 +377,12 @@ mod tests {
         // `Err(SendError(value))` when there are no
         // receivers — which is exactly our setup. The
         // broadcaster layer wraps and re-emits that as
-        // `Box<SendError<AgentEvent>>`, so we discard
+        // `Box<SendError<BroadcastEvent>>`, so we discard
         // it. The important point is: the channel does
         // not buffer undelivered events for future
         // subscribers.
         for _ in 0..5 {
-            let _ = broadcaster.send(event.clone());
+            let _ = broadcaster.send(run(event.clone()));
         }
 
         // Late subscriber attaches AFTER the events were

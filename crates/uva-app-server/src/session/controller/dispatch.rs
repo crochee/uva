@@ -215,12 +215,14 @@ async fn handle_received_op(
     submitted: SubmittedOp,
     run_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> bool {
-    let (op, provider, ack) = submitted.into_parts();
+    let (op, provider, turn_id, ack) = submitted.into_parts();
     let mut ack = ack;
     let stop = match op {
         SessionOp::Prompt { content, priority } => {
             park_provider(inner, provider);
-            let failure = handle_prompt_op(inner, content, priority).await;
+            let failure =
+                handle_prompt_op(inner, content, priority, turn_id.as_deref())
+                    .await;
             ack_durability(&mut ack, failure);
             start_run_if_idle(inner, run_handle).await;
             false
@@ -231,9 +233,14 @@ async fn handle_received_op(
             priority,
         } => {
             park_provider(inner, provider);
-            let failure =
-                handle_prompt_multi_op(inner, parts, agent_name, priority)
-                    .await;
+            let failure = handle_prompt_multi_op(
+                inner,
+                parts,
+                agent_name,
+                priority,
+                turn_id.as_deref(),
+            )
+            .await;
             ack_durability(&mut ack, failure);
             start_run_if_idle(inner, run_handle).await;
             false
@@ -371,6 +378,7 @@ async fn handle_prompt_op(
     inner: &ControllerInner,
     content: String,
     priority: u8,
+    turn_id: Option<&str>,
 ) -> Option<String> {
     tracing::info!(
         target: "uva.session",
@@ -380,7 +388,7 @@ async fn handle_prompt_op(
         preview = truncate(&content, 40),
         "op_rx: received Prompt"
     );
-    park_text_turn(inner, content).await
+    park_text_turn(inner, content, turn_id).await
 }
 
 /// Park one plain-text turn — the single-`Text`-part shape of
@@ -399,6 +407,7 @@ async fn handle_prompt_op(
 async fn park_text_turn(
     inner: &ControllerInner,
     content: String,
+    turn_id: Option<&str>,
 ) -> Option<String> {
     let parts = vec![uva::provider::ContentPart::Text(
         uva::provider::TextContent {
@@ -406,7 +415,8 @@ async fn park_text_turn(
             cache_control: None,
         },
     )];
-    let (park_id, failure) = park_durably(inner, &parts, &None, false).await;
+    let (park_id, failure) =
+        park_durably(inner, &parts, &None, false, turn_id).await;
     inner.pending_turns.lock().push_back(ParkedPrompt {
         park_id,
         parts,
@@ -435,6 +445,7 @@ async fn handle_prompt_multi_op(
     parts: Vec<uva::provider::ContentPart>,
     agent_name: Option<String>,
     priority: u8,
+    turn_id: Option<&str>,
 ) -> Option<String> {
     tracing::info!(
         target: "uva.session",
@@ -446,7 +457,7 @@ async fn handle_prompt_multi_op(
         "op_rx: received PromptMulti"
     );
     let (park_id, failure) =
-        park_durably(inner, &parts, &agent_name, false).await;
+        park_durably(inner, &parts, &agent_name, false, turn_id).await;
     inner.pending_turns.lock().push_back(ParkedPrompt {
         park_id,
         parts,
@@ -478,6 +489,7 @@ async fn park_durably(
     parts: &[uva::provider::ContentPart],
     agent_name: &Option<String>,
     rerun: bool,
+    turn_id: Option<&str>,
 ) -> (String, Option<String>) {
     // The turn's provider selection is a fact about the turn, so it
     // goes into the row: a takeover resolves it by name instead of
@@ -499,7 +511,13 @@ async fn park_durably(
         };
         (provider, model, Arc::clone(&deps.attachment_store))
     };
-    let park_id = uuid::Uuid::new_v4().to_string();
+    // The submitter's id, when it minted one: the turn's row is
+    // written under it, so the client's live stream and the durable
+    // transcript speak the same id.
+    let park_id = match turn_id {
+        Some(id) => id.to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
     let event = uva::session::parked_prompt(
         park_id.clone(),
         prompt_text_of_parts(parts),
@@ -553,7 +571,7 @@ async fn handle_rerun_op(
     );
     cancel_inflight_run(inner);
     let (park_id, failure) =
-        park_durably(inner, &parts, &agent_name, true).await;
+        park_durably(inner, &parts, &agent_name, true, None).await;
     inner.pending_turns.lock().push_back(ParkedPrompt {
         park_id,
         parts,
@@ -624,7 +642,9 @@ async fn handle_steer_op(
         preview = truncate(&content, 40),
         "op_rx: received Steer"
     );
-    park_text_turn(inner, content).await
+    // A steer parks under an id the controller mints: the steer did
+    // not come from a client that named a turn.
+    park_text_turn(inner, content, None).await
 }
 
 /// Fire the in-flight run's cancel token (without taking

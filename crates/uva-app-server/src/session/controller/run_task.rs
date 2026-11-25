@@ -68,6 +68,30 @@ impl ControllerInner {
     }
 }
 
+/// Why a turn ended, by the state the run settled into.
+///
+/// The settle transition is the run's own verdict: a run that
+/// finished its steps is `Idle`, a run that stopped on an open
+/// approval is `AwaitingApproval`, and a run a cancel decided is
+/// `Cancelled`. The turn-scoped subscriber reports this reason, so a
+/// client reads "the answer is complete" and "the answer was cut
+/// short" as different facts.
+fn turn_end_reason(
+    state: crate::session::status::SessionState,
+) -> &'static str {
+    use crate::session::status::SessionState;
+    match state {
+        SessionState::Idle => "completed",
+        SessionState::AwaitingApproval => "suspended",
+        SessionState::Cancelled => "cancelled",
+        // A run that settles while still `Running` is a state this
+        // module cannot produce — the settle transition only leaves
+        // `Running` for the three states above. Answering
+        // "completed" keeps the frame's vocabulary closed.
+        SessionState::Running => "completed",
+    }
+}
+
 /// The provider and model the log's last request snapshot names.
 ///
 /// The read goes through the vocabulary, which compares the row's tag
@@ -516,6 +540,13 @@ impl ControllerInner {
             } else {
                 (None, false, None)
             };
+            // The turn this run answers, by the id its durable
+            // `parked_prompt` row carries. Every live event of the
+            // run is tagged with it, so a client that asked for one
+            // turn's stream can tell that turn's events from the
+            // tail of an earlier one. `None` for a run no prompt
+            // started — a resumed turn has no park of its own.
+            let turn_id: Option<String> = take_park.clone();
             // Reconstruct prior-turn assistant / tool messages from
             // the durable events the previous runs persisted to the
             // session sink. Without this, every run starts with an
@@ -755,7 +786,10 @@ impl ControllerInner {
             let mut event_count = 0usize;
             while let Some(event) = stream.next().await {
                 event_count += 1;
-                if let Err(e) = inner.persist_and_broadcast(&event).await {
+                if let Err(e) = inner
+                    .persist_and_broadcast(turn_id.as_deref(), &event)
+                    .await
+                {
                     tracing::error!(
                         target: "uva.session",
                         session_id = %inner.session_id,
@@ -779,7 +813,7 @@ impl ControllerInner {
             // `Running` (and the next step boundary would have
             // injected it) or it reads `Idle` and becomes an ordinary
             // queued turn. One decision, one row.
-            {
+            let settled_state = {
                 let _settled = inner.steer_gate.lock().await;
                 // The settle transition consumes the controller
                 // state's private suspended record: a suspended run
@@ -788,8 +822,8 @@ impl ControllerInner {
                 // mirrors them so the list view and `is_startable`
                 // agree without a rescan); anything else — a cancel
                 // that already decided — stays where it is.
-                inner.state.settle();
-            }
+                inner.state.settle()
+            };
             tracing::info!(
                 target: "uva.session",
                 session_id = %inner.session_id,
@@ -820,6 +854,17 @@ impl ControllerInner {
             inner
                 .state
                 .settle_flushed(inner.deps.lock().default_max_iterations);
+            // The turn is over: the run's rows are on disk and the
+            // session is idle again. A turn-scoped subscriber waits
+            // for exactly this frame, so it is published after the
+            // flush — the client that ends its stream on this frame
+            // has already seen every row the turn produced.
+            inner
+                .broadcast_turn_ended(
+                    turn_id.as_deref(),
+                    turn_end_reason(settled_state),
+                )
+                .await;
         }))
     }
 }

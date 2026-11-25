@@ -175,6 +175,7 @@ use self::{
 };
 use crate::{
     api::validate_resource_name,
+    event_stream::BroadcastEvent,
     rpc::{Outbound, RpcError},
     session::{
         EPHEMERAL_SESSION_PREFIX,
@@ -449,7 +450,7 @@ fn resolve_target(metadata: Option<&Metadata>) -> Result<Target, String> {
 /// A run that has been dispatched but has not finished.
 struct StartedTurn {
     controller: Arc<SessionController>,
-    events: broadcast::Receiver<AgentEvent>,
+    events: broadcast::Receiver<crate::event_stream::BroadcastEvent>,
     accumulator: Turn,
     /// The session the run belongs to — the notification's
     /// `session_id`.
@@ -676,13 +677,20 @@ async fn publish_frames(
     outbound: &Outbound,
     session_id: &str,
     accumulator: &mut Turn,
-    events: &mut broadcast::Receiver<AgentEvent>,
+    events: &mut broadcast::Receiver<BroadcastEvent>,
 ) {
     let (name, data) = accumulator.start().event();
     emit_event(outbound, session_id, name, data);
     loop {
         match events.recv().await {
-            Ok(event) => {
+            Ok(item) => {
+                // The turn's end is not a run event: the Anthropic
+                // protocol's own terminal frames come from the
+                // accumulator, so the marker only says the turn is
+                // over.
+                let BroadcastEvent::Run { event, .. } = item else {
+                    continue;
+                };
                 let terminal = is_terminal(&event);
                 for frame in accumulator.on_event(&event) {
                     let (name, data) = frame.event();
@@ -737,7 +745,10 @@ async fn complete_response(turn: StartedTurn) -> Result<Value, RpcError> {
     let mut turn = turn;
     loop {
         match turn.events.recv().await {
-            Ok(event) => {
+            Ok(item) => {
+                let BroadcastEvent::Run { event, .. } = item else {
+                    continue;
+                };
                 let terminal = is_terminal(&event);
                 turn.accumulator.on_event(&event);
                 if terminal {

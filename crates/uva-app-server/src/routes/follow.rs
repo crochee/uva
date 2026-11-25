@@ -77,6 +77,7 @@ use uva::{
 
 use crate::{
     api::{v1::session_view::SessionTurn, validate_resource_name},
+    event_stream::BroadcastEvent,
     routes::{chat::resolve_user_id, sessions::SESSION_LIST_TAIL_WINDOW},
     rpc::RpcError,
     session::{
@@ -756,7 +757,7 @@ async fn rows_after(
 pub(crate) async fn follow_stream(
     controller: Arc<SessionController>,
     sink: Arc<dyn uva::session::SessionSink>,
-    rx: broadcast::Receiver<uva::harness::AgentEvent>,
+    rx: broadcast::Receiver<BroadcastEvent>,
     baseline: FollowSnapshot,
     mut emit: impl FnMut(FollowEvent) + Send,
 ) {
@@ -785,10 +786,17 @@ pub(crate) async fn follow_stream(
         loop {
             tokio::select! {
                 received = rx.recv() => match received {
-                    Ok(event) => {
+                    Ok(item) => {
                         // A live event means the session is active: the
                         // durable poll keeps the fast rate.
                         poll_delay = FOLLOW_POLL;
+                        // The turn's end is not a run event: it says
+                        // the turn is over, not that the session went
+                        // idle. The projection has nothing to fold
+                        // from it.
+                        let BroadcastEvent::Run { event, .. } = &item else {
+                            continue;
+                        };
                         let live = if controller.projects_live_locally() {
                             controller.live_snapshot()
                         } else {
@@ -797,14 +805,14 @@ pub(crate) async fn follow_stream(
                             // carries no position, so a client's
                             // ordinal comparison falls back to "any
                             // content row supersedes it".
-                            remote_live.apply(&event);
+                            remote_live.apply(event);
                             remote_live.clone()
                         };
                         if live.live_seq > live_seq {
                             live_seq = live.live_seq;
                             emit(FollowEvent::Live { live: live.clone() });
                         }
-                        if is_terminal(&event) {
+                        if is_terminal(event) {
                             tracing::debug!(
                                 target: "uva.session",
                                 "follow: the run settled; the stream stays open"

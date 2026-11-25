@@ -4,20 +4,26 @@
 
 use std::sync::atomic::Ordering;
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use uva::harness::{AgentEvent, SystemEvent};
 
 use super::inner::ControllerInner;
-use crate::state::UsageMetrics;
+use crate::{event_stream::BroadcastEvent, state::UsageMetrics};
 
 impl ControllerInner {
+    /// The live funnel every run event passes through.
+    ///
+    /// `turn_id` names the turn the event belongs to — the id the
+    /// turn's `parked_prompt` row carries, so a client correlates
+    /// the live stream and the transcript with one id. `None` for a
+    /// run no prompt started (a resumed turn, a compaction pass).
     pub(super) async fn persist_and_broadcast(
         &self,
+        turn_id: Option<&str>,
         event: &AgentEvent,
     ) -> Result<()> {
         let outer_kind = event.kind();
         let system_kind = Self::classify_system_kind(event);
-        let event_value = Self::encode_event(event)?;
         let event_type = event.kind();
         tracing::debug!(
             session_id = %self.session_id,
@@ -46,7 +52,7 @@ impl ControllerInner {
         // model facts, flushed before the corresponding event is
         // emitted) and the op loop's out-of-band rows. This path
         // only broadcasts what already happened durably.
-        self.fan_out_live(event, outer_kind, system_kind, &event_value)
+        self.fan_out_live(turn_id, event, outer_kind, system_kind)
             .await;
         Ok(())
     }
@@ -55,27 +61,34 @@ impl ControllerInner {
     /// this node's subscribers, then the cluster bus frame.
     async fn fan_out_live(
         &self,
+        turn_id: Option<&str>,
         event: &AgentEvent,
         outer_kind: &'static str,
         system_kind: Option<&'static str>,
-        event_value: &serde_json::Value,
     ) {
-        self.broadcast_event(event, outer_kind, system_kind);
-        self.publish_session_frame(None, event_value).await;
+        let item = BroadcastEvent::Run {
+            turn_id: turn_id.map(str::to_string),
+            event: event.clone(),
+        };
+        self.broadcast_event(&item, outer_kind, system_kind);
+        // The cluster frame carries the same item the local
+        // subscribers get, so a remote node's live stream is the
+        // local one — same events, same turn ids.
+        self.publish_session_frame(None, &item).await;
     }
 
-    /// Fan one run event out on the cluster bus (best-effort).
+    /// Fan one live item out on the cluster bus (best-effort).
     ///
     /// A publish failure only costs a remote subscriber a live
     /// frame; its `from` cursor re-reads the row from disk. The
     /// event stream carries no durable rows any more — the log's
-    /// rows are written by the writers, not this tap — so the
+    /// rows are written by the writers, not by this tap — so the
     /// frame's cursor is always `None` and is never filtered
     /// against a resume cursor.
     async fn publish_session_frame(
         &self,
         cursor: Option<u64>,
-        payload: &serde_json::Value,
+        item: &BroadcastEvent,
     ) {
         // A single-node deployment never has another subscriber; the
         // local broadcaster already served every SSE client. Skipping
@@ -84,10 +97,22 @@ impl ControllerInner {
         if !self.cluster.clustered {
             return;
         }
+        let payload = match serde_json::to_value(item) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(
+                    target: "uva.session",
+                    session_id = %self.session_id,
+                    error = %error,
+                    "cluster: could not encode the live event"
+                );
+                return;
+            }
+        };
         let frame = crate::cluster::SessionFrame {
             origin: self.cluster.node_id.clone(),
             cursor,
-            payload: payload.clone(),
+            payload,
         };
         let key = crate::cluster::SessionKey::new(
             self.user_id.clone(),
@@ -133,15 +158,22 @@ impl ControllerInner {
         }
     }
 
-    /// Single serialization pass: `to_value` builds the tree the
-    /// cluster frame shares. The byte count the frame path once
-    /// needed is gone with it — nothing reads it any more, so no
-    /// event pays a `to_vec` of its own tree just to feed a log
-    /// line.
-    pub(super) fn encode_event(
-        event: &AgentEvent,
-    ) -> Result<serde_json::Value> {
-        serde_json::to_value(event).context("failed to serialize agent event")
+    /// Publish the turn's end on the live channel.
+    ///
+    /// The turn-scoped subscriber waits for exactly this frame: it
+    /// is the signal that the turn's rows are on disk and no further
+    /// event of that turn will arrive.
+    pub(super) async fn broadcast_turn_ended(
+        &self,
+        turn_id: Option<&str>,
+        reason: &str,
+    ) {
+        let item = BroadcastEvent::TurnEnded {
+            turn_id: turn_id.map(str::to_string),
+            reason: reason.to_string(),
+        };
+        self.broadcast_event(&item, "TurnEnded", None);
+        self.publish_session_frame(None, &item).await;
     }
 
     /// Resolved kind for the structural log line, if `event`
@@ -155,14 +187,14 @@ impl ControllerInner {
         }
     }
 
-    /// Fan the event out to the live SSE/WebSocket
+    /// Fan the item out to the live SSE/WebSocket
     /// subscribers. A send with no subscribers is a debug
     /// log, not an error — the durable rows a subscriber may
     /// resume from are the writers', flushed before the
     /// corresponding event reaches this fan-out.
     pub(super) fn broadcast_event(
         &self,
-        event: &AgentEvent,
+        item: &BroadcastEvent,
         outer_kind: &'static str,
         system_kind: Option<&'static str>,
     ) {
@@ -187,7 +219,7 @@ impl ControllerInner {
             system_kind = system_kind.unwrap_or("-"),
             "broadcast_event: fanning the live event out"
         );
-        if let Err(e) = self.broadcaster.send(event.clone()) {
+        if let Err(e) = self.broadcaster.send(item.clone()) {
             tracing::debug!(
                 target: "uva.session",
                 session_id = %self.session_id,

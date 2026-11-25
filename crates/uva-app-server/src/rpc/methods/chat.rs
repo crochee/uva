@@ -12,6 +12,7 @@ use crate::{
         CreateSessionRequest,
         FeedbackRequest,
         SendMessageRequest,
+        stream::stream_message,
     },
     rpc::{RpcRouter, encode},
 };
@@ -67,6 +68,10 @@ pub fn register(router: &mut RpcRouter) {
             chat::send_message(state, params.session_id, params.request)
                 .await?,
         )
+    });
+    router.register(names::CHAT_MESSAGE_STREAM, |state, raw| async move {
+        let params = SendMessageParams::parse(raw)?;
+        encode(stream_message(state, params.session_id, params.request).await?)
     });
     router.register(names::CHAT_CANCEL, |state, raw| async move {
         let params: CancelParams = parse(raw)?;

@@ -88,8 +88,9 @@
 - **缺行时的行为**：`agent-loop` 缺 → **boot 失败**（`boot.rs:445-450`）；`approval` /
   `context-compactor` 缺 → 不挂载，审批应答 / 上下文压缩能力与界面同消（D32）。
 - **现状证据**：`crates/uva-app-server/src/state/app_state/boot.rs:445-450`、
-  `crates/uva-app-server/src/rpc/methods/chat.rs`（7 个 `chat/*` 方法，
-  `chat/message/send` / `chat/regenerate` / `chat/cancel` 等）。
+  `crates/uva-app-server/src/rpc/methods/chat.rs`（8 个 `chat/*` 方法，
+  `chat/message/send` / `chat/message/stream` / `chat/regenerate` /
+  `chat/cancel` 等）。
 
 ### 4.3 模型（models）
 
@@ -245,7 +246,7 @@
   mcp
   ```
 
-  19 个方法名全部在注册表（64 个 `router.register`）中：`chat/message/send` /
+  19 个方法名全部在注册表（66 个 `router.register`）中：`chat/message/send` /
   `evals/run` / `models/list` / `schedules/tick` / `search/all` /
   `sessions/list` / `tasks/list` / `ui/schema` 等；精简部署里
   `eval` 缺行 → dump 无此行（`grep -c '"id": "eval"'` 为 0）。

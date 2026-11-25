@@ -1463,6 +1463,49 @@ async fn the_durable_submit_answers_only_after_the_park_row_is_on_disk() {
     );
 }
 
+/// A turn submitted with the caller's id parks under it: the row's
+/// `park_id` is the id the caller minted, so a client that asked for
+/// that turn's stream matches the live frames and the durable
+/// transcript with one id.
+#[tokio::test]
+async fn a_turn_parks_under_the_submitters_id() {
+    use super::{
+        super::SessionOp,
+        support::{VecFactory, make_manager_and_controller},
+    };
+
+    let turn_id = "22222222-3333-4333-8333-444444444444".to_string();
+    let calls = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let (controller, manager, _temp) = make_manager_and_controller(
+        Duration::from_secs(60),
+        Arc::new(VecFactory::new(Vec::new(), calls)),
+    )
+    .await;
+
+    controller
+        .submit_durable_turn(
+            SessionOp::Prompt {
+                content: "the named turn".to_string(),
+                priority: 0,
+            },
+            None,
+            Some(turn_id.clone()),
+        )
+        .await
+        .expect("the named turn is durable");
+
+    let rows = manager
+        .sink("alice", "s1")
+        .read()
+        .await
+        .expect("the log reads");
+    assert!(
+        rows.iter().any(|row| row["type"] == "parked_prompt"
+            && row["park_id"] == turn_id.as_str()),
+        "the park row carries the submitter's id: {rows:?}",
+    );
+}
+
 /// The durable submit must not deadlock on a busy controller: the
 /// wait holds nothing the loop needs, so a controller that is running
 /// a turn still parks — and confirms — the next one.

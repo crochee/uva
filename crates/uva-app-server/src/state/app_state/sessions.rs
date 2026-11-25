@@ -385,7 +385,7 @@ impl AppState {
         )
         .with_default_provider_name(catalogue.default_provider_name())
         .with_provider_resolver(
-            Arc::clone(&catalogue) as Arc<dyn uva::provider::ProviderResolver>,
+            Arc::clone(&catalogue) as Arc<dyn uva::provider::ProviderResolver>
         )
         .with_host(Some(self.plugin_host.clone()))
         .with_prompt_context(self.prompt_context(&self_name).await)

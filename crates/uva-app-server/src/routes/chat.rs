@@ -425,7 +425,7 @@ async fn steer_session_op(
 /// (the Anthropic wire maps the same variants the same way). The
 /// message is the error's own `Display`, which names the value the
 /// caller sent.
-fn selection_error(error: ModelSelectionError) -> RpcError {
+pub(crate) fn selection_error(error: ModelSelectionError) -> RpcError {
     let message = error.to_string();
     RpcError::from(Error::validation(message.clone()))
         .with_code("invalid_model")
@@ -727,7 +727,7 @@ fn has_multimodal_input(req: &SendMessageRequest) -> bool {
 /// A `None` store does not degrade the turn silently — an image the
 /// caller supplied disappearing from the prompt is a wrong answer, not
 /// a smaller one.
-fn admit_attachments(
+pub(crate) fn admit_attachments(
     req: &SendMessageRequest,
     available: bool,
 ) -> Result<(), &'static str> {
@@ -749,7 +749,7 @@ fn admit_attachments(
 /// and the bytes are inlined as an `Image` part (replay-safe via
 /// content addressing). Pass `None` in tests / when the store is
 /// unavailable; unresolved refs are skipped with a warn log.
-fn build_parts(
+pub(crate) fn build_parts(
     req: &SendMessageRequest,
     attachment_store: Option<&uva::attachment::AttachmentStore>,
 ) -> Vec<ContentPart> {
@@ -936,6 +936,8 @@ fn extract_last_user_parts(events: &[Value]) -> Option<Vec<ContentPart>> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+pub mod stream;
 
 #[cfg(test)]
 mod tests;

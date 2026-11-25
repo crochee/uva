@@ -92,6 +92,12 @@ pub enum ControlFrame {
         /// about the node that accepted it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The turn's id, when the caller minted one. The owner
+        /// parks the turn under it and tags the turn's live events
+        /// with it, so the caller's stream and the owner's
+        /// transcript speak the same id across the bus.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
     /// Abort the session's in-flight run on its owner.
     CancelSession { origin: NodeId, key: SessionKey },

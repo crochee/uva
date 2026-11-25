@@ -50,9 +50,22 @@ pub(crate) fn spawn_control_dispatcher(state: Arc<AppState>) {
 
 async fn apply(state: &Arc<AppState>, frame: ControlFrame) {
     match frame {
-        ControlFrame::ForwardOp { key, op, model, .. } => {
-            forward_op(state, key.user_id, key.session_id, op.into(), model)
-                .await;
+        ControlFrame::ForwardOp {
+            key,
+            op,
+            model,
+            turn_id,
+            ..
+        } => {
+            forward_op(
+                state,
+                key.user_id,
+                key.session_id,
+                op.into(),
+                model,
+                turn_id,
+            )
+            .await;
         }
         ControlFrame::CompactSession { key, .. } => {
             compact_on_owner(state, key.user_id, key.session_id).await;
@@ -63,6 +76,7 @@ async fn apply(state: &Arc<AppState>, frame: ControlFrame) {
                 key.user_id,
                 key.session_id,
                 crate::session::controller::SessionOp::Cancel { reason: None },
+                None,
                 None,
             )
             .await;
@@ -131,6 +145,7 @@ async fn forward_op(
     session_id: String,
     op: crate::session::controller::SessionOp,
     model: Option<String>,
+    turn_id: Option<String>,
 ) {
     let key = (user_id, session_id);
     let controller = state.active_sessions.get(&key).map(|c| c.clone());
@@ -162,7 +177,7 @@ async fn forward_op(
         },
         None => None,
     };
-    if let Err(e) = controller.submit_with_provider(op, provider).await {
+    if let Err(e) = controller.submit_turn(op, provider, turn_id).await {
         tracing::warn!(
             session = ?key,
             error = %e,

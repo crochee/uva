@@ -277,7 +277,8 @@ impl AppServer {
             Some(
                 "session/event"
                 | "anthropic/messages/event"
-                | "approval/request",
+                | "approval/request"
+                | "chat/turn/event",
             ) => {}
             _ => {
                 self.broadcast(frame);

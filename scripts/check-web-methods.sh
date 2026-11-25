@@ -91,6 +91,7 @@ METHODS_DIR="crates/uva-app-server/src/rpc/methods"
 NOTIFY_FILES=(
   crates/uva-app-server/src/rpc/notify.rs
   crates/uva-app-server/src/routes/messages/mod.rs
+  crates/uva-app-server/src/routes/chat/stream.rs
 )
 CONTRACT="crates/uva-app-server/src/api/contract.rs"
 WEB_API_DIR="uva-web/src/api"

@@ -217,6 +217,10 @@ VOCAB=" ${TAGS[*]} ${DIALECTS[*]} "
 # allows: fix a real row-tag spelling, never exempt it.
 EXEMPTIONS='
 crates/uva-app-server/src/api/operation.rs|compaction|an OperationKind, not a session row tag
+crates/uva-app-server/src/routes/chat/stream.rs|tool_call|a chat/turn/event frame kind, not a session row tag
+crates/uva-app-server/src/routes/chat/stream.rs|tool_result|a chat/turn/event frame kind, not a session row tag
+crates/uva-app-server/src/routes/chat/stream.rs|usage|a chat/turn/event frame kind, not a session row tag
+crates/uva-app-server/src/routes/chat/stream.rs|warning|a chat/turn/event frame kind, not a session row tag
 crates/uva-app-server/src/state/boot.rs|compaction|a run-config key, not a session row tag
 crates/uva-context/src/memory/file/entry.rs|feedback|a MemoryKind, not a session row tag
 crates/uva-events/src/events/mod.rs|Model|an AgentEvent kind, not a session row tag

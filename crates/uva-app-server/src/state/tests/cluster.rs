@@ -103,10 +103,14 @@ async fn shared_bus_forwards_ops_and_mirrors_the_tail() {
         .unwrap();
 
     let saw_text = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Ok(event) = tail.recv().await {
-            if let crate::session::controller::AgentEvent::Model(
-                uva::provider::ContentPart::Text(text),
-            ) = event
+        while let Ok(item) = tail.recv().await {
+            if let crate::event_stream::BroadcastEvent::Run {
+                event:
+                    crate::session::controller::AgentEvent::Model(
+                        uva::provider::ContentPart::Text(text),
+                    ),
+                ..
+            } = item
                 && text.text.contains("pong")
             {
                 return true;
@@ -159,10 +163,14 @@ async fn closing_the_owner_hands_the_lease_over() {
         .await
         .unwrap();
     let ran = tokio::time::timeout(Duration::from_secs(5), async {
-        while let Ok(event) = tail.recv().await {
-            if let crate::session::controller::AgentEvent::Model(
-                uva::provider::ContentPart::Text(text),
-            ) = event
+        while let Ok(item) = tail.recv().await {
+            if let crate::event_stream::BroadcastEvent::Run {
+                event:
+                    crate::session::controller::AgentEvent::Model(
+                        uva::provider::ContentPart::Text(text),
+                    ),
+                ..
+            } = item
                 && text.text.contains("pong")
             {
                 return true;

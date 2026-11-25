@@ -107,6 +107,15 @@ pub(super) enum OpAck {
 pub(super) struct SubmittedOp {
     pub(super) op: SessionOp,
     pub(super) provider: Option<PinnedProvider>,
+    /// The id the submitter minted for the turn this operation
+    /// starts.
+    ///
+    /// The turn's durable `parked_prompt` row carries it, and every
+    /// live event of the turn is tagged with it — so a client that
+    /// asked for this turn's stream matches the stream and the
+    /// transcript with one id. `None` leaves the id to the
+    /// controller, which mints one.
+    pub(super) turn_id: Option<String>,
     /// The submitter's ack channel: `Some` when the caller waits for
     /// the operation's durable effect. The loop answers it once the
     /// operation's row is on disk (or with the failure that stopped
@@ -122,8 +131,9 @@ impl SubmittedOp {
     ) -> (
         SessionOp,
         Option<PinnedProvider>,
+        Option<String>,
         Option<oneshot::Sender<OpAck>>,
     ) {
-        (self.op, self.provider, self.ack)
+        (self.op, self.provider, self.turn_id, self.ack)
     }
 }

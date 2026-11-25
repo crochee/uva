@@ -3982,13 +3982,9 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "uva-context",
  "uva-core",
- "uva-harness",
  "uva-provider",
  "uva-search",
- "uva-session",
- "uva-steering",
  "uva-test-support",
  "uva-tool",
 ]

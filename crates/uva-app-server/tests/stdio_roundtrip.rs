@@ -269,6 +269,105 @@ fn a_follow_answers_the_baseline() {
     );
     assert_eq!(stopped["result"]["stopped"], true);
 }
+/// `chat/message/stream` — one request, the turn's deltas back.
+///
+/// The headless core's native streaming door: the answer names the
+/// turn it started, the turn's frames follow as `chat/turn/event`
+/// notifications carrying that id, and the last frame is the turn's
+/// end. The demo provider answers in one text chunk, so the proof is
+/// the *shape* of the stream — the text frame, then the end frame,
+/// all under one turn id, none of them the session's cumulative
+/// snapshot.
+///
+/// The frames can precede the response: the turn starts when the
+/// park is durable, and the demo provider answers before the
+/// response's round trip completes. The test therefore collects the
+/// turn's notifications while it waits for the answer — exactly what
+/// a client that buffers notifications it cannot yet attribute has
+/// to do.
+#[test]
+fn a_turn_streams_its_deltas() {
+    let temp = workspace();
+    let mut core = Core::spawn(temp.path());
+    core.await_ready();
+    let created = core.call(
+        "c1",
+        "chat/session/create",
+        json!({ "title": "a streamed turn" }),
+    );
+    let session_id = created["result"]["session_id"]
+        .as_str()
+        .expect("the session id")
+        .to_string();
+    core.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "c2",
+        "method": "chat/message/stream",
+        "params": { "session_id": session_id, "text": "hello stream" },
+    }));
+    // Collect the turn's frames while the answer is in flight: a
+    // notification that arrives before its request's response is
+    // still part of that request's stream.
+    let mut frames: Vec<Value> = Vec::new();
+    let answer = loop {
+        let frame = core.recv();
+        if frame.get("method").and_then(Value::as_str)
+            == Some("chat/turn/event")
+        {
+            frames.push(frame);
+            continue;
+        }
+        if frame.get("id") == Some(&json!("c2")) {
+            break frame;
+        }
+    };
+    assert!(answer["result"]["accepted"] == true, "{answer}");
+    let turn_id = answer["result"]["turn_id"]
+        .as_str()
+        .expect("the turn id")
+        .to_string();
+    // Read the turn's own frames until its end. The demo provider
+    // answers in one text chunk, so the stream is short — but it must
+    // end with an `end` frame under the same turn id, and a text
+    // frame must arrive before it.
+    let mut saw_text = false;
+    let mut seq = 0u64;
+    let reason = loop {
+        let frame = if frames.is_empty() {
+            core.recv()
+        } else {
+            frames.remove(0)
+        };
+        if frame.get("method").and_then(Value::as_str)
+            != Some("chat/turn/event")
+        {
+            continue;
+        }
+        let params = &frame["params"];
+        assert_eq!(
+            params["turn_id"].as_str(),
+            Some(turn_id.as_str()),
+            "{frame}"
+        );
+        let next = params["seq"].as_u64().expect("the frame's ordinal");
+        assert_eq!(next, seq + 1, "the frames number themselves: {frame}");
+        seq = next;
+        match params["frame"]["kind"].as_str() {
+            Some("text") => {
+                saw_text = true;
+                let text = params["frame"]["text"].as_str().unwrap_or("");
+                assert!(
+                    text.contains("hello stream"),
+                    "the demo echo carries the prompt: {frame}"
+                );
+            }
+            Some("end") => break params["frame"]["reason"].clone(),
+            _ => {}
+        }
+    };
+    assert_eq!(reason, json!("completed"), "{reason}");
+    assert!(saw_text, "the stream carried the answer's text");
+}
 /// The core's stdout carries the protocol and nothing else: a log
 /// line on stdout would reach the peer as a malformed frame.
 #[test]

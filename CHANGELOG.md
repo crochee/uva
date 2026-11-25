@@ -12,6 +12,26 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Added (无头内核的原生回合流)
+
+- **`chat/message/stream`**：无头内核（stdio JSON-RPC 2.0）第一次有了自己的流式门。
+  请求与 `chat/message/send` 同形；回答 `{accepted, turn_id}`，该回合的增量以
+  `chat/turn/event` 通知逐帧发布——`text` / `reasoning`（模型增量）、`tool_call` /
+  `tool_progress` / `tool_result`、`usage` / `warning`、`gap`（live 帧被丢弃的
+  诚实声明）、`end`（终帧，`completed` / `cancelled` / `suspended`）。帧按 `seq`
+  从 1 编号。客户端不再需要 `sessions/follow` 的累积快照（O(n²) 字节、自己
+  diff）或借道 Anthropic 方言。
+- **一个回合一个 id**：回合 id 由提交方现铸，随 op 信封交给控制器，成为 durable
+  `parked_prompt` 行的 `park_id` 与每帧 live 事件的标签——回答流、durable 转录、
+  集群转发三方共用一个字符串。集群转发（`ControlFrame::ForwardOp`）携带它。
+- **live 通道的条目换形**：`EventBroadcaster` 携带 `BroadcastEvent::{Run,
+  TurnEnded}`（带 `turn_id`）；`TurnEnded` 在行 flush 之后发布，是 live 流里
+  第一个回合级终信号。网关把 `chat/turn/event` 与 `session/event` 同表按
+  `session_id` 路由。`sessions/follow` 的累积快照语义不动（TUI 与浏览器的
+  渲染契约）。
+
+见 `docs/adr/0030-one-id-per-turn-one-owner-per-the-live-channel.md`。
+
 ### Changed (一步的回合归一次折叠)
 
 - **一步的回合只有一个主人**：Anthropic 与 OpenAI 的流处理器退回纯解码——正文、工具调用、

@@ -83,6 +83,9 @@ pub const EVALS_RUN: &str = "evals/run";
 pub const CHAT_SESSION_CREATE: &str = "chat/session/create";
 /// `chat/message/send` — send a message into a session.
 pub const CHAT_MESSAGE_SEND: &str = "chat/message/send";
+/// `chat/message/stream` — send one message and stream that turn's
+/// deltas back as `chat/turn/event` notifications.
+pub const CHAT_MESSAGE_STREAM: &str = "chat/message/stream";
 /// `chat/cancel` — cancel the running turn.
 pub const CHAT_CANCEL: &str = "chat/cancel";
 /// `chat/regenerate` — run the turn again.
@@ -207,6 +210,7 @@ pub const ALL: &[&str] = &[
     // chat
     CHAT_SESSION_CREATE,
     CHAT_MESSAGE_SEND,
+    CHAT_MESSAGE_STREAM,
     CHAT_CANCEL,
     CHAT_REGENERATE,
     CHAT_FEEDBACK,

@@ -309,6 +309,7 @@ impl SessionController {
                 while let Some(submitted) = op_rx.recv().await {
                     let model =
                         submitted.provider.as_ref().map(|pin| pin.model_name());
+                    let turn_id = submitted.turn_id.clone();
                     let frame = match submitted.op {
                         SessionOp::Shutdown => break,
                         SessionOp::Cancel { .. } => {
@@ -323,6 +324,7 @@ impl SessionController {
                                 key: key.clone(),
                                 op,
                                 model,
+                                turn_id,
                             },
                             None => {
                                 // Resume has no wire form: it reads
@@ -363,11 +365,15 @@ impl SessionController {
                     return;
                 };
                 while let Some(frame) = rx.recv().await {
-                    if let Ok(event) = serde_json::from_value::<
-                        uva::harness::AgentEvent,
+                    // The bus carries the channel's own item — a run's
+                    // event or a turn's end — and the durable rows
+                    // beside it. A row is not an item, so the decode
+                    // refuses it and the frame is skipped.
+                    if let Ok(item) = serde_json::from_value::<
+                        crate::event_stream::BroadcastEvent,
                     >(frame.payload)
                     {
-                        let _ = broadcaster.send(event);
+                        let _ = broadcaster.send(item);
                     }
                 }
             });
@@ -397,9 +403,26 @@ impl SessionController {
         op: SessionOp,
         provider: Option<PinnedProvider>,
     ) -> Result<()> {
+        self.submit_turn(op, provider, None).await
+    }
+
+    /// Submit an operation, naming the turn it starts.
+    ///
+    /// The turn id is the submitter's: it becomes the turn's durable
+    /// `parked_prompt` row id and the tag on every live event of the
+    /// turn, so a client that asked for this turn's stream matches
+    /// the stream and the transcript with one id. `None` leaves the
+    /// id to the controller, which mints one.
+    pub async fn submit_turn(
+        &self,
+        op: SessionOp,
+        provider: Option<PinnedProvider>,
+        turn_id: Option<String>,
+    ) -> Result<()> {
         let submitted = SubmittedOp {
             op,
             provider,
+            turn_id,
             ack: None,
         };
         self.op_tx
@@ -451,10 +474,27 @@ impl SessionController {
         op: SessionOp,
         provider: Option<PinnedProvider>,
     ) -> Result<()> {
+        self.submit_durable_turn(op, provider, None).await
+    }
+
+    /// [`Self::submit_durable_with_provider`] with the turn's id
+    /// minted by the caller.
+    ///
+    /// The id names the turn the operation starts: it becomes the
+    /// turn's durable `parked_prompt` row id and the tag on every
+    /// live event of the turn. A client that streams one turn's
+    /// answer matches the stream and the transcript with it.
+    pub async fn submit_durable_turn(
+        &self,
+        op: SessionOp,
+        provider: Option<PinnedProvider>,
+        turn_id: Option<String>,
+    ) -> Result<()> {
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         let submitted = SubmittedOp {
             op,
             provider,
+            turn_id,
             // A remote handle has no log to confirm: the owner parks
             // the turn there.
             ack: (!self.remote).then_some(ack_tx),
@@ -753,10 +793,15 @@ impl SessionController {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Subscribe to the session's event broadcast channel.
+    /// Subscribe to the session's live channel.
+    ///
+    /// The channel carries the run's events and the turn's end, each
+    /// tagged with the turn it belongs to — see
+    /// [`crate::event_stream::BroadcastEvent`].
     pub fn subscribe(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<uva::harness::AgentEvent> {
+    ) -> tokio::sync::broadcast::Receiver<crate::event_stream::BroadcastEvent>
+    {
         self.broadcaster.subscribe()
     }
 
@@ -770,7 +815,11 @@ impl SessionController {
     /// session.
     #[cfg(test)]
     pub(crate) fn broadcast_event(&self, event: &uva::harness::AgentEvent) {
-        if let Err(error) = self.broadcaster.send(event.clone()) {
+        let item = crate::event_stream::BroadcastEvent::Run {
+            turn_id: None,
+            event: event.clone(),
+        };
+        if let Err(error) = self.broadcaster.send(item) {
             tracing::debug!(
                 target: "uva.session",
                 session_id = %self.session_id,
@@ -810,6 +859,7 @@ impl SessionController {
         if let Err(e) = self.op_tx.try_send(SubmittedOp {
             op: SessionOp::Shutdown,
             provider: None,
+            turn_id: None,
             ack: None,
         }) {
             tracing::debug!(

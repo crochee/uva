@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use tokio::sync::broadcast;
-use uva::harness::AgentEvent;
 
 use super::controller::{SessionController, SessionOp};
 
@@ -60,8 +59,10 @@ pub trait SessionLane: Send + Sync {
         Box<dyn std::future::Future<Output = Result<(), LaneError>> + Send>,
     >;
 
-    /// Subscribe to the lane's broadcast agent-event stream.
-    fn subscribe(&self) -> broadcast::Receiver<AgentEvent>;
+    /// Subscribe to the lane's broadcast live stream.
+    fn subscribe(
+        &self,
+    ) -> broadcast::Receiver<crate::event_stream::BroadcastEvent>;
 
     /// Close the lane. Idempotent.
     fn close(
@@ -130,7 +131,9 @@ impl SessionLane for DefaultLane {
         })
     }
 
-    fn subscribe(&self) -> broadcast::Receiver<AgentEvent> {
+    fn subscribe(
+        &self,
+    ) -> broadcast::Receiver<crate::event_stream::BroadcastEvent> {
         self.controller.subscribe()
     }
 }

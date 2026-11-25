@@ -205,5 +205,11 @@ async fn test_events_are_persisted_and_broadcast() {
         .unwrap();
     // The first broadcast event is the Message event (emitted first
     // by the factory).
-    assert!(matches!(received, AgentEvent::Model(ContentPart::Text(_))));
+    assert!(matches!(
+        received,
+        crate::event_stream::BroadcastEvent::Run {
+            event: AgentEvent::Model(ContentPart::Text(_)),
+            ..
+        }
+    ));
 }
