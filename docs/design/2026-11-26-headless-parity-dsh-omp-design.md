@@ -67,8 +67,9 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 委派控制面 | `interrupt()` 鉴权到祖先链（`packages/subagent/subagent/src/manager.ts:196-233`） | RPC：`get_subagents` / `cancel_subagent` / `steer_subagent`，子代理记录按字节增量读（`packages/coding-agent/src/modes/rpc/rpc-subagents.ts:74-107`） | 机器有（`crates/uva-tool-task/src/control/mod.rs:389` 的 `kill`、`registry`），**但没有无头门** | **缺口 G8（本轮切）** |
 | 控制面协议 | 自有 JSON-RPC stdio server（`packages/sdk/server/src/server.ts:609-667`） | 自有 JSONL：~90 条命令、协议协商、**分块帧**（`wire/commands.ts:35-454`、`rpc-frame.ts:6,9`） | JSON-RPC 2.0 + Content-Length 帧，64 MiB 逻辑上限，超限即错（`crates/uva-app-server/src/rpc/framing.rs:32`） | **对齐（切 10）**：逻辑上限同 omp v2；分块/协商对 Content-Length 不适用（见切 10）；出站背压落盘 |
 | 增量读 | — | `get_entries?since` + 分页游标（`docs/rpc.md`） | `sessions/events` **每次整本**返回（`crates/uva-app-server/src/routes/sessions/mod.rs:827-855`） | **缺口 G11（本轮切）** |
-| 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write` 经 ACP `fs/*` 回到客户端，见「切 5」）；`terminal/*` 与每会话 MCP 仍如实缺席 | **半缺口 G12**：terminal 半边留下（本部署没有终端操作可委派） |
+| 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12）**：协议没有「宿主自带工具」的原语，那一半如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
+| 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
 ---
@@ -88,6 +89,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G9 | ~~无跨进程会话租约~~ **已落**（切 9）：`owner.lock` + flock，append 拒绝失败关闭 | — | `crates/uva-session/src/ownership.rs` |
 | G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
 | G12 | ~~无客户端侧 fs/terminal 委派~~ **已落**（切 5 的 fs 半边 + 切 11 的 terminal 半边）：`fs/*` 与 `terminal/*` 两套委派都走同一条「客户端拥有」的路 | — | 同左 |
+| G13 | **工具族少一个 `edit`**：只有 `read` 与 `write`，改一行要重写整个文件——两个参考都有精确编辑（dsh `str_replace_editor`、omp `edit`） | 中 | `crates/uva-tool-plugins/src/` |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
 
 ---
@@ -491,6 +493,43 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
 
 ---
 
+
+### 切 12 — `edit` 工具：精确改一处（G13）
+
+**要什么**：工具族里有 `read` 与 `write`，**没有 `edit`**——改一行就要把整个
+文件重写一遍，评审者看到的 diff 也因此变大。两个参考都有精确编辑：dsh 的
+`str_replace_editor`（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`）
+与 omp 的 `edit`（`packages/coding-agent/src/edit/magic-tools.ts:191-210`）。
+
+**怎么落**：
+1. **一个模块 + 一个 feature**（插件族的老规矩）：`uva_tool_plugins::edit`，
+   feature `edit`，facade 的 `tool-edit`，app-server 的 `tool-edit` 行
+   （`profile.toml` 与能力矩阵同步）。
+2. **逐字命中**：旧文本必须原样出现；多处命中被拒，**并点名行号**（dsh 的
+   做法），除非显式 `replace_all`。
+3. **失败可解释**：两种「没命中」给两种下一步——新文本已经在文件里（这次改动
+   已经应用过），否则就是「逐字不符，去重读并复制原文」（omp 的诊断思路）。
+   另外两条在读文件之前就拒：旧新相同（不改任何东西）、`replace_all` 配空白
+   旧文本（会命中 everywhere）。
+4. **走同一条缝**：文件归谁所有，编辑就落在谁的字节上——客户端拥有工作区时，
+   `edit` 改的是客户端的文件（`FileSystemOwner` 这条缝在切 5 已经铺好）。
+
+**落点**：
+- `crates/uva-tool-plugins/src/edit/mod.rs`：`EditTool`（逐字匹配、行号、
+  两种失败解释）。
+- `crates/uva-tool-plugins/src/edit/plugin.rs`：`EditToolPlugin`（注册进
+  `tools` 注册表，卸载即撤销）。
+- `crates/uva-app-server/src/composition/kernel/mod.rs`：`tool-edit` 行。
+
+**验收**：
+- 单元（edit）：逐字命中改对了并点名行号；多处命中被拒且点名行号；
+  `replace_all` 改全部；空新串即删除；两种「没命中」各给各的下一步；相同替换与
+  空白 `replace_all` 在读文件前被拒；缺文件与越界路径被拒；编辑落在 owner 的
+  字节上（本机磁盘没被碰）。
+- 行为（app-server）：部署挂载了 `edit`（工具注册表里有它）。
+
+---
+
 ---
 
 ## 6. 下一轮候选（不在本轮）
@@ -505,7 +544,7 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
 （G7 已驳回——取消检查在工具流的 drain 里。G2 已结——切 8：连续性已
   结构化交付，seam 留给会铸造原生状态的适配器。G4 已落——切 6。
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
-  （terminal）。）
+  （terminal）。G13 已落——切 12。）
 
 ---
 

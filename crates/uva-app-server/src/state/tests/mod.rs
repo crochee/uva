@@ -52,4 +52,5 @@ mod self_mcp;
 mod session_resolution;
 mod sessions;
 pub(crate) mod support;
+mod tool_surface;
 mod unapplied_keys;

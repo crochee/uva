@@ -20,6 +20,12 @@ name = "tool-write"
 
 [[core.entries]]
 disabled = false
+id = "tool-edit"
+inject = ["tools"]
+name = "tool-edit"
+
+[[core.entries]]
+disabled = false
 id = "tool-shell"
 inject = ["tools"]
 name = "tool-shell"

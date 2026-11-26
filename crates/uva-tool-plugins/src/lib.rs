@@ -10,6 +10,7 @@
 //! |---|---|---|
 //! | `read` | [`mod@read`] | read a workspace file, with an optional line range |
 //! | `write` | [`mod@write`] | write a workspace file |
+//! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
 //! | `shell` | [`mod@shell`] | run a process, under the OS execution policy it owns |
 //! | `todo` | [`mod@todo`] | the `TodoWrite` task list |
 //! | `web` | [`mod@web`] | fetch a URL — the only tool that pulls an HTTP client |
@@ -40,6 +41,8 @@
 //! because it needs the agent vocabulary rather than the tool trait
 //! alone.
 
+#[cfg(feature = "edit")]
+pub use edit::{EditTool, EditToolPlugin};
 pub use files::{FileError, FileSystemOwner, LocalFileSystem};
 #[cfg(feature = "memo")]
 pub use memo::{
@@ -84,6 +87,8 @@ pub use web::{WebFetchTool, WebFetchToolPlugin};
 #[cfg(feature = "write")]
 pub use write::{WriteTool, WriteToolPlugin};
 
+#[cfg(feature = "edit")]
+pub mod edit;
 /// The file-system seam the `read` and `write` tools read through.
 pub mod files;
 #[cfg(feature = "memo")]
