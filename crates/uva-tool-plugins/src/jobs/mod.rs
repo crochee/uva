@@ -702,7 +702,11 @@ async fn spawn_job(
             Err(error) => JobState::Failed(format!("wait failed: {error}")),
         };
         if let Ok(mut slot) = waiter_state.lock() {
-            *slot = next.clone();
+            // A kill already said what happened to this job; the
+            // exit status does not overwrite that.
+            if !matches!(*slot, JobState::Killed) {
+                *slot = next.clone();
+            }
         }
         // The host hears about the completion: the model learns that
         // its command is done without polling for it.
