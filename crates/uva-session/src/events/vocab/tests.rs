@@ -105,8 +105,8 @@ fn strings_outside_both_vocabularies_read_as_neither() {
 /// The vocabulary's size is a deliberate contract: adding or
 /// removing a row tag is a wire change, never silent growth.
 #[test]
-fn the_wire_vocabulary_has_thirty_three_tags() {
-    assert_eq!(RowTag::ALL.len(), 33, "thirty-three tags, no drift");
+fn the_wire_vocabulary_has_thirty_four_tags() {
+    assert_eq!(RowTag::ALL.len(), 34, "thirty-four tags, no drift");
 }
 
 /// THE tie that pins both directions of the correspondence: for

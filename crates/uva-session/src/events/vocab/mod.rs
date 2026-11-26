@@ -120,6 +120,8 @@ pub enum RowTag {
     ParkConsumed,
     /// User feedback on a completed turn (log-only).
     Feedback,
+    /// The session's durable goal (one row per change).
+    Goal,
     /// One plugin event: `data.kind` names the plugin's event.
     Plugin,
 }
@@ -129,7 +131,7 @@ impl RowTag {
     /// wire schema publishes them in. Test-only: the published
     /// surface is the enum and its schema, not a list.
     #[cfg(test)]
-    pub(crate) const ALL: [RowTag; 33] = [
+    pub(crate) const ALL: [RowTag; 34] = [
         RowTag::UserMessage,
         RowTag::AssistantMessage,
         RowTag::AssistantChunk,
@@ -162,6 +164,7 @@ impl RowTag {
         RowTag::ParkedPrompt,
         RowTag::ParkConsumed,
         RowTag::Feedback,
+        RowTag::Goal,
         RowTag::Plugin,
     ];
 
@@ -205,6 +208,7 @@ impl RowTag {
             Self::ParkedPrompt => "parked_prompt",
             Self::ParkConsumed => "park_consumed",
             Self::Feedback => "feedback",
+            Self::Goal => "goal",
             Self::Plugin => "plugin",
         }
     }
@@ -251,6 +255,7 @@ impl RowTag {
             "parked_prompt" => Some(Self::ParkedPrompt),
             "park_consumed" => Some(Self::ParkConsumed),
             "feedback" => Some(Self::Feedback),
+            "goal" => Some(Self::Goal),
             "plugin" => Some(Self::Plugin),
             _ => None,
         }
@@ -299,6 +304,7 @@ impl RowTag {
             | Self::ParkedPrompt
             | Self::ParkConsumed
             | Self::Feedback
+            | Self::Goal
             | Self::Plugin => SurfaceRole::LogOnly,
         }
     }
@@ -347,6 +353,7 @@ impl RowTag {
             | Self::ParkedPrompt
             | Self::ParkConsumed
             | Self::Feedback
+            | Self::Goal
             | Self::Plugin => None,
         }
     }
@@ -398,6 +405,7 @@ impl RowTag {
             | Self::ParkedPrompt
             | Self::ParkConsumed
             | Self::Feedback
+            | Self::Goal
             | Self::Plugin => false,
         }
     }
@@ -640,6 +648,13 @@ impl RowTag {
                 ts: String::new(),
                 message_id: String::new(),
                 thumbs_up: false,
+            },
+            Self::Goal => SessionEvent::Goal {
+                seq: 0,
+                ts: String::new(),
+                state: String::new(),
+                objective: String::new(),
+                budget_tokens: None,
             },
             Self::Plugin => SessionEvent::Plugin {
                 seq: 0,

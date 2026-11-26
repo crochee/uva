@@ -1285,6 +1285,15 @@ mod one_owner_per_tag {
             ]),
             Case::new("park_consumed", park_consumed("park-1".to_string()))
                 .typed([("park_id", json!("park-1"))]),
+            Case::new(
+                "goal",
+                goal("active", "ship the tool family", Some(50_000)),
+            )
+            .typed([
+                ("state", json!("active")),
+                ("objective", json!("ship the tool family")),
+                ("budget_tokens", json!(50_000)),
+            ]),
             Case::new("feedback", feedback("42".to_string(), true)).typed([
                 ("message_id", json!("42")),
                 ("thumbs_up", json!(true)),

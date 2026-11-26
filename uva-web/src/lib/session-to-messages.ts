@@ -1183,6 +1183,9 @@ const TYPED_ROW_TREATMENT: Record<SessionEventType, TypedRowHandler | null> = {
   park_consumed: null,
   // Log-only by design: never model-visible.
   feedback: null,
+  // The session's durable goal: a control row, not a transcript
+  // message.
+  goal: null,
 };
 
 function applyHistoryEntry(entry: SessionTurn, sessionId: string, out: ChatMessageLike[]): void {

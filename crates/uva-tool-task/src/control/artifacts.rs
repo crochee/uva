@@ -199,6 +199,7 @@ fn render_row(out: &mut String, row: &Value) {
         | RowTag::ParkedPrompt
         | RowTag::ParkConsumed
         | RowTag::Feedback
+        | RowTag::Goal
         | RowTag::Plugin => {}
     }
 }

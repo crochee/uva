@@ -208,6 +208,23 @@ pub fn approval_granted(
     }
 }
 
+/// Build a `Goal` row: one row per change, the latest one the
+/// session's goal.
+#[must_use]
+pub fn goal(
+    state: &str,
+    objective: &str,
+    budget_tokens: Option<u64>,
+) -> SessionEvent {
+    SessionEvent::Goal {
+        seq: 0,
+        ts: String::new(),
+        state: state.to_string(),
+        objective: objective.to_string(),
+        budget_tokens,
+    }
+}
+
 /// Build the `ToolDispatch` intent row written before a call runs.
 #[must_use]
 pub fn tool_dispatch(

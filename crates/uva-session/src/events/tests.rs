@@ -39,6 +39,9 @@ fn extra_fields(tag: &str) -> Value {
         }),
         "park_consumed" => json!({"park_id": "park-1"}),
         "feedback" => json!({"message_id": "m1", "thumbs_up": true}),
+        "goal" => json!({
+            "state": "active", "objective": "ship the tool family",
+        }),
         "plugin" => json!({
             "kind": "acme.span", "payload": {"span": "s1"},
         }),
@@ -1299,6 +1302,10 @@ fn the_rows_the_vocabulary_writes() -> Vec<(&'static str, SessionEvent)> {
             builders::park_consumed("park-1".to_string()),
         ),
         ("feedback", builders::feedback("42".to_string(), true)),
+        (
+            "goal",
+            builders::goal("active", "ship the tool family", Some(50_000)),
+        ),
         (
             "session_shutdown",
             builders::session_shutdown(SessionEndReason::Cancelled),

@@ -172,13 +172,14 @@ TAGS=(
   parked_prompt
   park_consumed
   feedback
+  goal
   plugin
 )
 
 DIALECTS=(UserInput Model Message Agent)
 
-if [[ ${#TAGS[@]} -ne 33 || ${#DIALECTS[@]} -ne 4 ]]; then
-  echo "FAIL: the gate's vocabulary must be 33 tags + 4 dialects" >&2
+if [[ ${#TAGS[@]} -ne 34 || ${#DIALECTS[@]} -ne 4 ]]; then
+  echo "FAIL: the gate's vocabulary must be 34 tags + 4 dialects" >&2
   exit 1
 fi
 

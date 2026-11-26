@@ -7202,6 +7202,223 @@ export type SessionTurn =
       original_bytes?: number | null;
     }
   | {
+      type?: 'goal';
+      data?: unknown;
+      /**
+       * RFC 3339 instant the writer stamped the row with.
+       */
+      ts?: string | null;
+      /**
+       * The writer's ordinal for the row. This is the client's only
+       * cursor, and what a resume token's `last_seq` points at.
+       */
+      seq?: number | null;
+      /**
+       * Provenance recorded beside the row, when it is not an ordinary
+       * turn boundary. Today only `"steer"`.
+       */
+      source?: string | null;
+      /**
+       * `true` on a `tool_result` row whose tool failed.
+       */
+      is_error?: boolean | null;
+      /**
+       * The provider call id — a `tool_call` / `tool_output` row, an
+       * approval row, a `tool_dispatch` row or a transformed result.
+       */
+      call_id?: string | null;
+      /**
+       * The provider call id a `tool_result` row answers.
+       */
+      tool_call_id?: string | null;
+      attachments?: unknown;
+      /**
+       * The surface op the row applies instead of appending —
+       * `"append"` (a plain string) or a replace range.
+       */
+      surface_op?: SurfaceOp | null;
+      /**
+       * `true` on a row whose kind this build does not know — the
+       * writer's marker, letting such a build skip the row instead of
+       * refusing the whole log.
+       */
+      ignorable?: boolean | null;
+      /**
+       * Which boundary the row is — a `step` / `turn` row. On a
+       * `plugin` row it is the plugin's own event kind, a different
+       * fact that happens to share the name.
+       */
+      kind?: string | null;
+      /**
+       * Which turn the row belongs to — a `step` / `turn` row.
+       */
+      turn?: number | null;
+      /**
+       * Which step inside the turn — a `step` row.
+       */
+      step?: number | null;
+      /**
+       * The chunk's ordinal within its turn — an `assistant_chunk` row.
+       */
+      chunk_seq?: number | null;
+      /**
+       * The provider stop reason — a terminal `assistant_chunk` row.
+       */
+      finish_reason?: string | null;
+      /**
+       * The correlation token of a compaction — the `compaction_start` /
+       * `compaction_summary` / `compaction_end` rows.
+       */
+      token?: string | null;
+      /**
+       * How a compaction ended — `committed` / `failed` / `interrupted`.
+       */
+      outcome?: string | null;
+      /**
+       * The tool a `tool_call` row names.
+       */
+      name?: string | null;
+      /**
+       * The tool a row addresses — a `tool_output` row, an approval row
+       * or a `tool_dispatch` row.
+       */
+      tool?: string | null;
+      /**
+       * The delegated child's session — a `subagent_enter` /
+       * `subagent_exit` row.
+       */
+      child_session_id?: string | null;
+      /**
+       * The delegating session — a `subagent_enter` row.
+       */
+      parent_session_id?: string | null;
+      /**
+       * The agent a row names — a `subagent_enter` / `parked_prompt` row.
+       */
+      agent_name?: string | null;
+      /**
+       * How deep the delegation is — the root session is `0`.
+       */
+      depth?: number | null;
+      /**
+       * How a row ended — a `subagent_exit` / `approval_decided` row.
+       */
+      status?: string | null;
+      /**
+       * The provider a row names — a `request_header` /
+       * `request_snapshot` / `parked_prompt` row.
+       */
+      provider?: string | null;
+      /**
+       * The model a row names — a `request_header` / `request_snapshot` /
+       * `parked_prompt` row.
+       */
+      model?: string | null;
+      /**
+       * The request id an approval row refers to.
+       */
+      id?: string | null;
+      /**
+       * The digest of a held call's arguments — an `approval_asked` /
+       * `tool_dispatch` row.
+       */
+      arguments_hash?: string | null;
+      /**
+       * The risk a held call was judged at — an `approval_asked` row.
+       */
+      risk?: string | null;
+      /**
+       * The agent a held call belongs to — an `approval_asked` row.
+       */
+      agent?: string | null;
+      /**
+       * Who decided — an `approval_decided` row.
+       */
+      by?: string | null;
+      payload?: unknown;
+      /**
+       * What a grant covers — `"session"` / `"deployment"`.
+       */
+      scope?: string | null;
+      /**
+       * The workspace a grant is bound to.
+       */
+      workspace_hash?: string | null;
+      /**
+       * The digest of the sampling parameters — a `request_snapshot` row.
+       */
+      params_hash?: string | null;
+      /**
+       * The digest of the offered tool definitions — a `request_snapshot`
+       * row.
+       */
+      tools_hash?: string | null;
+      /**
+       * The digest of the assembled system prompt — a `request_snapshot`
+       * row.
+       */
+      system_hash?: string | null;
+      /**
+       * The prompt-section ids that contributed — a `request_snapshot`
+       * row.
+       */
+      sections?: string[] | null;
+      /**
+       * The digest of the approval policy — a `request_snapshot` row.
+       */
+      policy_hash?: string | null;
+      /**
+       * The typed provider usage report — a `usage` row.
+       */
+      usage?: UsageBuckets | null;
+      /**
+       * The execution-policy override — a `sandbox_mode` row.
+       */
+      mode?: string | null;
+      /**
+       * The transformers that ran, in registration order.
+       */
+      transformers?: string[] | null;
+      /**
+       * The tool a transformed result belongs to.
+       */
+      tool_name?: string | null;
+      /**
+       * The digest of the result before a transformer rewrote it.
+       */
+      before?: string | null;
+      /**
+       * The digest of the result the model reads.
+       */
+      after?: string | null;
+      /**
+       * The handle a parked prompt is spent by — a `parked_prompt` /
+       * `park_consumed` row.
+       */
+      park_id?: string | null;
+      /**
+       * The parked prompt's text.
+       */
+      text?: string | null;
+      /**
+       * `true` when the turn was parked by a `Rerun`.
+       */
+      rerun?: boolean | null;
+      /**
+       * The ordinal of the message a `feedback` row rates.
+       */
+      message_id?: string | null;
+      /**
+       * `true` for a thumbs-up, `false` for a thumbs-down.
+       */
+      thumbs_up?: boolean | null;
+      /**
+       * The payload's encoded size, when a cap truncated it — a
+       * `plugin` row.
+       */
+      original_bytes?: number | null;
+    }
+  | {
       type?: 'plugin';
       data?: unknown;
       /**
@@ -7550,6 +7767,7 @@ export type SessionEventType =
   | 'parked_prompt'
   | 'park_consumed'
   | 'feedback'
+  | 'goal'
   | 'plugin';
 
 export interface AgentDetail {

@@ -301,6 +301,17 @@ fn variant_rows() -> Vec<(&'static str, Value, Option<RowKind>)> {
     ));
     vec![
         (
+            "Goal",
+            json!({
+                "type": "goal",
+                "seq": 1,
+                "ts": "t",
+                "state": "active",
+                "objective": "ship the tool family",
+            }),
+            None,
+        ),
+        (
             "UserMessage",
             json!({"type": "user_message", "seq": 1, "ts": "t", "data": user}),
             Some(RowKind::User),

@@ -858,6 +858,29 @@ pub enum SessionEvent {
         /// `true` for a thumbs-up, `false` for a thumbs-down.
         thumbs_up: bool,
     },
+    /// The session's durable goal: the objective the agent keeps
+    /// working toward across turns.
+    ///
+    /// One row per change; the latest row is the goal's state (the
+    /// same "the log is the truth" rule the approval rows follow).
+    /// dsh's `tool-goal` and omp's goal mode are the reference
+    /// shape: a model-created objective with a lifecycle, a token
+    /// budget, and a host that can pause it.
+    Goal {
+        /// Sequence ordinal.
+        seq: u64,
+        /// ISO-8601 timestamp.
+        ts: String,
+        /// `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+        state: String,
+        /// The objective, in the model's own words (empty once the
+        /// goal is dropped).
+        objective: String,
+        /// The token budget the goal was created with, when one was
+        /// given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        budget_tokens: Option<u64>,
+    },
     /// A plugin's own domain event.
     ///
     /// The escape hatch for a plugin that publishes a fact the
@@ -1493,6 +1516,7 @@ impl SessionEvent {
             | Self::ParkedPrompt { seq, .. }
             | Self::ParkConsumed { seq, .. }
             | Self::Feedback { seq, .. }
+            | Self::Goal { seq, .. }
             | Self::Plugin { seq, .. }
             | Self::SandboxMode { seq, .. }
             | Self::Usage { seq, .. } => *seq,
@@ -1541,6 +1565,7 @@ impl SessionEvent {
             Self::ParkedPrompt { .. } => RowTag::ParkedPrompt,
             Self::ParkConsumed { .. } => RowTag::ParkConsumed,
             Self::Feedback { .. } => RowTag::Feedback,
+            Self::Goal { .. } => RowTag::Goal,
             Self::Plugin { .. } => RowTag::Plugin,
         }
     }
@@ -1625,6 +1650,7 @@ impl SessionEvent {
             | Self::ParkedPrompt { .. }
             | Self::ParkConsumed { .. }
             | Self::Feedback { .. }
+            | Self::Goal { .. }
             | Self::Plugin { .. } => (None, None),
         }
     }
