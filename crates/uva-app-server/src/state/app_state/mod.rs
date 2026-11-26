@@ -132,6 +132,12 @@ pub struct AppState {
     /// session's terminal registers its owner here — so an editor's
     /// commands land in the editor's pane.
     pub terminals: Arc<crate::session::terminals::SessionTerminals>,
+    /// The deployment's background jobs.
+    ///
+    /// The `job` tool files them, and a session's controller listens
+    /// for the ones it owns — so the model hears that its command is
+    /// done without polling for it.
+    pub jobs: Arc<uva::tool_job::JobRegistry>,
     /// Multi-agent registry. Populated at startup with the
     /// canonical [`ReActAgent`](uva::harness::ReActAgent) descriptor so any panel/judge
     /// agents registered later surface in the system prompt as

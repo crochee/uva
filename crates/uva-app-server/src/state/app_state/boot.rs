@@ -452,6 +452,10 @@ impl AppState {
         // `shell` tool asks it before it spawns anything.
         let terminals =
             Arc::new(crate::session::terminals::SessionTerminals::new());
+        // The deployment's background jobs: the `tool-job` row files
+        // them, and a session's controller listens for the ones it
+        // owns.
+        let jobs = Arc::new(uva::tool_job::JobRegistry::new());
         // The containers the mount hands the rows: the one tool
         // registry, the peer-agent registry, the harness host and the
         // child-session writer slot. Every capability — the `task`
@@ -472,6 +476,7 @@ impl AppState {
             plugin_host: input.plugin_host.clone(),
             file_system: Arc::clone(&file_system),
             terminals: Arc::clone(&terminals),
+            jobs: Arc::clone(&jobs),
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same
@@ -728,6 +733,7 @@ impl AppState {
             tool_registry,
             file_system,
             terminals,
+            jobs,
             agent_registry: input.agent_registry,
             session_search: input.session_search,
             session_manager,

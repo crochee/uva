@@ -87,6 +87,7 @@ fn services_over(
         plugin_host,
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
+        jobs: Arc::new(uva::tool_job::JobRegistry::new()),
     })
 }
 

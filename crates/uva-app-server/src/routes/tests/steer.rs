@@ -44,6 +44,9 @@ use crate::{
 /// fires — the "run is still working" shape a steer has to land in.
 struct BlockingFactory {
     calls: Arc<AtomicUsize>,
+    /// The messages the live run received through its inbox — the
+    /// in-memory copy a steer hands to a run that is in flight.
+    inboxed: Arc<Mutex<Vec<String>>>,
     /// Every run's own cancel token, in start order.
     ///
     /// A test ends a run through its token rather than through
@@ -59,9 +62,22 @@ impl RunStreamFactory for BlockingFactory {
         &self,
         _config: AgentRunConfig,
         _overrides: RunOverrides,
-        _input: AgentInput,
+        input: AgentInput,
         cancel: Arc<AtomicCancelToken>,
     ) -> Pin<Box<dyn Stream<Item = AgentEvent> + Send + 'static>> {
+        // The run's steer channel: the fake stands in for the loop and
+        // drains it the way the loop does at a step boundary.
+        if let Some(inbox) = input.inbox.clone() {
+            let sink = Arc::clone(&self.inboxed);
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                for message in inbox.drain().await {
+                    let text =
+                        message.content.extract_text().unwrap_or_default();
+                    sink.lock().expect("inbox mutex poisoned").push(text);
+                }
+            });
+        }
         // The token is published before the call is counted: a test
         // that saw run `n` start may index its token.
         self.tokens
@@ -82,6 +98,8 @@ struct Fixture {
     state: Arc<AppState>,
     controller: Arc<SessionController>,
     calls: Arc<AtomicUsize>,
+    /// The messages the live run received through its inbox.
+    inboxed: Arc<Mutex<Vec<String>>>,
     tokens: Arc<Mutex<Vec<Arc<AtomicCancelToken>>>>,
     _temp: tempfile::TempDir,
 }
@@ -107,6 +125,7 @@ async fn fixture() -> Fixture {
     );
     let calls = Arc::new(AtomicUsize::new(0));
     let tokens = Arc::new(Mutex::new(Vec::new()));
+    let inboxed = Arc::new(Mutex::new(Vec::new()));
     let controller = SessionController::spawn(
         user.clone(),
         SESSION,
@@ -116,6 +135,7 @@ async fn fixture() -> Fixture {
         Arc::new(BlockingFactory {
             calls: Arc::clone(&calls),
             tokens: Arc::clone(&tokens),
+            inboxed: Arc::clone(&inboxed),
         }),
     );
     state
@@ -126,6 +146,7 @@ async fn fixture() -> Fixture {
         controller,
         calls,
         tokens,
+        inboxed,
         _temp: temp,
     }
 }
@@ -285,6 +306,59 @@ async fn steer_is_durable_before_the_response() {
         serde_json::from_value(steers[0]["data"].clone())
             .expect("the payload is a provider message");
     assert_eq!(decoded.role, uva::provider::Role::User);
+
+    fixture
+        .controller
+        .close()
+        .await
+        .expect("the session closes");
+}
+
+/// The steer reaches the live run.
+///
+/// The row is durable and the in-memory copy goes to the run's inbox
+/// — the channel the loop drains at its step boundary, so the message
+/// rides into the model's next request. Without the inbox the row
+/// would sit in the log until the next turn, and the handler's
+/// `"delivery": "steer"` would promise an injection that never
+/// happened.
+#[tokio::test]
+async fn a_steer_reaches_the_live_run_through_its_inbox() {
+    let fixture = fixture().await;
+    fixture.post("start", Delivery::Queue).await;
+    fixture.wait_for_runs(1).await;
+    fixture.wait_for_state(SessionState::Running).await;
+
+    let response = fixture.post("focus on the tests", Delivery::Steer).await;
+    assert_eq!(response.delivery, Delivery::Steer);
+
+    // The run drains its inbox at the next step boundary.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if !fixture
+            .inboxed
+            .lock()
+            .expect("inbox mutex poisoned")
+            .is_empty()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the steered message never reached the live run"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let received = fixture
+        .inboxed
+        .lock()
+        .expect("inbox mutex poisoned")
+        .clone();
+    assert_eq!(
+        received,
+        vec!["focus on the tests".to_string()],
+        "the live run received the steered message"
+    );
 
     fixture
         .controller

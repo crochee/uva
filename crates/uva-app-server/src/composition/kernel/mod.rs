@@ -149,6 +149,9 @@ pub(crate) struct BootServices {
     /// asks it before it spawns anything, so a session whose client
     /// owns the terminal runs there instead of on this machine.
     pub terminals: Arc<crate::session::terminals::SessionTerminals>,
+    /// The deployment's background jobs. The `tool-job` row files
+    /// them, so a job started in one call is still there in the next.
+    pub jobs: Arc<uva::tool_job::JobRegistry>,
 }
 
 /// Why a native mount failed — a profile-assembly or kernel verdict.
@@ -697,6 +700,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
         plugin_host: Host::default(),
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
+        jobs: Arc::new(uva::tool_job::JobRegistry::new()),
     }))
 }
 
@@ -950,11 +954,13 @@ fn read_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
         as Arc<dyn uva::tool_files::FileSystemOwner>))
 }
 
-fn job_tool_plugin(_services: &BootServices) -> Arc<dyn KernelPlugin> {
-    // The job tool owns its registry: the tool is a deployment-level
+fn job_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The registry is the deployment's: the tool is a deployment-level
     // singleton, so a job started in one call is still there in the
-    // next one.
-    Arc::new(uva::tool_job::JobToolPlugin::new())
+    // next one, and a session's controller can hear about it.
+    Arc::new(uva::tool_job::JobToolPlugin::with_tool(Arc::new(
+        uva::tool_job::JobTool::with_registry(Arc::clone(&services.jobs)),
+    )))
 }
 
 fn edit_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {

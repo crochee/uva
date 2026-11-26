@@ -27,6 +27,7 @@ mod cancel;
 mod compaction_gate;
 mod event_emission;
 mod history;
+mod job_delivery;
 mod lifecycle;
 mod live_projection;
 mod parked_prompt;

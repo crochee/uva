@@ -412,7 +412,7 @@ impl ControllerInner {
         // drained, and a run can never be marked `Running` after a
         // steer was told the session was idle. Everything before this
         // point was read-only; the gate covers only the mutation.
-        let (resume, parked_take, provider) = {
+        let (resume, parked_take, provider, inbox) = {
             let _start_gate = self.steer_gate.lock().await;
             if !self.state.is_startable() {
                 return None;
@@ -475,8 +475,8 @@ impl ControllerInner {
                     .take()
                     .map(super::PinnedProvider::take),
             };
-            self.mark_running(parked_take.is_some());
-            (resume, parked_take, provider)
+            let inbox = self.mark_running(parked_take.is_some());
+            (resume, parked_take, provider, inbox)
         };
 
         // If the parked turn carried an explicit agent selection,
@@ -764,6 +764,11 @@ impl ControllerInner {
             // state (the `task` tool's child bookkeeping) key on it.
             let mut input = input;
             input.thread_id = Some(inner.session_id.clone());
+            // The run's steer channel: a message the host made
+            // durable while this run is in flight (a steer, a job's
+            // completion) arrives through the inbox and the loop
+            // carries it into its next request.
+            let input = input.with_inbox(inbox);
 
             tracing::info!(
                 target: "uva.session",
@@ -815,6 +820,9 @@ impl ControllerInner {
             // queued turn. One decision, one row.
             let settled_state = {
                 let _settled = inner.steer_gate.lock().await;
+                // The run is done: a message that arrives now belongs
+                // to the next turn.
+                inner.clear_steer_inbox();
                 // The settle transition consumes the controller
                 // state's private suspended record: a suspended run
                 // leaves the session paused (the log's open

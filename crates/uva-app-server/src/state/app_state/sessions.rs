@@ -383,6 +383,7 @@ impl AppState {
             self.workspace_root.clone(),
             self.system_prompt.clone(),
         )
+        .with_jobs(Arc::clone(&self.jobs))
         .with_default_provider_name(catalogue.default_provider_name())
         .with_provider_resolver(
             Arc::clone(&catalogue) as Arc<dyn uva::provider::ProviderResolver>

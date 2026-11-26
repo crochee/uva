@@ -170,10 +170,32 @@ impl Job {
     }
 }
 
+/// What a finished job tells the host.
+///
+/// The host delivers it to the session that owns the job: the model
+/// learns that its command is done without polling for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCompletion {
+    /// The job's id.
+    pub job_id: String,
+    /// The session that started the job.
+    pub session_id: String,
+    /// The command the job ran.
+    pub command: String,
+    /// The exit code, when the process reported one.
+    pub exit_code: Option<i32>,
+    /// The signal that killed it, when one did.
+    pub signal: Option<i32>,
+}
+
 /// The deployment's background jobs.
 pub struct JobRegistry {
     jobs: parking_lot::RwLock<HashMap<String, Arc<Job>>>,
     ids: SharedIdGen,
+    /// The hosts that want to hear when a job finishes.
+    subscribers: parking_lot::RwLock<
+        Vec<futures::channel::mpsc::UnboundedSender<JobCompletion>>,
+    >,
 }
 
 impl Default for JobRegistry {
@@ -197,6 +219,30 @@ impl JobRegistry {
         Self {
             jobs: parking_lot::RwLock::new(HashMap::new()),
             ids: SharedIdGen::ulid(),
+            subscribers: parking_lot::RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Listen for the jobs' completions.
+    ///
+    /// The host that holds the receiver decides what a completion
+    /// means — the deployment delivers it to the session that owns
+    /// the job.
+    pub fn subscribe(
+        &self,
+    ) -> futures::channel::mpsc::UnboundedReceiver<JobCompletion> {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        self.subscribers.write().push(tx);
+        rx
+    }
+
+    /// Tell the subscribers that a job finished.
+    fn notify(&self, completion: JobCompletion) {
+        let subscribers = self.subscribers.read().clone();
+        for subscriber in subscribers {
+            // A subscriber that went away is its own business: the
+            // job still finished.
+            let _ = subscriber.unbounded_send(completion.clone());
         }
     }
 
@@ -421,6 +467,7 @@ impl JobTool {
 
         let id = self.registry.next_id();
         match spawn_job(
+            Arc::clone(&self.registry),
             &id,
             &context.session_id,
             command,
@@ -570,6 +617,7 @@ fn render_job(job: &Job) -> String {
 /// Start the command in the background.
 #[cfg(unix)]
 async fn spawn_job(
+    registry: Arc<JobRegistry>,
     id: &str,
     session_id: &str,
     command: &str,
@@ -597,6 +645,11 @@ async fn spawn_job(
     // signals the process group, which reaches the whole tree.
     let state = Arc::new(Mutex::new(JobState::Running));
     let waiter_state = Arc::clone(&state);
+    // The completion names the job, so the host can tell the session
+    // that owns it which command is done.
+    let job_id = id.to_string();
+    let session = session_id.to_string();
+    let command_line = command.to_string();
     tokio::spawn(async move {
         let status = child.wait().await;
         let next = match status {
@@ -607,8 +660,23 @@ async fn spawn_job(
             Err(error) => JobState::Failed(format!("wait failed: {error}")),
         };
         if let Ok(mut slot) = waiter_state.lock() {
-            *slot = next;
+            *slot = next.clone();
         }
+        // The host hears about the completion: the model learns that
+        // its command is done without polling for it.
+        registry.notify(JobCompletion {
+            job_id,
+            session_id: session,
+            command: command_line,
+            exit_code: match &next {
+                JobState::Exited { code, .. } => *code,
+                _ => None,
+            },
+            signal: match &next {
+                JobState::Exited { signal, .. } => *signal,
+                _ => None,
+            },
+        });
         // The readers finish with the pipes; let them settle.
         let _ = stdout_task.await;
         let _ = stderr_task.await;
@@ -628,6 +696,7 @@ async fn spawn_job(
 /// Start the command in the background: the non-unix build refuses.
 #[cfg(not(unix))]
 async fn spawn_job(
+    _registry: Arc<JobRegistry>,
     _id: &str,
     _session_id: &str,
     _command: &str,

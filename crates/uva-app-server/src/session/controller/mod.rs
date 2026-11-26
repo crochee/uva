@@ -113,6 +113,11 @@ pub struct SessionController {
     /// channel: a durable steer (see [`Self::steer`]). `None` for a
     /// remote handle — it owns no run and no log.
     inner: Option<Arc<ControllerInner>>,
+    /// The signal that ends this controller's job delivery.
+    ///
+    /// The delivery task waits on it: a controller that is dropped
+    /// (forgotten, deleted, closed) must not leave a task behind.
+    job_delivery_stop: Arc<tokio::sync::Notify>,
     /// The session's cold-open gate, owned by this controller.
     ///
     /// The gate map holds a weak reference to the lock and this
@@ -188,6 +193,13 @@ impl SessionController {
         // process-wide totals.
         let usage = Arc::clone(&deps.usage_metrics);
         let cluster = Arc::clone(&deps.cluster);
+        // The delivery task's stop signal: the controller's end ends
+        // it.
+        let job_delivery_stop = Arc::new(tokio::sync::Notify::new());
+        // Cloned out before `deps` moves into the inner mutex: the
+        // delivery task needs the registry, not the whole dependency
+        // set.
+        let deps_jobs = deps.jobs.clone();
 
         let inner = Arc::new(ControllerInner {
             session_id: session_id.clone(),
@@ -212,6 +224,7 @@ impl SessionController {
             live: parking_lot::Mutex::new(LiveTurn::default()),
             pending_resume: parking_lot::Mutex::new(None),
             steer_gate: tokio::sync::Mutex::new(()),
+            steer_inbox: parking_lot::Mutex::new(None),
             compaction_pass_gate: tokio::sync::Mutex::new(()),
             on_exit: parking_lot::Mutex::new(None),
         });
@@ -230,8 +243,20 @@ impl SessionController {
             remote: false,
             inner: Some(Arc::clone(&inner)),
             spawn_gate: parking_lot::Mutex::new(None),
+            job_delivery_stop: Arc::clone(&job_delivery_stop),
         });
         tokio::spawn(run_controller_loop(inner, op_rx));
+
+        // The background jobs this session owns: a job that finishes
+        // is delivered to the session that started it, so the model
+        // learns that its command is done without polling for it.
+        if let Some(jobs) = deps_jobs {
+            spawn_job_delivery(
+                Arc::clone(&controller),
+                jobs,
+                Arc::clone(&job_delivery_stop),
+            );
+        }
 
         controller
     }
@@ -298,6 +323,9 @@ impl SessionController {
             // on the owning node.
             inner: None,
             spawn_gate: parking_lot::Mutex::new(None),
+            // A remote handle owns no job delivery: the owning node
+            // delivers.
+            job_delivery_stop: Arc::new(tokio::sync::Notify::new()),
         });
 
         // Forwarder: local `submit` → bus control frame.
@@ -905,3 +933,70 @@ impl SessionController {
 
 #[cfg(test)]
 mod tests;
+
+impl Drop for SessionController {
+    fn drop(&mut self) {
+        // The delivery task waits on this signal: a controller that is
+        // gone must not leave a task behind.
+        self.job_delivery_stop.notify_waiters();
+    }
+}
+
+/// Deliver this session's background job completions.
+///
+/// A job that finishes is delivered the way a steer is: a durable row
+/// plus the live run's inbox. The model learns that its command is
+/// done without polling for it — and the notice is in the log, so the
+/// next turn's fold sees it too.
+fn spawn_job_delivery(
+    controller: Arc<SessionController>,
+    jobs: Arc<uva::tool_job::JobRegistry>,
+    stop: Arc<tokio::sync::Notify>,
+) {
+    let mut completions = jobs.subscribe();
+    let session_id = controller.session_id.clone();
+    // The handle is weak: the task must not keep the controller alive
+    // (a forgotten session's controller must be collectable).
+    let weak = Arc::downgrade(&controller);
+    tokio::spawn(async move {
+        use futures::StreamExt;
+        loop {
+            let completion = tokio::select! {
+                biased;
+                _ = stop.notified() => return,
+                completion = completions.next() => match completion {
+                    Some(completion) => completion,
+                    // The registry is gone: no more jobs will finish.
+                    None => return,
+                },
+            };
+            if completion.session_id != session_id {
+                // Another session's job: its own controller owns it.
+                continue;
+            }
+            let Some(controller) = weak.upgrade() else {
+                // The controller is gone: nobody to deliver to.
+                return;
+            };
+            let status = match (completion.exit_code, completion.signal) {
+                (Some(code), _) => format!("exit code {code}"),
+                (None, Some(signal)) => format!("killed by signal {signal}"),
+                (None, None) => "no exit status".to_string(),
+            };
+            let message = format!(
+                "[job] the background command `{}` finished ({status}). \
+                 Read its output with the job tool.",
+                completion.command
+            );
+            // A session that has closed takes no more messages; the
+            // completion stays in the job's own output.
+            if let Err(error) = controller.steer(message, None).await {
+                tracing::debug!(
+                    session_id = %session_id,
+                    %error,
+                    "a job completion could not be delivered"
+                );
+            }
+        }
+    });
+}

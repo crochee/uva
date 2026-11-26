@@ -69,7 +69,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 增量读 | — | `get_entries?since` + 分页游标（`docs/rpc.md`） | `sessions/events` **每次整本**返回（`crates/uva-app-server/src/routes/sessions/mod.rs:827-855`） | **缺口 G11（本轮切）** |
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12）**：协议没有「宿主自带工具」的原语，那一半如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
-| 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知的主动送达还没做**（模型自己来问） | 对齐（通知送达是回合机器层的另一半） |
+| 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
@@ -90,7 +90,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G9 | ~~无跨进程会话租约~~ **已落**（切 9）：`owner.lock` + flock，append 拒绝失败关闭 | — | `crates/uva-session/src/ownership.rs` |
 | G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
 | G12 | ~~无客户端侧 fs/terminal 委派~~ **已落**（切 5 的 fs 半边 + 切 11 的 terminal 半边）：`fs/*` 与 `terminal/*` 两套委派都走同一条「客户端拥有」的路 | — | 同左 |
-| G14 | **没有后台作业**：`shell` 在前台跑命令，600 s 上限即放弃——构建 / 测试 / 迁移装不进这个窗口 | 高 | `crates/uva-tool-plugins/src/shell/mod.rs` |
+| G14 | ~~没有后台作业~~ **已落（切 13 + 切 14）**：`job` 工具把命令放到后台（`start` / `output` / `list` / `kill`），**完成通知主动送达**（切 14：作业结束 → 会话收到通知） | — | 同左 |
 | G13 | **工具族少一个 `edit`**：只有 `read` 与 `write`，改一行要重写整个文件——两个参考都有精确编辑（dsh `str_replace_editor`、omp `edit`） | 中 | `crates/uva-tool-plugins/src/` |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
 
@@ -571,6 +571,46 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
 
 ---
 
+
+### 切 14 — 运行中的回合能收到消息；作业完成主动送达
+
+**要什么**：两件事，都是「运行中的会话怎么收到外面来的消息」。
+
+1. **live steer 兑现承诺**：`delivery: "steer"` 的路由文档写着「注入**当下**正在跑
+   的回合，下一个 step 边界把它带进模型的下一个请求」，控制器的注释也写着「steer
+   追加行时回合还在 Running，下一个 step 边界就会注入它」——但**注入的那一步从
+   来没有接线**：`AgentInput::inbox` 这条通道只有 `task` 工具的委派控制在用，主
+   会话没有。于是行是耐久的，模型这一轮**看不到**它，而响应却回答
+   `"delivery": "steer"`——**说了没做到**。
+2. **作业完成主动送达**：切 13 的作业完成后，模型得自己去问。dsh 的做法是把完成通
+   知送进主人的下一步（或在空闲时开一回合）。
+
+**怎么落**：
+1. **主会话有自己的 inbox**：控制器在 `mark_running`（与 `Running` 状态翻转同一个
+   闸门）建通道，把 `AgentInput::with_inbox` 交给这一轮；`append_live_steer` 在行
+   落盘之后把消息交给通道——顺序就是 `RunInbox` 文档写的「先写行，再交消息，中
+   间崩了丢的是内存副本、耐久的事实还在」。回合结束时通道随控制器一起消失（弱引
+   用 + 停止信号，不留后台任务）。
+2. **作业完成走同一条路**：作业注册表在作业结束时通知订阅者；会话控制器订阅与自己
+   会话 id 相同的那条，按 steer 的方式送达（耐久行 + 活回合的 inbox；没有活回合
+   时退化成排队的下一轮——dsh 的 `wakeup` 语义）。
+
+**落点**：
+- `crates/uva-app-server/src/session/controller/inner.rs`：inbox 的安装、投递与清空。
+- `crates/uva-app-server/src/session/controller/run_task.rs`：输入带 inbox；回合
+  收尾时清空。
+- `crates/uva-app-server/src/session/controller/mod.rs`：作业完成的投递任务（弱引用
+  + 停止信号，控制器没了它就没了）。
+- `crates/uva-tool-plugins/src/jobs/mod.rs`：注册表的完成通知（`JobCompletion`）。
+
+**验收**：
+- 行为（steer）：live steer 的消息到达活回合的 inbox（控制器测试 + 路由测试各
+  一条）。
+- 行为（job）：`job` 工具起一个作业 → 作业结束 → 拥有它的会话收到通知（端到端：
+  真命令、真注册表、真控制器）。
+
+---
+
 ---
 
 ## 6. 下一轮候选（不在本轮）
@@ -585,8 +625,7 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
 （G7 已驳回——取消检查在工具流的 drain 里。G2 已结——切 8：连续性已
   结构化交付，seam 留给会铸造原生状态的适配器。G4 已落——切 6。
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
-  （terminal）。G13 已落——切 12。G14 已落（工具半边）——切 13；剩下的「完成通知
-  送达」是回合机器层的一半，留着。）
+  （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。）
 
 ---
 

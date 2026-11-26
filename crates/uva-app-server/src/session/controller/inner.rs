@@ -108,6 +108,16 @@ pub(super) struct ControllerInner {
     pub(super) run_cancel: Mutex<Option<Arc<AtomicCancelToken>>>,
     pub(super) run_factory: Arc<dyn RunStreamFactory>,
     pub(super) alive: Arc<AtomicBool>,
+    /// The inbox the live run drains: the messages the host made
+    /// durable while the run was in flight (a steer, a job's
+    /// completion) arrive here.
+    ///
+    /// The row is written first and the message handed over second,
+    /// so a crash between the two loses the in-memory copy and keeps
+    /// the durable fact — the next run's fold sees it.
+    pub(super) steer_inbox: parking_lot::Mutex<
+        Option<futures::channel::mpsc::UnboundedSender<uva::provider::Message>>,
+    >,
     /// The turns queued for the next runs: one durable park per
     /// queued message — a single `Text` part for `Prompt` / `Steer`,
     /// lossless parts for `PromptMulti` / `Rerun` — consumed one
@@ -327,6 +337,11 @@ impl ControllerInner {
             self.writer
                 .append_event(&uva::session::user_message(data, Some("steer")))
                 .await?;
+            // The row is durable; the in-memory copy is what the live
+            // run carries into its next request. The message is the
+            // same text the row holds.
+            let message = uva::provider::Message::user(content);
+            self.deliver_to_live_run(message);
             true
         };
         // The answer is a durability promise: the row must be on disk
@@ -498,7 +513,10 @@ impl ControllerInner {
     /// subscribers observe the transition immediately), and
     /// install a fresh cancel token for the run about to
     /// start.
-    pub(super) fn mark_running(&self, parked_turn: bool) {
+    pub(super) fn mark_running(
+        &self,
+        parked_turn: bool,
+    ) -> std::sync::Arc<uva::harness::ChannelInbox> {
         let pending_count = self.pending_turns.lock().len();
         tracing::info!(
             target: "uva.session",
@@ -526,6 +544,36 @@ impl ControllerInner {
         *self.run_cancel.lock().expect("run_cancel mutex poisoned") =
             Some(cancel_token);
         self.reset_live();
+
+        // The run's steer channel: a message that lands while this
+        // run is in flight is handed to the loop here, and the loop
+        // carries it into its next request. Installed with the
+        // `Running` transition, so a steer that finds the session
+        // live finds the inbox too.
+        let (inbox, sender) = uva::harness::ChannelInbox::channel();
+        *self.steer_inbox.lock() = Some(sender);
+        inbox
+    }
+
+    /// Drop the live run's inbox.
+    ///
+    /// The run has ended: a message that arrives now belongs to the
+    /// next turn, not to a run that will not sample again.
+    pub(super) fn clear_steer_inbox(&self) {
+        *self.steer_inbox.lock() = None;
+    }
+
+    /// Hand a message the host just made durable to the live run.
+    ///
+    /// The row is already on disk; this is the in-memory copy the
+    /// loop drains at its next step boundary. A run that has no
+    /// inbox (it has not started, or it has ended) simply does not
+    /// receive it — the row is still the durable fact.
+    pub(super) fn deliver_to_live_run(&self, message: uva::provider::Message) {
+        let sender = self.steer_inbox.lock().clone();
+        if let Some(sender) = sender {
+            let _ = sender.unbounded_send(message);
+        }
     }
 
     /// Build an [`AgentRunConfig`] for the next run. Lets the

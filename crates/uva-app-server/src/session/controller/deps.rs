@@ -50,6 +50,13 @@ pub struct RunDependencies {
     /// management-route registration all land here, and every run
     /// built from these dependencies advertises the live surface.
     pub tool_registry: Arc<ToolRegistry>,
+    /// The deployment's background jobs.
+    ///
+    /// The controller listens to it: a job that finishes is delivered
+    /// to the session that owns it, so the model learns that its
+    /// command is done without polling for it. `None` in a host that
+    /// mounts no `job` tool.
+    pub(crate) jobs: Option<Arc<uva::tool_job::JobRegistry>>,
     /// Working directory handed to built-in tools via
     /// [`AgentRunConfig::workspace_root`](crate::agent_run_config::AgentRunConfig::workspace_root). Replaces the
     /// previous hard-coded `/tmp` so `read_file` / `shell`
@@ -200,6 +207,7 @@ impl RunDependencies {
             provider_resolver: None,
             default_provider_name: String::new(),
             tool_registry,
+            jobs: None,
             workspace_root,
             system_prompt,
             host: None,
@@ -217,6 +225,16 @@ impl RunDependencies {
             ),
             approval_timeout: None,
         }
+    }
+
+    /// Install the deployment's background jobs.
+    ///
+    /// The controller listens to them: a job that finishes is
+    /// delivered to the session that owns it.
+    #[must_use]
+    pub fn with_jobs(mut self, jobs: Arc<uva::tool_job::JobRegistry>) -> Self {
+        self.jobs = Some(jobs);
+        self
     }
 
     /// Install the deployment's attachment store — where a parked
