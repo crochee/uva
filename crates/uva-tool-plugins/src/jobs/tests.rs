@@ -136,6 +136,51 @@ async fn a_long_job_is_still_running_when_the_model_looks() {
     );
 }
 
+/// A finished job keeps its output; the registry keeps only the
+/// recent ones, so a long deployment's memory stays bounded.
+#[cfg(unix)]
+#[tokio::test]
+async fn old_finished_jobs_are_dropped() {
+    let registry = Arc::new(JobRegistry::new());
+    let tool = JobTool::with_registry(Arc::clone(&registry));
+    let context = make_context();
+
+    for _ in 0..(MAX_FINISHED_JOBS + 4) {
+        let started = tool
+            .call(json!({ "action": "start", "command": "true" }), &context)
+            .await;
+        assert!(
+            first_text(&started).contains("Started job"),
+            "the job starts"
+        );
+    }
+    // The jobs finish on their own; wait for the registry to settle.
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let finished = registry
+            .list()
+            .iter()
+            .filter(|job| job.is_finished())
+            .count();
+        if finished >= MAX_FINISHED_JOBS {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the jobs never finished"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // The cap holds: the finished jobs past the cap are gone.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let total = registry.list().len();
+    assert!(
+        total <= MAX_FINISHED_JOBS + 1,
+        "the registry keeps at most the cap, got {total}"
+    );
+}
+
 #[tokio::test]
 async fn a_start_without_a_command_is_refused() {
     let tool = JobTool::new();

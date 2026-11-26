@@ -238,11 +238,47 @@ impl JobRegistry {
 
     /// Tell the subscribers that a job finished.
     fn notify(&self, completion: JobCompletion) {
+        // A job that just finished is a candidate for eviction.
+        self.evict_finished();
         let subscribers = self.subscribers.read().clone();
         for subscriber in subscribers {
             // A subscriber that went away is its own business: the
             // job still finished.
             let _ = subscriber.unbounded_send(completion.clone());
+        }
+    }
+
+    /// Park a job, and drop the oldest finished ones past the cap.
+    ///
+    /// A finished job keeps its output in memory, so a deployment
+    /// that ran a thousand jobs would hold a thousand outputs. The
+    /// cap keeps the recent ones — the ones a model is still likely
+    /// to ask about — and drops the rest. A running job is never
+    /// evicted: its output is still growing.
+    fn insert(&self, job: Arc<Job>) {
+        self.jobs.write().insert(job.id().to_string(), job);
+        self.evict_finished();
+    }
+
+    /// Drop the oldest finished jobs past the cap.
+    ///
+    /// A finished job keeps its output in memory, so a deployment
+    /// that ran a thousand jobs would hold a thousand outputs. The
+    /// cap keeps the recent ones — the ones a model is still likely
+    /// to ask about — and drops the rest. A running job is never
+    /// evicted: its output is still growing.
+    fn evict_finished(&self) {
+        let mut jobs = self.jobs.write();
+        let mut finished: Vec<String> = jobs
+            .values()
+            .filter(|job| job.is_finished())
+            .map(|job| job.id().to_string())
+            .collect();
+        // The ids are ULIDs: their order is their creation order.
+        finished.sort();
+        let excess = finished.len().saturating_sub(MAX_FINISHED_JOBS);
+        for id in finished.into_iter().take(excess) {
+            jobs.remove(&id);
         }
     }
 
@@ -305,6 +341,12 @@ struct JobRequest {
 
 /// The longest an `output` call waits for a job.
 const MAX_WAIT_SECS: u64 = 600;
+
+/// How many finished jobs the registry keeps.
+///
+/// A finished job holds its output; the cap is what keeps a long
+/// deployment's memory bounded.
+const MAX_FINISHED_JOBS: usize = 32;
 
 /// `job` — run a command in the background and come back to it.
 pub struct JobTool {
@@ -477,7 +519,7 @@ impl JobTool {
         .await
         {
             Ok(job) => {
-                self.registry.jobs.write().insert(id.clone(), Arc::new(job));
+                self.registry.insert(Arc::new(job));
                 ToolOutput::text(format!(
                     "Started job `{id}`: {command}\nIt runs in the \
                      background; read it with `action = \"output\"` and \
