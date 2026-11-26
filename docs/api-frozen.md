@@ -514,7 +514,7 @@ types, credentials, retry classification, cache policy, JSON repair.
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
 
-### uva-session — 154 names
+### uva-session — 155 names
 
 The durable ledger: JSONL sink and version header, events, the row
 vocabulary (tags, dialects, the restore to the current row, borrowed
@@ -535,7 +535,7 @@ RowDialect, RowTag, Rows, SearchError, SearchQuery
 SessionEndReason, SessionError, SessionEvent, SessionHit, SessionLog
 SessionMetadataHeader, SessionSearch, SessionSink, SessionSnapshot, SessionStoreConfig
 SessionStorePlugin, SharedSessionSearch, SharedSurfaceLedger, SnapshotBus, SnapshotReceiver
-STEP_INTERRUPTED, SummaryCompactor, SurfaceLedger, SurfaceOp, SurfaceRole
+STEP_INTERRUPTED, SummaryCompactor, SummaryInput, SurfaceLedger, SurfaceOp, SurfaceRole
 SurfaceToken, TOOL_NOT_STARTED, TOOL_OUTCOME_UNKNOWN, TURN_INTERRUPTED, TokenBudget
 TokenMeasurement, TokenMeter, TokenMeterError, TouchedPair, UnbalancedCut
 UnreadableLog, UsageBuckets, ValidationError, approval_asked, approval_decided

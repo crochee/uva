@@ -228,6 +228,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
             },
             session_view::{SessionArtifact, SessionPart, SessionTurn},
         },
+        composition::kernel::RowAudit,
         routes::{
             agents::AgentDetail,
             chat::{Delivery, SendMessageResponse},
@@ -446,6 +447,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
         ),
         // ---- profile -------------------------------------------
         response::<ProfileRow>("profile/list", "ProfileRow", "ProfileRow"),
+        response::<RowAudit>("profile/audit", "RowAudit", "RowAudit"),
         response::<ProfileSegment>(
             "profile/list",
             "ProfileSegment",

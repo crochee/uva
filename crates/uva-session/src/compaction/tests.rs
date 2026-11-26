@@ -23,6 +23,8 @@ use uva_provider::{
     ProviderConfig,
     Role,
     TokenUsage,
+    ToolChoice,
+    ToolDefinition,
     ToolUse,
 };
 
@@ -267,6 +269,134 @@ fn outcome_names_the_summariser_that_answered() {
     );
 }
 
+// A summary with the envelope replays the conversation: the
+// conversation's own system prompt first, the shadowed messages in
+// surface order, the instruction as the FINAL user message (dsh
+// `summarizer.ts:74-79`). Everything but the instruction is then a
+// genuine prefix of the last routed request, so the provider's warm
+// cache covers it.
+#[test]
+fn an_enveloped_summary_replays_the_conversation_and_appends_the_instruction() {
+    let (compactor, provider) = compactor();
+    let history = vec![big_user(0, 2_000), Message::assistant("kept")];
+    let plan = compactor
+        .plan(
+            &history,
+            TokenBudget {
+                window: 8,
+                reserve: 0,
+            },
+        )
+        .expect("plan");
+    let input = SummaryInput {
+        system: Some("the conversation's own system prompt".to_string()),
+        tools: Arc::new(vec![ToolDefinition {
+            name: "read".to_string(),
+            description: "read a file".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            cache_control: None,
+            annotations: None,
+        }]),
+    };
+
+    let outcome = block_on_future(compactor.summarize(
+        &plan,
+        &input,
+        Arc::new(AtomicCancelToken::new()) as Arc<dyn CancelToken>,
+    ))
+    .expect("summary");
+    assert_eq!(outcome.summary, "a compact summary");
+
+    let request = provider.last_request();
+    let messages = &*request.messages;
+    // The conversation's own system prompt leads — not a summariser
+    // system prompt, which would invalidate the prefix cache.
+    assert_eq!(
+        messages.first().map(|message| message.role),
+        Some(Role::System)
+    );
+    assert_eq!(
+        messages
+            .first()
+            .and_then(|message| message.content.extract_text()),
+        Some("the conversation's own system prompt".to_string())
+    );
+    // The shadowed messages follow in surface order.
+    assert_eq!(messages[1].role, Role::User);
+    assert!(
+        messages[1]
+            .content
+            .extract_text()
+            .is_some_and(|text| text.starts_with("turn 0")),
+        "the shadowed user turn rides as itself, not as rendered text"
+    );
+    // The instruction is the FINAL user message — the only novel
+    // input the provider sees.
+    let last = messages.last().expect("the instruction is a message");
+    assert_eq!(last.role, Role::User);
+    assert!(
+        last.content
+            .extract_text()
+            .is_some_and(|text| text.contains("compaction engine")),
+        "the directive rides as the final user message"
+    );
+    assert_eq!(messages.len(), 3);
+    // The schemas ride for prefix alignment, but the reply must be
+    // text: the request refuses tool calls outright.
+    assert_eq!(request.tools.len(), 1, "the schemas replay for the cache");
+    assert_eq!(request.tool_choice, ToolChoice::None);
+}
+
+// A summary without the envelope is a standalone request: the span
+// rendered as text, the instruction as the final user message. This
+// is the manual pass's shape — a host that holds only the log has no
+// run to read the request context from.
+#[test]
+fn a_bare_summary_renders_the_span_and_appends_the_instruction() {
+    let (compactor, provider) = compactor();
+    let history = vec![big_user(0, 2_000), Message::assistant("kept")];
+    let plan = compactor
+        .plan(
+            &history,
+            TokenBudget {
+                window: 8,
+                reserve: 0,
+            },
+        )
+        .expect("plan");
+
+    let outcome = block_on_fallible(&compactor, &plan).expect("summary");
+    assert_eq!(outcome.summary, "a compact summary");
+
+    let request = provider.last_request();
+    let messages = &*request.messages;
+    assert_eq!(
+        messages.len(),
+        2,
+        "no system prompt of its own: {messages:?}"
+    );
+    // The span renders as text, role-prefixed.
+    assert_eq!(messages[0].role, Role::User);
+    assert!(
+        messages[0]
+            .content
+            .extract_text()
+            .is_some_and(|text| text.contains("user: turn 0")),
+        "the rendered span leads: {messages:?}"
+    );
+    // The instruction is the final message.
+    let last = messages.last().expect("the instruction is a message");
+    assert!(
+        last.content
+            .extract_text()
+            .is_some_and(|text| text.contains("compaction engine"))
+    );
+    assert!(request.tools.is_empty());
+    // No tools means the request keeps its own tool-choice default:
+    // Anthropic refuses `tool_choice` on a request with no tools.
+    assert_eq!(request.tool_choice, ToolChoice::Auto);
+}
+
 #[test]
 fn plan_trigger_holds_at_the_window_boundaries() {
     // No window: no reserve, and a zero trigger means never compact.
@@ -411,8 +541,12 @@ fn cancelled_summary_never_reaches_the_provider() {
         .expect("plan");
     let cancel = Arc::new(AtomicCancelToken::new());
     cancel.cancel();
-    let error = block_on_future(compactor.summarize(&plan, cancel))
-        .expect_err("a cancelled summary must fail");
+    let error = block_on_future(compactor.summarize(
+        &plan,
+        &SummaryInput::fresh(),
+        cancel,
+    ))
+    .expect_err("a cancelled summary must fail");
     assert_eq!(error, CompactionError::Cancelled);
     assert!(!called.load(Ordering::SeqCst));
 }
@@ -433,6 +567,7 @@ fn block_on_fallible(
 ) -> Result<CompactionOutcome, CompactionError> {
     block_on_future(compactor.summarize(
         plan,
+        &SummaryInput::fresh(),
         Arc::new(AtomicCancelToken::new()) as Arc<dyn CancelToken>,
     ))
 }
@@ -525,6 +660,7 @@ impl Compactor for FixedPlan {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         unimplemented!("planning never summarises")
@@ -545,6 +681,7 @@ impl Compactor for NeverPlans {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         unimplemented!("a declined plan is never summarised")
@@ -663,7 +800,11 @@ async fn a_hung_summariser_times_out() {
         )
         .expect("an oversized history must plan");
     let error = compactor
-        .summarize(&plan, Arc::new(AtomicCancelToken::new()))
+        .summarize(
+            &plan,
+            &SummaryInput::fresh(),
+            Arc::new(AtomicCancelToken::new()),
+        )
         .await
         .expect_err("a hung provider must time out");
     assert!(

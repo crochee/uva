@@ -118,6 +118,13 @@ pub struct AppState {
     /// outer one would force agents to clone a snapshot instead of
     /// sharing the live surface.
     pub tool_registry: Arc<ToolRegistry>,
+    /// The owner of every session's files: the deployment's disk, or
+    /// the client's workspace when the client owns it.
+    ///
+    /// The `read` and `write` tools go through it, and a client that
+    /// owns a session's workspace registers its owner here — so an
+    /// editor's session reads the editor's files, not this disk's.
+    pub file_system: Arc<crate::session::files::SessionFileSystem>,
     /// Multi-agent registry. Populated at startup with the
     /// canonical [`ReActAgent`](uva::harness::ReActAgent) descriptor so any panel/judge
     /// agents registered later surface in the system prompt as
@@ -578,6 +585,46 @@ impl AppState {
     pub fn search(&self) -> Option<Arc<crate::search::SearchService>> {
         self.assembly.service::<crate::search::SearchService>(
             crate::search::plugin::KEY_SEARCH,
+        )
+    }
+
+    /// The mounted `approval` policy, or `None` when its plugin is
+    /// unloaded.
+    ///
+    /// The policy is the deployment's stance on held calls: which
+    /// risks are asked about, and — the reason this accessor exists —
+    /// how long a held call waits for an operator. An unloaded row
+    /// means "no deadline": the ask waits for a human, which is the
+    /// fail-safe reading.
+    #[must_use]
+    pub fn approval_policy(
+        &self,
+    ) -> Option<Arc<uva::approval::ApprovalPolicy>> {
+        self.assembly.service::<uva::approval::ApprovalPolicy>(
+            uva::approval::KEY_APPROVAL,
+        )
+    }
+
+    /// The deployment's approval deadline, if the mounted policy has
+    /// one.
+    #[must_use]
+    pub fn approval_timeout(&self) -> Option<std::time::Duration> {
+        self.approval_policy().and_then(|policy| policy.timeout())
+    }
+
+    /// The mounted `tool-task` row's control surface, or `None` when
+    /// the row is unloaded.
+    ///
+    /// The surface owns the handle table of delegated children: the
+    /// roster, the hard stop, the steer. A host reaches it through
+    /// the `subagents/*` methods; the model reaches the same table
+    /// through the `agents_*` tools.
+    #[must_use]
+    pub fn control_surface(
+        &self,
+    ) -> Option<Arc<uva::tool_task::ControlSurface>> {
+        self.assembly.service::<uva::tool_task::ControlSurface>(
+            uva::tool_task::KEY_CONTROL,
         )
     }
 

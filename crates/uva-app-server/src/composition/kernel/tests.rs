@@ -85,6 +85,7 @@ fn services_over(
         usage: Arc::new(crate::state::UsageMetrics::default()),
         hook_registry,
         plugin_host,
+        file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
     })
 }
 
@@ -847,4 +848,77 @@ async fn remounting_the_hooks_row_reuses_the_boots_table() {
         "the remounted row publishes the same table, not a fresh one"
     );
     drop(registration);
+}
+
+// --- the plugin-tree audit ------------------------------------------
+
+/// A healthy tree reports nothing: every row is usable, and the audit
+/// is the exception report, not the tree itself (dsh `auditRows`).
+#[test]
+fn the_audit_of_a_healthy_tree_is_empty() {
+    let dir = tempdir().expect("tempdir");
+    let (services, extras) = boot_services(dir.path());
+    let profile = profile_with_catalogue();
+    let (ctx, _handle) = mount_profile(
+        Arc::clone(&services),
+        &profile,
+        SharedClock::system(),
+        extras,
+    )
+    .expect("the native set mounts");
+
+    let audit = super::plugin_tree_audit(&ctx, &profile, &services);
+    assert!(
+        audit.is_empty(),
+        "a healthy tree reports nothing: {audit:?}"
+    );
+}
+
+/// A row waiting for a service the composition does not supply is
+/// `pending`, and the audit names the key it waits for — the same key
+/// the mount's own audit parks the row on.
+#[test]
+fn the_audit_names_a_pending_row_and_its_missing_key() {
+    let dir = tempdir().expect("tempdir");
+    let (services, extras) = boot_services(dir.path());
+    let mut profile = profile_with_catalogue();
+    let row = profile
+        .core
+        .iter_mut()
+        .find(|entry| entry.id == "tool-read")
+        .expect("the native set has tool-read");
+    row.inject
+        .get_or_insert_with(Vec::new)
+        .push("no.such.service".to_string());
+    let (ctx, _handle) = mount_profile(
+        Arc::clone(&services),
+        &profile,
+        SharedClock::system(),
+        extras,
+    )
+    .expect("a non-required row parks instead of failing the mount");
+
+    // The kernel holds the row in its pending state.
+    assert_eq!(
+        _handle.plugin_state("tool-read"),
+        Some(uva::kernel::PluginState::Pending),
+        "the row parks waiting for its service"
+    );
+
+    let audit = super::plugin_tree_audit(&ctx, &profile, &services);
+    let row = audit
+        .iter()
+        .find(|row| row.id == "tool-read")
+        .expect("the audit reports the parked row");
+    assert_eq!(row.state, "pending");
+    assert_eq!(
+        row.missing,
+        vec!["no.such.service".to_string()],
+        "the audit names the key the row waits for"
+    );
+    assert!(
+        audit.iter().all(|row| row.state == "pending"),
+        "no row is failed: every row the mount reached is pending or \
+         usable: {audit:?}"
+    );
 }

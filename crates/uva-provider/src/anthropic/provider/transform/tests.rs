@@ -1474,3 +1474,38 @@ fn a_tool_use_is_shaped_for_this_wire() {
         "an over-long name violates `name.maxLength: 200`"
     );
 }
+
+// --- tool_choice -----------------------------------------------------
+
+/// `None` must reach the wire as `{"type":"none"}`: the compaction
+/// summary replays tool schemas for prefix-cache alignment, and the
+/// reply has to be the checkpoint text, not a tool call.
+#[test]
+fn tool_choice_none_maps_to_the_none_wire_value() {
+    let got = tool_choice_from(&ToolChoice::None);
+    let json = serde_json::to_value(got).expect("serialize");
+    assert_eq!(json, serde_json::json!({"type": "none"}));
+}
+
+#[test]
+fn tool_choice_required_maps_to_any() {
+    let json = serde_json::to_value(tool_choice_from(&ToolChoice::Required))
+        .expect("serialize");
+    assert_eq!(json, serde_json::json!({"type": "any"}));
+}
+
+#[test]
+fn tool_choice_specific_names_the_tool() {
+    let json = serde_json::to_value(tool_choice_from(&ToolChoice::Specific {
+        name: "read".to_string(),
+    }))
+    .expect("serialize");
+    assert_eq!(json, serde_json::json!({"type": "tool", "name": "read"}));
+}
+
+/// `Auto` is omitted: Anthropic's own default is `auto`, so the
+/// canonical default costs no wire field.
+#[test]
+fn tool_choice_auto_is_omitted() {
+    assert!(tool_choice_from(&ToolChoice::Auto).is_none());
+}

@@ -16,6 +16,8 @@
 //! let plugin = ReadToolPlugin::new();
 //! ```
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use schemars_derive::JsonSchema;
 use serde::Deserialize;
@@ -26,6 +28,8 @@ use uva_tool::{
     ToolOutput,
     workspace::{check_path_safety, resolve_path},
 };
+
+use crate::files::{FileError, FileSystemOwner, LocalFileSystem};
 
 const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
 
@@ -56,12 +60,40 @@ struct ReadRequest {
 }
 
 /// `read` — read a workspace file with optional line range.
-#[derive(Debug, Default)]
-pub struct ReadTool;
+pub struct ReadTool {
+    owner: Arc<dyn FileSystemOwner>,
+}
+
+impl std::fmt::Debug for ReadTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadTool").finish_non_exhaustive()
+    }
+}
+
+impl Default for ReadTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ReadTool {
+    /// The tool over the deployment's own disk.
+    #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            owner: Arc::new(LocalFileSystem),
+        }
+    }
+
+    /// The tool over `owner`: the files it reads live wherever the
+    /// owner says they do.
+    ///
+    /// A client that owns the workspace installs an owner that asks
+    /// the client — so the model reads the user's files, not the
+    /// deployment's copy of them.
+    #[must_use]
+    pub fn with_owner(owner: Arc<dyn FileSystemOwner>) -> Self {
+        Self { owner }
     }
 }
 
@@ -122,26 +154,40 @@ impl Tool for ReadTool {
             }
         };
 
-        let workspace_root = &context.workspace_root;
-        if let Some(err) = check_path_safety(workspace_root, &request.file_path)
+        // The owner decides where this session's files live: the
+        // deployment's workspace, or the client's own directory when
+        // the client owns the workspace.
+        let workspace_root = self
+            .owner
+            .session_root(&context.session_id)
+            .unwrap_or_else(|| context.workspace_root.clone());
+        if let Some(err) =
+            check_path_safety(&workspace_root, &request.file_path)
         {
             return ToolOutput::error(err);
         }
-        let resolved = resolve_path(workspace_root, &request.file_path);
+        let resolved = resolve_path(&workspace_root, &request.file_path);
 
         let offset = request.offset.map(|v| v as usize);
         let limit = request.limit.map(|v| v as usize);
 
-        let bytes = match tokio::fs::read(&resolved).await {
-            Ok(b) => b,
-            Err(e) => {
-                return ToolOutput::error(format!(
-                    "Failed to read file '{}': {}",
-                    resolved.display(),
-                    e
-                ));
-            }
-        };
+        let bytes =
+            match self.owner.read_file(&context.session_id, &resolved).await {
+                Ok(b) => b,
+                Err(FileError::Missing) => {
+                    return ToolOutput::error(format!(
+                        "Failed to read file '{}': the file does not exist",
+                        resolved.display()
+                    ));
+                }
+                Err(error) => {
+                    return ToolOutput::error(format!(
+                        "Failed to read file '{}': {}",
+                        resolved.display(),
+                        error
+                    ));
+                }
+            };
 
         let bytes = if bytes.starts_with(UTF8_BOM) {
             &bytes[UTF8_BOM.len()..]

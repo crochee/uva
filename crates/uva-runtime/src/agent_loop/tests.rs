@@ -36,6 +36,7 @@ impl Compactor for NoopCompactor {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &uva_session::SummaryInput,
         _cancel: Arc<dyn uva_core::CancelToken>,
     ) -> futures::future::BoxFuture<
         'static,

@@ -720,6 +720,20 @@ pub struct TypedEventResponse {
     pub legacy: Vec<Value>,
     pub unknown: Vec<Value>,
     pub broken: Vec<Value>,
+    /// The cursor the next read starts from: the highest ordinal this
+    /// answer carried.
+    ///
+    /// A client that reads incrementally sends it back as `since` and
+    /// gets only the rows after it. The ordinal is the log's own
+    /// coordinate (the writer allocates it), so the cursor is stable
+    /// across restarts and across nodes — it names a position in the
+    /// durable log, not a position in this answer.
+    ///
+    /// It advances over **every** row the answer carried, including
+    /// the ones this build cannot decode: a client that only moved
+    /// its cursor over the rows it understood would ask for the same
+    /// broken row forever.
+    pub last_seq: u64,
 }
 
 /// Which bucket one row lands in — decided from the vocabulary's read
@@ -827,6 +841,7 @@ fn classify_rows(raw: Vec<Value>) -> ClassifiedRows {
 pub async fn list_session_events(
     state: Arc<AppState>,
     id: String,
+    since: Option<u64>,
 ) -> Result<TypedEventResponse, RpcError> {
     validate_resource_name(&id)?;
     if state.session_manager.get(&id).await.is_none() {
@@ -840,6 +855,34 @@ pub async fn list_session_events(
         .read()
         .await
         .map_err(|e| Error::session(format!("{e}")))?;
+    // The cursor is the log's own coordinate: a row is "after" the
+    // cursor when its ordinal is greater. Rows without a usable
+    // ordinal cannot be placed, so they are always answered — a
+    // client must never be told "nothing new" while a row it cannot
+    // read sits in the log.
+    let (raw, last_seq) = match since {
+        None => {
+            let last = raw
+                .iter()
+                .filter_map(|row| row.get("seq").and_then(Value::as_u64))
+                .max()
+                .unwrap_or(0);
+            (raw, last)
+        }
+        Some(cursor) => {
+            let mut last = cursor;
+            let mut kept = Vec::with_capacity(raw.len());
+            for row in raw {
+                match row.get("seq").and_then(Value::as_u64) {
+                    Some(seq) if seq <= cursor => continue,
+                    Some(seq) => last = last.max(seq),
+                    None => {}
+                }
+                kept.push(row);
+            }
+            (kept, last)
+        }
+    };
     let rows = classify_rows(raw);
     Ok(TypedEventResponse {
         id,
@@ -851,6 +894,7 @@ pub async fn list_session_events(
         legacy: rows.legacy,
         unknown: rows.unknown,
         broken: rows.broken,
+        last_seq,
     })
 }
 /// `GET /api/v1/sessions/{id}/status` — live operation status

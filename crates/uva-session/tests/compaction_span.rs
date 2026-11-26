@@ -29,6 +29,7 @@ use uva_session::{
     PlannedCompaction,
     ProvenancedHistory,
     SessionEvent,
+    SummaryInput,
     SurfaceLedger,
     SurfaceOp,
     TokenBudget,
@@ -348,6 +349,7 @@ impl Compactor for FixedSpan {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         Box::pin(async {

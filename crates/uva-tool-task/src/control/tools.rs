@@ -354,32 +354,53 @@ impl Tool for AgentsInterruptTool {
 /// Steer a running child: the row is the fact, the channel is how the
 /// live round learns about it.
 async fn steer(target: SteerTarget, text: &str) -> ToolOutput {
+    match deliver_steer(target, text).await {
+        Ok(()) => ToolOutput::text("the running sub-agent was steered"),
+        Err(error) => ToolOutput::error(error),
+    }
+}
+
+/// Deliver `text` to a running sub-agent.
+///
+/// The message is **durable first**: the child's own log carries the
+/// user row (tagged `steer`) before the message reaches the round's
+/// inbox, so a crash between the two loses nothing the transcript
+/// does not already say. The delivery is then the inbox write.
+///
+/// A host reaches the same door through this function, so a steer
+/// from the model's `agents_message` tool and a steer from a headless
+/// client are one behaviour, not two.
+///
+/// # Errors
+///
+/// The row could not be encoded, written or flushed; or the round is
+/// no longer draining its inbox.
+pub async fn deliver_steer(
+    target: SteerTarget,
+    text: &str,
+) -> Result<(), String> {
     if let Some(writer) = target.writer.as_ref() {
         let row = match serde_json::to_value(Message::user(text)) {
             Ok(data) => user_message(data, Some("steer")),
             Err(error) => {
-                return ToolOutput::error(format!(
+                return Err(format!(
                     "the steer message could not be encoded: {error}"
                 ));
             }
         };
         if let Err(error) = writer.append_event(&row).await {
-            return ToolOutput::error(format!(
-                "the steer row could not be written: {error}"
-            ));
+            return Err(format!("the steer row could not be written: {error}"));
         }
         if let Err(error) = writer.flush().await {
-            return ToolOutput::error(format!(
-                "the steer row could not be flushed: {error}"
-            ));
+            return Err(format!("the steer row could not be flushed: {error}"));
         }
     }
-    if target.steer.unbounded_send(Message::user(text)).is_err() {
-        return ToolOutput::error(
-            "the sub-agent's run is no longer draining its inbox",
-        );
-    }
-    ToolOutput::text("the running sub-agent was steered")
+    target
+        .steer
+        .unbounded_send(Message::user(text))
+        .map_err(|_| {
+            "the sub-agent's run is no longer draining its inbox".to_string()
+        })
 }
 
 /// Run another round of a child and report its answer.

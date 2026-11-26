@@ -211,11 +211,65 @@ impl Transcript {
         self.messages.splice(range.clone(), [replacement]);
         self.surface_seqs.splice(range, [seq]);
     }
+
+    /// Clear the reasoning signatures a compaction invalidated.
+    ///
+    /// A signed reasoning block is bound to the request prefix it was
+    /// minted under — the system prompt, the tools and every earlier
+    /// message. A compaction **rewrites** that prefix, so a signature
+    /// that outlived one is void: a provider that enforces the
+    /// binding rejects the whole request, not just the block. The
+    /// signature is therefore cleared, which leaves the part unsigned
+    /// — and an unsigned reasoning part is one the provider's own
+    /// rule drops, so the turn keeps its text and loses the
+    /// reasoning.
+    ///
+    /// `boundary` is the ordinal of the compaction: every message
+    /// written before it had its prefix rewritten. The rule is
+    /// deliberately coarse — it also voids the signatures of the
+    /// messages *before* the replaced span, whose prefix did not
+    /// change. Voiding a valid signature costs the model some
+    /// context; keeping a void one costs the turn.
+    ///
+    /// Returns how many signatures were voided.
+    pub(crate) fn void_signatures_before(&mut self, boundary: u64) -> usize {
+        let mut voided = 0;
+        for (index, seq) in self.surface_seqs.iter().enumerate() {
+            if *seq >= boundary {
+                continue;
+            }
+            let Some(message) = self.messages.get_mut(index) else {
+                continue;
+            };
+            voided += clear_reasoning_signatures(&mut message.content);
+        }
+        voided
+    }
+}
+
+// Clear the signature of every reasoning part of `content`.
+//
+// A `Content` is one part or many; both shapes are walked, and the
+// count of the parts that carried a signature is returned.
+fn clear_reasoning_signatures(content: &mut Content) -> usize {
+    let mut voided = 0;
+    let parts = match content {
+        Content::Single(part) => std::slice::from_mut(part),
+        Content::Multi(parts) => parts.as_mut_slice(),
+    };
+    for part in parts {
+        if let ContentPart::Reasoning(reasoning) = part
+            && reasoning.signature.take().is_some()
+        {
+            voided += 1;
+        }
+    }
+    voided
 }
 
 #[cfg(test)]
 mod tests {
-    use uva_provider::Content;
+    use uva_provider::{Content, ContentPart, Role};
 
     use super::*;
 
@@ -246,6 +300,49 @@ mod tests {
         assert_in_step(&transcript);
         assert_eq!(transcript.messages().len(), 2);
         assert_eq!(transcript.surface_seqs(), &[7, 8]);
+    }
+
+    // A compaction voids the signatures minted before it — and only
+    // those: a message written after the compaction kept its prefix.
+    #[test]
+    fn a_compaction_voids_only_the_signatures_before_it() {
+        let mut transcript = Transcript::empty();
+        transcript.append_message(signed_reasoning(5), 5);
+        transcript.append_message(signed_reasoning(9), 9);
+
+        let voided = transcript.void_signatures_before(7);
+        assert_eq!(voided, 1, "one signature was void");
+        let signatures: Vec<Option<String>> = transcript
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|part| match part {
+                ContentPart::Reasoning(reasoning) => {
+                    Some(reasoning.signature.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            signatures,
+            vec![None, Some("sig".to_string())],
+            "the message written before the compaction lost its \
+             signature; the one after it kept it"
+        );
+    }
+
+    // An assistant turn carrying one signed reasoning part.
+    fn signed_reasoning(seq: u64) -> Message {
+        let _ = seq;
+        Message::new(
+            Role::Assistant,
+            Content::parts(vec![ContentPart::Reasoning(
+                uva_provider::ReasoningContent {
+                    text: "thinking".to_string(),
+                    signature: Some("sig".to_string()),
+                },
+            )]),
+        )
     }
 
     // A request may not interleave a user turn between a `tool_use`

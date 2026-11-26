@@ -1446,8 +1446,17 @@ async fn run_manual_compaction_pass(
     let token = begin_compaction(writer.as_ref(), &plan, "manual")
         .await
         .map_err(session_read_error)?;
+    // A manual pass over a log holds no run to read the request
+    // envelope from, so the summariser builds a standalone request
+    // (the span rendered as text, the instruction as the final user
+    // message). The run's own pass replays its envelope instead — see
+    // the harness's compaction module.
     let outcome = match compactor
-        .summarize(&plan, Arc::new(uva::core::AtomicCancelToken::new()))
+        .summarize(
+            &plan,
+            &uva::session::SummaryInput::fresh(),
+            Arc::new(uva::core::AtomicCancelToken::new()),
+        )
         .await
     {
         Ok(outcome) => outcome,

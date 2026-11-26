@@ -219,6 +219,10 @@ async fn run_one_parallel(
     call: &ToolUse,
     agent_state_ref: &AgentState,
 ) -> (usize, ToolOutcome) {
+    // The cancel check is not here: it lives one layer down, in the
+    // tool stream's drain (`dispatch_tool_call`), which every call
+    // passes through — a call that has not started when the turn is
+    // cancelled never runs, whichever bucket it is in.
     let outcome = guard::execute_gated(this, call, agent_state_ref).await;
     (idx, outcome)
 }

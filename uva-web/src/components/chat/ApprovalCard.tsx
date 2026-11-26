@@ -59,6 +59,9 @@ const DECIDED_LABEL: Record<ResumeStatus, string> = {
   resolved: '已批准一次',
   rejected: '已拒绝',
   cancelled: '已取消',
+  // The deadline decided, not the operator: the card can meet this
+  // decision when it re-reads a session whose ask timed out.
+  timed_out: '已超时',
 };
 
 export function ApprovalCard({

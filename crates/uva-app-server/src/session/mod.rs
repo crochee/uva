@@ -1,6 +1,7 @@
 //! Session controller and supporting types.
 
 pub mod controller;
+pub mod files;
 pub mod lane;
 pub mod session_index;
 pub mod status;

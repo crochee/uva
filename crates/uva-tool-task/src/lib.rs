@@ -144,6 +144,7 @@ pub use control::{
     SessionIndex,
     SteerTarget,
     TransitionError,
+    deliver_steer,
     discover,
     head_records,
 };
@@ -159,7 +160,7 @@ pub use gate::{
     run_gate,
     verdict_summary,
 };
-pub use plugin::{TASK_TOOL_PLUGIN_ID, TaskToolPlugin};
+pub use plugin::{KEY_CONTROL, TASK_TOOL_PLUGIN_ID, TaskToolPlugin};
 pub use spec::{MAX_SUBAGENT_DEPTH, TASK_TOOL_NAME, TaskSpec};
 pub use tool::TaskTool;
 pub use worktree::{

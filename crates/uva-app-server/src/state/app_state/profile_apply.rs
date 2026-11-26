@@ -75,6 +75,15 @@ impl AppState {
         self.assembly.rows()
     }
 
+    /// The deployment's plugin-tree audit (dsh `auditRows`): the rows
+    /// that are not usable, with why — `failed` never started or was
+    /// rejected, `pending` waits for a service the composition does
+    /// not supply (and names it).
+    #[must_use]
+    pub fn profile_audit(&self) -> Vec<crate::composition::kernel::RowAudit> {
+        self.assembly.audit()
+    }
+
     /// One profile row's detail.
     #[must_use]
     pub fn profile_row(&self, id: &str) -> Option<ProfileRow> {

@@ -60,6 +60,15 @@ pub const TASK_TOOL_PLUGIN_ID: &str = "tool-task";
 /// Label of the effect that withdraws the `task` registration.
 const TASK_TOOL_EFFECT: &str = "tool-task";
 
+/// The service key the control surface is published under.
+///
+/// The control surface is the handle table the `task` tool fills and
+/// the three `agents_*` tools read. Publishing it lets a **host**
+/// reach the same table: a headless client must be able to list a
+/// session's sub-agents, stop one, and redirect one — the same three
+/// moves the model has, without a model in the loop.
+pub const KEY_CONTROL: &str = "control";
+
 /// The `tool-task` kernel plugin: registers the `task` tool and the
 /// control surface's three tools.
 ///
@@ -80,6 +89,7 @@ impl TaskToolPlugin {
             PluginManifest::new(TASK_TOOL_PLUGIN_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.inject.push(KEY_TOOLS.to_string());
+        manifest.provides.push(KEY_CONTROL.to_string());
         Self {
             manifest,
             tool,
@@ -134,12 +144,17 @@ impl KernelPlugin for TaskToolPlugin {
             ToolEntry::new(surface.message_tool() as Arc<dyn Tool>),
             ToolEntry::new(surface.interrupt_tool() as Arc<dyn Tool>),
         ];
+        // The control surface is published as a service, so a host
+        // can drive the children the `task` tool spawns. The effect
+        // withdraws it with the row: an unloaded row takes the
+        // surface's service with it.
+        let control = ctx.provide_arc(KEY_CONTROL, Arc::clone(surface))?;
         let effect = register_tool_entries(
             ctx,
             entries,
             ToolProvenance::Core,
             TASK_TOOL_EFFECT,
         )?;
-        Ok(vec![effect])
+        Ok(vec![control, effect])
     }
 }

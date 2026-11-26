@@ -13,7 +13,7 @@
 //! and must stay inside the workspace — the shared `check_path_safety`
 //! guard from `uva_tool::workspace` is enforced.
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use schemars_derive::JsonSchema;
@@ -26,6 +26,8 @@ use uva_tool::{
     ToolOutput,
     workspace::{check_path_safety, resolve_path},
 };
+
+use crate::files::{FileError, FileSystemOwner, LocalFileSystem};
 
 /// The `write` tool brick as a native kernel plugin.
 pub mod plugin;
@@ -69,12 +71,40 @@ struct WriteRequest {
 }
 
 /// `write` — create or append to a workspace file.
-#[derive(Debug, Default)]
-pub struct WriteTool;
+pub struct WriteTool {
+    owner: Arc<dyn FileSystemOwner>,
+}
+
+impl Default for WriteTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for WriteTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteTool").finish_non_exhaustive()
+    }
+}
 
 impl WriteTool {
+    /// The tool over the deployment's own disk.
+    #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            owner: Arc::new(LocalFileSystem),
+        }
+    }
+
+    /// The tool over `owner`: the files it writes live wherever the
+    /// owner says they do.
+    ///
+    /// A client that owns the workspace installs an owner that asks
+    /// the client — so the model writes the user's files, not the
+    /// deployment's copy of them.
+    #[must_use]
+    pub fn with_owner(owner: Arc<dyn FileSystemOwner>) -> Self {
+        Self { owner }
     }
 }
 
@@ -151,8 +181,15 @@ impl Tool for WriteTool {
             }
         };
 
+        // The owner decides where this session's files live: the
+        // deployment's workspace, or the client's own directory when
+        // the client owns the workspace.
+        let workspace_root = self
+            .owner
+            .session_root(&context.session_id)
+            .unwrap_or_else(|| context.workspace_root.clone());
         if let Some(err) =
-            check_path_safety(&context.workspace_root, &request.file_path)
+            check_path_safety(&workspace_root, &request.file_path)
         {
             return ToolOutput::error(err);
         }
@@ -160,47 +197,53 @@ impl Tool for WriteTool {
         let mode = request.mode.unwrap_or_default();
         let should_create_dirs = request.create_directories.unwrap_or(true);
         let resolved: PathBuf =
-            resolve_path(&context.workspace_root, &request.file_path);
+            resolve_path(&workspace_root, &request.file_path);
 
-        if should_create_dirs
-            && let Some(parent) = resolved.parent()
-            && !parent.as_os_str().is_empty()
-            && !parent.exists()
-            && let Err(e) = tokio::fs::create_dir_all(parent).await
-        {
-            return ToolOutput::error(format!(
-                "Failed to create parent directory '{}': {}",
-                parent.display(),
-                e
-            ));
-        }
-
-        let existed = resolved.exists();
+        // Whether the file was there, and what it held: the owner
+        // answers, because the file may live on the client and not on
+        // this disk. One read serves both questions.
+        let prior =
+            match self.owner.read_file(&context.session_id, &resolved).await {
+                Ok(bytes) => Some(bytes),
+                Err(FileError::Missing) => None,
+                // A read that failed for another reason does not decide
+                // the question; the write below will say what happened.
+                Err(_) => None,
+            };
+        let existed = prior.is_some();
         let new_text = if mode == WriteMode::Append {
-            let prior = if existed {
-                match tokio::fs::read_to_string(&resolved).await {
-                    Ok(s) => s,
+            let prior = match prior {
+                Some(bytes) => match String::from_utf8(bytes) {
+                    Ok(text) => text,
                     Err(e) => {
                         return ToolOutput::error(format!(
-                            "Failed to read existing file '{}' for append: {}",
-                            resolved.display(),
-                            e
+                            "Failed to read existing file '{}' for \
+                             append: {e}",
+                            resolved.display()
                         ));
                     }
-                }
-            } else {
-                String::new()
+                },
+                None => String::new(),
             };
             format!("{prior}{}", request.content)
         } else {
             request.content
         };
 
-        if let Err(e) = tokio::fs::write(&resolved, new_text.as_bytes()).await {
+        if let Err(error) = self
+            .owner
+            .write_file(
+                &context.session_id,
+                &resolved,
+                new_text.as_bytes(),
+                should_create_dirs,
+            )
+            .await
+        {
             return ToolOutput::error(format!(
                 "Failed to write file '{}': {}",
                 resolved.display(),
-                e
+                error
             ));
         }
 

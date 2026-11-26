@@ -34,12 +34,13 @@ use uva_session::{
     LogWriter,
     SessionEvent,
     SummaryCompactor,
+    SummaryInput,
     SurfaceOp,
     TokenBudget,
     derive_history,
     in_memory::InMemorySessionSink,
 };
-use uva_tool::ToolRegistry;
+use uva_tool::{Context, Tool, ToolEntry, ToolOutput, ToolRegistry};
 
 use super::support::*;
 use crate::{
@@ -72,6 +73,15 @@ impl SummaryProvider {
             requests: Mutex::new(Vec::new()),
             calls: AtomicUsize::new(0),
         })
+    }
+
+    fn last_request(&self) -> CompletionRequest {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .last()
+            .expect("a request was captured")
+            .clone()
     }
 
     fn last_prompt(&self) -> String {
@@ -329,6 +339,258 @@ async fn a_compactor_writes_one_replace_row_with_its_provenance() {
     );
 }
 
+// A compaction rewrote the request prefix, so the reasoning
+// signatures minted under the old prefix are void.
+//
+// A provider that enforces the binding rejects the **whole
+// request** when a thinking block carries a signature from another
+// prefix — not just the block. So the signature is cleared before
+// the first sample: the model loses that reasoning, not the turn.
+#[tokio::test]
+async fn a_compaction_voids_the_signatures_it_invalidated() {
+    let writer = writer_with_a_compacted_prefix().await;
+    let (_events, provider) = run(Arc::clone(&writer), None).await;
+
+    let requests = provider.captured.lock().await;
+    let request = requests.first().expect("the loop sampled once");
+    let reasoning: Vec<&uva_provider::ReasoningContent> = request
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|part| match part {
+            uva_provider::ContentPart::Reasoning(reasoning) => Some(reasoning),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        reasoning.iter().all(|part| part.signature.is_none()),
+        "no reasoning signature survives the compaction: {reasoning:?}"
+    );
+    // The turn itself survived: the assistant message is in the
+    // request, so the signature was voided — not the message with it.
+    assert!(
+        request
+            .iter()
+            .any(|message| message.content.extract_text().as_deref()
+                == Some("answered")),
+        "the assistant turn is still in the request"
+    );
+}
+
+// A log whose compaction replaced the first turn: the assistant
+// turn that follows it kept its signed reasoning, and that
+// signature is void.
+async fn writer_with_a_compacted_prefix() -> Arc<LogWriter> {
+    let sink = Arc::new(InMemorySessionSink::new("void-signature"));
+    let writer = Arc::new(LogWriter::new(sink, Arc::new(SystemClock)));
+    writer
+        .append_event(&uva_session::user_message(
+            serde_json::to_value(Message::user("first turn"))
+                .expect("a user message serialises"),
+            None,
+        ))
+        .await
+        .expect("seed the turn");
+    writer
+        .append_event(&uva_session::assistant_message(
+            serde_json::to_value(Message::new(
+                Role::Assistant,
+                uva_provider::Content::parts(vec![
+                    uva_provider::ContentPart::Reasoning(
+                        uva_provider::ReasoningContent {
+                            text: "thinking".to_string(),
+                            signature: Some("sig-1".to_string()),
+                        },
+                    ),
+                    uva_provider::ContentPart::Text(
+                        uva_provider::TextContent {
+                            text: "answered".to_string(),
+                            cache_control: None,
+                        },
+                    ),
+                ]),
+            ))
+            .expect("an assistant message serialises"),
+        ))
+        .await
+        .expect("seed the answer");
+    // The compaction replaces the first turn only: the assistant
+    // turn survives, and its prefix is the one the compaction
+    // rewrote.
+    writer
+        .append_event(&uva_session::SessionEvent::Compaction {
+            seq: 0,
+            ts: String::new(),
+            data: serde_json::json!({"summary": "condensed"}),
+            surface_op: uva_session::SurfaceOp::Replace {
+                start: 0,
+                end: 1,
+                source_event_seqs: vec![1],
+            },
+        })
+        .await
+        .expect("seed the compaction");
+    writer.flush().await.expect("flush the seeded rows");
+    writer
+}
+
+// The run's compaction pass replays its own request envelope: the
+// same system prompt the routed request sent, the shadowed messages
+// as themselves, the instruction as the final user message (dsh
+// `summarizer.ts:74-79`). Everything but the instruction is then a
+// genuine prefix of the last routed request, so the provider's warm
+// cache covers it.
+#[tokio::test]
+async fn the_summary_call_replays_the_runs_own_request_prefix() {
+    // One registered tool, so the replay carries a schema and the
+    // reply-refusal (`ToolChoice::None`) is observable. An empty
+    // registry would keep the request's own default — the manual
+    // fallback's shape, not the run's.
+    struct ProbeTool;
+    #[async_trait]
+    impl Tool for ProbeTool {
+        fn name(&self) -> &str {
+            "probe"
+        }
+
+        fn description(&self) -> &str {
+            "a tool whose schema rides the replay"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _context: &Context,
+        ) -> ToolOutput {
+            ToolOutput::text("ok")
+        }
+    }
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(ToolEntry::new(Arc::new(ProbeTool)));
+
+    let writer = seeded_writer_with(12_000).await;
+    let summariser = SummaryProvider::replying(REASONING);
+    let provider: Arc<dyn ModelProvider> = summariser.clone();
+    let compactor: Arc<dyn Compactor> =
+        Arc::new(SummaryCompactor::new(provider, "summariser"));
+    let main_provider = Arc::new(
+        CapturingProvider::new(vec![done_chunk("ok")])
+            .with_context_window(1_000),
+    );
+    let _events = run_scripted(
+        Arc::clone(&writer),
+        Some(compactor),
+        Arc::clone(&main_provider),
+        registry,
+    )
+    .await;
+
+    // The routed request the main loop sampled with.
+    let main = main_provider
+        .captured
+        .lock()
+        .await
+        .first()
+        .expect("the loop sampled")
+        .clone();
+    // The auxiliary request the summariser received.
+    let summary = summariser.last_request();
+
+    // The same system prompt leads both — not a summariser prompt of
+    // its own, which would invalidate the prefix cache.
+    let main_system = main
+        .first()
+        .filter(|message| message.role == Role::System)
+        .expect("the routed request opens with its system prompt");
+    let summary_system = summary
+        .messages
+        .first()
+        .filter(|message| message.role == Role::System)
+        .expect("the summary request opens with a system prompt");
+    assert_eq!(
+        main_system.content.extract_text(),
+        summary_system.content.extract_text(),
+        "the summary replays the conversation's own system prompt"
+    );
+    // The instruction is the final user message — the only novel
+    // input the provider sees.
+    let last = summary.messages.last().expect("the instruction rides");
+    assert_eq!(last.role, Role::User);
+    assert!(
+        last.content
+            .extract_text()
+            .is_some_and(|text| text.contains("compaction engine"))
+    );
+    // The schemas ride for the cache, but the reply must be text.
+    assert_eq!(
+        summary.tool_choice,
+        uva_provider::ToolChoice::None,
+        "a schema-toting summary must refuse tool calls outright"
+    );
+    assert_eq!(summary.tools.len(), 1, "the registered schema replayed");
+    assert_eq!(
+        summariser.calls.load(Ordering::SeqCst),
+        1,
+        "one compaction pass, one summary call"
+    );
+}
+
+// The kept tail's signatures are voided too — and that is
+// *correct*, not coarse: a compaction's span always starts at the
+// surface head, so every kept-tail message's prefix contains the
+// shadowed span. There is no message before the compaction boundary
+// whose prefix survived it.
+#[tokio::test]
+async fn a_signature_in_the_kept_tail_is_voided_too() {
+    let writer = seeded_writer_with(12_000).await;
+    let summariser = SummaryProvider::replying(REASONING);
+    let provider: Arc<dyn ModelProvider> = summariser.clone();
+    let compactor: Arc<dyn Compactor> =
+        Arc::new(SummaryCompactor::new(provider, "summariser"));
+    let (_events, main_provider) =
+        run(Arc::clone(&writer), Some(compactor)).await;
+
+    // The post-compaction request: the surface is [system, summary,
+    // kept tail...]. The kept tail is old — written before the
+    // compaction row — so its signatures are bound to a prefix the
+    // replace rewrote. The turn continues; the request must not
+    // carry them.
+    let requests = main_provider.captured.lock().await;
+    // The compaction pass runs before the first request of the run,
+    // so every captured request is post-compaction; identify it by
+    // the summary it must carry in place of the shadowed turns.
+    let post_compaction = requests
+        .iter()
+        .find(|request| {
+            request.iter().any(|message| {
+                message
+                    .content
+                    .extract_text()
+                    .is_some_and(|text| text.contains(REASONING))
+            })
+        })
+        .expect("a request after the compaction replays the summary");
+    let signed: Vec<Option<String>> = post_compaction
+        .iter()
+        .flat_map(|message| {
+            message.content.iter().filter_map(|part| match part {
+                uva_provider::ContentPart::Reasoning(reasoning) => {
+                    Some(reasoning.signature.clone())
+                }
+                _ => None,
+            })
+        })
+        .collect();
+    assert!(
+        signed.iter().all(|signature| signature.is_none()),
+        "the kept tail's signatures are voided: their prefix contains \
+         the shadowed span"
+    );
+}
+
 #[tokio::test]
 async fn without_a_compactor_no_compaction_row_is_written() {
     let writer = seeded_writer().await;
@@ -440,6 +702,7 @@ impl Compactor for MisreportingCompactor {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> futures::future::BoxFuture<
         'static,

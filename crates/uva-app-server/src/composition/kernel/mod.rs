@@ -40,7 +40,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uva::{
     agent::AgentRegistry,
-    approval::{ApprovalPlugin, ApprovalPolicy},
+    approval::ApprovalPlugin,
     attachment::AttachmentPlugin,
     core::SharedClock,
     eval::EvalPlugin,
@@ -138,6 +138,13 @@ pub(crate) struct BootServices {
     /// registration with the host the run assembly receives, so a
     /// bind reaches the same registry.
     pub plugin_host: Host,
+    /// The owner of every session's files: the deployment's disk, or
+    /// the client's workspace when the client owns it.
+    ///
+    /// The `read` and `write` tools read and write through it, so a
+    /// session a client claimed touches the client's files, not the
+    /// deployment's copy of them.
+    pub file_system: Arc<crate::session::files::SessionFileSystem>,
 }
 
 /// Why a native mount failed — a profile-assembly or kernel verdict.
@@ -334,7 +341,8 @@ pub(crate) fn build_rows(
         .with_clock(clock)
         .with_blocking(extras.blocking.clone())
         .with_compaction(extras.compaction.clone())
-        .with_sessions_dir(extras.sessions_dir.clone());
+        .with_sessions_dir(extras.sessions_dir.clone())
+        .with_approval(extras.approval.clone());
     let pairs = build_plugins(rows, &factories, &boot, realms)?
         .into_iter()
         .map(|built| (built.plugin, built.row))
@@ -489,6 +497,139 @@ fn audit_pending(
     Ok(())
 }
 
+/// One row of the deployment's plugin-tree audit: what the row is,
+/// and — when it is not usable — why.
+///
+/// The wire shape of `profile/audit`: `id` and `name` identify the
+/// row, `state` says which list it belongs to, `missing` names the
+/// service keys a pending row still waits for.
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+pub struct RowAudit {
+    /// The row's id (its own, not its factory's).
+    pub id: String,
+    /// The row's factory name.
+    pub name: String,
+    /// `failed` (never started, or the activation rejected) or
+    /// `pending` (waiting for a service the composition does not
+    /// supply). A row in neither list is usable.
+    pub state: &'static str,
+    /// The service keys a pending row still waits for.
+    ///
+    /// Empty for a failed row — the failure is the activation's, not
+    /// a dependency's.
+    pub missing: Vec<String>,
+}
+
+/// Audit the deployment's plugin tree: the `failed` and `pending`
+/// rows (dsh `auditRows`, `packages/preset/agent-preset-registry/
+/// src/mount.ts:115-152`). Every row in neither list is usable.
+///
+/// The kernel is the truth for the state: `PluginState::Failed` is a
+/// failed row, `PluginState::Pending` a pending one. The missing keys
+/// are recomputed with the same fixpoint the mount's audit uses, so
+/// the report names the same services the mount would.
+pub fn plugin_tree_audit(
+    context: &Context,
+    profile: &Profile,
+    services: &Arc<BootServices>,
+) -> Vec<RowAudit> {
+    let factories = profile_factories(Arc::clone(services));
+    let rows: Vec<&Manifest> = profile.all_rows();
+    // What each row provides, and what it waits for.
+    let provides: std::collections::BTreeMap<&str, Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            let keys = factories
+                .get(&row.name)
+                .map(|factory| factory.manifest().provides)
+                .unwrap_or_default();
+            (row.id.as_str(), keys)
+        })
+        .collect();
+    let edges: std::collections::BTreeMap<&str, Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            let keys = factories
+                .get(&row.name)
+                .map(|factory| {
+                    let manifest = factory.manifest();
+                    effective_inject(&manifest.inject, row.inject.as_deref())
+                })
+                .unwrap_or_default();
+            (row.id.as_str(), keys)
+        })
+        .collect();
+    // The fixpoint: a row is live when every key it waits for is
+    // provided by a live row or already present in the parent scope.
+    let mut live: std::collections::BTreeSet<&str> =
+        std::collections::BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for row in &rows {
+            if live.contains(row.id.as_str()) {
+                continue;
+            }
+            let missing = edges
+                .get(row.id.as_str())
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|key| {
+                            !live_provides(&provides, &live, key)
+                                && !parent_service_available(context, key)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if missing.is_empty() {
+                live.insert(row.id.as_str());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // The report: a row that is not live names the keys it waits for.
+    rows.iter()
+        .filter(|row| !live.contains(row.id.as_str()))
+        .map(|row| {
+            let missing = edges
+                .get(row.id.as_str())
+                .map(|keys| {
+                    keys.iter()
+                        .filter(|key| {
+                            !live_provides(&provides, &live, key)
+                                && !parent_service_available(context, key)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            RowAudit {
+                id: row.id.clone(),
+                name: row.name.clone(),
+                state: if missing.is_empty() {
+                    // Not live, and nothing it waits for: the row never
+                    // started or its activation was rejected.
+                    "failed"
+                } else {
+                    "pending"
+                },
+                missing,
+            }
+        })
+        .collect()
+}
+
 /// Whether a live row provides `key`.
 fn live_provides(
     provides: &std::collections::BTreeMap<&str, Vec<String>>,
@@ -524,6 +665,12 @@ pub(crate) struct BootExtras {
     /// caller-supplied registry was built with, so the row and the
     /// fixture agree on where sessions live.
     pub sessions_dir: Option<std::path::PathBuf>,
+    /// The deployment's approval stance: which calls are held, and
+    /// how long a held call waits for an operator.
+    ///
+    /// `None` means the default stance — high-risk calls are asked
+    /// about, and the ask waits for a human.
+    pub approval: Option<uva::approval::ApprovalPolicy>,
 }
 
 /// A factory directory for `--dump-config` and other manifest-only
@@ -542,6 +689,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
         usage: Arc::new(crate::state::UsageMetrics::default()),
         hook_registry: HookRegistry::new(),
         plugin_host: Host::default(),
+        file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
     }))
 }
 
@@ -550,9 +698,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
 fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // Rows the boot constructs: their plugins build the capability in
     // `apply` from the boot context (config only — no containers).
-    const BOOT_SPECS: [(&str, BootMake); 15] = [
-        ("tool-read", read_tool_plugin),
-        ("tool-write", write_tool_plugin),
+    const BOOT_SPECS: [(&str, BootMake); 13] = [
         ("tool-shell", shell_tool_plugin),
         ("tool-todo", todo_tool_plugin),
         ("tool-web", web_tool_plugin),
@@ -572,8 +718,10 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 3] = [
+    const SPECS: [(&str, Make); 5] = [
         ("tool-registry", tool_registry_plugin),
+        ("tool-read", read_tool_plugin),
+        ("tool-write", write_tool_plugin),
         ("tool-task", task_tool_plugin),
         ("hooks", hooks_plugin),
     ];
@@ -786,16 +934,18 @@ fn tool_registry_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
     Arc::new(ToolRegistryPlugin::new(Arc::clone(&services.tool_registry)))
 }
 
-fn read_tool_plugin(
-    _boot: &BootContext,
-) -> Result<Arc<dyn KernelPlugin>, PluginError> {
-    Ok(Arc::new(uva::tool_read::ReadToolPlugin::new()))
+fn read_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    Arc::new(uva::tool_read::ReadToolPlugin::with_owner(Arc::clone(
+        &services.file_system,
+    )
+        as Arc<dyn uva::tool_files::FileSystemOwner>))
 }
 
-fn write_tool_plugin(
-    _boot: &BootContext,
-) -> Result<Arc<dyn KernelPlugin>, PluginError> {
-    Ok(Arc::new(uva::tool_write::WriteToolPlugin::new()))
+fn write_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    Arc::new(uva::tool_write::WriteToolPlugin::with_owner(Arc::clone(
+        &services.file_system,
+    )
+        as Arc<dyn uva::tool_files::FileSystemOwner>))
 }
 
 fn shell_tool_plugin(
@@ -966,16 +1116,18 @@ fn compaction_plugin(
     Ok(Arc::new(CompactionPlugin::new(config)))
 }
 
-/// The `approval` row's plugin: the deployment's default approval
-/// stance.
+/// The `approval` row's plugin: the deployment's approval stance.
 ///
-/// The policy is the row's own object — the boot holds no stance, so
-/// the row publishes the default and the deployment's grants layer
-/// over it.
+/// The policy is the row's own object — the boot resolved it from the
+/// deployment's configuration, so the row publishes *that* policy
+/// rather than a hard-coded default. A deployment that configured
+/// nothing gets the default stance: high-risk calls are asked about,
+/// and the ask waits for a human.
 fn approval_plugin(
-    _boot: &BootContext,
+    boot: &BootContext,
 ) -> Result<Arc<dyn KernelPlugin>, PluginError> {
-    Ok(Arc::new(ApprovalPlugin::new(ApprovalPolicy::default())))
+    let policy = boot.approval().cloned().unwrap_or_default();
+    Ok(Arc::new(ApprovalPlugin::new(policy)))
 }
 
 /// The `hooks` row's plugin: the deployment's one interception table,

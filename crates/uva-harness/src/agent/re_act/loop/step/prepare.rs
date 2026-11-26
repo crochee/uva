@@ -13,6 +13,7 @@
 
 use std::sync::Arc;
 
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::debug;
 use uva_core::Clock;
@@ -90,7 +91,15 @@ impl ReActLoop {
                     check_input_history(input, history.messages())?;
                     let attachments = super::sample::attachment_parts(input);
                     warn_attachments(self, &attachments);
-                    (Transcript::from_projection(history), attachments, rows)
+                    let mut transcript = Transcript::from_projection(history);
+                    // A compaction rewrote the request prefix of
+                    // everything before it, so the reasoning signatures
+                    // minted under the old prefix are void: a provider
+                    // that enforces the binding rejects the whole
+                    // request. The signatures are cleared before the
+                    // first sample, not when the provider refuses.
+                    void_void_signatures(&mut transcript, &rows);
+                    (transcript, attachments, rows)
                 }
                 None => (
                     Transcript::from_messages(initial_transcript(input)),
@@ -394,6 +403,42 @@ fn check_input_history(
         input.history.len(),
         derived.len()
     )))
+}
+
+// Clear the reasoning signatures the log's compactions invalidated.
+//
+// A compaction replaces a span of the surface, so every message
+// written before it had its request prefix rewritten — and a signed
+// reasoning block is bound to the prefix it was minted under. The
+// signature is void; keeping it would make the provider reject the
+// whole request.
+//
+// A log with no compaction has no boundary: the signatures stand.
+fn void_void_signatures(transcript: &mut Transcript, rows: &[Value]) {
+    let Some(boundary) = latest_compaction_ordinal(rows) else {
+        return;
+    };
+    let voided = transcript.void_signatures_before(boundary);
+    if voided > 0 {
+        debug!(
+            boundary,
+            voided,
+            "the run voided the reasoning signatures a compaction \
+             invalidated"
+        );
+    }
+}
+
+// The ordinal of the log's latest compaction, if it holds one.
+fn latest_compaction_ordinal(rows: &[Value]) -> Option<u64> {
+    rows.iter()
+        .filter_map(|row| match uva_session::restore_row(row).event() {
+            Some(uva_session::SessionEvent::Compaction { seq, .. }) => {
+                Some(seq)
+            }
+            _ => None,
+        })
+        .max()
 }
 
 // ===== request-local passes =========================================

@@ -109,6 +109,7 @@ pub use compaction::{
     PRUNED_TOOL_RESULT,
     PlannedCompaction,
     SummaryCompactor,
+    SummaryInput,
     TokenBudget,
     TouchedPair,
     ValidationError,

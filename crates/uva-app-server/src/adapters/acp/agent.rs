@@ -42,6 +42,7 @@ use agent_client_protocol::{
         AgentCapabilities,
         AuthenticateRequest,
         CancelNotification,
+        FileSystemCapabilities,
         Implementation,
         InitializeRequest,
         InitializeResponse,
@@ -70,6 +71,10 @@ pub struct AcpAgent {
     pub(crate) state: Arc<AppState>,
     /// The sessions the client opened, and the directory it named.
     sessions: Mutex<HashMap<String, AcpSession>>,
+    /// What the client offered in `initialize`: which `fs/*` methods
+    /// it answers. A session opened by a client that offers them
+    /// reads and writes **its own files**.
+    fs: Mutex<Option<FileSystemCapabilities>>,
 }
 
 /// One session the client opened.
@@ -88,6 +93,7 @@ impl AcpAgent {
         Arc::new(Self {
             state,
             sessions: Mutex::new(HashMap::new()),
+            fs: Mutex::new(None),
         })
     }
 
@@ -127,8 +133,12 @@ impl AcpAgent {
             .on_receive_request(
                 {
                     let agent = Arc::clone(&agent);
-                    async move |request: NewSessionRequest, responder, _cx| {
-                        responder.respond(agent.session_new(request))
+                    async move |request: NewSessionRequest,
+                                responder,
+                                cx: agent_client_protocol::v1::ConnectionTo<
+                        Client,
+                    >| {
+                        responder.respond(agent.session_new(request, &cx))
                     }
                 },
                 agent_client_protocol::on_receive_request!(),
@@ -199,6 +209,16 @@ impl AcpAgent {
     /// reload a session, it takes text and image prompts, and it has
     /// no MCP transports of its own.
     fn initialize(&self, request: InitializeRequest) -> InitializeResponse {
+        let fs = request.client_capabilities.fs.clone();
+        if fs.read_text_file || fs.write_text_file {
+            info!(
+                read = fs.read_text_file,
+                write = fs.write_text_file,
+                "the client offers the ACP file methods; its sessions \
+                 will work on its own files"
+            );
+        }
+        self.fs.lock().replace(fs);
         InitializeResponse::new(request.protocol_version)
             .agent_capabilities(
                 AgentCapabilities::new()
@@ -225,7 +245,11 @@ impl AcpAgent {
     /// The id is opaque to the client and is the session's own id in
     /// the deployment, so a session the client opened is the same
     /// session the deployment's own surfaces see.
-    fn session_new(&self, request: NewSessionRequest) -> NewSessionResponse {
+    fn session_new(
+        &self,
+        request: NewSessionRequest,
+        cx: &agent_client_protocol::v1::ConnectionTo<Client>,
+    ) -> NewSessionResponse {
         if !request.mcp_servers.is_empty() {
             info!(
                 servers = request.mcp_servers.len(),
@@ -235,6 +259,18 @@ impl AcpAgent {
         }
         let cwd = Some(request.cwd.to_string_lossy().to_string());
         let session_id = format!("sess_{}", Uuid::new_v4().simple());
+        // A client that offered the `fs/*` methods owns this session's
+        // files: the session's `read` and `write` tools ask it instead
+        // of touching this disk. A client that offered nothing leaves
+        // the session on the deployment's own workspace.
+        if let Some(fs) = self.fs.lock().clone() {
+            let owner = Arc::new(super::files::ClientFileSystem::new(
+                cx.clone(),
+                request.cwd.clone(),
+                fs,
+            ));
+            self.state.file_system.register(&session_id, owner);
+        }
         self.sessions
             .lock()
             .insert(session_id.clone(), AcpSession { cwd: cwd.clone() });

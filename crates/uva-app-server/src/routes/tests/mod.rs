@@ -2,3 +2,4 @@
 
 mod follow;
 mod steer;
+mod subagents;

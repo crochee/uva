@@ -7487,9 +7487,11 @@ export type RenderKind = 'text' | 'shell' | 'read' | 'write' | 'web_fetch' | 'to
  * [`ResumeStatus::Resolved`] lets the call execute;
  * [`ResumeStatus::Cancelled`] and [`ResumeStatus::Rejected`] record
  * the decision and write a model-visible `is_error` tool result
- * instead of executing it.
+ * instead of executing it. [`ResumeStatus::TimedOut`] is the
+ * deadline's own answer: nobody replied, so the call did not run —
+ * but the model is told *that*, not that an operator said no.
  */
-export type ResumeStatus = 'resolved' | 'cancelled' | 'rejected';
+export type ResumeStatus = ('resolved' | 'cancelled' | 'rejected') | 'timed_out';
 /**
  * How a submitted message should reach its run.
  *
@@ -8320,6 +8322,37 @@ export interface ResumeToken {
    * Fingerprint of the request envelope at suspension time.
    */
   request_snapshot_hash: string;
+}
+/**
+ * One row of the deployment's plugin-tree audit: what the row is,
+ * and — when it is not usable — why.
+ *
+ * The wire shape of `profile/audit`: `id` and `name` identify the
+ * row, `state` says which list it belongs to, `missing` names the
+ * service keys a pending row still waits for.
+ */
+export interface RowAudit {
+  /**
+   * The row's id (its own, not its factory's).
+   */
+  id: string;
+  /**
+   * The row's factory name.
+   */
+  name: string;
+  /**
+   * `failed` (never started, or the activation rejected) or
+   * `pending` (waiting for a service the composition does not
+   * supply). A row in neither list is usable.
+   */
+  state: string;
+  /**
+   * The service keys a pending row still waits for.
+   *
+   * Empty for a failed row — the failure is the activation's, not
+   * a dependency's.
+   */
+  missing: string[];
 }
 /**
  * `GET /api/v1/schedules/{id}` — full row.

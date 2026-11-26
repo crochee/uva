@@ -1,7 +1,7 @@
 //! What a run needs: the provider, tool registry, prompt context and
 //! per-agent knobs a controller hands to every agent run it starts.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 /// Resolves a recorded provider / model pair back to a live handle.
 ///
@@ -145,6 +145,12 @@ pub struct RunDependencies {
     /// per-run agents add no process. Tests and embedders leave this
     /// `None`; the assembly then installs `Host::default_policy`.
     pub host: Option<uva::harness::Host>,
+    /// How long a held call waits for an operator's answer.
+    ///
+    /// `None` waits forever. The value comes from the deployment's
+    /// approval policy (`approval.timeout_secs`); the controller is
+    /// the layer that waits, so it owns the deadline.
+    pub approval_timeout: Option<Duration>,
 }
 
 impl RunDependencies {
@@ -209,6 +215,7 @@ impl RunDependencies {
             attachment_store: Arc::new(
                 uva::attachment::AttachmentStore::default(),
             ),
+            approval_timeout: None,
         }
     }
 
@@ -305,6 +312,19 @@ impl RunDependencies {
     ) -> Self {
         self.agent_registry = Some(registry);
         self.default_agent_name = Some(default_agent_name);
+        self
+    }
+
+    /// Install the deployment's approval deadline.
+    ///
+    /// A held call waits this long for an operator. `None` waits
+    /// forever — the deployment default, and the right one where
+    /// somebody is always watching. The deadline is the controller's
+    /// business because the controller is what waits: the harness
+    /// ends the turn when it holds a call, and the operator's answer
+    /// comes back through the resume path.
+    pub fn with_approval_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.approval_timeout = timeout;
         self
     }
 }

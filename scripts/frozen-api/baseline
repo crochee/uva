@@ -277,6 +277,7 @@ uva-session::SharedSurfaceLedger
 uva-session::SnapshotBus
 uva-session::SnapshotReceiver
 uva-session::SummaryCompactor
+uva-session::SummaryInput
 uva-session::SurfaceLedger
 uva-session::SurfaceOp
 uva-session::SurfaceRole

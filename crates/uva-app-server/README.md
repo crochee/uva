@@ -138,10 +138,16 @@ schema 类型——客户端解的就是这个服务写的。仓内自己的映�
 - **审批闸门**：`acp` 模式装上部署的 `approval` 策略（风险由工具自己
   判定），其余界面保持现状。权限选项是一次性的两项：`allow-once` /
   `reject-once`（与参考 harness 相同）。
-- **不委派**：客户端侧的文件系统、终端与每会话 MCP 服务器都不委派——
-  工具在进程内跑，与三个参考 harness 一致。
+- **文件系统委派**（客户端声明了才生效）：客户端在 `initialize` 里声明
+  `clientCapabilities.fs`，它开的会话就把 `read` / `write` 工具指到**它自己的
+  文件**上——工具的路径以客户端的 `cwd` 为根，读写经 ACP 的
+  `fs/read_text_file` / `fs/write_text_file` 请求回到客户端。未声明的客户端
+  一切照旧：工具跑在部署的工作区根。
+- **不委派**：终端与每会话 MCP 服务器不委派——本部署没有终端操作，MCP
+  用部署自己的配置。
 - **工作目录**：工具跑在部署的工作区根，不是客户端给的 `cwd`（工具
-  注册表是开机时按部署根构造的）。
+  注册表是开机时按部署根构造的）；**文件系统委派的会话例外**——它的
+  文件路径以客户端的 `cwd` 为根。
 
 ### ACP 走两条传输
 
@@ -169,15 +175,26 @@ schema 类型——客户端解的就是这个服务写的。仓内自己的映�
 
 一个方法表，`domain/verb` 命名（LSP / MCP / gRPC 的斜杠风格），60 余个
 方法分属：`sessions/*`（含 `sessions/follow` / `sessions/resume` /
-`session/unfollow`）、`approval/respond`（审批回复，映射到既有的
+`session/unfollow`；`sessions/events` 带 `since` 游标，客户端按序增量读）、
+`approval/respond`（审批回复，映射到既有的
 `sessions/resume` + `ResumeToken`）、`chat/*`、`agents/*`、`skills/*`、
-`tools/*`、`schedules/*`、`tasks/*`、`evals/*`、
+`tools/*`、`schedules/*`、`tasks/*`、`subagents/*`（委派子代理的宿主
+控制面：`list` / `cancel` / `steer`）、`evals/*`、
 `attachments/*`、`search/all`（六域统一检索）、`health/*`、
 `models/list`、`metrics/gather`（本进程的 Prometheus exposition，供网关
 合流）与 Anthropic 兼容的 `anthropic/messages`。方法表见
 [`src/rpc/methods/`](src/rpc/methods/)；每个方法名在
 [`src/rpc/methods/names.rs`](src/rpc/methods/names.rs) 里只写一次，
 路由按那些常量注册，客户端（终端、浏览器门禁）读同一张表。
+
+### 审批的截止时间
+
+`[approval]` 配置段是部署对「被持有的调用」的立场：`mode`
+（`ask_high_risk` / `always` / `never`）、`ask_unknown`、
+`timeout_secs` 与逐工具的 `overrides`。`approval` 行发布这份策略，
+控制器读它的**截止时间**：到期仍无人回答的调用按「拒绝」结算——决定落进
+日志（`approval_decided`，`denied`），模型读到的是一条**超时**拒绝（而不是
+「操作者拒绝了」），回合继续。默认没有截止时间（等人）。
 
 ## `~/.agents/` 布局
 

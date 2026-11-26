@@ -77,6 +77,17 @@ pub struct ApprovalPolicy {
     pub overrides: BTreeMap<String, ApprovalMode>,
     /// Host grants: a matching tool + workspace is pre-approved.
     pub grants: BTreeSet<GrantKey>,
+    /// How long a held call waits for an answer, in seconds.
+    ///
+    /// `None` waits forever: the ask stays open until an operator
+    /// answers or the turn is cancelled. A deadline is the headless
+    /// deployment's answer to the same question — a client that never
+    /// comes back must not park the session forever. On expiry the
+    /// held call is **denied** (the log records the decision, and the
+    /// model reads a distinct "nobody answered" refusal), and the
+    /// turn continues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl Default for ApprovalPolicy {
@@ -86,6 +97,7 @@ impl Default for ApprovalPolicy {
             ask_unknown: false,
             overrides: BTreeMap::new(),
             grants: BTreeSet::new(),
+            timeout_secs: None,
         }
     }
 }
@@ -143,6 +155,16 @@ impl ApprovalPolicy {
     #[must_use]
     pub fn mode_for(&self, tool: &str) -> ApprovalMode {
         self.overrides.get(tool).copied().unwrap_or(self.mode)
+    }
+
+    /// How long a held call waits for an answer.
+    ///
+    /// `None` means the ask waits forever — the deployment's default,
+    /// and the right one for a deployment where an operator is always
+    /// watching.
+    #[must_use]
+    pub fn timeout(&self) -> Option<std::time::Duration> {
+        self.timeout_secs.map(std::time::Duration::from_secs)
     }
 
     /// Whether `tool` is pre-approved for `workspace_hash`.
@@ -297,7 +319,9 @@ pub fn may_retry(risk: Risk, idempotent_hint: Option<bool>) -> bool {
 /// [`ResumeStatus::Resolved`] lets the call execute;
 /// [`ResumeStatus::Cancelled`] and [`ResumeStatus::Rejected`] record
 /// the decision and write a model-visible `is_error` tool result
-/// instead of executing it.
+/// instead of executing it. [`ResumeStatus::TimedOut`] is the
+/// deadline's own answer: nobody replied, so the call did not run —
+/// but the model is told *that*, not that an operator said no.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema,
 )]
@@ -306,6 +330,13 @@ pub enum ResumeStatus {
     Resolved,
     Cancelled,
     Rejected,
+    /// Nobody answered before the deadline.
+    ///
+    /// The durable row says `denied` — the log's vocabulary has no
+    /// fourth answer — while the model-visible text names the
+    /// deadline, so the model can tell "the operator said no" from
+    /// "nobody was there".
+    TimedOut,
 }
 
 /// One decision from the client. `Resolved` approves this call;
@@ -327,13 +358,14 @@ impl ResumeDecision {
     /// The status the durable `approval_decided` row carries.
     ///
     /// The log's vocabulary is `approved` / `denied` / `cancelled`, so
-    /// a wire-level `rejected` is recorded as `denied`.
+    /// a wire-level `rejected` — and a deadline's `timed_out` — are
+    /// recorded as `denied`.
     #[must_use]
     pub fn durable_status(&self) -> &'static str {
         match self.status {
             ResumeStatus::Resolved => "approved",
             ResumeStatus::Cancelled => "cancelled",
-            ResumeStatus::Rejected => "denied",
+            ResumeStatus::Rejected | ResumeStatus::TimedOut => "denied",
         }
     }
 
@@ -352,10 +384,25 @@ impl ResumeDecision {
                 .or_else(|| payload.get("reason").and_then(Value::as_str))
                 .map(str::to_string)
         });
+        // The deadline is not the operator: the text says so, because
+        // "nobody answered" and "somebody said no" lead the model to
+        // different next moves (retry later vs. try another way).
+        if self.status == ResumeStatus::TimedOut {
+            return match detail {
+                Some(reason) => format!(
+                    "tool call timed out before an operator answered; it \
+                     did not run: {reason}"
+                ),
+                None => "tool call timed out before an operator answered; \
+                         it did not run"
+                    .to_string(),
+            };
+        }
         let verb = match self.status {
             ResumeStatus::Resolved => "approved",
             ResumeStatus::Cancelled => "cancelled",
             ResumeStatus::Rejected => "rejected",
+            ResumeStatus::TimedOut => "timed out",
         };
         match detail {
             Some(reason) => {
@@ -643,6 +690,45 @@ mod tests {
         assert_eq!(request.arguments_hash, "sha256:abc");
         assert_eq!(request.risk, Risk::High);
         assert_eq!(request.agent, "default");
+    }
+
+    #[test]
+    fn the_deadline_denies_the_call_and_says_so() {
+        // The durable row says `denied` — the log's vocabulary has no
+        // fourth answer — while the model reads a refusal that names
+        // the deadline instead of an operator's "no".
+        let decision = ResumeDecision {
+            id: "a1".to_string(),
+            status: ResumeStatus::TimedOut,
+            payload: Some(serde_json::json!({
+                "reason": "no decision within the 300s approval deadline",
+            })),
+        };
+        assert_eq!(decision.durable_status(), "denied");
+        assert!(!decision.executes());
+        let message = decision.denial_message();
+        assert!(
+            message.contains("timed out"),
+            "the model is told the deadline, not an operator: {message}"
+        );
+        assert!(
+            !message.contains("by the operator"),
+            "nobody answered: {message}"
+        );
+        assert!(
+            message.contains("300s"),
+            "and the deadline is named: {message}"
+        );
+    }
+
+    #[test]
+    fn the_policy_carries_its_deadline() {
+        assert_eq!(ApprovalPolicy::default().timeout(), None);
+        let policy = ApprovalPolicy {
+            timeout_secs: Some(300),
+            ..ApprovalPolicy::default()
+        };
+        assert_eq!(policy.timeout(), Some(std::time::Duration::from_secs(300)));
     }
 
     #[test]

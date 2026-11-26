@@ -19,6 +19,7 @@ pub mod search;
 pub mod session_search;
 pub mod sessions;
 pub mod skills;
+pub mod subagents;
 pub mod tasks;
 pub mod tool;
 pub mod ui;

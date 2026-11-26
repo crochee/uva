@@ -57,6 +57,7 @@ uva = { workspace = true, features = [
   "provider-openai",
   "context",
   "tool",
+  "tool-files",
   "tool-read",
   "tool-write",
   "tool-shell",

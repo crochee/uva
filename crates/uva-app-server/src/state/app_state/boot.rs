@@ -441,6 +441,12 @@ impl AppState {
         let session_index_slot =
             Arc::new(crate::session::session_index::SessionIndexSlot::new());
 
+        // The owner of every session's files: the deployment's disk
+        // by default, the client's workspace when the client owns it.
+        // The `read` and `write` tools read through it, and the ACP
+        // adapter claims sessions here.
+        let file_system =
+            Arc::new(crate::session::files::SessionFileSystem::new());
         // The containers the mount hands the rows: the one tool
         // registry, the peer-agent registry, the harness host and the
         // child-session writer slot. Every capability — the `task`
@@ -459,6 +465,7 @@ impl AppState {
             usage: Arc::clone(&usage_metrics),
             hook_registry: input.plugin_host.hook_registry().clone(),
             plugin_host: input.plugin_host.clone(),
+            file_system: Arc::clone(&file_system),
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same
@@ -472,6 +479,12 @@ impl AppState {
                 settings: input.default_compaction.unwrap_or_default(),
             }),
             sessions_dir: input.sessions_dir.clone(),
+            // The deployment's approval stance: the `approval` row
+            // publishes it, and the controller reads its deadline.
+            approval: input
+                .server_config
+                .as_ref()
+                .map(|config| config.approval.policy()),
         };
         let (kernel, mounted) = mount_profile(
             Arc::clone(&boot_services),
@@ -707,6 +720,7 @@ impl AppState {
             clock,
             cluster: input.cluster,
             tool_registry,
+            file_system,
             agent_registry: input.agent_registry,
             session_search: input.session_search,
             session_manager,

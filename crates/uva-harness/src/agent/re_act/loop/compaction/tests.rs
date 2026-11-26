@@ -33,6 +33,7 @@ use uva_session::{
     Compactor,
     LogWriter,
     SessionEvent,
+    SummaryInput,
     TokenBudget,
     in_memory::InMemorySessionSink,
 };
@@ -149,6 +150,7 @@ impl Compactor for NeverPlans {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         unreachable!("no plan means no summary")
@@ -319,6 +321,7 @@ impl Compactor for FixedSpan {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         Box::pin(async {

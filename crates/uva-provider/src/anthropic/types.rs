@@ -69,9 +69,37 @@ pub(super) struct AnthropicRequest {
     pub(super) max_tokens: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) tools: Option<Vec<AnthropicTool>>,
+    /// Anthropic's `tool_choice`. `None` omits the field, which is
+    /// Anthropic's own default (`auto`).
+    ///
+    /// The canonical request's [`ToolChoice`](crate::types::ToolChoice)
+    /// maps onto this: the summary call of a compaction replays the
+    /// conversation's tool schemas for prefix-cache alignment and asks
+    /// for `none`, so the reply is the checkpoint text — a schema in
+    /// the prefix must not become a tool call in the answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) temperature: Option<f64>,
     pub(super) stream: bool,
+}
+
+/// Anthropic's `tool_choice` wire value.
+///
+/// `Auto` is deliberately absent: the canonical request's default is
+/// `auto` and Anthropic's default is `auto`, so the adapter omits the
+/// field rather than sending what the endpoint already assumes.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(super) enum AnthropicToolChoice {
+    /// The model may call a tool, or answer in text.
+    Auto,
+    /// The model must not call any tool.
+    None,
+    /// The model must call some tool.
+    Any,
+    /// The model must call the named tool.
+    Tool { name: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -359,6 +387,7 @@ mod tests {
             messages: vec![],
             max_tokens: 100,
             tools: None,
+            tool_choice: None,
             temperature: None,
             stream: false,
         };

@@ -69,13 +69,22 @@ impl ReadToolPlugin {
     /// Build the brick over a default [`ReadTool`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_owner(Arc::new(crate::files::LocalFileSystem))
+    }
+
+    /// Build the brick over the owner of the files it reads.
+    ///
+    /// A host whose client owns the workspace installs an owner that
+    /// asks the client, so the tool reads the user's files.
+    #[must_use]
+    pub fn with_owner(owner: Arc<dyn crate::files::FileSystemOwner>) -> Self {
         let mut manifest =
             PluginManifest::new(READ_TOOL_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.inject.push(KEY_TOOLS.to_string());
         Self {
             manifest,
-            tool: Arc::new(ReadTool::new()),
+            tool: Arc::new(ReadTool::with_owner(owner)),
         }
     }
 }

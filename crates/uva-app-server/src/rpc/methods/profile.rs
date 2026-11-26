@@ -25,6 +25,9 @@ pub fn register(router: &mut RpcRouter) {
     router.register(names::PROFILE_LIST, |state, _raw| async move {
         encode(state.profile_rows())
     });
+    router.register(names::PROFILE_AUDIT, |state, _raw| async move {
+        encode(state.profile_audit())
+    });
     router.register(names::PROFILE_GET, |state, raw| async move {
         let params: IdParams = parse(raw)?;
         match state.profile_row(&params.id) {

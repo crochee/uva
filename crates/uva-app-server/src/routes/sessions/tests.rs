@@ -77,9 +77,11 @@ fn typed_event_response_serialises_with_counts() {
         legacy: Vec::new(),
         unknown: Vec::new(),
         broken: Vec::new(),
+        last_seq: 7,
     };
     let v = serde_json::to_value(&resp).expect("serialise");
     assert_eq!(v["id"], "abc");
+    assert_eq!(v["last_seq"], 7, "the read cursor crosses the wire");
     assert_eq!(v["typed_count"], 2);
     assert_eq!(v["legacy_count"], 1);
     assert_eq!(v["unknown_count"], 3);
@@ -137,9 +139,10 @@ async fn the_events_response_restores_old_dialects_and_keeps_unknown_tags_apart(
         .await
         .expect("the session is registered");
 
-    let response = list_session_events(Arc::clone(&state), "mixed".to_string())
-        .await
-        .expect("the events read");
+    let response =
+        list_session_events(Arc::clone(&state), "mixed".to_string(), None)
+            .await
+            .expect("the events read");
 
     assert_eq!(
         response.typed_count, 2,
@@ -169,6 +172,70 @@ async fn the_events_response_restores_old_dialects_and_keeps_unknown_tags_apart(
         Some("hi"),
         "the restored row carries the text the legacy envelope held"
     );
+}
+
+/// The read cursor: a client that already read up to an ordinal gets
+/// only the rows after it, and the answer names the next cursor.
+///
+/// This is what makes a headless client cheap to keep in sync: it
+/// reads each row once instead of re-reading the whole log on every
+/// poll.
+#[tokio::test]
+async fn the_events_response_honours_the_read_cursor() {
+    let (state, dir) = durable_state().await;
+    write_current_transcript(
+        dir.path(),
+        "cursor",
+        &[
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 1,
+                "ts": "2026-09-25T08:00:00+00:00",
+                "data": {"role": "user", "content": "one"},
+            }),
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 2,
+                "ts": "2026-09-25T08:00:01+00:00",
+                "data": {"role": "user", "content": "two"},
+            }),
+            serde_json::json!({
+                "type": "user_message",
+                "seq": 3,
+                "ts": "2026-09-25T08:00:02+00:00",
+                "data": {"role": "user", "content": "three"},
+            }),
+        ],
+    );
+    state
+        .session_manager
+        .create_with_user(
+            "cursor".to_string(),
+            SERVER_DEFAULT_USER_ID.to_string(),
+        )
+        .await
+        .expect("the session is registered");
+
+    let whole =
+        list_session_events(Arc::clone(&state), "cursor".to_string(), None)
+            .await
+            .expect("the events read");
+    assert_eq!(whole.typed_count, 3, "the whole log answers");
+    assert_eq!(whole.last_seq, 3, "and names the log's tail");
+
+    let tail =
+        list_session_events(Arc::clone(&state), "cursor".to_string(), Some(1))
+            .await
+            .expect("the events read");
+    assert_eq!(tail.typed_count, 2, "only the rows after the cursor");
+    assert_eq!(tail.last_seq, 3, "the cursor advances to the new tail");
+
+    let empty =
+        list_session_events(Arc::clone(&state), "cursor".to_string(), Some(3))
+            .await
+            .expect("the events read");
+    assert_eq!(empty.typed_count, 0, "nothing is after the tail");
+    assert_eq!(empty.last_seq, 3, "and the cursor stands still");
 }
 
 /// A known tag whose payload does not decode is a **defect**, not a
@@ -203,7 +270,7 @@ async fn the_events_response_reports_a_broken_row_apart_from_history() {
         .expect("the session is registered");
 
     let response =
-        list_session_events(Arc::clone(&state), "broken".to_string())
+        list_session_events(Arc::clone(&state), "broken".to_string(), None)
             .await
             .expect("the events read");
 

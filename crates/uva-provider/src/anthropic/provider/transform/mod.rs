@@ -28,6 +28,7 @@ use super::{
         AnthropicSystem,
         AnthropicSystemBlock,
         AnthropicTool,
+        AnthropicToolChoice,
         AnthropicToolResultContent,
         CacheControl,
     },
@@ -35,8 +36,26 @@ use super::{
 };
 use crate::{
     cache_mark::{CacheControlMark, CacheScope, CacheTtl},
-    types::{CompletionRequest, Content, ContentPart, Role},
+    types::{CompletionRequest, Content, ContentPart, Role, ToolChoice},
 };
+
+/// Map the canonical [`ToolChoice`] onto Anthropic's wire field.
+///
+/// `Auto` is omitted: Anthropic's own default is `auto`, so sending
+/// it would spend a field to say what the endpoint already assumes.
+/// The other variants are honoured — a summary request that replays
+/// tool schemas for prefix-cache alignment asks for `None`, and the
+/// reply must be text, not a tool call.
+fn tool_choice_from(choice: &ToolChoice) -> Option<AnthropicToolChoice> {
+    match choice {
+        ToolChoice::Auto => None,
+        ToolChoice::None => Some(AnthropicToolChoice::None),
+        ToolChoice::Required => Some(AnthropicToolChoice::Any),
+        ToolChoice::Specific { name } => {
+            Some(AnthropicToolChoice::Tool { name: name.clone() })
+        }
+    }
+}
 
 /// Map the provider-neutral [`CacheTtl`] class to an Anthropic
 /// `ttl_seconds` value. `Ephemeral` defers to Anthropic's default (no
@@ -189,6 +208,7 @@ impl AnthropicProvider {
             messages,
             max_tokens: request.max_tokens.unwrap_or(4096),
             tools: if tools.is_empty() { None } else { Some(tools) },
+            tool_choice: tool_choice_from(&request.tool_choice),
             temperature: request.temperature,
             stream: false,
         }

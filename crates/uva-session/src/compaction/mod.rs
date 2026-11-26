@@ -61,6 +61,8 @@ use uva_provider::{
     ModelProvider,
     Role,
     TokenUsage,
+    ToolChoice,
+    ToolDefinition,
     estimate_messages_token_count,
 };
 
@@ -92,10 +94,37 @@ pub const DEFAULT_PRUNE_MIN_CHARS: usize = 1_024;
 const DEFAULT_RESERVE: usize = 16_384;
 /// The kept tail may use this fraction of the post-reserve budget.
 const TAIL_DIVISOR: usize = 2;
-const SUMMARY_INSTRUCTION: &str = "You compact an assistant's \
-conversation history for another assistant. Summarise what happened: \
-the goal, the decisions, the files and tools that mattered, and what \
-is still open. Keep concrete identifiers. Reply with the summary only.";
+// The summarisation directive, delivered as the FINAL user message
+// after the replayed conversation (dsh `summarizer.ts:74-79`): the
+// conversation's own system prompt and message prefix stay in front of
+// it, so the auxiliary call is a genuine prefix of the last routed
+// request and the provider's KV cache is reused instead of
+// invalidated. The sections are dsh's skeleton; a fixed structure
+// keeps the checkpoint navigable for the model that resumes on it.
+const SUMMARY_INSTRUCTION: &str = "You are acting as a compaction \
+engine for this assistant. Condense the conversation above into a \
+checkpoint that lets another model resume the work with no loss of \
+essential context.\n\nReply with exactly this Markdown structure, \
+every section in order, terse bullets rather than prose; write \
+\"(none)\" for an empty section — never drop a section:\n\n## \
+Primary Request and Intent\n- [the user's original and evolving \
+goals; quote verbatim where the exact wording matters]\n\n## Key \
+Technical Concepts\n- [technologies, frameworks, patterns and \
+conventions in play]\n\n## Files and Code\n- [exact path: why it \
+matters, key changes or snippets]\n\n## Errors and Fixes\n- [error: \
+how it was resolved, plus related user feedback]\n\n## Pending \
+Jobs\n- [explicitly requested work not yet completed]\n\n## Current \
+Work\n- [precisely what was in progress at this checkpoint]\n\n## \
+Next Step\n- [the single next action, in line with the most recent \
+request, or \"(none)\"]\n\n## Critical Context\n- [decisions and \
+their rationale, constraints, user preferences, open questions, data \
+needed to continue]\n\nRules:\n- Preserve exact file paths, \
+commands, error strings, identifiers, numeric values and function \
+signatures.\n- Capture user feedback and explicit instructions \
+faithfully, especially corrections.\n- Do not mention this \
+summarization request or that the context was compacted.\n- Reply \
+with the checkpoint text only: call no tool and take no other \
+action.";
 
 /// What a request may spend: the model's window and the reserve the
 /// reply needs.
@@ -197,6 +226,47 @@ pub enum CompactionError {
 }
 
 /// Decides whether to compact and produces the replacement.
+#[derive(Clone, Default, Debug)]
+/// The request context a summariser replays to stay cache-aligned.
+///
+/// dsh parity (`compaction-basic/src/summarizer.ts:74-79`): with an
+/// envelope, the summary call is a **genuine prefix of the last
+/// routed request** — the conversation's own system prompt and tool
+/// schemas in front, the shadowed messages in surface order, the
+/// instruction as the **final user message**. The provider's warm
+/// prefix cache then covers everything but the instruction, which is
+/// the only novel input.
+///
+/// [`SummaryInput::fresh`] is the no-context fallback: the summariser
+/// builds a standalone request (the span rendered as text, no system
+/// prompt of its own), the shape callers without the envelope keep.
+pub struct SummaryInput {
+    /// The conversation's own system prompt, when the caller knows it.
+    ///
+    /// `Some` selects the replay shape; `None` the standalone one.
+    pub system: Option<String>,
+    /// The request's tool schemas, replayed for prefix alignment.
+    ///
+    /// The schemas ride the summary request but the model is told
+    /// not to call anything ([`ToolChoice::None`]): they exist for the
+    /// cache, not for the reply.
+    pub tools: Arc<Vec<ToolDefinition>>,
+}
+
+impl SummaryInput {
+    #[must_use]
+    /// The no-context fallback: the summariser builds a standalone
+    /// request.
+    ///
+    /// A caller that knows the conversation's envelope should hand it
+    /// over — the summary then rides the provider's warm cache — but
+    /// a manual pass over a log holds no run to read it from, and a
+    /// standalone request is the honest shape for it.
+        pub fn fresh() -> Self {
+        Self::default()
+    }
+}
+
 pub trait Compactor: Send + Sync {
     /// Return the span to compact, or `None` to leave history alone.
     fn plan(
@@ -216,9 +286,14 @@ pub trait Compactor: Send + Sync {
     }
 
     /// Produce the summary. May call the provider once.
+    ///
+    /// `input` is the request context to replay (see
+    /// [`SummaryInput`]); a summariser that ignores it still answers —
+    /// the envelope is an optimisation, not an obligation.
     fn summarize(
         &self,
         plan: &CompactionPlan,
+        input: &SummaryInput,
         cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>>;
 }
@@ -364,11 +439,48 @@ impl Compactor for SummaryCompactor {
     fn summarize(
         &self,
         plan: &CompactionPlan,
+        input: &SummaryInput,
         cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         // Pruning is part of building the request, so it provably
         // precedes the provider call.
-        let prompt = render_messages(&self.prune(plan));
+        //
+        // Two shapes, one instruction — the instruction is the FINAL
+        // user message in both, and everything before it is the part
+        // the provider may already have cached:
+        //
+        // * replay (`Some(system)`): the conversation's own system
+        //   prompt, the shadowed messages in surface order, the
+        //   instruction. A genuine prefix of the last routed request,
+        //   so the warm cache covers all but the instruction.
+        // * standalone (`None`): the span rendered as text, the
+        //   instruction. No prefix to align with — the manual pass
+        //   over a log holds no run to read the envelope from.
+        let pruned = self.prune(plan);
+        let messages = match &input.system {
+            Some(system) => {
+                let mut messages = Vec::with_capacity(pruned.len() + 2);
+                messages.push(Message::system(system.clone()));
+                messages.extend(pruned);
+                messages.push(Message::user(SUMMARY_INSTRUCTION));
+                messages
+            }
+            None => vec![
+                Message::user(render_messages(&pruned)),
+                Message::user(SUMMARY_INSTRUCTION),
+            ],
+        };
+        // The schemas ride for the cache; the reply is prose. `None`
+        // keeps a schema-toting summary from turning into a tool call.
+        // An empty schema list keeps the request's own default instead:
+        // Anthropic refuses `tool_choice` on a request with no tools, and
+        // the manual pass (the fallback shape) carries none.
+        let tools = Arc::clone(&input.tools);
+        let tool_choice = if tools.is_empty() {
+            ToolChoice::Auto
+        } else {
+            ToolChoice::None
+        };
         let provider = Arc::clone(&self.provider);
         let provider_name = self.provider.name().to_string();
         let model = self.model.clone();
@@ -382,10 +494,9 @@ impl Compactor for SummaryCompactor {
             }
             let request = CompletionRequest {
                 model: model.clone(),
-                messages: Arc::new(vec![
-                    Message::system(SUMMARY_INSTRUCTION),
-                    Message::user(prompt),
-                ]),
+                messages: Arc::new(messages),
+                tools,
+                tool_choice,
                 ..CompletionRequest::default()
             };
             // The three futures are raced in this order and no other:

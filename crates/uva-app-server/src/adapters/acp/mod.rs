@@ -19,6 +19,8 @@
 //! # The pieces
 //!
 //! - [`agent`] — the methods: the handshake, the sessions, the turn.
+//! - [`files`] — the client that owns a session's files: the
+//!   `fs/*` delegation a capable client advertises in `initialize`.
 //! - [`projection`] — the vocabulary: the core's events become the
 //!   protocol's session updates, in both directions (live and
 //!   replay).
@@ -45,6 +47,7 @@
 pub mod agent;
 pub mod approval;
 pub mod channel;
+pub mod files;
 pub mod projection;
 pub mod stdio;
 pub mod turn;

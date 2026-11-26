@@ -12,6 +12,90 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
+### Added (无头 harness 的业界对齐：dsh + omp 逆向后的三刀)
+
+逆向证据与完整缺口账本：[`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)。
+本轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面，
+对账后落了三个刀口。
+
+- **审批有了截止时间**（G1）：被持有的调用在 `approval.timeout_secs` 内
+  没有答案，就按**拒绝**结算——决定落进日志（`approval_decided`，`denied`），
+  回合**继续**，模型读到的是一条**超时**拒绝而不是「操作者拒绝了」。
+  期限由**控制器**持有（harness 在挂起时已结束回合，等操作者是宿主的事），
+  到期走的是与人工作答**同一条** resume 路径，因此一次调用只有一条决定。
+  新增 `ResumeStatus::TimedOut`：日志词汇仍是 `approved` / `denied` /
+  `cancelled`，但模型可见的文案区分「没人回答」与「有人说不」。
+  这一刀补上了 `crates/uva-app-server/src/rpc/mod.rs` 早先声称的
+  「a timeout still defaults to deny」——此前代码里没有这个机制。
+- **`approval` 行的 config 真的生效了**（G1b）：新增 `[approval]` 配置段
+  （`mode` / `ask_unknown` / `timeout_secs` / 逐工具 `overrides`）。此前
+  `approval` 行发布的永远是 `ApprovalPolicy::default()`，行的配置是摆设。
+- **委派有了宿主控制面**（G8）：新增 `subagents/list`、`subagents/cancel`、
+  `subagents/steer` 三条核心 JSON-RPC 方法（omp 的
+  `get_subagents` / `cancel_subagent` / `steer_subagent` 同构）。机器早就在
+  `uva-tool-task` 的控制面里（模型侧是 `agents_*` 三个工具），这一刀只是
+  **开门**：控制面由 `tool-task` 行发布为 `control` 服务，宿主经同一张表
+  列举 / 硬杀 / 转向子代理。取消是**幂等**的——已经停掉的子代理答
+  `cancelled: false`，不是错误。
+- **durable 读有了游标**（G11）：`sessions/events` 接受 `since`（日志序号），
+  只回它之后的行，并回 `last_seq` 让客户端接着读（omp 的 `get_entries?since`
+  同构）。游标跨行推进——连本版本读不懂的行也算在内，客户端不会永远重问
+  同一行坏行。
+- **`replay_state` 的声明对齐了现实**（G2）：两个 `replay_state` 字段的文档
+  此前声称「适配器校验并消费」，而全仓没有任何生产者铸造过状态。核实后如实
+  记述：在仓适配器无可铸造的原生状态（OpenAI 走 Chat Completions；
+  Anthropic Messages 无可回放的 response id），dsh §7 背后的机制——推理
+  连续性——已由「思维块签名 + 压缩边界作废规则」结构化交付，且该规则是
+  **精确的**：压缩的 span 永远从 surface 头开始，每条 kept-tail 消息的前缀
+  都含被遮蔽 span，不存在误作废（新增钉子 `a_signature_in_the_kept_tail_is_voided_too`）。
+  字段保留为 seam：会铸造原生状态的适配器（Responses API 的
+  `previous_response_id`、逐消息前缀摘要）铸造在响应、回传在请求、校验在
+  适配器，两端已存在。
+- **插件树有了审计报告**（G6）：`profile/audit` 回答「这棵树有没有不能用的行」
+  ——dsh `auditRows` 的三态语义。不在报告里的行就是 usable；报告里只有
+  `failed`（从未启动或激活被拒）与 `pending`（在等一个组合不提供的服务，
+  `missing` 逐一列出）。缺口计算复用 mount 自己的不动点，所以报告说的与
+  mount 会说的是同一件事——修好一个依赖后两边同时转绿，不会漂移。
+- **压缩的摘要请求复用被路由请求的暖前缀**（G4）：此前摘要是旁路请求——自己
+  的 system prompt、span 渲染成一段文字——provider 的前缀缓存对它毫无用处，
+  每轮压缩都是一次全新计费。现在 `SummaryInput` 信封让步内压缩重放**会话自己
+  的** system prompt 与工具 schema、被遮蔽的消息按 surface 顺序、指令作为
+  **最后一条 user 消息**（dsh `summarizer.ts:74-79` 的形状）——摘要请求是上一个
+  被路由请求的真前缀，暖缓存覆盖除指令外的一切。手动压缩（`sessions/compact`）
+  没有可读的 run 信封，保持独立形状并注明。压缩指令换成 dsh 的分段骨架
+  （Primary Request / Key Concepts / Files / Errors / Pending / Current / Next /
+  Critical Context——空节写 `(none)`），恢复的模型拿到的是可导航的检查点。
+- **Anthropic 适配器不再忽略 `tool_choice`**：canonical
+  `CompletionRequest.tool_choice` 此前被完全丢弃——任何调用方设 `None`
+  都被静默当作 `auto`。现在映射到线上字段（`none` / `any` / `tool{name}`；
+  `auto` 省略——Anthropic 默认就是它）。压缩摘要在重放工具 schema 的同时用
+  `None` 锁死答复是文字而不是工具调用；空工具列表保持 `auto`，避开 Anthropic
+  拒绝无工具却带 `tool_choice` 的请求。
+- **客户端拥有它自己的文件**（G12 的 fs 半边）：一个在 `initialize` 里声明
+  `clientCapabilities.fs` 的 ACP 客户端，它开的会话把 `read` / `write` 工具
+  指到**它自己的文件**上——路径以客户端的 `cwd` 为根，读写经 ACP 的
+  `fs/read_text_file` / `fs/write_text_file` 回到客户端。实现是一个 seam
+  （`uva-tool-plugins::files::FileSystemOwner`——「这个会话的文件在哪里、谁
+  持有字节」，`LocalFileSystem` 是默认实现）、一个注册表
+  （`SessionFileSystem`：会话 id → 客户端 owner，未认领的会话照旧跑部署的
+  盘）与一个 owner（`ClientFileSystem`：持有连接与客户端声明的能力，未声明
+  的能力是**明确的错误**而不是静默回退）。工具的渲染不变——模型看到的形状
+  不因文件在哪台机器上而变。未声明能力的客户端一切照旧。
+- **压缩作废了它推翻的签名思维块**（G5）：Anthropic 把思维块的签名绑定在
+  它被生成时的请求前缀上，而压缩改写前缀——provider 会因此拒绝**整个请求**。
+  本仓此前原样回送作废的签名，压缩后的第一轮请求就是一次 400。现在 harness
+  在两处清理签名（开跑前按日志里的压缩行算边界；本轮压缩落盘后按压缩行的
+  序号）：清空签名后该 part 变成无签名，provider 自己的规则就会丢掉它——
+  **模型失去那段推理，回合不失去**。判定是粗的（压缩点之前那些前缀未变的
+  签名也一并作废）：作废一个有效签名只是少一点上下文，保留一个作废签名会
+  赔上一整个回合。
+
+### Changed (本轮的对账结论)
+
+- `docs/reference-harnesses.md` 之外新增一份**缺口账本**：dsh / omp 的行为
+  对账表、12 条缺口（G1–G12）、本轮三刀与下一轮候选（客户端侧 fs/terminal
+  委派、签名思维块的前缀绑定、分块帧、缓存友好的压缩……）。
+
 ### Added (一个核心，多协议适配器：ACP 母语面 + AG-UI 投影)
 
 - **核心只维护一套事件流**：会话、回合、工具调用、权限请求、取消。核心不

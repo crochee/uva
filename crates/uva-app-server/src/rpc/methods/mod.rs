@@ -36,6 +36,7 @@ pub mod misc;
 pub mod names;
 pub mod profile;
 pub mod sessions;
+pub mod subagents;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -66,6 +67,7 @@ pub fn register_all(router: &mut RpcRouter) {
     misc::register(router);
     profile::register(router);
     sessions::register(router);
+    subagents::register(router);
 }
 #[cfg(test)]
 mod tests;

@@ -134,6 +134,7 @@ pub struct BootContext {
     blocking: Option<Arc<dyn uva::core::blocking::Blocking>>,
     compaction: Option<uva::session::CompactionPluginConfig>,
     sessions_dir: Option<PathBuf>,
+    approval: Option<uva::approval::ApprovalPolicy>,
 }
 
 impl BootContext {
@@ -148,6 +149,7 @@ impl BootContext {
             blocking: None,
             compaction: None,
             sessions_dir: None,
+            approval: None,
         }
     }
 
@@ -202,6 +204,23 @@ impl BootContext {
     #[must_use]
     pub fn compaction(&self) -> Option<&uva::session::CompactionPluginConfig> {
         self.compaction.as_ref()
+    }
+
+    /// Attach the deployment's approval stance, which the
+    /// `approval` row publishes as its service.
+    #[must_use]
+    pub fn with_approval(
+        mut self,
+        approval: Option<uva::approval::ApprovalPolicy>,
+    ) -> Self {
+        self.approval = approval;
+        self
+    }
+
+    /// The deployment's approval stance, when the boot resolved one.
+    #[must_use]
+    pub fn approval(&self) -> Option<&uva::approval::ApprovalPolicy> {
+        self.approval.as_ref()
     }
 
     /// Attach the session corpus root, when it differs from

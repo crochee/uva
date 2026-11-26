@@ -143,6 +143,44 @@ fn test_provider_config_with_multiple_models() {
 }
 
 // =============================================================================
+// ApprovalConfig
+// =============================================================================
+
+/// The `[approval]` section is the deployment's stance on held calls:
+/// which ones are asked about, and how long an ask waits.
+#[test]
+fn test_approval_config_becomes_the_policy() {
+    let config: ServerConfig = serde_yaml::from_str(
+        "approval:\n  mode: always\n  ask_unknown: true\n  \
+         timeout_secs: 120\n  overrides:\n    shell: never\n",
+    )
+    .unwrap();
+    let policy = config.approval.policy();
+    assert_eq!(policy.mode, uva::approval::ApprovalMode::Always);
+    assert!(policy.ask_unknown);
+    assert_eq!(policy.timeout_secs, Some(120));
+    assert_eq!(
+        policy.mode_for("shell"),
+        uva::approval::ApprovalMode::Never,
+        "a per-tool override narrows the run-wide stance"
+    );
+    assert_eq!(
+        policy.mode_for("write"),
+        uva::approval::ApprovalMode::Always
+    );
+}
+
+/// A configuration that says nothing keeps the built-in stance.
+#[test]
+fn test_approval_config_defaults_to_the_built_in_policy() {
+    let config: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let policy = config.approval.policy();
+    assert_eq!(policy.mode, uva::approval::ApprovalMode::AskHighRisk);
+    assert!(!policy.ask_unknown);
+    assert_eq!(policy.timeout(), None, "no deadline by default");
+}
+
+// =============================================================================
 // AgentConfig
 
 // ServerConfig — defaults and full round-trip
@@ -233,6 +271,7 @@ fn build_sample_server_config() -> ServerConfig {
         },
         cluster: crate::config::server::ClusterConfig::default(),
         scheduler: crate::config::server::SchedulerConfig::default(),
+        approval: crate::config::server::ApprovalConfig::default(),
     }
 }
 

@@ -69,13 +69,22 @@ impl WriteToolPlugin {
     /// Build the brick over a default [`WriteTool`].
     #[must_use]
     pub fn new() -> Self {
+        Self::with_owner(Arc::new(crate::files::LocalFileSystem))
+    }
+
+    /// Build the brick over the owner of the files it writes.
+    ///
+    /// A host whose client owns the workspace installs an owner that
+    /// asks the client, so the tool writes the user's files.
+    #[must_use]
+    pub fn with_owner(owner: Arc<dyn crate::files::FileSystemOwner>) -> Self {
         let mut manifest =
             PluginManifest::new(WRITE_TOOL_ID, PLUGIN_PROTOCOL_VERSION);
         manifest.runtime = RuntimeKind::Native;
         manifest.inject.push(KEY_TOOLS.to_string());
         Self {
             manifest,
-            tool: Arc::new(WriteTool::new()),
+            tool: Arc::new(WriteTool::with_owner(owner)),
         }
     }
 }

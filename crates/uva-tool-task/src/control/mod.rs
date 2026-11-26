@@ -93,6 +93,7 @@ pub use tools::{
     AgentsInterruptTool,
     AgentsListTool,
     AgentsMessageTool,
+    deliver_steer,
 };
 use uva_agent::{AgentRegistry, SubagentUsage};
 use uva_core::{SharedClock, sleeper::Sleeper, spawn::SharedSpawner};

@@ -296,6 +296,111 @@ fn a_reload_replays_the_transcript() {
     assert!(!replayed.is_empty(), "the transcript replayed: {updates:?}");
 }
 
+/// A client that offers the ACP file methods owns its session's
+/// files: the `read` tool asks the client instead of touching the
+/// deployment's disk.
+///
+/// The client advertises `fs/readTextFile` in `initialize`, opens a
+/// session with its own directory, and prompts a turn that reads a
+/// file. The agent sends `fs/read_text_file` back to the client, the
+/// client answers with its own bytes, and the model sees those bytes
+/// — not whatever this disk holds at that path.
+#[test]
+fn a_client_who_offers_the_file_methods_reads_its_own_files() {
+    let temp = workspace();
+    let mut acp = Acp::spawn(temp.path());
+    acp.call(
+        "c1",
+        "initialize",
+        json!({
+            "protocolVersion": 1,
+            "clientCapabilities": {
+                "fs": {"readTextFile": true, "writeTextFile": false},
+            },
+        }),
+    );
+    let opened = acp.call(
+        "c2",
+        "session/new",
+        json!({"cwd": "/client", "mcpServers": []}),
+    );
+    let session_id = opened["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the session id: {opened}"))
+        .to_string();
+    acp.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "c3",
+        "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{
+                "type": "text",
+                "text": r#"!tool read {"file_path": "notes.txt"}"#,
+            }],
+        },
+    }));
+    // The turn asks the client to read the file. The question is a
+    // request with its own id: the client answers it.
+    let mut read_request = None;
+    let mut updates: Vec<Value> = Vec::new();
+    for _ in 0..64 {
+        let message = acp.recv();
+        if message.get("method").and_then(Value::as_str)
+            == Some("session/update")
+        {
+            updates.push(message);
+            continue;
+        }
+        if message.get("method").and_then(Value::as_str)
+            == Some("fs/read_text_file")
+        {
+            read_request = Some(message);
+            break;
+        }
+    }
+    let read_request =
+        read_request.expect("the agent asked the client for the file");
+    assert_eq!(
+        read_request["params"]["sessionId"], session_id,
+        "the read names the session"
+    );
+    assert_eq!(
+        read_request["params"]["path"], "/client/notes.txt",
+        "the read names the client's own path: {read_request}"
+    );
+    acp.send(&json!({
+        "jsonrpc": "2.0",
+        "id": read_request["id"].clone(),
+        "result": {"content": "from the client"},
+    }));
+    // The turn continues: the updates that follow the answer carry
+    // the tool result, and the prompt answers with its stop reason.
+    let mut answer = None;
+    for _ in 0..256 {
+        let message = acp.recv();
+        if message.get("method").and_then(Value::as_str)
+            == Some("session/update")
+        {
+            updates.push(message);
+            continue;
+        }
+        if message.get("id").and_then(Value::as_str) == Some("c3") {
+            answer = Some(message);
+            break;
+        }
+    }
+    let answer = answer.expect("the prompt answers");
+    assert_eq!(answer["result"]["stopReason"], "end_turn", "{answer}");
+    // The tool result the model saw is the client's own bytes, in the
+    // line-numbered form the read tool renders.
+    let rendered = updates.iter().any(|update| {
+        let text = update["params"]["update"]["content"].to_string();
+        text.contains("from the client")
+    });
+    assert!(rendered, "the model saw the client's bytes: {updates:?}");
+}
+
 /// A held call asks the operator, and the answer continues the turn.
 ///
 /// The demo provider scripts a `shell` call whose command redirects

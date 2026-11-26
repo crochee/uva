@@ -125,6 +125,63 @@ pub struct ServerConfig {
     /// `[scheduler]` — the background tick that fires due jobs.
     #[serde(default)]
     pub scheduler: SchedulerConfig,
+    /// `[approval]` — the deployment's stance on held tool calls.
+    ///
+    /// The `approval` row publishes this policy as the `approval`
+    /// service; the controller reads its deadline. Defaults to the
+    /// built-in stance (high-risk calls are asked about, and the ask
+    /// waits for a human).
+    #[serde(default)]
+    pub approval: ApprovalConfig,
+}
+
+/// `[approval]` — which tool calls are held, and for how long.
+///
+/// Every member is optional: an absent member keeps the built-in
+/// default, so a deployment can move one knob at a time.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ApprovalConfig {
+    /// The run-wide stance: `ask_high_risk` (default), `always` or
+    /// `never`.
+    #[serde(default)]
+    pub mode: Option<uva::approval::ApprovalMode>,
+    /// Whether a call the tool did not classify is held.
+    #[serde(default)]
+    pub ask_unknown: Option<bool>,
+    /// How long a held call waits for an operator, in seconds.
+    ///
+    /// Absent means "wait forever" — the ask stays open until a
+    /// human answers or the turn is cancelled. A headless deployment
+    /// that cannot count on a human sets a deadline: on expiry the
+    /// held call is denied and the turn continues.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Per-tool stances, keyed by the tool's name.
+    #[serde(default)]
+    pub overrides:
+        std::collections::BTreeMap<String, uva::approval::ApprovalMode>,
+}
+
+impl ApprovalConfig {
+    /// The policy this configuration describes.
+    ///
+    /// A configuration that says nothing yields the default policy —
+    /// the same one the row published before the section existed.
+    #[must_use]
+    pub fn policy(&self) -> uva::approval::ApprovalPolicy {
+        let mut policy = uva::approval::ApprovalPolicy::default();
+        if let Some(mode) = self.mode {
+            policy.mode = mode;
+        }
+        if let Some(ask_unknown) = self.ask_unknown {
+            policy.ask_unknown = ask_unknown;
+        }
+        if let Some(timeout_secs) = self.timeout_secs {
+            policy.timeout_secs = Some(timeout_secs);
+        }
+        policy.overrides = self.overrides.clone();
+        policy
+    }
 }
 
 /// `[scheduler]` — the deployment's background tick.
@@ -293,6 +350,7 @@ impl Default for ServerConfig {
             tools: ToolsConfig::default(),
             cluster: ClusterConfig::default(),
             scheduler: SchedulerConfig::default(),
+            approval: ApprovalConfig::default(),
         }
     }
 }

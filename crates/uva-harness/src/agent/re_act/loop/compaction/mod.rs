@@ -34,12 +34,13 @@ use uva_session::{
     Compactor,
     PlannedCompaction,
     SessionError,
+    SummaryInput,
     TokenBudget,
     plan_compaction,
 };
 
 use super::ReActLoop;
-use crate::agent::re_act::state::RunState;
+use crate::agent::re_act::{projection::tool_definitions, state::RunState};
 
 // The reason a compaction pass names in its log-only rows.
 const COMPACT_REASON: &str = "context_pressure";
@@ -108,8 +109,20 @@ pub(super) async fn compact(
         first_seq: plan.shadowed_seqs.first().copied(),
         last_seq: plan.shadowed_seqs.last().copied(),
     });
+    // The envelope the summary replays (dsh `summarizer.ts:74-79`):
+    // the conversation's own system prompt and tool schemas, so the
+    // auxiliary call is a genuine prefix of the last routed request
+    // and the provider's warm cache covers all but the instruction.
+    // The projection is the run's own (`RunState::projection`), so the
+    // replayed schemas are exactly the ones the next request will
+    // carry — the same promotion of called tools included.
+    let tools = tool_definitions(this.caps.as_ref(), &mut session.projection);
+    let input = SummaryInput {
+        system: Some(session.system_prompt.clone()),
+        tools,
+    };
     let cancel = Arc::clone(&session.cancel);
-    let summary = compactor.summarize(&plan, cancel).await;
+    let summary = compactor.summarize(&plan, &input, cancel).await;
     finish(FinishArgs {
         this,
         session,
@@ -171,6 +184,13 @@ async fn finish(
                     Message::assistant(outcome.summary.clone()),
                     seq,
                 );
+                // The replace rewrote the request prefix of every
+                // message before it, so the reasoning signatures
+                // minted under the old prefix are void. They are
+                // cleared here, before the next sample: a provider
+                // that enforces the binding rejects the whole
+                // request, not just the block.
+                session.transcript.void_signatures_before(seq);
                 session.last_compaction = Some(seq);
             }
             this.sink.system(SystemEvent::CompactionFinished {

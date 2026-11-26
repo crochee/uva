@@ -95,8 +95,11 @@ pub fn register(router: &mut RpcRouter) {
         encode(sessions::fork_session(state, params.id, params.request).await?)
     });
     router.register(names::SESSIONS_EVENTS, |state, raw| async move {
-        let params: IdParams = parse(raw)?;
-        encode(sessions::list_session_events(state, params.id).await?)
+        let params: EventsParams = parse(raw)?;
+        encode(
+            sessions::list_session_events(state, params.id, params.since)
+                .await?,
+        )
     });
     router.register(names::SESSIONS_STATUS, |state, raw| async move {
         let params: IdParams = parse(raw)?;
@@ -271,6 +274,21 @@ fn unknown_approval(id: &str) -> crate::rpc::RpcError {
 #[derive(Deserialize, validator::Validate)]
 struct IdParams {
     id: String,
+}
+
+/// `sessions/events` — the session id beside the read cursor.
+///
+/// `since` is the log ordinal the reader has already seen: the
+/// answer carries only the rows after it, so a client that follows a
+/// long session reads each row once instead of re-reading the whole
+/// log on every poll.
+#[derive(Deserialize, validator::Validate)]
+struct EventsParams {
+    id: String,
+    /// The exclusive lower bound: rows with an ordinal at or below it
+    /// are not answered.
+    #[serde(default)]
+    since: Option<u64>,
 }
 /// The one-parameter shape: `{"session_id": "…"}`.
 #[derive(Deserialize, validator::Validate)]

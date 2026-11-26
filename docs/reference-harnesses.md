@@ -1,10 +1,15 @@
 # The reference harnesses: what was compared, and where it lives
 
-Three harnesses are the reference for the headless control plane:
-**DeepSeek Harness** (`dsh`), **pi** (`pi-mono`) and **Codex**
-(`openai/codex`). They are not dependencies — they are the
-*comparison*: when this repository answers an ACP client, the answer
-must be the answer those harnesses give.
+Four harnesses are the reference for the headless control plane:
+**DeepSeek Harness** (`dsh`), **pi** (`pi-mono`), **Codex**
+(`openai/codex`) and **omp** (`can1357/oh-my-pi`). They are not
+dependencies — they are the *comparison*: when this repository answers
+an ACP client, the answer must be the answer those harnesses give.
+
+The round that added **omp** is written up separately, as a gap
+ledger: [`design/2026-11-26-headless-parity-dsh-omp-design.md`](design/2026-11-26-headless-parity-dsh-omp-design.md)
+— the behaviour-by-behaviour table against dsh **and** omp, the twelve
+gaps it found (G1–G12), and the three cuts this repository took.
 
 This page records what was read, where it lives in those trees, and
 which of it this repository already carries. The evidence was

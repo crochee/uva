@@ -177,6 +177,7 @@ context = ["dep:uva-context", "core", "provider", "session"]
 tool = ["dep:uva-tool", "core", "provider", "session"]
 # One tool implementation per feature, exactly as a consumer would
 # depend on them. All offline except `tool-web`.
+tool-files = ["dep:uva-tool-plugins"]
 tool-read = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/read"]
 tool-write = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/write"]
 tool-shell = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/shell"]

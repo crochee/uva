@@ -11,6 +11,7 @@
 //! | [`support`]      | Shared fixtures (`VecFactory`, `BlockingFactory`, `RecordingFactory`, `ToolCapturingProvider`, `test_deps`, `make_manager_and_controller`, `wait_for_runs`, …) |
 //! | [`truncate`]     | The `truncate` helper — char-counted, ellipsis-on-truncation contract |
 //! | [`lifecycle`]    | State transitions — concurrent prompt dedup, idle shutdown, post-shutdown error, snapshot bus, idempotent `close` |
+//! | [`approval_deadline`] | The approval deadline — a held call nobody answers is denied and the turn continues |
 //! | [`cancel`]       | `Cancel` op — terminates run, idempotent, safe before run starts |
 //! | [`compaction_gate`] | The compaction gate as the handle offers it — a promise about run starts, and the remote handle's ungated work |
 //! | [`event_emission`] | Persist + broadcast of agent events, durable/ephemeral split, `request_header` epoch marker |
@@ -21,6 +22,7 @@
 //! | [`run_config`]   | R34/R50/R58 + factory wiring: `tool_surface` / `strategy` / `tool_restriction` deps-to-config hop, factory narrows wire tools, runs the configured strategy |
 //! | [`usage`]        | Process-wide usage counters: `SystemEvent::Usage` token totals and one turn per `SystemEvent::SessionEnded` (any reason) |
 //! | [`writer`]       | One writer per session: feedback interleaves cleanly, a durable row is on disk before broadcast, a fork re-stamps, the ledger takes the sink's ordinals |
+mod approval_deadline;
 mod cancel;
 mod compaction_gate;
 mod event_emission;

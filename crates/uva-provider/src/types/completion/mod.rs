@@ -32,12 +32,25 @@ pub struct CompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub cache_policy: Option<CachePolicy>,
     /// R29 (dsh `assistantProvenance.replayState` parity):
-    /// opaque provider-native state the caller wants the
-    /// adapter to restore on a later call (Anthropic prompt
-    /// cache id, OpenAI response id, etc.). The runtime
-    /// threads it through unchanged; the adapter validates
-    /// and either consumes or drops it. Default: `None`
-    /// (no replay state to restore).
+    /// opaque provider-native continuity state the caller wants the
+    /// adapter to restore on this call — the seam dsh calls
+    /// `assistantProvenance.replayState`.
+    ///
+    /// **Status:** the shipped adapters mint no native state —
+    /// the OpenAI adapter speaks Chat Completions (no
+    /// `previous_response_id`, which belongs to the Responses
+    /// API) and Anthropic Messages has no replayable response
+    /// id. Reasoning continuity for Anthropic is carried
+    /// structurally instead: the thinking `signature` rides the
+    /// reasoning part itself, and the harness voids signatures a
+    /// compaction invalidated (its span always starts at the
+    /// surface head, so every kept-tail message's prefix contains
+    /// the shadowed span — the rule is exact, not an
+    /// approximation). An adapter that does mint native state
+    /// (a Responses-API adapter's `previous_response_id`, a
+    /// per-message prefix digest) writes it on the response,
+    /// sees it back here, and validates or drops it. Default:
+    /// `None` (no replay state to restore).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub replay_state: Option<serde_json::Value>,
 }
@@ -67,11 +80,14 @@ pub struct CompletionResponse {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub stop_reason: Option<String>,
     /// R29 (dsh `assistantProvenance.replayState` parity):
-    /// opaque provider-native state the adapter minted
-    /// for this response (Anthropic prompt cache id,
-    /// OpenAI response id, etc.). The runtime may pass
-    /// it back to the adapter on a later request; the
-    /// adapter decides whether to restore the state.
+    /// opaque provider-native continuity state the adapter minted
+    /// for this response — the response half of
+    /// [`CompletionRequest::replay_state`].
+    ///
+    /// **Status:** no shipped adapter mints state (see the request
+    /// half for what carries continuity instead). The field is the
+    /// seam for an adapter that does; the runtime threads it through
+    /// unchanged and never interprets it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub replay_state: Option<serde_json::Value>,
 }

@@ -237,6 +237,23 @@ impl Assembly {
         self.profile_store.as_ref()
     }
 
+    /// The deployment's plugin-tree audit (dsh `auditRows`): every row
+    /// of the effective assembly that is not usable, with why.
+    ///
+    /// `failed` is a row that never started or whose activation was
+    /// rejected; `pending` a row waiting for a service the composition
+    /// does not supply. Every row in neither list is usable — the
+    /// audit is the exception report, not the whole tree.
+    #[must_use]
+    pub fn audit(&self) -> Vec<crate::composition::kernel::RowAudit> {
+        let assembled = effective(&self.raw());
+        crate::composition::kernel::plugin_tree_audit(
+            &self.kernel,
+            &assembled,
+            &self.boot_services,
+        )
+    }
+
     /// The settings page's read model: every row of the raw profile,
     /// with the assembly's verdict and the kernel's plugin state.
     ///

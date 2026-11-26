@@ -23,6 +23,7 @@ use uva_session::{
     SessionError,
     SessionSink,
     SessionSnapshot,
+    SummaryInput,
     TokenBudget,
     in_memory::InMemorySessionSink,
 };
@@ -108,6 +109,7 @@ impl Compactor for NeverCompactor {
     fn summarize(
         &self,
         _plan: &CompactionPlan,
+        _input: &SummaryInput,
         _cancel: Arc<dyn CancelToken>,
     ) -> BoxFuture<'static, Result<CompactionOutcome, CompactionError>> {
         Box::pin(async { Err(CompactionError::EmptySummary) })

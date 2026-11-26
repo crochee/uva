@@ -66,6 +66,13 @@ pub const SCHEDULES_TICK: &str = "schedules/tick";
 pub const TASKS_LIST: &str = "tasks/list";
 /// `tasks/get` — one task by id.
 pub const TASKS_GET: &str = "tasks/get";
+/// `subagents/list` — the roster of one session's delegated
+/// children.
+pub const SUBAGENTS_LIST: &str = "subagents/list";
+/// `subagents/cancel` — hard-stop one delegated child.
+pub const SUBAGENTS_CANCEL: &str = "subagents/cancel";
+/// `subagents/steer` — deliver a message to a running child.
+pub const SUBAGENTS_STEER: &str = "subagents/steer";
 /// `evals/list` — list the evaluations.
 pub const EVALS_LIST: &str = "evals/list";
 /// `evals/create` — create an evaluation.
@@ -140,6 +147,10 @@ pub const PROFILE_SET: &str = "profile/set";
 pub const PROFILE_CREATE: &str = "profile/create";
 /// `profile/delete` — remove a profile.
 pub const PROFILE_DELETE: &str = "profile/delete";
+/// `profile/audit` — the plugin-tree audit: the rows that are not
+/// usable, with why (`failed` never started or was rejected,
+/// `pending` waits for a service the composition does not supply).
+pub const PROFILE_AUDIT: &str = "profile/audit";
 
 // ---- misc ---------------------------------------------------------
 
@@ -202,6 +213,9 @@ pub const ALL: &[&str] = &[
     SCHEDULES_TICK,
     TASKS_LIST,
     TASKS_GET,
+    SUBAGENTS_LIST,
+    SUBAGENTS_CANCEL,
+    SUBAGENTS_STEER,
     EVALS_LIST,
     EVALS_CREATE,
     EVALS_GET,
@@ -237,6 +251,7 @@ pub const ALL: &[&str] = &[
     PROFILE_SET,
     PROFILE_CREATE,
     PROFILE_DELETE,
+    PROFILE_AUDIT,
     // misc
     HEALTH_PING,
     HEALTH_VERSION,

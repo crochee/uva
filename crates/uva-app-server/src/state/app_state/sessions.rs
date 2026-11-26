@@ -413,6 +413,9 @@ impl AppState {
         // API lists.
         .with_usage_metrics(Arc::clone(&self.usage_metrics))
         .with_cluster(Arc::clone(&self.cluster))
+        // The deployment's approval deadline: how long a held call
+        // waits for an operator before the ask denies itself.
+        .with_approval_timeout(self.approval_timeout())
         // The one place multimodal payload bytes live: a parked
         // prompt stores them here and its row carries the hash.
         .with_attachment_store(Arc::clone(&self.attachment_store));

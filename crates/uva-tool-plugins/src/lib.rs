@@ -17,6 +17,11 @@
 //! | `search` | [`mod@search`] | query the host's cross-domain search registry |
 //! | `memo` | [`mod@memo`] | memoise any tool's results |
 //!
+//! The [`files`](mod@files) module is not a tool: it is the seam the
+//! `read` and `write` tools read through — the owner of the files a
+//! session's tools touch (the deployment's disk by default, a
+//! client's workspace when the client owns it).
+//!
 //! ## Composing a tool surface
 //!
 //! Each tool ships as a **kernel plugin** that registers itself in the
@@ -35,6 +40,7 @@
 //! because it needs the agent vocabulary rather than the tool trait
 //! alone.
 
+pub use files::{FileError, FileSystemOwner, LocalFileSystem};
 #[cfg(feature = "memo")]
 pub use memo::{
     InMemoryMemoStore,
@@ -78,6 +84,8 @@ pub use web::{WebFetchTool, WebFetchToolPlugin};
 #[cfg(feature = "write")]
 pub use write::{WriteTool, WriteToolPlugin};
 
+/// The file-system seam the `read` and `write` tools read through.
+pub mod files;
 #[cfg(feature = "memo")]
 pub mod memo;
 #[cfg(feature = "read")]

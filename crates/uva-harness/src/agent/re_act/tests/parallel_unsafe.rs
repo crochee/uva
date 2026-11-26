@@ -6,7 +6,9 @@ use std::sync::{Arc, atomic::Ordering};
 use async_trait::async_trait;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
-use uva_tool::{Context, ToolOutput, ToolRegistry};
+use uva_context::AgentState;
+use uva_steering::tracker::Tracker;
+use uva_tool::{Context, Tool, ToolOutput, ToolRegistry};
 
 use super::{support::*, *};
 
@@ -45,6 +47,132 @@ async fn unsafe_tools_run_serially_even_when_safe_present() {
         MAX_CONCURRENT_UNSAFE.load(Ordering::SeqCst),
         1,
         "unsafe tool must never overlap with itself"
+    );
+}
+
+// A cancelled turn does not dispatch the calls queued behind the
+// concurrency bound.
+//
+// The parallel pool keeps its slots busy: without a cancel check, a
+// turn the operator cancelled would keep starting the calls that
+// were waiting for a slot — side effects after the stop.
+#[tokio::test]
+async fn a_cancelled_turn_does_not_dispatch_the_queued_parallel_calls() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static RAN: AtomicUsize = AtomicUsize::new(0);
+
+    // One call at a time, so the second call waits for the first's
+    // slot instead of starting beside it.
+    struct OneAtATime;
+    impl Tracker for OneAtATime {
+        fn on_iteration(&self, _state: &AgentState) {}
+
+        fn on_tool_call(
+            &self,
+            _name: &str,
+            _arguments: &serde_json::Value,
+            _state: &AgentState,
+        ) {
+        }
+
+        fn on_llm_response(
+            &self,
+            _usage: &uva_provider::TokenUsage,
+            _state: &AgentState,
+        ) {
+        }
+
+        fn recommended_concurrency(&self, _state: &AgentState) -> usize {
+            1
+        }
+    }
+
+    // The first call cancels the turn.
+    struct CancellingTool;
+    #[async_trait]
+    impl Tool for CancellingTool {
+        fn name(&self) -> &str {
+            "cancel"
+        }
+
+        fn description(&self) -> &str {
+            "cancels the turn"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            context: &Context,
+        ) -> ToolOutput {
+            context.cancel.cancel();
+            ToolOutput::text("cancelled")
+        }
+    }
+
+    // The second call must never run.
+    struct CountingTool;
+    #[async_trait]
+    impl Tool for CountingTool {
+        fn name(&self) -> &str {
+            "count"
+        }
+
+        fn description(&self) -> &str {
+            "counts its dispatches"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _context: &Context,
+        ) -> ToolOutput {
+            RAN.fetch_add(1, Ordering::SeqCst);
+            ToolOutput::text("counted")
+        }
+    }
+
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![
+            ToolUse {
+                id: "c".into(),
+                name: "cancel".into(),
+                input: json!({}),
+            },
+            ToolUse {
+                id: "k".into(),
+                name: "count".into(),
+                input: json!({}),
+            },
+        ]),
+        empty_response(),
+    ]));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(CancellingTool)));
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(CountingTool)));
+
+    let mut host = crate::agent::host::Host::default();
+    host.tracker(Arc::new(OneAtATime));
+    let _events = run_and_collect_with_host(
+        provider,
+        registry,
+        host,
+        AgentInput::text("m"),
+    )
+    .await;
+
+    assert_eq!(
+        RAN.load(Ordering::SeqCst),
+        0,
+        "the call queued behind the cancelled one must not run"
     );
 }
 

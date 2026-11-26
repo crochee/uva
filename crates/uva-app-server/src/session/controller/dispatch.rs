@@ -84,6 +84,11 @@ pub(super) async fn run_controller_loop(
     let lease_ttl = inner.cluster.lease_ttl;
     let mut renew_at = tokio::time::Instant::now() + lease_ttl / 3;
     let lease_held = !inner.lease.is_empty();
+    // The approval deadline: armed while the session waits for an
+    // operator, fired when nobody answered. The loop owns the wait
+    // (the harness ends the turn when it holds a call), so the
+    // deadline lives here rather than in the run.
+    let mut approval_deadline: Option<tokio::time::Instant> = None;
 
     loop {
         // The lease renewal comes first, before the select: a slow
@@ -117,6 +122,11 @@ pub(super) async fn run_controller_loop(
                 last_activity = tokio::time::Instant::now();
             }
 
+            _ = wait_approval_deadline(approval_deadline), if approval_deadline.is_some() => {
+                handle_approval_timeout(&inner, &mut run_handle).await;
+                last_activity = tokio::time::Instant::now();
+            }
+
             _ = tokio::time::sleep_until(renew_at), if lease_held => {
                 if !renew_lease_if_due(&inner, &mut renew_at, lease_ttl).await {
                     break;
@@ -133,6 +143,12 @@ pub(super) async fn run_controller_loop(
                 break;
             }
         }
+
+        // The deadline is armed by the *state*, not by the event that
+        // led to it: a session that adopted an open approval (a
+        // restart over a suspended turn) waits for an operator just
+        // like one that suspended a moment ago.
+        arm_approval_deadline(&inner, &mut approval_deadline);
     }
 
     // R29-Phase-I: every exit path lands here, so the session
@@ -991,6 +1007,120 @@ async fn wait_idle_timeout(deadline: Option<tokio::time::Instant>) {
         Some(deadline) => tokio::time::sleep_until(deadline).await,
         None => pending::<()>().await,
     }
+}
+
+/// The `select!` guard future for the approval-deadline arm.
+async fn wait_approval_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => pending::<()>().await,
+    }
+}
+
+/// Arm the approval deadline while the session waits for an operator.
+///
+/// The deadline follows the **state**, not the event that led to it:
+/// a session that adopted an open approval (a restart over a
+/// suspended turn) waits exactly like one that suspended a moment
+/// ago. It is dropped as soon as the state leaves
+/// `AwaitingApproval`, so an operator's answer ends the wait and a
+/// later suspension arms a fresh one — the deadline never restarts
+/// under an operator who is already on the line.
+fn arm_approval_deadline(
+    inner: &ControllerInner,
+    deadline: &mut Option<tokio::time::Instant>,
+) {
+    if inner.state.current()
+        != crate::session::status::SessionState::AwaitingApproval
+    {
+        *deadline = None;
+        return;
+    }
+    if deadline.is_some() {
+        return;
+    }
+    let timeout = inner.deps.lock().approval_timeout;
+    let Some(timeout) = timeout else {
+        return;
+    };
+    *deadline = Some(tokio::time::Instant::now() + timeout);
+}
+
+/// The deadline fired: nobody answered, so the held call is denied.
+///
+/// The decision goes through the **same** path an operator's answer
+/// takes — a resume with a derived token and one decision per open
+/// interrupt — so the log records exactly one decision per call and
+/// the turn continues with the model's own refusal in hand. The log
+/// is re-read first: an operator who answered in the meantime leaves
+/// no open interrupt, and then the deadline has nothing to say.
+async fn handle_approval_timeout(
+    inner: &Arc<ControllerInner>,
+    run_handle: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    let rows = match inner.writer.read().await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                target: "uva.session",
+                session_id = %inner.session_id,
+                %error,
+                "the approval deadline could not read the session log; the \
+                 ask stays open"
+            );
+            return;
+        }
+    };
+    let open = uva::harness::open_requests(&rows);
+    if open.is_empty() {
+        // An operator answered before the deadline fired.
+        return;
+    }
+    let Some(snapshot) = uva::harness::latest_request_snapshot_hash(&rows)
+    else {
+        tracing::warn!(
+            target: "uva.session",
+            session_id = %inner.session_id,
+            "the approval deadline found no request snapshot; the ask \
+             stays open"
+        );
+        return;
+    };
+    let tail = rows
+        .iter()
+        .filter_map(|row| row.get("seq").and_then(serde_json::Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    let pending: Vec<String> =
+        open.iter().map(|request| request.call_id.clone()).collect();
+    let token = uva::harness::ResumeToken::new(tail, pending, snapshot);
+    let seconds = inner
+        .deps
+        .lock()
+        .approval_timeout
+        .map(|timeout| timeout.as_secs())
+        .unwrap_or_default();
+    let decisions: Vec<uva::harness::ResumeDecision> = open
+        .iter()
+        .map(|request| uva::harness::ResumeDecision {
+            id: request.id.clone(),
+            status: uva::harness::ResumeStatus::TimedOut,
+            payload: Some(serde_json::json!({
+                "reason": format!(
+                    "no decision within the {seconds}s approval deadline"
+                ),
+            })),
+        })
+        .collect();
+    tracing::warn!(
+        target: "uva.session",
+        session_id = %inner.session_id,
+        interrupts = decisions.len(),
+        deadline_secs = seconds,
+        "the approval deadline fired; the held calls are denied"
+    );
+    handle_resume_op(inner, token, decisions, false).await;
+    start_run_if_idle(inner, run_handle).await;
 }
 
 /// Await a taken run handle to completion, ignoring its
