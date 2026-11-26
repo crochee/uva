@@ -152,6 +152,14 @@ pub(crate) struct BootServices {
     /// The deployment's background jobs. The `tool-job` row files
     /// them, so a job started in one call is still there in the next.
     pub jobs: Arc<uva::tool_job::JobRegistry>,
+    /// The sessions service's slot.
+    ///
+    /// The `sessions` service is published by a row during the mount,
+    /// so it does not exist when these containers are built. The
+    /// `tool-goal` row needs it (the goal lives in the session's
+    /// log), so it resolves through this slot, filled immediately
+    /// after the mount.
+    pub sessions: SessionSlot,
 }
 
 /// Why a native mount failed — a profile-assembly or kernel verdict.
@@ -189,13 +197,14 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 26] = [
+    const ENTRIES: [&str; 27] = [
         "tool-registry",
         "tool-read",
         "tool-write",
         "tool-edit",
         "tool-job",
         "tool-glob",
+        "tool-goal",
         "tool-grep",
         "tool-shell",
         "tool-todo",
@@ -703,6 +712,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
         jobs: Arc::new(uva::tool_job::JobRegistry::new()),
+        sessions: Arc::new(std::sync::OnceLock::new()),
     }))
 }
 
@@ -730,13 +740,14 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 10] = [
+    const SPECS: [(&str, Make); 11] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-edit", edit_tool_plugin),
         ("tool-job", job_tool_plugin),
         ("tool-glob", glob_tool_plugin),
+        ("tool-goal", goal_tool_plugin),
         ("tool-grep", grep_tool_plugin),
         ("tool-shell", shell_tool_plugin),
         ("tool-task", task_tool_plugin),
@@ -957,6 +968,21 @@ fn read_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
     )
         as Arc<dyn uva::tool_files::FileSystemOwner>))
 }
+
+fn goal_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The goal lives in the session's log: the store reads and writes
+    // it through the deployment's session registry, resolved from the
+    // slot the boot fills right after the mount.
+    Arc::new(uva::tool_goal::GoalToolPlugin::new(Arc::new(
+        crate::session::goals::SessionGoals::new(Arc::clone(
+            &services.sessions,
+        )),
+    )))
+}
+
+/// The sessions service, resolved after the mount.
+pub(crate) type SessionSlot =
+    Arc<std::sync::OnceLock<Arc<uva::session::manager::SessionRegistry>>>;
 
 fn glob_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
     // The file finder reads through the deployment's file owner ✓.

@@ -13,6 +13,7 @@
 //! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
 //! | `glob` | [`mod@glob`] | find the files that match a pattern |
 //! | `grep` | [`mod@grep`] | search the files' contents |
+//! | `goal` | [`mod@goal`] | keep a durable objective across turns |
 //! | `job` | [`mod@jobs`] | run a command in the background and come back to it |
 //! | `shell` | [`mod@shell`] | run a process, under the OS execution policy it owns |
 //! | `todo` | [`mod@todo`] | the `TodoWrite` task list |
@@ -49,6 +50,8 @@ pub use edit::{EditTool, EditToolPlugin};
 pub use files::{FileError, FileSystemOwner, LocalFileSystem};
 #[cfg(feature = "glob")]
 pub use glob::{GLOB_MAX_RESULTS, GlobTool, GlobToolPlugin};
+#[cfg(feature = "goal")]
+pub use goal::{GoalSnapshot, GoalStore, GoalTool, GoalToolPlugin};
 #[cfg(feature = "grep")]
 pub use grep::{GREP_MAX_MATCHES, GrepTool, GrepToolPlugin};
 #[cfg(feature = "job")]
@@ -102,6 +105,8 @@ pub mod edit;
 pub mod files;
 #[cfg(feature = "glob")]
 pub mod glob;
+#[cfg(feature = "goal")]
+pub mod goal;
 #[cfg(feature = "grep")]
 pub mod grep;
 #[cfg(feature = "job")]

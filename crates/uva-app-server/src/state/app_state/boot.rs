@@ -465,6 +465,11 @@ impl AppState {
         // the mount: the `tool-task` row reports delegated children
         // into the same atomics the session controllers write, and
         // `AppState` publishes them to `/api/v1/chat/usage`.
+        // The sessions service is published by a row during the
+        // mount; the rows that need it (the `tool-goal` row) resolve
+        // through this slot, filled right after the mount.
+        let sessions_slot: crate::composition::kernel::SessionSlot =
+            Arc::new(std::sync::OnceLock::new());
         let usage_metrics = Arc::new(UsageMetrics::default());
         let boot_services = Arc::new(BootServices {
             tool_registry: Arc::clone(&input.tool_registry),
@@ -477,6 +482,7 @@ impl AppState {
             file_system: Arc::clone(&file_system),
             terminals: Arc::clone(&terminals),
             jobs: Arc::clone(&jobs),
+            sessions: Arc::clone(&sessions_slot),
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same
@@ -567,6 +573,9 @@ impl AppState {
                     "the sessions service is unavailable after mount: {error}"
                 )
             })?;
+        // The mount published `sessions`: the rows that resolved
+        // through the slot can now reach it.
+        let _ = sessions_slot.set(Arc::clone(&session_manager));
         // The mount published `sessions`: build the child-session
         // router over it, then hand its writer source to the already
         // mounted `tool-task` tool through the slot.

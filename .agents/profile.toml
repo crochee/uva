@@ -38,6 +38,12 @@ name = "tool-glob"
 
 [[core.entries]]
 disabled = false
+id = "tool-goal"
+inject = ["tools"]
+name = "tool-goal"
+
+[[core.entries]]
+disabled = false
 id = "tool-grep"
 inject = ["tools"]
 name = "tool-grep"

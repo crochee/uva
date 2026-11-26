@@ -300,6 +300,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -516,6 +529,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -734,6 +760,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -950,6 +989,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -1168,6 +1220,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -1384,6 +1449,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -1602,6 +1680,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -1818,6 +1909,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -2036,6 +2140,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -2252,6 +2369,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -2470,6 +2600,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -2686,6 +2829,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -2904,6 +3060,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -3120,6 +3289,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -3338,6 +3520,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -3554,6 +3749,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -3772,6 +3980,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -3988,6 +4209,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -4206,6 +4440,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -4422,6 +4669,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -4640,6 +4900,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -4856,6 +5129,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -5074,6 +5360,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -5290,6 +5589,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -5508,6 +5820,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -5724,6 +6049,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -5942,6 +6280,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -6158,6 +6509,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -6376,6 +6740,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -6592,6 +6969,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -6810,6 +7200,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -7026,6 +7429,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
@@ -7244,6 +7660,19 @@ export type SessionTurn =
        */
       ignorable?: boolean | null;
       /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
+      /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different
        * fact that happens to share the name.
@@ -7460,6 +7889,19 @@ export type SessionTurn =
        * refusing the whole log.
        */
       ignorable?: boolean | null;
+      /**
+       * A `goal` row's lifecycle state —
+       * `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+       */
+      state?: string | null;
+      /**
+       * A `goal` row's objective, in the model's own words.
+       */
+      objective?: string | null;
+      /**
+       * A `goal` row's token budget, when one was given.
+       */
+      budget_tokens?: number | null;
       /**
        * Which boundary the row is — a `step` / `turn` row. On a
        * `plugin` row it is the plugin's own event kind, a different

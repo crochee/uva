@@ -134,6 +134,16 @@ pub struct SessionTurnEnvelope {
     /// refusing the whole log.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ignorable: Option<bool>,
+    /// A `goal` row's lifecycle state —
+    /// `"active"` | `"paused"` | `"completed"` | `"dropped"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    /// A `goal` row's objective, in the model's own words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    /// A `goal` row's token budget, when one was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u64>,
     /// Which boundary the row is — a `step` / `turn` row. On a
     /// `plugin` row it is the plugin's own event kind, a different
     /// fact that happens to share the name.

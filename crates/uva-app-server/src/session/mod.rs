@@ -2,6 +2,7 @@
 
 pub mod controller;
 pub mod files;
+pub mod goals;
 pub mod lane;
 pub mod session_index;
 pub mod status;

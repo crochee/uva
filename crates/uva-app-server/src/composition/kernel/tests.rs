@@ -88,6 +88,7 @@ fn services_over(
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
         jobs: Arc::new(uva::tool_job::JobRegistry::new()),
+        sessions: Arc::new(std::sync::OnceLock::new()),
     })
 }
 
@@ -166,7 +167,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
             "the boot profile is missing `{expected}`: {ids:?}"
         );
     }
-    assert_eq!(ids.len(), 26, "no duplicate rows: {ids:?}");
+    assert_eq!(ids.len(), 27, "no duplicate rows: {ids:?}");
 }
 
 #[tokio::test]
@@ -246,7 +247,7 @@ async fn mounts_the_native_set_through_the_kernel() {
     ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
         .expect("hooks");
 
-    assert_eq!(handle.len(), 26);
+    assert_eq!(handle.len(), 27);
     assert!(handle.plugin_state("skills").is_some());
 }
 

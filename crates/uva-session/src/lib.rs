@@ -237,6 +237,7 @@ pub use typed_event_builders::{
     compaction_start,
     compaction_summary,
     feedback,
+    goal,
     hook_block,
     iteration_end,
     iteration_start,

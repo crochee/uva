@@ -16,6 +16,7 @@ read = []
 write = []
 edit = []
 glob = []
+goal = []
 grep = ["dep:regex"]
 shell = ["dep:libc"]
 # The background runner enforces the shell crate's execution policy,

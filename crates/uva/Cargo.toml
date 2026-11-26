@@ -120,6 +120,7 @@ required-features = [
   "tool-write",
   "tool-edit",
   "tool-glob",
+  "tool-goal",
   "tool-grep",
   "tool-shell",
   "tool-job",
@@ -187,6 +188,7 @@ tool-write = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/write"]
 tool-edit = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/edit"]
 tool-job = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/job"]
 tool-glob = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/glob"]
+tool-goal = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/goal"]
 tool-grep = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/grep"]
 tool-shell = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/shell"]
 tool-todo = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/todo"]

@@ -35,6 +35,7 @@
 | `tool-edit` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-job` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-glob` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
+| `tool-goal` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-grep` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-shell` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-todo` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
