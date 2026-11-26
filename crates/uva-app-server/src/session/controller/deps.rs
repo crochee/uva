@@ -57,6 +57,12 @@ pub struct RunDependencies {
     /// command is done without polling for it. `None` in a host that
     /// mounts no `job` tool.
     pub(crate) jobs: Option<Arc<uva::tool_job::JobRegistry>>,
+    /// The session's goal, read through its log.
+    ///
+    /// The controller reads it after a turn ends: an active goal
+    /// starts the next turn (bounded — see
+    /// [`MAX_GOAL_CONTINUATIONS`](crate::session::controller::MAX_GOAL_CONTINUATIONS)).
+    pub(crate) goals: Option<Arc<crate::session::goals::SessionGoals>>,
     /// Working directory handed to built-in tools via
     /// [`AgentRunConfig::workspace_root`](crate::agent_run_config::AgentRunConfig::workspace_root). Replaces the
     /// previous hard-coded `/tmp` so `read_file` / `shell`
@@ -208,6 +214,7 @@ impl RunDependencies {
             default_provider_name: String::new(),
             tool_registry,
             jobs: None,
+            goals: None,
             workspace_root,
             system_prompt,
             host: None,
@@ -225,6 +232,19 @@ impl RunDependencies {
             ),
             approval_timeout: None,
         }
+    }
+
+    /// Install the session's goal store.
+    ///
+    /// The controller reads it after a turn ends: an active goal
+    /// starts the next turn.
+    #[must_use]
+    pub fn with_goals(
+        mut self,
+        goals: Arc<crate::session::goals::SessionGoals>,
+    ) -> Self {
+        self.goals = Some(goals);
+        self
     }
 
     /// Install the deployment's background jobs.

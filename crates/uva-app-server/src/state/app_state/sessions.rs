@@ -384,6 +384,9 @@ impl AppState {
             self.system_prompt.clone(),
         )
         .with_jobs(Arc::clone(&self.jobs))
+        .with_goals(Arc::new(crate::session::goals::SessionGoals::resolved(
+            Arc::clone(&self.session_manager),
+        )))
         .with_default_provider_name(catalogue.default_provider_name())
         .with_provider_resolver(
             Arc::clone(&catalogue) as Arc<dyn uva::provider::ProviderResolver>

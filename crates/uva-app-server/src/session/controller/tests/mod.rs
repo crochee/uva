@@ -26,6 +26,7 @@ mod approval_deadline;
 mod cancel;
 mod compaction_gate;
 mod event_emission;
+mod goals;
 mod history;
 mod job_delivery;
 mod lifecycle;

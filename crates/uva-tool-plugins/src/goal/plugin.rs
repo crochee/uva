@@ -13,7 +13,7 @@
 //!
 //! # The store is injected
 //!
-//! The host implements [`GoalStore`](crate::goal::GoalStore) over the
+//! The host implements [`GoalStore`] over the
 //! session's one writer, so the tool never spells a row: the log stays
 //! the single truth for the goal's state.
 

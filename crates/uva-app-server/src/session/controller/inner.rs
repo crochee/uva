@@ -115,6 +115,16 @@ pub(super) struct ControllerInner {
     /// The row is written first and the message handed over second,
     /// so a crash between the two loses the in-memory copy and keeps
     /// the durable fact — the next run's fold sees it.
+    /// The session's goal, read after a turn ends.
+    ///
+    /// `None` in a host that mounts no `goal` tool.
+    pub(super) goals: Option<Arc<crate::session::goals::SessionGoals>>,
+    /// How many turns the host has started for the current goal.
+    ///
+    /// A goal the model never completes must not spin forever: the
+    /// cap pauses it (a durable row) and the host stops continuing.
+    /// Any user turn resets the count.
+    pub(super) goal_continuations: std::sync::atomic::AtomicUsize,
     pub(super) steer_inbox: parking_lot::Mutex<
         Option<futures::channel::mpsc::UnboundedSender<uva::provider::Message>>,
     >,

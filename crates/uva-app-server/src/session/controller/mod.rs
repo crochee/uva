@@ -200,6 +200,9 @@ impl SessionController {
         // delivery task needs the registry, not the whole dependency
         // set.
         let deps_jobs = deps.jobs.clone();
+        // Cloned out before `deps` moves into the inner mutex: the
+        // continuation reads the goal through it.
+        let deps_goals = deps.goals.clone();
 
         let inner = Arc::new(ControllerInner {
             session_id: session_id.clone(),
@@ -225,6 +228,8 @@ impl SessionController {
             pending_resume: parking_lot::Mutex::new(None),
             steer_gate: tokio::sync::Mutex::new(()),
             steer_inbox: parking_lot::Mutex::new(None),
+            goals: deps_goals,
+            goal_continuations: std::sync::atomic::AtomicUsize::new(0),
             compaction_pass_gate: tokio::sync::Mutex::new(()),
             on_exit: parking_lot::Mutex::new(None),
         });

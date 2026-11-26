@@ -44,6 +44,15 @@ impl SessionGoals {
         Self { sessions }
     }
 
+    /// The store over a registry that already exists (the controller
+    /// builds one from the deployment's sessions).
+    #[must_use]
+    pub fn resolved(sessions: Arc<SessionRegistry>) -> Self {
+        let slot = Arc::new(OnceLock::new());
+        let _ = slot.set(sessions);
+        Self { sessions: slot }
+    }
+
     /// The sessions service, once the boot has filled the slot.
     fn sessions(&self) -> Option<&Arc<SessionRegistry>> {
         self.sessions.get()

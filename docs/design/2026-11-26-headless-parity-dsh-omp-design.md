@@ -70,7 +70,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12）**：协议没有「宿主自带工具」的原语，那一半如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
-| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`）；**如实缺席**：`lsp`、`checkpoint`/`rewind`（撤销）、`goal`（目标模式）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑） |
+| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑）；**如实缺席**：`lsp`、`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑） |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
@@ -92,6 +92,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
 | G12 | ~~无客户端侧 fs/terminal 委派~~ **已落**（切 5 的 fs 半边 + 切 11 的 terminal 半边）：`fs/*` 与 `terminal/*` 两套委派都走同一条「客户端拥有」的路 | — | 同左 |
 | G14 | ~~没有后台作业~~ **已落（切 13 + 切 14）**：`job` 工具把命令放到后台（`start` / `output` / `list` / `kill`），**完成通知主动送达**（切 14：作业结束 → 会话收到通知） | — | 同左 |
+| G16 | **工具族少 `goal`（目标模式）**：两个参考都有（dsh `tool-goal`、omp goal mode）——一个模型创建的目标、生命周期、token 预算、宿主续跑 | 高 | `crates/uva-tool-plugins/src/` |
 | G15 | ~~工具族少 `glob` 与 `grep`~~ **已落（切 15）**：两个工具都走本仓自己的遍历（不依赖外部 ripgrep），答案有界且自报截断 | — | 同左 |
 | G13 | **工具族少一个 `edit`**：只有 `read` 与 `write`，改一行要重写整个文件——两个参考都有精确编辑（dsh `str_replace_editor`、omp `edit`） | 中 | `crates/uva-tool-plugins/src/` |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
@@ -654,6 +655,49 @@ ripgrep，`packages/fs/tool-fs-search/src/glob.ts:93`）与 omp 内建的 `glob`
 
 ---
 
+
+### 切 16 — 目标模式：耐久目标 + 宿主续跑（G16）
+
+**要什么**：两个参考都有目标模式——dsh 的 `tool-goal` 与 omp 的 goal mode
+（`packages/coding-agent/src/modes/rpc/rpc-goal.ts`）：一个**模型创建的目标**、
+一个生命周期（create / pause / resume / complete / drop）、一个 token 预算，以及
+**宿主在回合结束后继续跑**。本仓此前只有 `todo`（一份清单 ✗——不是跨回合的目
+标）。
+
+**怎么落**：
+1. **目标是会话日志里的行**（切 16 之一）：新的 `goal` 行，每变一次写一行，
+   最后一行即目标状态；log-only，不进模型可见表面（与审批行同一套「日志即真源」
+   的规则）。词汇的每个穷尽点都表了态：`surface_role=LogOnly`、`row_kind=None`、
+   `ignorable=false`、`empty_event`、构造器、前端 handler（null）与重新生成的
+   wire 类型。
+2. **工具**（切 16 之二）：`goal` 的六个动作；有活目标时再 create 被拒；`pause`
+   只对 active、`resume` 只对 paused、`complete`/`drop` 只对未结束的目标。工具
+   **不拼任何行**：`GoalStore` 缝（宿主的会话注册表实现）读最后一行、写一行并
+   flush。
+3. **宿主续跑**（切 16 之三）：一个回合结束、没有排队的回合、而目标是 active
+   时，宿主自己起下一回合（把「继续朝着目标工作」park 成一行耐久的 prompt）。
+   两道边界：**预算**（会话 `usage` 行的 token 总和撞上目标预算 → 暂停目标）与
+   **续跑上限**（25 回合 → 暂停目标）；任何用户回合把计数清零。不完成的目
+   标于是变成一次可恢复的暂停，而不是无限自转。
+
+**落点**：
+- `crates/uva-session/src/events/`：`goal` 行（词汇、构造器、fixture、wire 类型）。
+- `crates/uva-tool-plugins/src/goal/`：`GoalStore` 缝 + `goal` 工具 + 内核插件。
+- `crates/uva-app-server/src/session/goals.rs`：`SessionGoals`（读最后一行、
+  写一行并 flush、`spent_tokens`、`budget_allows`）。
+- `crates/uva-app-server/src/session/controller/`：`continue_goal`（回合结束后的
+  续跑、预算与上限、暂停）。
+
+**验收**：
+- 词汇：34 个标签的穷尽点全部表态（计数、角色、kind、ignorable、fixture、
+  构造器回读、前端 handler 与契约）。
+- 工具：10 条单测（生命周期、每种拒绝、store 的写入次数）。
+- store：4 条（最后一行胜出、非 goal 行忽略、预算、只有 active 才续跑）。
+- 续跑（真控制器 + 真日志）：active 目标起下一回合且 prompt 携带目标；完成的
+  目标不再续跑；撞上上限时目标被暂停（一条单测各验证一条）。
+
+---
+
 ---
 
 ## 6. 下一轮候选（不在本轮）
@@ -669,8 +713,9 @@ ripgrep，`packages/fs/tool-fs-search/src/glob.ts:93`）与 omp 内建的 `glob`
   结构化交付，seam 留给会铸造原生状态的适配器。G4 已落——切 6。
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
   （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。
-  G15 已落——切 15（`glob` + `grep`）。工具族一行新加，剩余缺席如实记着：`lsp`、
-  `checkpoint`/`rewind`、`goal`、`ask`、`ast_grep`/`ast_edit`。）
+  G15 已落——切 15（`glob` + `grep`）。G16 已落——切 16（`goal` + 宿主续跑）。
+  工具族一行新加，剩余缺席如实记着：`lsp`、`checkpoint`/`rewind`、`ask`、
+  `ast_grep`/`ast_edit`。）
 
 ---
 

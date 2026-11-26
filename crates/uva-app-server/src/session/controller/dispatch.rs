@@ -1,6 +1,5 @@
 //! The controller loop: receiving operations, dispatching each to
 //! its handler, and the idle-timeout lifecycle around them.
-
 use std::{
     future::pending,
     sync::{Arc, atomic::Ordering},
@@ -9,7 +8,11 @@ use std::{
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
-use uva::{core::CancelToken, provider::traits::ModelProvider};
+use uva::{
+    core::CancelToken,
+    provider::traits::ModelProvider,
+    tool_goal::GoalStore,
+};
 
 use super::{
     inner::{ControllerInner, ParkedPrompt},
@@ -235,6 +238,11 @@ async fn handle_received_op(
     let mut ack = ack;
     let stop = match op {
         SessionOp::Prompt { content, priority } => {
+            // A user turn is the operator speaking: the goal's
+            // continuation budget starts over.
+            inner
+                .goal_continuations
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             park_provider(inner, provider);
             let failure =
                 handle_prompt_op(inner, content, priority, turn_id.as_deref())
@@ -248,6 +256,9 @@ async fn handle_received_op(
             agent_name,
             priority,
         } => {
+            inner
+                .goal_continuations
+                .store(0, std::sync::atomic::Ordering::SeqCst);
             park_provider(inner, provider);
             let failure = handle_prompt_multi_op(
                 inner,
@@ -982,6 +993,104 @@ async fn on_run_completed(
     }
     if let Some(h) = inner.maybe_start_run().await {
         *run_handle = Some(h);
+        return;
+    }
+    // Nothing was parked. An active goal is what keeps the session
+    // working: the host starts the next turn itself (bounded — a goal
+    // the model never completes pauses instead of spinning).
+    if continue_goal(inner).await
+        && let Some(h) = inner.maybe_start_run().await
+    {
+        *run_handle = Some(h);
+    }
+}
+
+/// The most turns the host starts for one goal before pausing it.
+///
+/// A goal the model never completes is a goal the operator should
+/// look at: the cap turns an infinite spin into a durable pause the
+/// host can resume.
+pub(crate) const MAX_GOAL_CONTINUATIONS: usize = 25;
+
+/// Start the next turn for an active goal, or say why not.
+///
+/// Returns whether a turn was parked for the next run. The budget and
+/// the continuation cap both end the continuation — the first by
+/// pausing the goal with the reason, the second by pausing it with
+/// the count.
+async fn continue_goal(inner: &Arc<ControllerInner>) -> bool {
+    use std::sync::atomic::Ordering;
+    let Some(goals) = inner.goals.as_ref() else {
+        return false;
+    };
+    let Some(goal) = crate::session::goals::continuation_goal(
+        goals.read(&inner.session_id).await,
+    ) else {
+        return false;
+    };
+    let spent =
+        crate::session::goals::spent_tokens(goals, &inner.session_id).await;
+    if !crate::session::goals::budget_allows(&goal, spent) {
+        tracing::info!(
+            target: "uva.session",
+            session_id = %inner.session_id,
+            spent,
+            budget = goal.budget_tokens,
+            "the goal's budget is spent; pausing it"
+        );
+        pause_goal(inner, goals, &goal, "the token budget is spent").await;
+        return false;
+    }
+    let started = inner.goal_continuations.fetch_add(1, Ordering::SeqCst);
+    if started >= MAX_GOAL_CONTINUATIONS {
+        tracing::info!(
+            target: "uva.session",
+            session_id = %inner.session_id,
+            started,
+            "the goal reached its continuation cap; pausing it"
+        );
+        pause_goal(inner, goals, &goal, "the continuation cap was reached")
+            .await;
+        return false;
+    }
+    let prompt = format!(
+        "Continue working toward the goal: {}. The host started this          turn because the goal is still active. Call `goal` with          `action = \"complete\"` when the objective is met.",
+        goal.objective
+    );
+    match park_text_turn(inner, prompt, None).await {
+        None => true,
+        Some(error) => {
+            tracing::warn!(
+                target: "uva.session",
+                session_id = %inner.session_id,
+                %error,
+                "the goal's continuation turn could not be parked"
+            );
+            false
+        }
+    }
+}
+
+/// Pause the goal, durably, with a reason the next reader sees.
+async fn pause_goal(
+    inner: &ControllerInner,
+    goals: &Arc<crate::session::goals::SessionGoals>,
+    goal: &uva::tool_goal::GoalSnapshot,
+    reason: &str,
+) {
+    let paused = uva::tool_goal::GoalSnapshot {
+        state: uva::tool_goal::GOAL_PAUSED.to_string(),
+        objective: goal.objective.clone(),
+        budget_tokens: goal.budget_tokens,
+    };
+    if let Err(error) = goals.write(&inner.session_id, &paused).await {
+        tracing::warn!(
+            target: "uva.session",
+            session_id = %inner.session_id,
+            %error,
+            reason,
+            "the goal could not be paused"
+        );
     }
 }
 
