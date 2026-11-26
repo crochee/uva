@@ -611,3 +611,112 @@ async fn a_failing_command_streams_and_settles_with_its_marker() {
         text_of(&results[0])
     );
 }
+
+/// A client that owns one session's terminal.
+struct FakeTerminals {
+    /// The sessions this client claims.
+    claimed: Vec<String>,
+    /// The commands that reached the client, in order.
+    ran: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl FakeTerminals {
+    fn new(claimed: &[&str]) -> Self {
+        Self {
+            claimed: claimed.iter().map(|s| s.to_string()).collect(),
+            ran: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl TerminalOwner for FakeTerminals {
+    fn owns(&self, session_id: &str) -> bool {
+        self.claimed.iter().any(|claimed| claimed == session_id)
+    }
+
+    async fn run(
+        &self,
+        session_id: &str,
+        command: &str,
+        cwd: &std::path::Path,
+        _timeout: std::time::Duration,
+    ) -> Result<TerminalRun, TerminalError> {
+        self.ran
+            .lock()
+            .expect("the fake's own lock")
+            .push((session_id.to_string(), command.to_string()));
+        Ok(TerminalRun {
+            output: format!("the client's pane ran it in {}\n", cwd.display()),
+            exit_code: Some(3),
+            timed_out: false,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_client_owned_session_runs_its_command_in_the_client_terminal() {
+    let terminals = Arc::new(FakeTerminals::new(&["s1"]));
+    let tool = ShellTool::new().with_terminals(terminals.clone());
+
+    let out = tool
+        .call(json!({ "command": "echo hi" }), &make_context())
+        .await;
+
+    let text = text_of(&out);
+    assert!(
+        text.contains("the client's pane ran it in /tmp"),
+        "the client's own output reaches the model: {text}"
+    );
+    assert!(
+        text.contains("[exit code: 3]"),
+        "the client's exit status is the run's status: {text}"
+    );
+    let ran = terminals.ran.lock().expect("the fake's own lock");
+    assert_eq!(
+        ran.as_slice(),
+        [("s1".to_string(), "echo hi".to_string())],
+        "the command reached the client, not this machine"
+    );
+}
+
+#[tokio::test]
+async fn a_session_the_client_does_not_own_runs_on_this_machine() {
+    let terminals = Arc::new(FakeTerminals::new(&["other"]));
+    let tool = ShellTool::new().with_terminals(terminals.clone());
+
+    let out = tool
+        .call(json!({ "command": "echo local" }), &make_context())
+        .await;
+
+    let text = text_of(&out);
+    assert!(
+        text.contains("local"),
+        "the local path ran the command: {text}"
+    );
+    assert!(
+        !text.contains("the client's pane"),
+        "the local path did not ask the client: {text}"
+    );
+    assert!(
+        terminals
+            .ran
+            .lock()
+            .expect("the fake's own lock")
+            .is_empty(),
+        "the client was never asked"
+    );
+}
+
+#[test]
+fn the_description_names_the_client_terminal_path() {
+    let description = ShellTool::new().description().to_string();
+    assert!(
+        description.contains("client's terminal"),
+        "the model is told where a command can run: {description}"
+    );
+    assert!(
+        description.contains("execution policy"),
+        "the policy still names the local path: {description}"
+    );
+}

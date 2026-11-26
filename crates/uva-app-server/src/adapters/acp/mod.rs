@@ -21,6 +21,9 @@
 //! - [`agent`] — the methods: the handshake, the sessions, the turn.
 //! - [`files`] — the client that owns a session's files: the
 //!   `fs/*` delegation a capable client advertises in `initialize`.
+//! - [`terminal`] — the client that owns a session's terminal: the
+//!   `terminal/*` delegation a capable client advertises in
+//!   `initialize`.
 //! - [`projection`] — the vocabulary: the core's events become the
 //!   protocol's session updates, in both directions (live and
 //!   replay).
@@ -50,6 +53,9 @@ pub mod channel;
 pub mod files;
 pub mod projection;
 pub mod stdio;
+pub mod terminal;
+#[cfg(test)]
+mod terminal_tests;
 pub mod turn;
 
 pub use agent::AcpAgent;

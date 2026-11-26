@@ -95,6 +95,9 @@ mod risk;
 /// The `stream` half of the `Tool` impl: `Progress` per pipe chunk,
 /// one terminal `Result`.
 mod stream;
+/// The terminal seam: who runs a session's commands when the client
+/// owns the terminal.
+pub mod terminal;
 pub use plugin::{
     KEY_SANDBOX,
     SandboxBackendKind,
@@ -121,12 +124,28 @@ pub use sandbox::{
     policy_prompt_block,
     resolve_confined_command,
 };
+pub use terminal::{LocalTerminals, TerminalError, TerminalOwner, TerminalRun};
 
 /// `shell`'s contract text, before the execution-policy paragraph
 /// [`policy_prompt_block`] appends.
 const BASE_DESCRIPTION: &str = "Execute a shell command and return its stdout and stderr \
      with a trailing exit-status marker. Non-zero exits are \
      normal results — inspect the `[exit code: N]` marker.";
+
+/// The block that says where a command runs when the session's client
+/// owns the terminal.
+///
+/// The tool's description is static — one text for every session — so
+/// it has to name both paths truthfully: the policy above holds for
+/// the sessions that run on this machine, and the client's own rules
+/// hold for the sessions whose terminal the client owns. A model that
+/// believes the sandbox is in force while the command runs in the
+/// user's terminal would read a policy denial that never comes.
+const TERMINAL_OWNER_PROMPT: &str = "Where the command runs: on this deployment's own \
+     machine, under the execution policy above — unless the session's client owns the \
+     terminal, in which case the command runs in the client's terminal (the pane the \
+     user watches) and the client's own rules apply there instead of the policy above. \
+     A command refused by the client's terminal comes back as that client's refusal.";
 
 /// Default deny-pattern list. Substring match (case-sensitive).
 pub const DEFAULT_DENY_PATTERNS: &[&str] = &[
@@ -181,7 +200,6 @@ struct ShellArgs {
     timeout_secs: Option<u64>,
 }
 
-#[derive(Debug)]
 pub struct ShellTool {
     config: ShellSafetyConfig,
     /// File-effect boundary every call runs under. The description
@@ -193,7 +211,23 @@ pub struct ShellTool {
     /// fail-closed refusal at call time, never a silent unconfined
     /// run.
     sandbox: Option<Arc<dyn SandboxBackend>>,
+    /// Who runs a session's commands when the client owns the
+    /// terminal. The default owns nothing: every session runs on this
+    /// machine.
+    terminals: Arc<dyn TerminalOwner>,
     description: String,
+}
+
+impl std::fmt::Debug for ShellTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The terminal owner is an opaque collaborator — the client
+        // that owns it is not the tool's business to print.
+        f.debug_struct("ShellTool")
+            .field("config", &self.config)
+            .field("policy", &self.policy)
+            .field("sandbox", &self.sandbox.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl ShellTool {
@@ -224,14 +258,28 @@ impl ShellTool {
         config: ShellSafetyConfig,
         policy: ExecutionPolicy,
     ) -> Self {
-        let description =
-            format!("{BASE_DESCRIPTION}\n\n{}", policy_prompt_block(policy));
+        let description = format!(
+            "{BASE_DESCRIPTION}\n\n{}\n\n{}",
+            policy_prompt_block(policy),
+            TERMINAL_OWNER_PROMPT,
+        );
         Self {
             config,
             policy,
             sandbox: None,
+            terminals: Arc::new(LocalTerminals),
             description,
         }
+    }
+
+    /// Attach the owner that runs a client-owned session's commands.
+    ///
+    /// The owner answers per session: a session it claims runs in the
+    /// client's terminal, every other session keeps running on this
+    /// machine under this tool's own policy.
+    pub fn with_terminals(mut self, terminals: Arc<dyn TerminalOwner>) -> Self {
+        self.terminals = terminals;
+        self
     }
 
     /// Attach the backend that enforces this tool's policy.
@@ -874,6 +922,44 @@ impl Tool for ShellTool {
 }
 
 impl ShellTool {
+    /// Run one command in the session's client-owned terminal.
+    ///
+    /// The run is the client's: its pane holds the output, its rules
+    /// hold the command. The tool renders the answer in the same
+    /// shape the local path renders — one body, the status marker
+    /// last — so the model's view of a run does not depend on where
+    /// it ran.
+    async fn run_in_client_terminal(
+        &self,
+        command: &str,
+        context: &Context,
+        timeout: Duration,
+    ) -> ToolOutput {
+        let run = self
+            .terminals
+            .run(
+                &context.session_id,
+                command,
+                &context.workspace_root,
+                timeout,
+            )
+            .await;
+        match run {
+            Ok(run) => {
+                let run = ShellRun {
+                    stdout: run.output,
+                    stderr: String::new(),
+                    exit_code: run.exit_code,
+                    signal: None,
+                    timed_out: run.timed_out,
+                    denied_by_policy: None,
+                };
+                ToolOutput::text(run.render(timeout.as_secs()))
+            }
+            Err(error) => ToolOutput::error(error.to_string()),
+        }
+    }
+
     /// Execute one call, announcing pipe chunks to `progress` when it
     /// is installed.
     async fn run(
@@ -900,6 +986,20 @@ impl ShellTool {
             .timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS)
             .clamp(1, MAX_TIMEOUT_SECS);
+
+        // A session whose client owns the terminal runs there: the
+        // client's pane, the client's rules. The deployment's own
+        // sandbox does not reach that far — the description says so
+        // for every session.
+        if self.terminals.owns(&context.session_id) {
+            return self
+                .run_in_client_terminal(
+                    &args.command,
+                    context,
+                    Duration::from_secs(timeout_secs),
+                )
+                .await;
+        }
 
         // Resolve the argv before running anything: a policy the
         // host cannot enforce refuses here, so the command never

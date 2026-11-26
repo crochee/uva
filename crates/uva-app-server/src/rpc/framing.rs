@@ -200,8 +200,8 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
 ///
 /// # Errors
 ///
-/// None today: the header fits its fixed buffer by construction
-/// ([`MAX_DECIMAL_DIGITS`] bounds the length).
+/// None today: the header fits its fixed buffer by construction (the
+/// declared length's digit count is bounded).
 pub fn encode_frame(payload: &[u8]) -> Vec<u8> {
     let mut header = [0u8; HEADER_PREFIX.len() + MAX_DECIMAL_DIGITS + 4];
     let mut cursor = HEADER_PREFIX.len();

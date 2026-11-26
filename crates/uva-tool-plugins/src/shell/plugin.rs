@@ -296,6 +296,26 @@ impl ShellToolPlugin {
             tool: Arc::new(ShellTool::new()),
         }
     }
+
+    /// Build the brick over a tool that asks `terminals` who runs a
+    /// session's commands.
+    ///
+    /// A client that owns the terminal installs its owner here: the
+    /// sessions it claims run in the client's pane, every other
+    /// session keeps running on this machine.
+    #[must_use]
+    pub fn with_terminals(
+        terminals: Arc<dyn crate::shell::terminal::TerminalOwner>,
+    ) -> Self {
+        let mut manifest =
+            PluginManifest::new(SHELL_TOOL_ID, PLUGIN_PROTOCOL_VERSION);
+        manifest.runtime = RuntimeKind::Native;
+        manifest.inject.push(KEY_TOOLS.to_string());
+        Self {
+            manifest,
+            tool: Arc::new(ShellTool::new().with_terminals(terminals)),
+        }
+    }
 }
 
 impl Default for ShellToolPlugin {

@@ -7,7 +7,8 @@
 //! (`packages/session/session-persistence-jsonl/src/lease.ts:1-24`,
 //! `:66-88`). This module is the same contract for the JSONL sink:
 //!
-//! - [`SessionOwnerLock::try_acquire`] opens `<dir>/owner.lock`,
+//! - [`SessionOwnerLock::try_acquire`](crate::ownership::SessionOwnerLock::try_acquire)
+//!   opens `<dir>/owner.lock`,
 //!   writes this process's id into it (diagnostics: a refused writer
 //!   can name the holder), and takes the exclusive lock without
 //!   blocking.

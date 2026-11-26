@@ -396,8 +396,7 @@ impl OutboundQueue {
         if inner.spool.is_some() {
             // Spill mode: everything after the memory prefix lands on
             // disk, so the arrival order survives the spill.
-            let written =
-                inner.spool.as_mut().map(|spool| spool.push(&frame));
+            let written = inner.spool.as_mut().map(|spool| spool.push(&frame));
             match written {
                 Some(Ok(())) => {}
                 Some(Err(error)) => {

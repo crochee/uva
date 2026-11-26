@@ -86,6 +86,7 @@ fn services_over(
         hook_registry,
         plugin_host,
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
+        terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
     })
 }
 

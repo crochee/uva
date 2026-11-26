@@ -87,7 +87,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G7 | ~~并行工具桶不观察取消~~ **已驳回**：取消检查在工具流的 drain 里（`crates/uva-harness/src/agent/re_act/loop/step/tools/route.rs:168`），两个桶都经过它——未开始的调用不跑。补了一个回归钉子（`agent/re_act/tests/parallel_unsafe.rs`） | — | 同左 |
 | G9 | ~~无跨进程会话租约~~ **已落**（切 9）：`owner.lock` + flock，append 拒绝失败关闭 | — | `crates/uva-session/src/ownership.rs` |
 | G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
-| G12 | 无客户端侧 fs/terminal 委派 | 中 | `crates/uva-app-server/src/adapters/acp/agent.rs:205-240` |
+| G12 | ~~无客户端侧 fs/terminal 委派~~ **已落**（切 5 的 fs 半边 + 切 11 的 terminal 半边）：`fs/*` 与 `terminal/*` 两套委派都走同一条「客户端拥有」的路 | — | 同左 |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
 
 ---
@@ -441,20 +441,71 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
   磁盘；排空后字节与顺序不变。
 - 行为（stdio）：慢读者（64 字节 duplex）下两帧应答都不丢、顺序稳定。
 
+
+### 切 11 — 客户端侧终端委派（G12 的 terminal 半边）
+
+**要什么**：ACP 的 `terminal/*`（SDK 5.6：`terminal/create` /
+`terminal/output` / `terminal/wait_for_exit` / `terminal/kill` /
+`terminal/release`）让**客户端拥有终端**：agent 不在自己机器上 spawn
+进程，而是请客户端在它自己的窗格里跑——用户看得见、能打断。omp 的
+`set_host_tools` 是同一件事的另一种说法（宿主把自己的工具交给 agent）。
+
+**怎么落**：
+1. **一条缝**：`uva_tool_plugins::shell::terminal::TerminalOwner`——与
+   `FileSystemOwner` 同构的「谁执行」缝：默认的 `LocalTerminals` 谁也不拥有，
+   每个会话都在本机跑；客户端拥有终端的会话走客户端。
+2. **工具按会话路由**：`ShellTool` 持有 `Arc<dyn TerminalOwner>`；会话被客户
+   端拥有时，命令交给客户端，否则走原来的本机路径（策略、沙箱、进程组、超时
+   全部不变）。**描述必须诚实**：工具的描述是静态的（一段文本对所有会话），
+   所以它同时写明两条路——本机路径讲策略，客户端路径讲「客户端的规则代替策略」。
+   一段谎称沙箱在生效、而命令其实跑在用户窗格里的描述，比没有描述更糟。
+3. **注册表**：app-server 的 `SessionTerminals` 与 `SessionFileSystem` 同构
+   （会话 id → 客户端 owner），挂在 `AppState` 上，`tool-shell` 行拿到它。
+4. **ACP 侧**：`ClientTerminal` 按 ACP 的五个方法实现 `TerminalOwner`：
+   `create`（`sh -c <command>`，cwd）→ `wait_for_exit`（带我们自己的截止时间，
+   超时则 `kill`）→ `output`（窗格的文本）→ `release`。客户端在
+   `initialize` 里声明 `terminal: true`，其会话才登记这个 owner；没声明的
+   客户端照旧跑在本机。
+
+**为什么恢复会话也要认领**：`session/load` 与 `session/new` 走同一条
+`claim_session`——恢复的会话同样是客户端的会话（文件与终端都是）。此前 fs
+半边只在 `session/new` 认领，恢复的会话会落回本机磁盘；这一刀把两边一起对齐。
+
+**落点**：
+- `crates/uva-tool-plugins/src/shell/terminal.rs`：`TerminalOwner` /
+  `TerminalRun` / `TerminalError` / `LocalTerminals`。
+- `crates/uva-tool-plugins/src/shell/mod.rs`：`ShellTool::with_terminals` 与
+  按会话的路由；`TERMINAL_OWNER_PROMPT`（诚实的描述）。
+- `crates/uva-app-server/src/session/terminals.rs`：`SessionTerminals`。
+- `crates/uva-app-server/src/adapters/acp/terminal.rs`：`ClientTerminal`。
+- `crates/uva-app-server/src/adapters/acp/agent.rs`：`claim_session`（新旧会话
+  同一条认领路径）。
+
+**验收**：
+- 单元（shell）：被客户端拥有的会话，命令到客户端、输出与退出码按 shell 的
+  形状渲染；没被拥有的会话照旧在本机跑，客户端一次也没被问。
+- 单元（registry）：认领的会话走客户端；释放后回到本机。
+- 行为（ACP，真实协议）：客户端声明 `terminal` 能力 → 开会话 → 部署把该会话
+  的终端登记给客户端 → 部署请客户端跑命令 → 客户端的输出与退出码回到部署
+  （`terminal/create` → `wait_for_exit` → `output` → `release` 全部走过）。
+
+---
+
 ---
 
 ## 6. 下一轮候选（不在本轮）
 
-- **G12 客户端侧 fs/terminal 委派**（ACP `fs/*` + `terminal/*`，SDK 5.6 已支持；
-  omp 的 `set_host_tools` 同构）——本仓 ACP 面显式声明「不做」，这是与编辑器
-  对接时最显眼的缺口。
+- **G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
+  `set_host_tools`：宿主把自己的工具交给 agent 调用）——ACP v1 没有对应的
+  原语，这是协议层的缺口，不是本仓能单方面补的。
 - **G10 的 JSON-RPC 重组协议**（若真要抄 omp v2 的分块语义）——那是线格式
   破坏：帧里不再是一个 JSON 值，而是一串需要重组的片段，客户端全都要改。
   切 10 已把**可迁移的部分**落完（背压落盘 + 64 MiB 逻辑上限），剩下的只有
   这一条真破坏。
 （G7 已驳回——取消检查在工具流的 drain 里。G2 已结——切 8：连续性已
   结构化交付，seam 留给会铸造原生状态的适配器。G4 已落——切 6。
-  G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。）
+  G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
+  （terminal）。）
 
 ---
 

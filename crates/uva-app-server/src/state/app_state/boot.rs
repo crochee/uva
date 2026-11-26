@@ -447,6 +447,11 @@ impl AppState {
         // adapter claims sessions here.
         let file_system =
             Arc::new(crate::session::files::SessionFileSystem::new());
+        // The owner of every session's terminal: this machine by
+        // default, the client's terminal when the client owns it. The
+        // `shell` tool asks it before it spawns anything.
+        let terminals =
+            Arc::new(crate::session::terminals::SessionTerminals::new());
         // The containers the mount hands the rows: the one tool
         // registry, the peer-agent registry, the harness host and the
         // child-session writer slot. Every capability — the `task`
@@ -466,6 +471,7 @@ impl AppState {
             hook_registry: input.plugin_host.hook_registry().clone(),
             plugin_host: input.plugin_host.clone(),
             file_system: Arc::clone(&file_system),
+            terminals: Arc::clone(&terminals),
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same
@@ -721,6 +727,7 @@ impl AppState {
             cluster: input.cluster,
             tool_registry,
             file_system,
+            terminals,
             agent_registry: input.agent_registry,
             session_search: input.session_search,
             session_manager,

@@ -125,6 +125,13 @@ pub struct AppState {
     /// owns a session's workspace registers its owner here — so an
     /// editor's session reads the editor's files, not this disk's.
     pub file_system: Arc<crate::session::files::SessionFileSystem>,
+    /// The owner of every session's terminal: this machine, or the
+    /// client's own terminal when the client owns it.
+    ///
+    /// The `shell` tool goes through it, and a client that owns a
+    /// session's terminal registers its owner here — so an editor's
+    /// commands land in the editor's pane.
+    pub terminals: Arc<crate::session::terminals::SessionTerminals>,
     /// Multi-agent registry. Populated at startup with the
     /// canonical [`ReActAgent`](uva::harness::ReActAgent) descriptor so any panel/judge
     /// agents registered later surface in the system prompt as

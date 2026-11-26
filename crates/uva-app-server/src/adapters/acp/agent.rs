@@ -75,6 +75,10 @@ pub struct AcpAgent {
     /// it answers. A session opened by a client that offers them
     /// reads and writes **its own files**.
     fs: Mutex<Option<FileSystemCapabilities>>,
+    /// Whether the client offered the `terminal/*` methods. A session
+    /// opened by a client that offers them runs its commands in the
+    /// client's own terminal.
+    terminal: Mutex<bool>,
 }
 
 /// One session the client opened.
@@ -94,6 +98,7 @@ impl AcpAgent {
             state,
             sessions: Mutex::new(HashMap::new()),
             fs: Mutex::new(None),
+            terminal: Mutex::new(false),
         })
     }
 
@@ -218,6 +223,13 @@ impl AcpAgent {
                  will work on its own files"
             );
         }
+        if request.client_capabilities.terminal {
+            info!(
+                "the client offers the ACP terminal methods; its sessions \
+                 will run their commands in its own terminal"
+            );
+        }
+        *self.terminal.lock() = request.client_capabilities.terminal;
         self.fs.lock().replace(fs);
         InitializeResponse::new(request.protocol_version)
             .agent_capabilities(
@@ -263,19 +275,43 @@ impl AcpAgent {
         // files: the session's `read` and `write` tools ask it instead
         // of touching this disk. A client that offered nothing leaves
         // the session on the deployment's own workspace.
-        if let Some(fs) = self.fs.lock().clone() {
-            let owner = Arc::new(super::files::ClientFileSystem::new(
-                cx.clone(),
-                request.cwd.clone(),
-                fs,
-            ));
-            self.state.file_system.register(&session_id, owner);
-        }
+        self.claim_session(&session_id, &request.cwd, cx);
         self.sessions
             .lock()
             .insert(session_id.clone(), AcpSession { cwd: cwd.clone() });
         info!(session_id = %session_id, cwd = ?cwd, "ACP session opened");
         NewSessionResponse::new(session_id)
+    }
+
+    /// Give the client the session it owns.
+    ///
+    /// The client that advertised the `fs/*` methods owns the
+    /// session's files; the client that advertised the `terminal/*`
+    /// methods owns the session's terminal. A client that advertised
+    /// neither leaves the session on the deployment's own disk and its
+    /// own machine.
+    fn claim_session(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+        cx: &agent_client_protocol::v1::ConnectionTo<Client>,
+    ) {
+        if let Some(fs) = self.fs.lock().clone() {
+            let owner = Arc::new(super::files::ClientFileSystem::new(
+                cx.clone(),
+                cwd.to_path_buf(),
+                fs,
+            ));
+            self.state.file_system.register(session_id, owner);
+        }
+        if *self.terminal.lock() {
+            let owner =
+                Arc::new(super::terminal::ClientTerminal::new(cx.clone()));
+            self.state.terminals.register(
+                session_id,
+                owner as Arc<dyn uva::tool_shell::TerminalOwner>,
+            );
+        }
     }
 
     /// Restore a session and replay its transcript.
@@ -317,6 +353,10 @@ impl AcpAgent {
                 break;
             }
         }
+        // A restored session is the client's session too: the client
+        // owns its files and its terminal, exactly as it owned them
+        // when the session was opened.
+        self.claim_session(&session_id, &request.cwd, cx);
         self.sessions.lock().entry(session_id).or_default();
         LoadSessionResponse::new()
     }

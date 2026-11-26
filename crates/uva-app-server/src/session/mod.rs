@@ -6,6 +6,7 @@ pub mod lane;
 pub mod session_index;
 pub mod status;
 pub mod subagent_router;
+pub mod terminals;
 
 pub use lane::{DefaultLane, LaneError, SessionLane};
 

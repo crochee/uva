@@ -145,6 +145,10 @@ pub(crate) struct BootServices {
     /// session a client claimed touches the client's files, not the
     /// deployment's copy of them.
     pub file_system: Arc<crate::session::files::SessionFileSystem>,
+    /// The owner of every session's terminal. The `tool-shell` row
+    /// asks it before it spawns anything, so a session whose client
+    /// owns the terminal runs there instead of on this machine.
+    pub terminals: Arc<crate::session::terminals::SessionTerminals>,
 }
 
 /// Why a native mount failed — a profile-assembly or kernel verdict.
@@ -690,6 +694,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
         hook_registry: HookRegistry::new(),
         plugin_host: Host::default(),
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
+        terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
     }))
 }
 
@@ -698,8 +703,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
 fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // Rows the boot constructs: their plugins build the capability in
     // `apply` from the boot context (config only — no containers).
-    const BOOT_SPECS: [(&str, BootMake); 13] = [
-        ("tool-shell", shell_tool_plugin),
+    const BOOT_SPECS: [(&str, BootMake); 12] = [
         ("tool-todo", todo_tool_plugin),
         ("tool-web", web_tool_plugin),
         ("session-store", session_store_plugin),
@@ -718,10 +722,11 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 5] = [
+    const SPECS: [(&str, Make); 6] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
+        ("tool-shell", shell_tool_plugin),
         ("tool-task", task_tool_plugin),
         ("hooks", hooks_plugin),
     ];
@@ -948,12 +953,14 @@ fn write_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
         as Arc<dyn uva::tool_files::FileSystemOwner>))
 }
 
-fn shell_tool_plugin(
-    _boot: &BootContext,
-) -> Result<Arc<dyn KernelPlugin>, PluginError> {
+fn shell_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
     // The brick keeps its own execution-policy pair; the `sandbox`
-    // service is a separate seam.
-    Ok(Arc::new(uva::tool_shell::ShellToolPlugin::new()))
+    // service is a separate seam. The terminal owner is a third: a
+    // session whose client owns the terminal runs there.
+    Arc::new(uva::tool_shell::ShellToolPlugin::with_terminals(
+        Arc::clone(&services.terminals)
+            as Arc<dyn uva::tool_shell::TerminalOwner>,
+    ))
 }
 
 fn todo_tool_plugin(
