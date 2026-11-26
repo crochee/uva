@@ -192,10 +192,13 @@ pub struct JobCompletion {
 pub struct JobRegistry {
     jobs: parking_lot::RwLock<HashMap<String, Arc<Job>>>,
     ids: SharedIdGen,
-    /// The hosts that want to hear when a job finishes.
+    /// The hosts that want to hear when a job finishes, each with the
+    /// id the registry prunes it by.
     subscribers: parking_lot::RwLock<
-        Vec<futures::channel::mpsc::UnboundedSender<JobCompletion>>,
+        Vec<(u64, futures::channel::mpsc::UnboundedSender<JobCompletion>)>,
     >,
+    /// The next subscriber's id.
+    next_subscriber: parking_lot::Mutex<u64>,
 }
 
 impl Default for JobRegistry {
@@ -220,6 +223,7 @@ impl JobRegistry {
             jobs: parking_lot::RwLock::new(HashMap::new()),
             ids: SharedIdGen::ulid(),
             subscribers: parking_lot::RwLock::new(Vec::new()),
+            next_subscriber: parking_lot::Mutex::new(0),
         }
     }
 
@@ -232,7 +236,12 @@ impl JobRegistry {
         &self,
     ) -> futures::channel::mpsc::UnboundedReceiver<JobCompletion> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        self.subscribers.write().push(tx);
+        let id = {
+            let mut next = self.next_subscriber.lock();
+            *next += 1;
+            *next
+        };
+        self.subscribers.write().push((id, tx));
         rx
     }
 
@@ -241,10 +250,18 @@ impl JobRegistry {
         // A job that just finished is a candidate for eviction.
         self.evict_finished();
         let subscribers = self.subscribers.read().clone();
-        for subscriber in subscribers {
+        let mut gone = Vec::new();
+        for (id, subscriber) in subscribers {
             // A subscriber that went away is its own business: the
-            // job still finished.
-            let _ = subscriber.unbounded_send(completion.clone());
+            // job still finished. Its handle is dropped so the
+            // registry does not keep the dead ones forever.
+            if subscriber.unbounded_send(completion.clone()).is_err() {
+                gone.push(id);
+            }
+        }
+        if !gone.is_empty() {
+            let mut subscribers = self.subscribers.write();
+            subscribers.retain(|(id, _)| !gone.contains(id));
         }
     }
 
