@@ -11,7 +11,7 @@ use super::{
     Outbound,
     RpcRouter,
     framing::{DEFAULT_MAX_FRAME_SIZE, read_frame},
-    stdio::{StioOptions, StioPump},
+    stdio::{OUTBOUND_MEMORY_WATERMARK, OutboundQueue, StioOptions, StioPump},
 };
 use crate::state::AppState;
 
@@ -99,7 +99,7 @@ async fn run_pump(input: Vec<u8>, options: StioOptions) -> Vec<Value> {
         .await
         .expect("the pump runs");
 
-    let mut frames = Vec::new();
+    let mut frames: Vec<Value> = Vec::new();
     loop {
         match read_frame(&mut output, DEFAULT_MAX_FRAME_SIZE).await {
             Ok(bytes) => frames
@@ -239,4 +239,90 @@ async fn a_malformed_frame_answers_the_parse_code() {
     let frames = run_pump(input, StioOptions::default()).await;
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[1]["error"]["code"], -32700);
+}
+
+#[tokio::test]
+async fn a_queue_over_the_watermark_spills_to_disk_and_keeps_its_order() {
+    let (_done_tx, done) = tokio::sync::watch::channel(false);
+    let queue = OutboundQueue::new(done);
+    // Ten blocks of one MiB: the memory watermark is four, so the
+    // queue must spill and hold the rest on disk.
+    let frame = vec![0xABu8; 1024 * 1024];
+    for _ in 0..10 {
+        queue.push(frame.clone());
+    }
+    assert!(
+        queue.peak_memory_bytes() <= OUTBOUND_MEMORY_WATERMARK,
+        "the memory segment stays under the watermark, got {}",
+        queue.peak_memory_bytes()
+    );
+
+    // Drain: memory first, then the spool, in arrival order.
+    let mut drained: Vec<u8> = Vec::new();
+    while let Some(frame) = queue.pop_memory() {
+        drained.extend_from_slice(&frame);
+    }
+    while let Some(block) = queue.take_spool_block() {
+        drained.extend_from_slice(&block);
+    }
+    assert_eq!(
+        drained.len(),
+        10 * 1024 * 1024,
+        "every frame survives the spill"
+    );
+    assert!(
+        drained
+            .chunks(1024 * 1024)
+            .all(|chunk| chunk.iter().all(|b| *b == 0xAB)),
+        "the frames keep their order and their bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_slow_reader_loses_no_frame_and_keeps_the_order() {
+    let (state, _dir) = test_state().await;
+    let mut input = request(json!(1), "health/ping");
+    // A second request: the peer reads late, so the writer stalls
+    // and the queue spills.
+    input.extend(request(json!(2), "health/ping"));
+    let (outbound_tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let outbound = Outbound::new(outbound_tx);
+    let pump = StioPump::with_options(
+        state,
+        Arc::new(router()),
+        receiver,
+        StioOptions::default(),
+    );
+    // A small duplex: the writer blocks until the test reads.
+    let (mut output, write_half) = tokio::io::duplex(64);
+    let cursor = Cursor::new(input);
+    let pumping = tokio::spawn(async move {
+        pump.run_with(move || cursor, write_half, outbound)
+            .await
+            .expect("the pump runs");
+    });
+
+    // Read late: give the writer time to stall and spill.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut frames: Vec<Value> = Vec::new();
+    loop {
+        match read_frame(&mut output, DEFAULT_MAX_FRAME_SIZE).await {
+            Ok(bytes) => frames
+                .push(serde_json::from_slice(&bytes).expect("a JSON frame")),
+            Err(error) if error.is_end_of_stream() => break,
+            Err(error) => panic!("the pump wrote a bad frame: {error}"),
+        }
+    }
+    pumping.await.expect("the pump task");
+
+    let answers: Vec<&Value> = frames
+        .iter()
+        .filter(|frame| frame.get("id").is_some())
+        .collect();
+    assert_eq!(answers.len(), 2, "both requests are answered");
+    let ids: Vec<&Value> = answers.iter().map(|frame| &frame["id"]).collect();
+    assert!(
+        ids == vec![&json!(1), &json!(2)] || ids == vec![&json!(2), &json!(1)],
+        "both ids are answered, order free: {ids:?}"
+    );
 }

@@ -82,6 +82,9 @@ pub mod log_surface;
 /// The in-memory session registry: ids, owners, sinks and writers.
 pub mod manager;
 pub mod operation;
+/// Cross-process session ownership — the writer's exclusive claim
+/// on a session directory (`owner.lock`), dsh `session.lock` parity.
+pub mod ownership;
 /// The `sessions` service: [`SessionStorePlugin`] builds the registry
 /// from [`SessionStoreConfig`] and publishes it under [`KEY_SESSIONS`].
 pub mod plugin;

@@ -434,6 +434,20 @@ pub enum SessionError {
     /// backend-level invariant (e.g. quota, schema mismatch).
     #[error("{0}")]
     Invalid(String),
+    /// Another live process owns this session's log: its writer
+    /// holds the directory's ownership lock, and a second writer
+    /// would stamp ordinals the reader cannot reproduce.
+    ///
+    /// `holder` is the process id the lock file names, when it is
+    /// readable. Fatal: the caller must not retry in this process —
+    /// the session belongs to the holder until it exits.
+    #[error("session is owned by another process{}", holder
+        .map(|pid| format!(" (pid {pid})"))
+        .unwrap_or_default())]
+    OwnedByAnotherProcess {
+        /// The holding process's id, when it is known.
+        holder: Option<u32>,
+    },
     /// The on-disk log's schema version cannot be read by this
     /// build. `found` is the version the file's header carries
     /// (`0` for a headerless pre-versioning file); `supported` is

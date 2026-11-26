@@ -262,7 +262,7 @@ impl SummaryInput {
     /// over — the summary then rides the provider's warm cache — but
     /// a manual pass over a log holds no run to read it from, and a
     /// standalone request is the honest shape for it.
-        pub fn fresh() -> Self {
+    pub fn fresh() -> Self {
         Self::default()
     }
 }

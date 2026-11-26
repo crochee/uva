@@ -38,12 +38,7 @@ use super::{
     PARSE_ERROR,
     RpcRouter,
     error_frame,
-    framing::{
-        DEFAULT_MAX_FRAME_SIZE,
-        FrameError,
-        read_frame_blocking,
-        write_frame,
-    },
+    framing::{DEFAULT_MAX_FRAME_SIZE, FrameError, read_frame_blocking},
     inflight::Inflight,
 };
 use crate::state::AppState;
@@ -173,27 +168,82 @@ impl StioPump {
         // closed stdin. On the signal the writer flushes what is
         // already queued and stops.
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
-        let mut writer = tokio::spawn(async move {
+        // The outbound side is two cooperating tasks over one queue:
+        //
+        // - the **encoder** drains the envelope channel eagerly, so a
+        //   slow reader never grows a queue of `Value` graphs in the
+        //   channel — the encoded bytes are an order smaller;
+        // - the **writer** owns stdout and drains the queue. While
+        //   the peer reads slowly the encoder keeps absorbing, and
+        //   what will not fit the memory watermark spills to a
+        //   private temporary file drained in 64 KiB blocks (omp
+        //   `rpc-frame.ts`: queued output memory stays bounded at
+        //   the cost of disk I/O and temporary disk usage).
+        let (encoder_done_tx, encoder_done) =
+            tokio::sync::watch::channel(false);
+        let out_queue = Arc::new(OutboundQueue::new(encoder_done));
+        let queue_for_encoder = Arc::clone(&out_queue);
+        let encoder_done_tx = encoder_done_tx;
+        let mut encoder = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => {
-                        while let Ok(envelope) = outbound_rx.try_recv() {
-                            if !write_envelope(&mut output, &envelope).await {
-                                return;
-                            }
+                        // The pump is going away: absorb what is
+                        // already queued so the writer can still
+                        // deliver it, then stop.
+                        while let Ok(envelope) = outbound_rx.try_recv()
+                        {
+                            if let Some(frame) = encode_envelope(&envelope) {
+                            queue_for_encoder.push(frame);
                         }
+                        }
+                        let _ = encoder_done_tx.send(true);
                         return;
                     }
                     envelope = outbound_rx.recv() => {
                         let Some(envelope) = envelope else {
+                            let _ = encoder_done_tx.send(true);
                             return;
                         };
-                        if !write_envelope(&mut output, &envelope).await {
-                            return;
+                        if let Some(frame) = encode_envelope(&envelope) {
+                            queue_for_encoder.push(frame);
                         }
                     }
                 }
+            }
+        });
+        let queue_for_writer = Arc::clone(&out_queue);
+        let mut writer = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            loop {
+                // The encoder's end only stops a drained writer —
+                // frames it parked before going away still go out.
+                // The check comes **before** the wait: `notify_one`
+                // keeps one permit, so a queue that emptied between
+                // pushes must not wait for a frame that never comes.
+                if queue_for_writer.encoder_has_ended()
+                    && queue_for_writer.is_idle()
+                {
+                    let _ = output.flush().await;
+                    return;
+                }
+                // Memory first, then the spool: the arrival order.
+                if let Some(frame) = queue_for_writer.pop_memory() {
+                    if output.write_all(&frame).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                if let Some(block) = queue_for_writer.take_spool_block() {
+                    if output.write_all(&block).await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                // Nothing queued and the encoder is still running:
+                // wait for the next frame or its end.
+                queue_for_writer.wait().await;
             }
         });
         // The readiness announcement. A peer waits for it before it
@@ -264,6 +314,10 @@ impl StioPump {
         drop(outbound);
         drop(state);
         let _ = shutdown_tx.send(());
+        // The encoder stops first (it only absorbs), the writer
+        // drains what it queued — both inside the grace, because the
+        // terminal session drain waits for this pump to finish.
+        let _ = tokio::time::timeout(grace, &mut encoder).await;
         if tokio::time::timeout(grace, &mut writer).await.is_err() {
             tracing::warn!("the frame writer did not drain; aborting it");
             writer.abort();
@@ -273,20 +327,206 @@ impl StioPump {
     }
 }
 
-/// Encode one envelope and write it as a frame.
+/// The encoded outbound queue: a bounded memory segment and a
+/// disk-backed spool for the rest, in arrival order.
 ///
-/// Returns `false` when stdout is gone, which ends the writer task;
-/// an encode failure is logged and skipped (the stream is still
-/// aligned).
-async fn write_envelope<W: AsyncWrite + Unpin>(
-    output: &mut W,
-    envelope: &Value,
-) -> bool {
+/// omp parity (`rpc-frame.ts`): when the peer reads slower than the
+/// process produces, the bytes beyond the memory watermark spill to a
+/// private temporary file and drain in 64 KiB blocks, so queued
+/// output memory stays bounded at the cost of disk I/O. Arrival order
+/// holds by construction: while the spool holds anything, every new
+/// frame appends to **it**, so the memory segment always sits before
+/// the spool in the stream.
+pub(crate) struct OutboundQueue {
+    pub(crate) inner: parking_lot::Mutex<OutboundQueueInner>,
+    /// Wakes the writer when a frame lands.
+    pub(crate) notify: tokio::sync::Notify,
+    /// The encoder's end signal, so a drained writer can stop. Behind
+    /// a lock because `changed()` wants `&mut` and the writer waits
+    /// through `&self`.
+    pub(crate) wait_receiver: parking_lot::Mutex<WaitReceiver>,
+}
+
+/// The watch receiver, named so the lock's type reads.
+pub(crate) struct WaitReceiver(tokio::sync::watch::Receiver<bool>);
+
+/// The memory ceiling before frames spill to disk.
+pub(crate) const OUTBOUND_MEMORY_WATERMARK: usize = 4 * 1024 * 1024;
+
+#[derive(Default)]
+pub(crate) struct OutboundQueueInner {
+    /// The in-memory prefix: encoded, framed payloads.
+    pub(crate) memory: std::collections::VecDeque<Vec<u8>>,
+    /// The memory segment's byte total.
+    pub(crate) memory_bytes: usize,
+    /// The high-water mark the memory segment ever reached — the
+    /// bound the spool defends, for diagnostics and tests.
+    pub(crate) peak_memory_bytes: usize,
+    /// The disk segment. Present only while it holds bytes: an empty
+    /// spool is dropped (its file goes with it) so routing returns to
+    /// memory.
+    pub(crate) spool: Option<crate::rpc::spool::Spool>,
+}
+
+impl OutboundQueue {
+    /// Build the queue around the encoder's end signal.
+    pub(crate) fn new(
+        encoder_done: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            inner: parking_lot::Mutex::new(OutboundQueueInner::default()),
+            notify: tokio::sync::Notify::new(),
+            wait_receiver: parking_lot::Mutex::new(WaitReceiver(encoder_done)),
+        }
+    }
+
+    /// Park one encoded frame.
+    ///
+    /// Memory while it is under the watermark and no spool exists;
+    /// the spool from the first overflow until it drains. The spool
+    /// write is synchronous std IO under the lock — a local
+    /// temporary file, bounded by the block the drain reads, and the
+    /// lock is never held across an await.
+    pub(crate) fn push(&self, frame: Vec<u8>) {
+        let mut inner = self.inner.lock();
+        let len = frame.len();
+        // Whether the frame stays in the memory segment.
+        let mut keep_in_memory = false;
+
+        if inner.spool.is_some() {
+            // Spill mode: everything after the memory prefix lands on
+            // disk, so the arrival order survives the spill.
+            let written =
+                inner.spool.as_mut().map(|spool| spool.push(&frame));
+            match written {
+                Some(Ok(())) => {}
+                Some(Err(error)) => {
+                    // A full disk cannot honor the memory bound: the
+                    // frame is lost and the failure is loud. The
+                    // writer keeps draining what it already holds.
+                    tracing::error!(
+                        %error,
+                        outbound_frame_bytes = len,
+                        "the outbound spool refused a frame; the slow \
+                         peer is losing live frames"
+                    );
+                }
+                None => {}
+            }
+        } else if inner.memory_bytes + len > OUTBOUND_MEMORY_WATERMARK {
+            // The first overflow opens the disk segment.
+            let opened = crate::rpc::spool::Spool::create("outbound")
+                .and_then(|mut spool| spool.push(&frame).map(|()| spool));
+            match opened {
+                Ok(spool) => {
+                    inner.spool = Some(spool);
+                }
+                Err(error) => {
+                    // No spool available: degrade to memory rather
+                    // than dropping the frame — the bound is defended
+                    // on a best-effort basis only when disk exists.
+                    tracing::warn!(
+                        %error,
+                        "no outbound spool could be created; frames \
+                         stay in memory"
+                    );
+                    keep_in_memory = true;
+                }
+            }
+        } else {
+            keep_in_memory = true;
+        }
+
+        if keep_in_memory {
+            inner.memory.push_back(frame);
+            inner.memory_bytes += len;
+            inner.peak_memory_bytes =
+                inner.peak_memory_bytes.max(inner.memory_bytes);
+        }
+        drop(inner);
+        self.notify.notify_one();
+    }
+
+    /// Take the next memory frame, if the memory segment is
+    /// non-empty (the arrival order serves memory first).
+    pub(crate) fn pop_memory(&self) -> Option<Vec<u8>> {
+        let mut inner = self.inner.lock();
+        let frame = inner.memory.pop_front()?;
+        inner.memory_bytes = inner.memory_bytes.saturating_sub(frame.len());
+        Some(frame)
+    }
+
+    /// Take one spool block, if the spool holds bytes.
+    ///
+    /// The file read happens under the lock (synchronous, bounded by
+    /// the block); the caller writes the block to the peer without
+    /// holding it.
+    pub(crate) fn take_spool_block(&self) -> Option<Vec<u8>> {
+        let mut inner = self.inner.lock();
+        let spool = inner.spool.as_mut()?;
+        if spool.is_empty() {
+            inner.spool = None;
+            return None;
+        }
+        match spool.take_block() {
+            Ok(block) => Some(block),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "the outbound spool could not be read; its frames \
+                     are lost"
+                );
+                inner.spool = None;
+                None
+            }
+        }
+    }
+
+    /// Whether anything is queued anywhere.
+    pub(crate) fn is_idle(&self) -> bool {
+        let inner = self.inner.lock();
+        inner.memory.is_empty()
+            && inner
+                .spool
+                .as_ref()
+                .is_none_or(crate::rpc::spool::Spool::is_empty)
+    }
+
+    /// The memory segment's high-water mark (bytes).
+    #[cfg(test)]
+    pub(crate) fn peak_memory_bytes(&self) -> usize {
+        self.inner.lock().peak_memory_bytes
+    }
+
+    /// Wait for the next frame or the encoder's end.
+    ///
+    /// No priming is needed: the writer waits only after finding the
+    /// queue non-idle, and every push left a `notify` permit, so the
+    /// wait resolves for the frames it already owes.
+    async fn wait(&self) {
+        let mut ended = self.wait_receiver.lock().0.clone();
+        tokio::select! {
+            biased;
+            _ = self.notify.notified() => {}
+            _ = ended.changed() => {}
+        }
+    }
+
+    /// Whether the encoder has signalled its end.
+    pub(crate) fn encoder_has_ended(&self) -> bool {
+        *self.wait_receiver.lock().0.borrow()
+    }
+}
+
+/// Encode one envelope into a complete frame. An envelope that
+/// cannot be encoded is dropped with a log line — the stream stays
+/// aligned (the same rule the old writer followed).
+fn encode_envelope(envelope: &Value) -> Option<Vec<u8>> {
     match serde_json::to_vec(envelope) {
-        Ok(payload) => write_frame(output, &payload).await.is_ok(),
+        Ok(payload) => Some(crate::rpc::framing::encode_frame(&payload)),
         Err(error) => {
             tracing::error!(%error, "could not encode an outbound frame");
-            true
+            None
         }
     }
 }

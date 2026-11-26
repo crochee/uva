@@ -52,6 +52,46 @@ async fn opening_a_sink_defers_the_whole_log_pass() {
 }
 
 // -----------------------------------------------------------------
+// Cross-process ownership
+// -----------------------------------------------------------------
+
+/// A second sink over the same directory must not write: its
+/// appends are refused with the holder's id, because two writers
+/// stamp colliding ordinals and a log the reader cannot renumber is
+/// unreadable (dsh `session.lock`; read handles coexist freely).
+#[tokio::test]
+async fn a_second_sink_over_the_same_directory_is_refused() {
+    let dir = temp_dir().join("s_owner");
+    let owner = JsonlSessionSink::new("s_owner", dir.clone());
+    write(&owner, json!({"type": "Model", "text": "mine"})).await;
+
+    // A second sink over the same directory: reading is fine, so
+    // opening and the deferred ordinal pass must not claim anything.
+    let other = JsonlSessionSink::new("s_owner", dir.clone());
+    assert_eq!(other.alloc_seq(), 2, "reads coexist with the owner");
+
+    // Writing is not: the refusal names the holder.
+    let refused = other
+        .append(&json!({"type": "Model", "text": "trespass"}))
+        .await
+        .expect_err("the second sink must not write");
+    match refused {
+        SessionError::OwnedByAnotherProcess { holder } => {
+            assert_eq!(holder, Some(std::process::id()));
+        }
+        other_error => panic!("the refusal is ownership: {other_error}"),
+    }
+
+    // Release is drop: once the owner is gone, the second sink's
+    // write succeeds — the crash case releases the same way, because
+    // the kernel closes the descriptor.
+    drop(owner);
+    write(&other, json!({"type": "Model", "text": "mine now"})).await;
+    let rows = other.read().await.expect("read");
+    assert_eq!(rows.len(), 2, "both rows are in the log");
+}
+
+// -----------------------------------------------------------------
 // Tail reads
 // -----------------------------------------------------------------
 

@@ -12,6 +12,7 @@ readme = "README.md"
 keywords.workspace = true
 categories.workspace = true
 [dependencies]
+libc = { workspace = true }
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true

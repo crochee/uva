@@ -26,7 +26,7 @@
 //!
 //! # Bounds
 //!
-//! [`DEFAULT_MAX_FRAME_SIZE`] is 8 MiB. A header that declares a
+//! [`DEFAULT_MAX_FRAME_SIZE`] is 64 MiB. A header that declares a
 //! larger body is rejected from the header alone — the payload is
 //! never allocated — and the header block itself is capped so a
 //! peer that never sends `\r\n\r\n` cannot grow it without bound.
@@ -36,7 +36,13 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// The largest frame body the core accepts by default.
-pub const DEFAULT_MAX_FRAME_SIZE: usize = 8 * 1024 * 1024;
+///
+/// 64 MiB, omp's negotiated logical ceiling (`rpc-frame.ts:9`
+/// `MAX_RPC_REASSEMBLED_BYTES`) — Content-Length framing has no
+/// physical frame limit to chunk around, so the logical ceiling is
+/// the only knob a peer can hit, and omp's is the ceiling an
+/// industry client expects to be able to send.
+pub const DEFAULT_MAX_FRAME_SIZE: usize = 64 * 1024 * 1024;
 
 /// The largest header block a frame may carry. Nothing the protocol
 /// needs comes close: one `Content-Length` line is a few dozen bytes.
@@ -183,6 +189,30 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer.write_all(&header[..cursor]).await?;
     writer.write_all(payload).await?;
     writer.flush().await
+}
+
+/// Render one Content-Length frame into bytes.
+///
+/// The synchronous twin of [`write_frame`]: the pump encodes a
+/// payload into the frame bytes **before** it hands them to the
+/// writer, so the outbound queue holds complete frames and the
+/// writer only copies bytes.
+///
+/// # Errors
+///
+/// None today: the header fits its fixed buffer by construction
+/// ([`MAX_DECIMAL_DIGITS`] bounds the length).
+pub fn encode_frame(payload: &[u8]) -> Vec<u8> {
+    let mut header = [0u8; HEADER_PREFIX.len() + MAX_DECIMAL_DIGITS + 4];
+    let mut cursor = HEADER_PREFIX.len();
+    header[..cursor].copy_from_slice(HEADER_PREFIX);
+    cursor += decimal_digits(payload.len(), &mut header[cursor..]);
+    header[cursor..cursor + 4].copy_from_slice(b"\r\n\r\n");
+    let cursor = cursor + 4;
+    let mut frame = Vec::with_capacity(cursor + payload.len());
+    frame.extend_from_slice(&header[..cursor]);
+    frame.extend_from_slice(payload);
+    frame
 }
 
 /// Write one Content-Length frame to a blocking writer and flush it.

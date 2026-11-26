@@ -216,6 +216,13 @@ const TAIL_READ_CHUNK: u64 = 8 * 1024;
 
 struct State {
     closed: bool,
+    /// This sink's cross-process write ownership, claimed with the
+    /// first append and held until the sink drops.
+    ///
+    /// `None` until the first write: a sink the listing opened reads
+    /// and never claims, so readers coexist with the live writer
+    /// (dsh's read-handle rule).
+    ownership: Option<crate::ownership::SessionOwnerLock>,
     /// How many rows this sink instance has written. The metadata
     /// header is written with the first row, so the header decision
     /// cannot ride the ordinal counter any more: a writer reserves
@@ -316,6 +323,25 @@ async fn reconcile_pending(state: &mut State, pending: PendingWrite) {
 }
 
 impl State {
+    /// Claim this sink's cross-process write ownership, once.
+    ///
+    /// The first append claims it; every later append is already
+    /// owned. A contended claim is an error the caller reports —
+    /// two writers stamp colliding ordinals, and a log whose ordinals
+    /// the reader cannot reproduce is unreadable, so refusing is the
+    /// only safe answer (dsh `session.lock`).
+    fn ensure_ownership(
+        &mut self,
+        root: &std::path::Path,
+    ) -> Result<(), crate::ownership::OwnershipError> {
+        if self.ownership.is_some() {
+            return Ok(());
+        }
+        let lock = crate::ownership::SessionOwnerLock::try_acquire(root)?;
+        self.ownership = Some(lock);
+        Ok(())
+    }
+
     /// The ordinal `row` carries, if it carries one.
     ///
     /// Ordinals are 1-based, so a row whose `seq` is missing or zero
@@ -416,6 +442,7 @@ impl JsonlSessionSink {
             id: id.into(),
             state: Arc::new(Mutex::new(State {
                 closed: false,
+                ownership: None,
                 rows_written: 0,
                 max_seq_written: 0,
                 bytes_on_disk,
@@ -483,6 +510,11 @@ impl SessionSink for JsonlSessionSink {
         let mut state = self.state.lock().await;
         if state.closed {
             return Err(SessionError::Closed);
+        }
+        if let Some(error) = state.ensure_ownership(&self.root).err() {
+            return Err(SessionError::OwnedByAnotherProcess {
+                holder: error.holder(),
+            });
         }
         // The version gate, on the write side. A row this build
         // writes into a log another version owns would leave a file
@@ -583,6 +615,11 @@ impl SessionSink for JsonlSessionSink {
         let mut state = self.state.lock().await;
         if state.closed {
             return Err(SessionError::Closed);
+        }
+        if let Some(error) = state.ensure_ownership(&self.root).err() {
+            return Err(SessionError::OwnedByAnotherProcess {
+                holder: error.holder(),
+            });
         }
         // The same version gate the single-row append applies: a
         // batch must not land in a log this build cannot read.
@@ -765,6 +802,12 @@ impl SessionSink for JsonlSessionSink {
     ) -> Result<(), SessionError> {
         let mut state = self.state.lock().await;
         state.closed = true;
+        // Closing hands the session over: the ownership lock is
+        // released so another node's takeover does not wait for this
+        // process to die (a crash releases the same way, through the
+        // kernel closing the descriptor). The sink is closed — no
+        // append of ours can follow the release.
+        state.ownership = None;
         Ok(())
     }
 }

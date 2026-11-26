@@ -80,6 +80,9 @@ mod framing_tests;
 pub mod inflight;
 pub mod methods;
 pub mod notify;
+pub(crate) mod spool;
+#[cfg(test)]
+mod spool_tests;
 pub mod stdio;
 #[cfg(test)]
 mod stdio_tests;

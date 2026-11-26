@@ -52,7 +52,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 结果提交序 | 按模型顺序提交，不按完成顺序（`packages/core/tools/src/batch.ts:135-146`） | 同（`agent-loop.ts:4204-4265` 合成结果） | 按 LLM 调用顺序（`…/step/tools/mod.rs:126`） | 对齐 |
 | 取消时未跑的调用 | 合成错误结果，日志仍可回放（`packages/core/tools/src/batch.ts:250-260`） | 合成结果，`aborted`/`skipped`/`length` 各有文案（`agent-loop.ts:4204-4265`） | 未开始的调用**不跑**（取消检查在工具流的 drain 里，`…/step/tools/route.rs:168`），已跑完的结果照旧 | 对齐 |
 | 日志即真源 | `session.deriveMessages()` 从日志派生（`agent.ts:203`） | `session-entries.ts` 逐条追加 | 审批 / 压缩 / resume 全是日志折叠 | 对齐（本仓更强：单写者） |
-| 单写者 | 进程内 + `flock` 跨进程（`packages/session/session-persistence-jsonl/src/lease.ts:1-24`） | 进程租约 `~/.omp/run/session-owners/<id>`，发现别人在写就**换新文件**（`docs/session.md:648-651`） | 进程内单写者（`crates/uva-session/src/manager.rs:184`） | **缺口 G9**：无跨进程租约 |
+| 单写者 | 进程内 + `flock` 跨进程（`packages/session/session-persistence-jsonl/src/lease.ts:1-24`） | 进程租约 `~/.omp/run/session-owners/<id>`，发现别人在写就**换新文件**（`docs/session.md:648-651`） | 进程内单写者 + **`owner.lock` 跨进程所有权**（切 9）：写路径首次追加时 flock 认领、拒绝**失败关闭**（不换文件——本仓的会话 id 就是身份） | 对齐 |
 | 崩溃修复 | 断尾截断 + 开回合补closer（`packages/core/session/src/repair.ts:59-105`） | 追加不 fsync，落盘即返回（`packages/coding-agent/src/session/session-storage.ts:66-76`） | `crates/uva-session/src/repair/mod.rs` 合成 `tool_result` / `step_end` / `turn_end` | 对齐 |
 | 审批闸门 | `tools/pre-execute` 水瀑，先于任何工具体（`packages/core/tools/src/pipeline.ts:196-215`） | 扩展包装器再查一次**真正要执行的参数**（`packages/coding-agent/src/extensibility/extensions/wrapper.ts:374-389`） | 五级否决流水线（`…/loop/guard.rs:47-85`） | 对齐 |
 | 审批**超时** | 工具级 `timeoutMs` → `TOOL_TIMEOUT` 结构化错误（`packages/guard/timeout-policy/src/index.ts:26`） | **没有超时**：要么有人回答，要么回合被 abort（`wrapper.ts:495-500`） | **没有超时**；而 `crates/uva-app-server/src/rpc/mod.rs:29` 却写着「a timeout still defaults to deny」 | **缺口 G1（本轮切）**：文档承诺了代码没有的东西 |
@@ -65,10 +65,10 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 插件树 | entry 模型 / group / 按 id diff / 三态审计（`packages/preset/agent-preset-registry/src/mount.ts:115-152`） | — | 同一套（`crates/uva-kernel/src/mount.rs:216-238`） | 对齐 |
 | 插件树**审计报告** | `auditRows` → `{failed, pending}` 两张表（`mount.ts:115-152`） | — | **已落**（切 7）：`profile/audit` 返回不能用的行 + 原因（`failed` / `pending` + 缺的 key），dsh 语义 | 对齐 |
 | 委派控制面 | `interrupt()` 鉴权到祖先链（`packages/subagent/subagent/src/manager.ts:196-233`） | RPC：`get_subagents` / `cancel_subagent` / `steer_subagent`，子代理记录按字节增量读（`packages/coding-agent/src/modes/rpc/rpc-subagents.ts:74-107`） | 机器有（`crates/uva-tool-task/src/control/mod.rs:389` 的 `kill`、`registry`），**但没有无头门** | **缺口 G8（本轮切）** |
-| 控制面协议 | 自有 JSON-RPC stdio server（`packages/sdk/server/src/server.ts:609-667`） | 自有 JSONL：~90 条命令、协议协商、**分块帧**（`wire/commands.ts:35-454`、`rpc-frame.ts:6,9`） | JSON-RPC 2.0 + Content-Length 帧，8 MiB 上限，超限即错（`crates/uva-app-server/src/rpc/framing.rs:32`） | **缺口 G10**：无分块 / 无协商 / 无背压落盘 |
+| 控制面协议 | 自有 JSON-RPC stdio server（`packages/sdk/server/src/server.ts:609-667`） | 自有 JSONL：~90 条命令、协议协商、**分块帧**（`wire/commands.ts:35-454`、`rpc-frame.ts:6,9`） | JSON-RPC 2.0 + Content-Length 帧，64 MiB 逻辑上限，超限即错（`crates/uva-app-server/src/rpc/framing.rs:32`） | **对齐（切 10）**：逻辑上限同 omp v2；分块/协商对 Content-Length 不适用（见切 10）；出站背压落盘 |
 | 增量读 | — | `get_entries?since` + 分页游标（`docs/rpc.md`） | `sessions/events` **每次整本**返回（`crates/uva-app-server/src/routes/sessions/mod.rs:827-855`） | **缺口 G11（本轮切）** |
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write` 经 ACP `fs/*` 回到客户端，见「切 5」）；`terminal/*` 与每会话 MCP 仍如实缺席 | **半缺口 G12**：terminal 半边留下（本部署没有终端操作可委派） |
-| 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见 G10） |
+| 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
 ---
@@ -85,8 +85,8 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G11 | **durable 读没有游标**：整本回传，客户端只能 O(n²) | 中 | `crates/uva-app-server/src/routes/sessions/mod.rs:827-855` |
 | G4 | ~~压缩摘要是旁路请求~~ **已落**（切 6）：`SummaryInput` 信封让摘要复用被路由请求的暖前缀 | — | `crates/uva-session/src/compaction/mod.rs`（`SummaryInput`） |
 | G7 | ~~并行工具桶不观察取消~~ **已驳回**：取消检查在工具流的 drain 里（`crates/uva-harness/src/agent/re_act/loop/step/tools/route.rs:168`），两个桶都经过它——未开始的调用不跑。补了一个回归钉子（`agent/re_act/tests/parallel_unsafe.rs`） | — | 同左 |
-| G9 | 无跨进程会话租约 | 中 | `crates/uva-session/src/manager.rs:184` |
-| G10 | 无分块帧 / 协议协商 / 背压落盘 | 中 | `crates/uva-app-server/src/rpc/framing.rs:32` |
+| G9 | ~~无跨进程会话租约~~ **已落**（切 9）：`owner.lock` + flock，append 拒绝失败关闭 | — | `crates/uva-session/src/ownership.rs` |
+| G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
 | G12 | 无客户端侧 fs/terminal 委派 | 中 | `crates/uva-app-server/src/adapters/acp/agent.rs:205-240` |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
 
@@ -369,6 +369,78 @@ provides 汇聚 + 父作用域已可解析的 key），所以报告说的与 mou
 **判定**：G2 以「机制已交付、声明已对齐、seam 留给真实载荷」结案，而不是
 以「给一个无人消费的字段再接一层管线」结案。
 
+### 切 9 — 跨进程的会话所有权（G9）
+
+**要什么**：两个进程共享一个 workspace 时，都能打开同一会话并各自追加——两个
+写者盖出**碰撞的序号**，而一个序号无法复现的日志是不可读的。dsh 用
+`flock(2)` 于 `session.lock`（`lease.ts:1-24,66-88`）：读句柄自由共存，
+**无过期**——僵死的持有者锁到进程死为止（过期能撕开日志）。
+
+**怎么落**：`owner.lock` 认领在**首次追加**时（`State::ensure_ownership`），
+不是在 sink 构造时——列表会话时每个 durable 会话开一个 sink 只读，读不认领
+（dsh 的读句柄规则）。持有到 sink 落地/进程退出：崩溃进程的内核关闭描述符
+即释放。**拒绝失败关闭**：第二个写者的 append 得到
+`SessionError::OwnedByAnotherProcess { holder: Some(pid) }`——写路径的既有
+语义本就是致命错（「洞让后续压缩不可解」），拒绝沿着同一条路走。与 omp 的
+差异如实记录：omp 换新兄弟文件（它的会话 id 允许），本仓的会话 id 就是
+身份，换文件等于丢身份——拒绝是唯一安全答案。
+
+**落点**：
+- `crates/uva-session/src/ownership.rs`：`SessionOwnerLock`（flock
+  `LOCK_EX|LOCK_NB`，pid 写进文件供拒绝点名；非 unix 用 O_EXCL + pid，
+  僵死文件同样失败关闭——更重，但不出错）。
+- `crates/uva-session/src/jsonl/mod.rs`：`append` / `append_many` 的
+  closed / 版本门之后、任何字节移动之前认领。
+- `crates/uva-session/src/sink.rs`：`SessionError::OwnedByAnotherProcess`。
+
+**验收**：
+- 单元（ownership）：同目录第二次认领被拒且点名 pid；drop 后可再认领。
+- 行为（jsonl）：同一目录第二个 sink——开与读不认领（读共存）；append 被拒
+  （点名 pid）；owner drop 后第二个 sink 写入成功、两行都在日志里。
+
+---
+
+### 切 10 — 出站背压落盘 + 逻辑上限（G10 的可迁移部分）
+
+**要什么**：omp 的 `rpc-frame.ts`：v1 物理帧 1 MiB，v2 分块重组到 64 MiB；
+背压时把待发字节**溢写到私有临时文件**，按 64 KiB 块排空
+（`rpc.md`：「the server spills pending bytes to a private temporary file
+and drains it in 64 KiB blocks」）。本仓的传输是 JSON-RPC 2.0 +
+Content-Length 帧——**没有「一行」就没有分块的理由**，但**「读者比作者慢」的
+理由完全一样**：出站通道是无界的，慢读者让进程内存无限增长。
+
+**怎么落**：
+1. 出站拆成两个任务：**编码器**（把信封通道排空成帧字节）与**写入器**（拥有
+   stdout）。编码器急切地编码，慢读者不再在通道里堆 `Value` 图——帧字节比
+   信封小一个数量级。
+2. 队列 = **内存段**（水位 4 MiB）+ **磁盘段**（spool 临时文件）。溢出之后
+   新帧一律进磁盘段，因此**到达顺序**由构造保证：内存段永远排在磁盘段
+   之前。排空按 64 KiB 块，内存里只留一块。
+3. 入站逻辑上限 8 MiB → **64 MiB**（omp v2 的重组上限）。Content-Length
+   没有物理帧上限要分块绕过，唯一可能被撞到的旋钮就是逻辑上限，而 64 MiB
+   是行业客户端预期能发的天花板。
+
+**为什么不抄「分块帧」与「协议协商」**：Content-Length 按长度定界，一个帧
+就是一个 JSON 值——把它拆开要在 JSON-RPC 层加重组协议（omp 的
+`chunk_begin/chunk/chunk_end` 是它自己 JSONL 帧协议的形状），那是一次
+**线格式破坏**：所有客户端都要跟着改，而本仓的帧里装的是 JSON-RPC 2.0 的
+单一 JSON 值。**协议协商**在只有一个版本的协议里是投机——协商出来的第二
+个版本还不存在。本仓的等价旋钮就是帧上限，已对齐 omp 的逻辑天花板。
+
+**落点**：
+- `crates/uva-app-server/src/rpc/spool.rs`：`Spool`（私有临时文件，pid + nonce
+  命名，64 KiB 块排空，排空完即删；写失败**大声失败**而不是无声丢帧）。
+- `crates/uva-app-server/src/rpc/stdio.rs`：`OutboundQueue`（内存段 + 磁盘段，
+  到达顺序，内存水位可测）+ 编码器/写入器两个任务。
+- `crates/uva-app-server/src/rpc/framing.rs`：`encode_frame`（帧的字节形态，
+  编码器用它拼帧）+ `DEFAULT_MAX_FRAME_SIZE` 8 MiB → 64 MiB。
+
+**验收**：
+- 单元（spool）：两帧跨块排空，字节与顺序不变；排空后文件随 drop 消失。
+- 单元（queue）：10 MiB 压进队列 → 内存段峰值不超过水位（4 MiB），其余在
+  磁盘；排空后字节与顺序不变。
+- 行为（stdio）：慢读者（64 字节 duplex）下两帧应答都不丢、顺序稳定。
+
 ---
 
 ## 6. 下一轮候选（不在本轮）
@@ -376,11 +448,13 @@ provides 汇聚 + 父作用域已可解析的 key），所以报告说的与 mou
 - **G12 客户端侧 fs/terminal 委派**（ACP `fs/*` + `terminal/*`，SDK 5.6 已支持；
   omp 的 `set_host_tools` 同构）——本仓 ACP 面显式声明「不做」，这是与编辑器
   对接时最显眼的缺口。
-- **G10 分块帧 + 协议协商 + 背压落盘**——8 MiB 上限 today，超限即错；
-  omp 的 v1/v2 与 1 MiB/64 MiB 两级上限是可抄的形状。
-- **G9 跨进程租约**。（G7 已驳回——取消检查在工具流的 drain 里。G2 已
-  结——切 8：连续性已结构化交付，seam 留给会铸造原生状态的适配器。
-  G4 已落——切 6。G6 已落——切 7。）
+- **G10 的 JSON-RPC 重组协议**（若真要抄 omp v2 的分块语义）——那是线格式
+  破坏：帧里不再是一个 JSON 值，而是一串需要重组的片段，客户端全都要改。
+  切 10 已把**可迁移的部分**落完（背压落盘 + 64 MiB 逻辑上限），剩下的只有
+  这一条真破坏。
+（G7 已驳回——取消检查在工具流的 drain 里。G2 已结——切 8：连续性已
+  结构化交付，seam 留给会铸造原生状态的适配器。G4 已落——切 6。
+  G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。）
 
 ---
 
