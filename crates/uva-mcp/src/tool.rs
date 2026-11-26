@@ -117,6 +117,14 @@ impl Tool for McpTool {
         let result = match self.client.tools_call(&self.spec.name, input).await
         {
             Ok(r) => r,
+            Err(uva_core::Error::Timeout { .. }) => {
+                // A deadline, not a failure of the call itself: the
+                // model gets the structured timeout so it — and a
+                // host routing on the code — can tell the two apart
+                // (dsh parity: `TOOL_TIMEOUT`). The budget the
+                // transport enforced names itself in the message.
+                return ToolOutput::timeout(self.client.call_budget());
+            }
             Err(e) => {
                 return ToolOutput::error(format!(
                     "MCP tool `{}` failed: {e}",

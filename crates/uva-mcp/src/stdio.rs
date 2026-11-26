@@ -8,7 +8,7 @@
 //! `kill_on_drop(true)` guarantees the child dies with the
 //! transport — a dropped client never leaks an MCP server.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -20,6 +20,7 @@ use tokio::{
 use uva_core::Error;
 
 use crate::{
+    CALL_BUDGET,
     McpTransport,
     SharedTransport,
     StdioConfig,
@@ -41,6 +42,8 @@ pub struct StdioTransport {
     /// Per-transport, NOT process-wide.
     io_lock: Mutex<()>,
     describe: String,
+    /// The per-request budget this transport enforces.
+    budget: Duration,
 }
 
 impl StdioTransport {
@@ -90,6 +93,7 @@ impl StdioTransport {
             child: Mutex::new(child),
             io_lock: Mutex::new(()),
             describe,
+            budget: config.call_timeout.unwrap_or(CALL_BUDGET),
         }))
     }
 
@@ -129,11 +133,9 @@ impl StdioTransport {
             message: format!("MCP parse `{}`: {e}", buf.trim()),
         })
     }
-}
 
-#[async_trait]
-impl McpTransport for StdioTransport {
-    async fn request(
+    /// The request loop proper: write, then read until the answer.
+    async fn request_inner(
         &self,
         id: u64,
         method: &str,
@@ -156,6 +158,44 @@ impl McpTransport for StdioTransport {
                 "ignoring MCP notification while awaiting response"
             );
         }
+    }
+}
+
+#[async_trait]
+impl McpTransport for StdioTransport {
+    async fn request(
+        &self,
+        id: u64,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, Error> {
+        // One call, one budget (dsh parity: `timeoutMs` on the tool,
+        // enforced at the execution seam). A stdio server that never
+        // answers would otherwise park the turn forever — the headless
+        // harness has no operator to notice. The HTTP sibling carries
+        // the same budget inside the reqwest client
+        // (`DEFAULT_HTTP_TIMEOUT`); the deadline here is the stdio
+        // half.
+        match tokio::time::timeout(
+            self.budget,
+            self.request_inner(id, method, params),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Error::Timeout {
+                message: format!(
+                    "MCP stdio request `{method}` timed out after {}ms \
+                     (server: {})",
+                    self.budget.as_millis(),
+                    self.describe,
+                ),
+            }),
+        }
+    }
+
+    fn call_budget(&self) -> Duration {
+        self.budget
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), Error> {

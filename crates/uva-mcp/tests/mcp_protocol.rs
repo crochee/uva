@@ -449,3 +449,69 @@ printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text
         .expect("call 2");
     assert_eq!(second.text(), "second");
 }
+
+// A stdio server that never answers must not park the turn forever:
+// the request runs under one budget, and its expiry is the structured
+// timeout the model — and a host routing on the code — can tell from
+// any other failure (dsh parity: `timeout-policy`).
+#[tokio::test]
+async fn a_silent_stdio_server_times_out_instead_of_hanging() {
+    use uva_core::Error;
+    // The responder answers the handshake, then goes silent: the
+    // `tools/call` line is read and never answered.
+    let script = r#"
+read -r line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"silent","version":"1"}}}'
+read -r line
+sleep 300
+"#;
+    let transport = StdioTransport::spawn(
+        &StdioConfig::new("sh")
+            .arg("-c")
+            .arg(script)
+            .with_call_timeout(std::time::Duration::from_millis(400)),
+    )
+    .await
+    .expect("spawn silent responder");
+    let client = McpClient::new(transport);
+    client.initialize().await.expect("initialize answers");
+
+    let started = std::time::Instant::now();
+    let error = client
+        .tools_call("echo", json!({"text": "a"}))
+        .await
+        .expect_err("the silent server never answers");
+    assert!(
+        matches!(error, Error::Timeout { .. }),
+        "the expiry is the timeout, not another failure: {error:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the call returned in one budget, took {:?}",
+        started.elapsed()
+    );
+
+    // The tool the client wraps answers with the structured timeout:
+    // the code a host routes on, not prose alone.
+    let tool = uva_mcp::McpTool::new(
+        McpToolSpec {
+            name: "echo".to_string(),
+            description: "d".to_string(),
+            input_schema: json!({"type": "object"}),
+            annotations: None,
+        },
+        client,
+    );
+    let output =
+        uva_tool::Tool::call(&tool, json!({"text": "a"}), &Context::default())
+            .await;
+    let text = output.content[0]
+        .text()
+        .map(str::to_string)
+        .unwrap_or_default();
+    assert_eq!(text, "Error: tool call timed out after 400ms");
+    assert_eq!(
+        output.error_code(),
+        Some(uva_tool::ToolOutput::TIMEOUT_CODE)
+    );
+}

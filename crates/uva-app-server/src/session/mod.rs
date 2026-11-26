@@ -1,5 +1,6 @@
 //! Session controller and supporting types.
 
+pub mod client_tools;
 pub mod controller;
 pub mod files;
 pub mod goals;

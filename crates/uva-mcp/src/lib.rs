@@ -51,7 +51,7 @@
 //! ← {"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":…}]}}
 //! ```
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -123,7 +123,19 @@ pub trait McpTransport: Send + Sync {
 
     /// Human-readable description for logs (`"stdio: npx -y …"`).
     fn describe(&self) -> String;
+
+    /// The per-request budget this transport enforces, so a caller
+    /// that renders a timeout names the budget that actually fired.
+    /// The default is [`CALL_BUDGET`]; transports with their own
+    /// deadline override it.
+    fn call_budget(&self) -> Duration {
+        CALL_BUDGET
+    }
 }
+
+/// The default per-request budget every transport falls back to
+/// (30 s — the HTTP sibling's own `DEFAULT_HTTP_TIMEOUT`).
+pub const CALL_BUDGET: Duration = Duration::from_secs(30);
 
 /// Build a JSON-RPC 2.0 request envelope.
 #[must_use]
@@ -175,6 +187,11 @@ pub struct StdioConfig {
     /// sees `server=files` instead of a dumped command line.
     /// Unset → a truncated rendering of the command.
     pub label: Option<String>,
+    /// How long one request waits for the child's answer.
+    /// `None` → [`crate::CALL_BUDGET`] (30 s, the HTTP sibling's
+    /// own default). A wedged server parks the turn otherwise —
+    /// the headless harness has no operator to notice.
+    pub call_timeout: Option<std::time::Duration>,
 }
 
 impl StdioConfig {
@@ -185,6 +202,7 @@ impl StdioConfig {
             args: Vec::new(),
             env: HashMap::new(),
             label: None,
+            call_timeout: None,
         }
     }
 
@@ -192,6 +210,13 @@ impl StdioConfig {
     #[must_use]
     pub fn label(mut self, label: impl Into<String>) -> Self {
         self.label = Some(label.into());
+        self
+    }
+
+    /// Set the per-request budget (see [`Self::call_timeout`]).
+    #[must_use]
+    pub fn with_call_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.call_timeout = Some(timeout);
         self
     }
 

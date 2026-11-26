@@ -83,10 +83,16 @@ impl ReActLoop {
         self.sink.emit_typed(event);
     }
 
-    /// The execution mode a call's name declares: the registry's
-    /// per-name mode.
-    pub(super) fn execution_mode(&self, name: &str) -> uva_tool::ExecutionMode {
-        self.caps.tools.registry.execution_mode(name)
+    /// The execution mode **this call** declares: the registry's
+    /// per-call classification over the call's own arguments.
+    pub(super) fn execution_mode(
+        &self,
+        call: &uva_provider::ToolUse,
+    ) -> uva_tool::ExecutionMode {
+        self.caps
+            .tools
+            .registry
+            .execution_mode_for(&call.name, &call.input)
     }
 
     pub(crate) fn cancelled(&self, reason: &str) -> bool {

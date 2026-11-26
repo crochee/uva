@@ -159,12 +159,18 @@ pub async fn list_tools(
 // `tool_registry` and survive until the server restarts; the
 // dynamic registration accepts a name + description + JSON
 // schema and registers a passthrough tool that echoes its
-// arguments back.
+// arguments back. A registration with `owner: "client"` instead
+// installs a tool whose implementation is the registering client
+// — every call travels to that client and back.
 pub async fn register_tool(
     state: Arc<AppState>,
     req: RegisterToolRequest,
 ) -> Result<ToolInfo, RpcError> {
     validate_resource_name(&req.name)?;
+
+    if req.owner == ToolOwner::Client {
+        return register_client_tool(state, req).await;
+    }
 
     let desc = req.description.clone();
     let params = req.input_schema.clone();
@@ -212,6 +218,64 @@ pub struct RegisterToolRequest {
     #[validate(length(min = 1, message = "must not be empty"))]
     pub description: String,
     pub input_schema: serde_json::Value,
+    /// Who owns the tool's implementation: the deployment (`core`,
+    /// the default — the node hosts a passthrough) or the client
+    /// that registered it (`client` — the core asks that client to
+    /// execute every call).
+    #[serde(default)]
+    pub owner: ToolOwner,
+    /// The session whose client executes a client-owned tool.
+    /// Required when `owner` is `client`.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// Who owns a registered tool's implementation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolOwner {
+    /// The deployment hosts the implementation.
+    #[default]
+    Core,
+    /// The registering client hosts the implementation: the core
+    /// sends every call to it and returns its answer.
+    Client,
+}
+
+/// Register a tool the client owns (see
+/// [`crate::session::client_tools`]).
+///
+/// The entry asks the owning session's client to execute every
+/// call, and the deployment's peers learn nothing: a peer has no
+/// client to ask, so the cluster mutation the `core` path publishes
+/// has no counterpart here.
+async fn register_client_tool(
+    state: Arc<AppState>,
+    req: RegisterToolRequest,
+) -> Result<ToolInfo, RpcError> {
+    let Some(session_id) = req.session_id else {
+        return Err(RpcError::from(Error::validation(
+            "a client-owned tool names the session its client owns",
+        )));
+    };
+    let tool = crate::session::client_tools::ClientOwnedTool::new(
+        req.name.clone(),
+        req.description.clone(),
+        req.input_schema.clone(),
+        session_id,
+        Arc::clone(&state.rpc),
+    );
+    let entry = uva::tool::ToolEntry::new(Arc::new(tool));
+    if !state.tool_registry.register_entry_if_absent(entry) {
+        return Err(RpcError::from(Error::already_exists(format!(
+            "tool '{}'",
+            req.name
+        ))));
+    }
+    Ok(ToolInfo {
+        name: req.name,
+        description: req.description,
+    })
 }
 
 /// GET /api/v1/tools/{name} - Get a single tool.

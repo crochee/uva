@@ -68,11 +68,20 @@
 //! the id was in flight (`result.cancelled`) or names it `not_found`.
 //! A cancelled request never writes its own response.
 //!
-//! # Concurrency
+//! # The other direction
 //!
+//! The core can also *ask* the client something — a tool the client
+//! owns is executed there, and the answer comes back on this same
+//! pipe. Those requests carry ids the core minted (a reserved
+//! prefix), and [`client_calls`] correlates the client's response
+//! frames with the waiters that asked. See that module for the wire
+//! shape and the id namespace.
+//!
+//! # Concurrency
 //! The pump reads a frame, spawns a task for it, and moves on. Two
 //! requests may therefore be in flight at once and their responses
 //! may arrive in either order — a client matches on `id`.
+pub mod client_calls;
 pub mod error;
 pub mod framing;
 #[cfg(test)]
@@ -87,8 +96,14 @@ pub mod stdio;
 #[cfg(test)]
 mod stdio_tests;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
+pub use client_calls::{
+    CORE_CALL_ID_PREFIX,
+    ClientCallError,
+    ClientCalls,
+    ClientToolResult,
+};
 pub use error::{
     APPLICATION_ERROR,
     INTERNAL_ERROR,
@@ -336,18 +351,23 @@ impl Outbound {
         }));
     }
 }
-/// The process-wide RPC runtime: the outbound channel and the
-/// per-session follow subscribers.
+/// The process-wide RPC runtime: the outbound channel, the
+/// per-session follow subscribers, and the core's own requests to
+/// the client.
 ///
 /// It lives on [`AppState`] so every method handler reaches the
 /// notification fan-out without a second argument. The runtime owns
 /// both halves of the envelope channel: the sender every handler
-/// writes through, and the receiver the transport drains.
+/// writes through, and the receiver the transport drains. The
+/// client-call table is here for the same reason — the code that
+/// asks holds this runtime, and the transport that reads the answer
+/// finds the table on it.
 pub struct RpcRuntime {
     outbound: Outbound,
     receiver:
         tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Value>>>,
     follows: Arc<FollowRegistry>,
+    calls: ClientCalls,
 }
 impl Default for RpcRuntime {
     fn default() -> Self {
@@ -365,6 +385,7 @@ impl RpcRuntime {
         let outbound = Outbound::new(tx);
         Self {
             follows: Arc::new(FollowRegistry::new(outbound.clone())),
+            calls: ClientCalls::new(),
             outbound,
             receiver: tokio::sync::Mutex::new(Some(rx)),
         }
@@ -381,6 +402,7 @@ impl RpcRuntime {
         (
             Self {
                 follows: Arc::new(FollowRegistry::new(outbound.clone())),
+                calls: ClientCalls::new(),
                 outbound,
                 receiver: tokio::sync::Mutex::new(None),
             },
@@ -395,6 +417,7 @@ impl RpcRuntime {
         let outbound = Outbound::detached();
         Self {
             follows: Arc::new(FollowRegistry::new(outbound.clone())),
+            calls: ClientCalls::new(),
             outbound,
             receiver: tokio::sync::Mutex::new(None),
         }
@@ -403,6 +426,54 @@ impl RpcRuntime {
     /// The outbound channel.
     pub fn outbound(&self) -> &Outbound {
         &self.outbound
+    }
+
+    /// Ask the client a question and wait for the answer.
+    ///
+    /// The request frame carries an id the core minted — the
+    /// reserved [`CORE_CALL_ID_PREFIX`] namespace — and the client's
+    /// response frame is correlated back here by that id. The
+    /// `params` should name the session the question is about (as
+    /// `session_id`), because a gateway routes a core-originated
+    /// request to the connection that owns that session, exactly as
+    /// it routes the ACP permission question.
+    ///
+    /// A client that never answers must not hang the turn that
+    /// asked: `timeout` bounds the wait, an expired call is removed
+    /// from the table, and the caller sees
+    /// [`ClientCallError::Timeout`].
+    pub async fn call_client(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, ClientCallError> {
+        let (id, receiver) = self.calls.begin();
+        self.outbound.send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }));
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(_dropped)) => Err(ClientCallError::Closed),
+            Err(_deadline) => {
+                self.calls.drop(&id);
+                Err(ClientCallError::Timeout)
+            }
+        }
+    }
+
+    /// Deliver a response frame to the call that asked, if it was
+    /// ours.
+    ///
+    /// The transport calls this for every inbound frame **before**
+    /// the ACP adapter sees it: ACP claims every response-shaped
+    /// frame, so only a table hit can steer an answer to the core's
+    /// own waiter. See [`ClientCalls::resolve`].
+    pub fn resolve_client_answer(&self, frame: &Value) -> bool {
+        self.calls.resolve(frame)
     }
 
     /// Take the receiving half of the envelope channel.

@@ -12,11 +12,55 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
-### Added (无头 harness 的业界对齐：dsh + omp 逆向后的十七刀)
+### Added (无头 harness 的业界对齐：dsh + omp 逆向后的二十三刀)
 
 逆向证据与完整缺口账本：[`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)。
-本轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面，
-对账后落了三个刀口。
+第一轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面
+对账后落了十八刀；第二轮（工具批的执行模型）再落三刀；第三轮（客户端的
+扩展工具）又落两刀：
+
+- **核心面有了出站请求通道**（第三轮切 22）：omp 的 RPC 服务器会向宿主发
+  `host_tool_call` 并等 `host_tool_result`，本仓的核心面此前只有一条方向
+  上的请求——客户端问，核心答。现在核心可以铸自己的请求 id
+  （保留前缀 `core:internal:`），把问题发给客户端并在预算内等应答；
+  应答帧先查核心自己的表再落 ACP（ACP 的 `answers()` 认领每一张响应
+  形状的帧，这条优先级是唯一的区分）。网关零改动——它早就按会话所有权
+  路由核心发的请求帧（ACP 权限问题走的同一条路）。
+- **客户端可以拥有工具**（第三轮切 23，omp `set_host_tools` 的核心面
+  对应物）：`tools/register` 增 `owner: "client"` 与 `session_id`——客户端
+  声明名字/描述/schema，核心把它登记进注册表（模型能看到、能调用），
+  调用经 `tools/execute` 请求发回**拥有该会话的客户端**，应答
+  `result.{content, is_error}` 就是工具结果；超时是结构化 `TOOL_TIMEOUT`
+  （60 s）。别的会话调用被明确拒绝（注册表是节点一个，名字全局、执行
+  按会话归属——已知 wart 如实记在账本里）。ACP 面没有 `set_host_tools`
+  原语，那一半继续缺席。
+
+第二轮的三刀：
+- **工具批按模型序执行**（G18，第二轮切 19）：两个参考都按模型写的顺序
+  跑工具批——dsh 分组（`packages/core/tools/src/batch.ts:78-83`），omp 用
+  `lastExclusive` 链屏障（`packages/agent/src/agent-loop.ts:4044`）。本仓
+  此前**按模式分桶**：全部 Parallel 先跑，再全部 Sequential——模型说
+  「先写后读」，本仓先读。现在调度器按模型序分**波**：连续的并发安全调用
+  共享一波，Sequential 调用是屏障（前面的波排干才开跑，后面的波等它）。
+  既有保全语义按新序重新表述：排他调用失败 ⇒ 其后的排他调用跳过
+  （文案不变），共享波照跑（dsh/omp 都不停兄弟）。
+- **并发安全按调用判定**（G19，第二轮切 20）：dsh 的
+  `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)`
+  都按**调用**判，本仓只按工具名判——`shell` 永远串行，`ls` 也排队。
+  现在 `Tool::mode_for(&input)`（默认回落 `mode()`）让工具按参数自判，
+  调度器问**这一次调用**；`shell` 第一个吃螃蟹：只读命令
+  （风险分类 `Low`，失败关闭的白名单）可并行，其余独占。
+- **工具级超时是结构化 `TOOL_TIMEOUT`**（G20，第二轮切 21）：dsh 的
+  `timeout-policy` 给每个工具武装 `timeoutMs`，到期把结果换成结构化错误
+  （`error.info.code = 'TOOL_TIMEOUT'`）。本仓一处都没有：stdio MCP
+  服务器不出声就把回合**永远**挂住——无头端没有操作员会注意到。现在
+  `ToolOutput::timeout(after)` 造出 dsh 形状的结构化失败，harness 的提交
+  路径把 `metadata.error.code` 提升进 durable 行的 `error` 成员（中断行
+  已经在用的位置），stdio MCP 传输的每个请求跑在一个预算下
+  （默认 30 s = HTTP 兄弟的默认；`StdioConfig::call_timeout` 可调），
+  到期 `McpTool` 答结构化超时而不是散文。
+
+第一轮的十八刀：
 
 - **审批有了截止时间**（G1）：被持有的调用在 `approval.timeout_secs` 内
   没有答案，就按**拒绝**结算——决定落进日志（`approval_decided`，`denied`），

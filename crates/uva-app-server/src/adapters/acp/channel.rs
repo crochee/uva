@@ -123,8 +123,9 @@ impl AcpEndpoint {
     ///
     /// An ACP method is the agent's; a response — a frame with a
     /// result and no method — is the answer to a question the agent
-    /// asked. The core asks no questions of its own, so every
-    /// response on this channel belongs to the agent.
+    /// asked. The core's own questions are answered first, by the
+    /// client-call table, so the response frames that reach this
+    /// check belong to the agent.
     #[must_use]
     pub fn answers(&self, frame: &Value) -> bool {
         match frame.get("method").and_then(Value::as_str) {

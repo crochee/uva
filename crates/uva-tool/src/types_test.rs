@@ -116,3 +116,28 @@ fn tool_output_serialize_with_truncation() {
     let json2 = serde_json::to_value(&output2).unwrap();
     assert!(json2.get("truncated_by").is_none());
 }
+
+// The timeout is a structured failure: the text the model reads, the
+// flag that marks it, and the code a host — and the durable row the
+// harness commits — routes on (dsh parity: `toolTimeoutResult`).
+#[test]
+fn tool_output_timeout_is_structured() {
+    use std::time::Duration;
+    let output = ToolOutput::timeout(Duration::from_millis(1500));
+    let text = output.content[0]
+        .text()
+        .map(str::to_string)
+        .unwrap_or_default();
+    assert_eq!(text, "Error: tool call timed out after 1500ms");
+    assert_eq!(output.is_error, Some(true));
+    assert_eq!(output.error_code(), Some(ToolOutput::TIMEOUT_CODE));
+    assert_eq!(output.metadata["error"]["name"], "ToolTimeoutError");
+}
+
+// An output without the reserved metadata entry has no code: the
+// reader must not invent one.
+#[test]
+fn tool_output_error_code_is_none_without_the_entry() {
+    assert!(ToolOutput::error("boom").error_code().is_none());
+    assert!(ToolOutput::text("ok").error_code().is_none());
+}

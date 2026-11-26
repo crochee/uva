@@ -57,6 +57,37 @@ fn ls_is_low_risk_and_rm_is_high_risk() {
     );
 }
 
+// The scheduler asks per call, not per tool: a read-only command is
+// safe beside another call, anything it cannot prove read-only is not.
+#[test]
+fn a_read_only_command_may_overlap_and_anything_else_may_not() {
+    let tool = ShellTool::new();
+    for command in ["ls -la", "cat README.md", "rg TODO crates", "pwd"] {
+        assert_eq!(
+            tool.mode_for(&json!({ "command": command })),
+            ExecutionMode::Parallel,
+            "{command} is read-only, so it may overlap"
+        );
+    }
+    for command in [
+        "rm -rf target",
+        "echo hi > out.txt",
+        "cargo build",
+        "git push origin main",
+    ] {
+        assert_eq!(
+            tool.mode_for(&json!({ "command": command })),
+            ExecutionMode::Sequential,
+            "{command} is not proven read-only, so it runs alone"
+        );
+    }
+    assert_eq!(
+        tool.mode_for(&json!({})),
+        ExecutionMode::Sequential,
+        "a call without a command is not classified parallel"
+    );
+}
+
 #[test]
 fn mutating_wrappers_and_flags_are_high_risk() {
     let tool = ShellTool::new();

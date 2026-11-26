@@ -19,6 +19,7 @@
 //! | [`parallel_descriptor_context`] | Descriptor context pinning for parallel dispatch     |
 //! | [`parallel_safe`]          | Safe (concurrent) tool execution                            |
 //! | [`parallel_unsafe`]        | Sequential bucket for unsafe tools                          |
+//! | [`model_order`]            | The batch runs in the model's order; exclusive = barrier   |
 //! | [`tool_projection_memo`]   | Tool projection memoization across iterations               |
 //! | [`tool_restriction`]       | Per-agent `denied_tools` / `allow_list`                     |
 //! | [`tool_metrics`]           | The Prometheus tool counters the loop's dispatch feeds      |
@@ -66,6 +67,7 @@ mod steering_transformers;
 
 mod lifecycle;
 mod log_read_count;
+mod model_order;
 pub(crate) mod support;
 mod tool_metrics;
 mod tool_projection_memo;

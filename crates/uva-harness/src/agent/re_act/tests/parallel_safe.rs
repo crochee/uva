@@ -256,3 +256,66 @@ async fn tool_results_are_committed_in_the_assistants_order() {
          order, not the order the calls finished"
     );
 }
+
+// A structured failure code reaches the durable row: the model-facing
+// text stays the tool's own, and the code rides beside it in the
+// member the interrupted rows already use — a reader that routes on
+// `data.error` can tell a timeout from any other failure without
+// parsing the prose.
+#[tokio::test]
+async fn a_structured_failure_code_reaches_the_durable_row() {
+    struct TimedOutTool;
+    #[async_trait]
+    impl uva_tool::Tool for TimedOutTool {
+        fn name(&self) -> &str {
+            "timed_out"
+        }
+
+        fn description(&self) -> &str {
+            "answers with the structured timeout"
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            _input: serde_json::Value,
+            _ctx: &Context,
+        ) -> ToolOutput {
+            ToolOutput::timeout(std::time::Duration::from_millis(1500))
+        }
+    }
+    let sink = Arc::new(uva_session::in_memory::InMemorySessionSink::new("s"));
+    let writer = Arc::new(uva_session::LogWriter::new(
+        sink.clone(),
+        Arc::new(uva_core::SystemClock),
+    ));
+    let provider = Arc::new(CapturingProvider::new(vec![
+        tool_call_response(vec![ToolUse {
+            id: "t1".into(),
+            name: "timed_out".into(),
+            input: json!({}),
+        }]),
+        empty_response(),
+    ]));
+    let registry = Arc::new(ToolRegistry::new());
+    registry.register_entry(uva_tool::ToolEntry::new(Arc::new(TimedOutTool)));
+    let agent = ReActAgent::new(provider, registry).with_log_writer(writer);
+    let mut stream = agent
+        .run(AgentInput::text("run"), Arc::new(CancellationToken::new()))
+        .await;
+    while futures::StreamExt::next(&mut stream).await.is_some() {}
+
+    let rows = sink.read().await.expect("read");
+    let row = rows
+        .iter()
+        .find(|row| row["type"] == "tool_result")
+        .expect("the tool result row exists");
+    assert_eq!(
+        row["data"]["error"],
+        serde_json::json!(ToolOutput::TIMEOUT_CODE),
+        "the row carries the machine-readable code beside the payload"
+    );
+}

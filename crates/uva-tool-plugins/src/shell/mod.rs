@@ -397,6 +397,29 @@ impl Tool for ShellTool {
         ExecutionMode::Sequential
     }
 
+    /// A read-only command is concurrency-safe; anything else runs
+    /// alone.
+    ///
+    /// dsh classifies per call the same way (`isConcurrencySafe(args)`
+    /// on the SSH tool: a read is shared, a write is exclusive), and
+    /// the classification here reuses the tool's own security
+    /// judgement: `classify_command_risk` is fail-closed, so
+    /// `Risk::Low` means every segment of the command is a program
+    /// from the read-only list with no redirect, substitution or
+    /// backgrounding. A command it could not resolve is not "probably
+    /// read-only" — it is `Sequential`.
+    fn mode_for(&self, input: &serde_json::Value) -> ExecutionMode {
+        let command = input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if risk::classify_command_risk(command) == Risk::Low {
+            ExecutionMode::Parallel
+        } else {
+            ExecutionMode::Sequential
+        }
+    }
+
     /// Shell risk is per call, not per tool: `ls` and `rm -rf` share
     /// this tool but not this risk. Read-only argv is low; a write,
     /// redirect, delete, privilege change or network reach is high;

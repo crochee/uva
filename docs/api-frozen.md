@@ -88,6 +88,24 @@ Be explicit about the other side of the promise:
 Signatures evolve under the rule above. The breaking shapes this line
 ships are recorded here, beside the promise they narrow:
 
+- **`Tool` grew a per-call scheduling classification** (model-order
+  scheduling, second round cut 20). `Tool::mode_for(&input)` is a
+  defaulted method (default: `self.mode()`), so every existing
+  implementor keeps compiling; `ToolRegistry` gained
+  `execution_mode_for(name, input)` beside `execution_mode(name)`.
+  No crate-root name moved, so the `uva-tool` count stays 45. dsh
+  classifies per call (`isConcurrencySafe(args)`), omp too
+  (`resolveToolConcurrency(tool, args)`); the scheduler now asks the
+  call, not the name.
+
+- **`ToolOutput` grew the structured timeout vocabulary** (tool
+  timeout, second round cut 21). `ToolOutput::timeout(after)`,
+  `ToolOutput::TIMEOUT_CODE` and `ToolOutput::error_code()` are
+  additive members on the existing name — no crate-root name moved,
+  so the `uva-tool` count stays 45. The harness's commit path lifts
+  `metadata.error.code` into the durable `tool_result` row's `error`
+  member (the one interrupted rows already use).
+
 - **The session's durable goal joined the curated surface** (the goal
   tool). `goal` joined the curated `uva-session` surface: the typed
   builder for the `Goal` row — the one row per change that carries a

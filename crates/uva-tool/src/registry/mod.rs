@@ -525,6 +525,30 @@ impl ToolRegistry {
             .unwrap_or(ExecutionMode::Sequential)
     }
 
+    #[must_use]
+    /// The scheduling [`ExecutionMode`] of **this call**: the
+    /// tool's per-call classification
+    /// ([`Tool::mode_for`]) over its
+    /// arguments, and the conservative default for a name that does
+    /// not resolve.
+    ///
+    /// The batch scheduler asks this, not [`Self::execution_mode`]:
+    /// a tool may be safe beside another read for one set of
+    /// arguments and not for the next.
+    pub fn execution_mode_for(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> ExecutionMode {
+        self.inner
+            .read()
+            .tools
+            .get(name)
+            .and_then(|entries| entries.last())
+            .map(|entry| entry.tool.mode_for(input))
+            .unwrap_or(ExecutionMode::Sequential)
+    }
+
     /// The entry `name` currently resolves to: the last-registered
     /// provider wins (the same LIFO top every read path —
     /// [`ToolRegistry::exposure`], [`ToolRegistry::descriptors`],

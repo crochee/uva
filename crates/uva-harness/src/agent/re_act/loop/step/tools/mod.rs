@@ -1,28 +1,23 @@
-//! Tool-execution phase: bucket the batch by execution mode,
+//! Tool-execution phase: schedule the batch in the model's order,
 //! run it, and commit the results to the transcript.
 
 mod commit;
 mod route;
+mod schedule;
 
 use commit::commit_all_results;
 pub(crate) use commit::commit_tool_result;
-use futures::StreamExt;
 #[cfg(test)]
 pub(crate) use route::TOOL_OUTPUT_FLUSH_CHUNKS;
 pub(crate) use route::dispatch_tool_call;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use uva_approval::ApprovalRequest;
 use uva_context::AgentState;
-use uva_events::{SystemEvent, WarningKind};
 use uva_provider::ToolUse;
 use uva_steering::tool_fingerprint;
-use uva_tool::{ExecutionMode, ToolOutput};
+use uva_tool::ToolOutput;
 
-use super::super::{
-    super::{panic::isolate, state::RunState},
-    ReActLoop,
-    guard::{self, ToolOutcome},
-};
+use super::super::{super::state::RunState, ReActLoop, guard};
 
 pub(super) async fn execute_tools(
     this: &ReActLoop,
@@ -87,35 +82,18 @@ pub(super) async fn execute_tools(
         this.flush_log().await?;
     }
 
-    // 2. Bucket the runnable calls by ExecutionMode. The guarded call
-    // is what executes, so its (possibly rewritten) name decides the
-    // bucket — bucketing the raw batch would schedule a call by a name
-    // that never runs. The buckets already skip the calls the gate
-    // did not let through, so their indices are the runnable ones.
-    let (safe_indices, unsafe_indices, concurrency) =
-        bucket_by_execution_mode(this, &runnable, agent_state_ref);
-    // 3. Run both buckets; slots stay `None` for held calls (and for
+    // 2. Schedule the batch in the model's order. The guarded call is
+    // what executes, so its (possibly rewritten) name decides the
+    // wave — scheduling the raw batch would schedule a call by a
+    // name that never runs. The waves skip the calls the gate did
+    // not let through, so their indices are the runnable ones.
+    //
+    // 3. Run the waves; slots stay `None` for held calls (and for
     // calls a cancellation or abort never reached, which
     // `fill_unanswered` names). File activity returns with each
     // output and is committed once, below.
-    run_parallel_bucket(
-        this,
-        &runnable,
-        &safe_indices,
-        concurrency,
-        agent_state_ref,
-        &mut batch,
-    )
-    .await;
-    run_sequential_bucket(
-        this,
-        calls,
-        &runnable,
-        &unsafe_indices,
-        agent_state_ref,
-        &mut batch,
-    )
-    .await;
+    schedule::run_batch(this, calls, &runnable, agent_state_ref, &mut batch)
+        .await;
 
     // A held call is not an unanswered one: a sibling's cancel/abort
     // fill must not turn it into a result row, or the model (and the
@@ -163,174 +141,6 @@ fn record_tool_fingerprints(calls: &[ToolUse], agent_state: &mut AgentState) {
     }
 }
 
-pub(in crate::agent::re_act) fn bucket_by_execution_mode(
-    this: &ReActLoop,
-    guarded: &[Option<ToolUse>],
-    agent_state_ref: &AgentState,
-) -> (Vec<usize>, Vec<usize>, usize) {
-    let mut safe_indices: Vec<usize> = Vec::with_capacity(guarded.len());
-    let mut unsafe_indices: Vec<usize> = Vec::with_capacity(guarded.len());
-    for (idx, call) in guarded.iter().enumerate() {
-        // A held/refused call never runs; it does not occupy a bucket.
-        let Some(call) = call else { continue };
-        let mode = this.execution_mode(&call.name);
-        if mode == ExecutionMode::Parallel {
-            safe_indices.push(idx);
-        } else {
-            unsafe_indices.push(idx);
-        }
-    }
-    // The fourth consumer-supplied `Tracker` method; the other three are
-    // guarded. A panic here falls back to the neutral bound
-    // (`usize::MAX`, i.e. the batch's own size) rather than ending a run
-    // the tracker was only advising.
-    let recommended = isolate(
-        &this.sink,
-        WarningKind::Hook,
-        None,
-        "tracker.recommended_concurrency",
-        || {
-            let mut bound = usize::MAX;
-            for tracker in &this.caps.control.seams.tracker_table() {
-                bound =
-                    bound.min(tracker.recommended_concurrency(agent_state_ref));
-            }
-            bound
-        },
-    )
-    .unwrap_or(usize::MAX);
-    let concurrency = recommended.min(safe_indices.len()).max(1);
-    info!(
-        tool_call_count = guarded.len(),
-        parallel_count = safe_indices.len(),
-        sequential_count = unsafe_indices.len(),
-        concurrency,
-        "step 4 execute_tools: bucketed; running Parallel via join_all, Sequential serially"
-    );
-    (safe_indices, unsafe_indices, concurrency)
-}
-
-// -- Parallel bucket ------------------------------------------------------
-
-// Shared by the capped and uncapped paths; the permit outlives the call.
-async fn run_one_parallel(
-    this: &ReActLoop,
-    idx: usize,
-    call: &ToolUse,
-    agent_state_ref: &AgentState,
-) -> (usize, ToolOutcome) {
-    // The cancel check is not here: it lives one layer down, in the
-    // tool stream's drain (`dispatch_tool_call`), which every call
-    // passes through — a call that has not started when the turn is
-    // cancelled never runs, whichever bucket it is in.
-    let outcome = guard::execute_gated(this, call, agent_state_ref).await;
-    (idx, outcome)
-}
-
-async fn run_parallel_bucket(
-    this: &ReActLoop,
-    guarded: &[Option<ToolUse>],
-    safe_indices: &[usize],
-    concurrency: usize,
-    agent_state_ref: &AgentState,
-    batch: &mut Batch,
-) {
-    if safe_indices.is_empty() {
-        return;
-    }
-    // The batch runs under a concurrency bound, so a tracker that
-    // caps the parallelism is honoured by construction: at most
-    // `concurrency` calls are in flight, and the next one starts as
-    // soon as a slot frees. The bound is the batch's own size when
-    // no tracker caps it, so the common case is unbounded — the same
-    // shape the loop had before the bound existed.
-    let futs: Vec<_> = safe_indices
-        .iter()
-        .map(|&idx| {
-            run_one_parallel(
-                this,
-                idx,
-                guarded[idx].as_ref().expect("the gate passed this call"),
-                agent_state_ref,
-            )
-        })
-        .collect();
-    let results: Vec<(usize, ToolOutcome)> = futures::stream::iter(futs)
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
-    collect_parallel(results, batch);
-}
-
-fn collect_parallel(mut results: Vec<(usize, ToolOutcome)>, batch: &mut Batch) {
-    // The bounded batch finishes in completion order, so the slots
-    // are filled by index and the terminal outcome is taken from the
-    // lowest-indexed call — the same one an unbounded batch would
-    // have reported. The rows themselves are committed in the
-    // assistant's source order (see `commit_all_results`).
-    results.sort_by_key(|(index, _)| *index);
-    for (idx, outcome) in results {
-        batch.outputs[idx] = Some(outcome.output);
-        if batch.terminate.is_none() {
-            batch.terminate = outcome.terminate;
-        }
-    }
-}
-
-// -- Sequential bucket ----------------------------------------------------
-
-async fn run_sequential_bucket(
-    this: &ReActLoop,
-    calls: &[ToolUse],
-    guarded: &[Option<ToolUse>],
-    unsafe_indices: &[usize],
-    agent_state_ref: &AgentState,
-    batch: &mut Batch,
-) {
-    let total_sequential = unsafe_indices.len();
-    let mut sequential_aborted = false;
-    for (seq_pos, idx) in unsafe_indices.iter().copied().enumerate() {
-        match run_one_sequential(
-            this,
-            calls,
-            guarded,
-            idx,
-            total_sequential - seq_pos,
-            agent_state_ref,
-            batch,
-        )
-        .await
-        {
-            SequentialStep::Continue => {}
-            SequentialStep::Cancelled => {
-                fill_unanswered(
-                    calls,
-                    &mut batch.outputs,
-                    "tool call cancelled before dispatch; safe to retry",
-                );
-                return;
-            }
-            SequentialStep::Aborted => {
-                sequential_aborted = true;
-                fill_unanswered(
-                    calls,
-                    &mut batch.outputs,
-                    "skipped after sibling sequential tool error; \
-                     outcome unknown — verify external state before \
-                     retrying",
-                );
-                break;
-            }
-        }
-    }
-    if sequential_aborted {
-        debug!(
-            tool_call_count = calls.len(),
-            "step 4 execute_tools: Sequential round aborted after first error"
-        );
-    }
-}
-
 /// Without the named cause the model cannot tell a safe retry from an
 /// unknown-outcome skip.
 pub(super) fn fill_unanswered(
@@ -351,57 +161,6 @@ pub(super) fn did_not_run(call: &ToolUse, reason: &str) -> ToolOutput {
         call.name
     ))
 }
-// Abort so corrective feedback reaches the model first.
-enum SequentialStep {
-    Continue,
-    Cancelled,
-    Aborted,
-}
-
-async fn run_one_sequential(
-    this: &ReActLoop,
-    calls: &[ToolUse],
-    guarded: &[Option<ToolUse>],
-    idx: usize,
-    remaining_sequential: usize,
-    agent_state_ref: &AgentState,
-    batch: &mut Batch,
-) -> SequentialStep {
-    // Silent mid-batch abort: the loop's cancel handling reports
-    // the interruption once the iteration unwinds; a per-call
-    // event here would duplicate it for every queued sibling.
-    if this.run.cancel.is_cancelled() {
-        debug!(
-            tool_call_count = calls.len(),
-            remaining_sequential,
-            "step 4 execute_tools: cancelled mid-Sequential batch"
-        );
-        return SequentialStep::Cancelled;
-    }
-    let call = &calls[idx];
-    this.sink.system(SystemEvent::Progress {
-        message: format!("Executing tool {}", call.name),
-        step: 0,
-        total: this.caps.control.max_iterations,
-    });
-    let effective = guarded[idx].as_ref().expect("the gate passed this call");
-    let outcome = guard::execute_gated(this, effective, agent_state_ref).await;
-    let abort = outcome.output.is_error.unwrap_or(false);
-    batch.outputs[idx] = Some(outcome.output);
-    if batch.terminate.is_none() {
-        batch.terminate = outcome.terminate;
-    }
-    if abort {
-        warn!(
-            tool_name = %call.name,
-            tool_use_id = call.id,
-            "step 4 execute_tools: sequential tool reported error; aborting remaining sequential calls"
-        );
-        return SequentialStep::Aborted;
-    }
-    SequentialStep::Continue
-}
-
 pub(crate) fn text_parts(parts: &[uva_provider::ContentPart]) -> String {
     let mut out = String::new();
     for (idx, part) in parts.iter().enumerate() {

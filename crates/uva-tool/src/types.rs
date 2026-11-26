@@ -127,6 +127,10 @@ pub struct ToolOutput {
 }
 
 impl ToolOutput {
+    /// The failure code a timed-out call answers with (dsh parity:
+    /// `timeout-policy`'s `error.info.code`).
+    pub const TIMEOUT_CODE: &str = "TOOL_TIMEOUT";
+
     pub fn text(content: impl Into<String>) -> Self {
         Self {
             content: vec![uva_provider::types::ContentPart::Text(
@@ -207,6 +211,43 @@ impl ToolOutput {
     ) -> Self {
         self.metadata.insert(key.into(), value);
         self
+    }
+
+    #[must_use]
+    /// The structured failure of a timed-out call (dsh parity:
+    /// `toolTimeoutResult`).
+    ///
+    /// The model sees `Error: tool call timed out after Nms`; the
+    /// output is flagged `is_error`; the metadata carries
+    /// `{name: "ToolTimeoutError", "code": "TOOL_TIMEOUT"}` so a host
+    /// — and the durable row the commit path writes — can tell a
+    /// timeout from any other failure.
+    pub fn timeout(after: std::time::Duration) -> Self {
+        let mut output = Self::error(format!(
+            "Error: tool call timed out after {}ms",
+            after.as_millis()
+        ));
+        output.metadata.insert(
+            "error".to_string(),
+            serde_json::json!({
+                "name": "ToolTimeoutError",
+                "code": Self::TIMEOUT_CODE,
+            }),
+        );
+        output
+    }
+
+    #[must_use]
+    /// The machine-readable failure code this output carries, if any.
+    ///
+    /// Reads the reserved `metadata.error.code` entry
+    /// [`ToolOutput::timeout`] writes; a caller may write the same
+    /// shape itself for a failure code of its own.
+    pub fn error_code(&self) -> Option<&str> {
+        self.metadata
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str)
     }
 }
 

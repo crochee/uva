@@ -132,7 +132,25 @@ pub(crate) async fn commit_tool_result(
     let message =
         Message::tool(Content::parts(content.clone()), call_id.clone());
     let row = this.sink.has_writer().then(|| {
-        serde_json::to_value(&message).expect("tool result serializes")
+        let mut data =
+            serde_json::to_value(&message).expect("tool result serializes");
+        // A structured failure code rides beside the output, in the
+        // member the interrupted rows already use: a reader that
+        // routes on `data.error` — the TUI's outcome, a repair pass
+        // — can tell a timeout from any other failure without
+        // parsing the model-facing text.
+        if let Some(code) = metadata
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str)
+            && let Some(object) = data.as_object_mut()
+        {
+            object.insert(
+                "error".to_string(),
+                serde_json::Value::String(code.to_string()),
+            );
+        }
+        data
     });
     // The tool result is a harness-owned log fact: write it here,
     // on the loop's own task, and land it BEFORE the event goes

@@ -368,6 +368,123 @@ fn a_turn_streams_its_deltas() {
     assert_eq!(reason, json!("completed"), "{reason}");
     assert!(saw_text, "the stream carried the answer's text");
 }
+
+/// A client-owned tool executes on the client.
+///
+/// The reverse direction of the core face: the client registers a
+/// tool it owns (`tools/register` with `owner: "client"`), the model
+/// calls it, and the core *asks the client to run it* — a request
+/// frame with an id the core minted, answered on the same pipe. The
+/// proof is the whole loop: the `tools/execute` request arrives
+/// while the turn is running, the client's answer becomes the tool
+/// result, and the durable rows carry it.
+#[test]
+fn a_client_owned_tool_executes_on_the_client() {
+    let temp = workspace();
+    let mut core = Core::spawn(temp.path());
+    core.await_ready();
+    let created = core.call(
+        "c1",
+        "chat/session/create",
+        json!({ "title": "a client tool" }),
+    );
+    let session_id = created["result"]["session_id"]
+        .as_str()
+        .expect("the session id")
+        .to_string();
+    let registered = core.call(
+        "c2",
+        "tools/register",
+        json!({
+            "name": "client_tool",
+            "description": "runs on the client that registered it",
+            "input_schema": { "type": "object" },
+            "owner": "client",
+            "session_id": session_id,
+        }),
+    );
+    assert_eq!(registered["result"]["name"], "client_tool", "{registered}");
+
+    core.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "c3",
+        "method": "chat/message/stream",
+        "params": {
+            "session_id": session_id,
+            "text": "!tool client_tool {}",
+        },
+    }));
+    let mut answered = None;
+    let mut answer = None;
+    let end;
+    // One loop, three facts: the stream's answer, the core's
+    // question — answered the moment it arrives, the turn is
+    // waiting on it — and the turn's end frame. The answer comes
+    // when the park is durable, the question when the model asks,
+    // and the end frame only after the answer flowed back, so the
+    // loop exits exactly when the whole round trip is done.
+    loop {
+        let frame = core.recv();
+        if frame.get("method").and_then(Value::as_str) == Some("tools/execute")
+        {
+            assert_eq!(
+                frame["params"]["name"], "client_tool",
+                "the question names the tool: {frame}"
+            );
+            assert_eq!(
+                frame["params"]["session_id"], session_id,
+                "the question names the session it is about: {frame}"
+            );
+            assert!(
+                frame["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("core:internal:")),
+                "the id is one the core minted: {frame}"
+            );
+            answered = Some(frame["id"].clone());
+            core.send(&json!({
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "result": {
+                    "content": "ran on the client",
+                    "is_error": false,
+                },
+            }));
+            continue;
+        }
+        if frame.get("id") == Some(&json!("c3")) && answer.is_none() {
+            answer = Some(frame);
+            continue;
+        }
+        if frame.get("method").and_then(Value::as_str)
+            == Some("chat/turn/event")
+            && frame["params"]["frame"]["kind"].as_str() == Some("end")
+        {
+            end = frame;
+            break;
+        }
+    }
+    let answer = answer.expect("the stream answered");
+    assert!(answer["result"]["accepted"] == true, "{answer}");
+    assert!(answered.is_some(), "the core asked the client to run it");
+    let turn_id = answer["result"]["turn_id"].as_str().expect("the turn id");
+    assert_eq!(
+        end["params"]["turn_id"].as_str(),
+        Some(turn_id),
+        "the end frame belongs to the turn the answer named: {end}"
+    );
+    assert_eq!(end["params"]["frame"]["reason"], json!("completed"));
+
+    // The durable rows carry the client's answer as the tool result.
+    let events =
+        core.call("c4", "sessions/events", json!({ "id": session_id }));
+    let rows = serde_json::to_string(&events["result"]["typed"])
+        .expect("the durable rows serialise");
+    assert!(
+        rows.contains("ran on the client"),
+        "the client's answer is the tool result: {events}"
+    );
+}
 /// The core's stdout carries the protocol and nothing else: a log
 /// line on stdout would reach the peer as a malformed frame.
 #[test]

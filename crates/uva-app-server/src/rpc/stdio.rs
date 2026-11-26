@@ -652,6 +652,14 @@ fn handle_frame(
     if handle_cancel(&frame, inflight, outbound) {
         return;
     }
+    // The answer to a question the core asked: a response frame whose
+    // id the core minted belongs to the waiter that asked. It is
+    // checked before the ACP adapter because that adapter claims
+    // every response-shaped frame — only a table hit can steer an
+    // answer to the core's own waiter.
+    if state.rpc.resolve_client_answer(&frame) {
+        return;
+    }
     // An ACP frame belongs to the ACP adapter, not to the core's
     // router: the two vocabularies share this pipe, and the method
     // names tell them apart. The adapter's answers travel back the

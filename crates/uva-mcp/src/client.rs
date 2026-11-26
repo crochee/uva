@@ -255,6 +255,12 @@ impl McpClient {
         })
     }
 
+    /// The per-request budget the transport enforces.
+    #[must_use]
+    pub fn call_budget(&self) -> std::time::Duration {
+        self.transport.call_budget()
+    }
+
     /// Build one [`McpTool`] handle for `spec`.
     #[must_use]
     pub fn tool(&self, spec: &McpToolSpec, client: Arc<McpClient>) -> McpTool {

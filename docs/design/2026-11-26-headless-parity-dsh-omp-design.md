@@ -67,7 +67,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 委派控制面 | `interrupt()` 鉴权到祖先链（`packages/subagent/subagent/src/manager.ts:196-233`） | RPC：`get_subagents` / `cancel_subagent` / `steer_subagent`，子代理记录按字节增量读（`packages/coding-agent/src/modes/rpc/rpc-subagents.ts:74-107`） | 机器有（`crates/uva-tool-task/src/control/mod.rs:389` 的 `kill`、`registry`），**但没有无头门** | **缺口 G8（本轮切）** |
 | 控制面协议 | 自有 JSON-RPC stdio server（`packages/sdk/server/src/server.ts:609-667`） | 自有 JSONL：~90 条命令、协议协商、**分块帧**（`wire/commands.ts:35-454`、`rpc-frame.ts:6,9`） | JSON-RPC 2.0 + Content-Length 帧，64 MiB 逻辑上限，超限即错（`crates/uva-app-server/src/rpc/framing.rs:32`） | **对齐（切 10）**：逻辑上限同 omp v2；分块/协商对 Content-Length 不适用（见切 10）；出站背压落盘 |
 | 增量读 | — | `get_entries?since` + 分页游标（`docs/rpc.md`） | `sessions/events` **每次整本**返回（`crates/uva-app-server/src/routes/sessions/mod.rs:827-855`） | **缺口 G11（本轮切）** |
-| 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12）**：协议没有「宿主自带工具」的原语，那一半如实缺席 |
+| 客户端侧工具 | — | `set_host_tools` + `host_tool_call`/`host_tool_result` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`、`rpc-types.ts:907-953`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；**客户端自有的工具已落地**（第三轮切 23：核心面 `tools/register owner=client` + `tools/execute` 问答回到客户端）；ACP 面没有 `set_host_tools` 原语，那一半如实缺席；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12 + 23）**：核心面有了原语，ACP 面如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
 | 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
@@ -96,7 +96,9 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G17 | ~~工具族少 `lsp`~~ **已落（切 17 + 切 18）**：诊断面（编译器的话）与查询面（dsh 的四个导航动作）都齐了；服务器由部署声明，能力缺一项就按能力名回绝 | — | `crates/uva-tool-plugins/src/lsp/` |
 | G15 | ~~工具族少 `glob` 与 `grep`~~ **已落（切 15）**：两个工具都走本仓自己的遍历（不依赖外部 ripgrep），答案有界且自报截断 | — | 同左 |
 | G13 | ~~工具族少一个 `edit`~~ **已落（切 12）**：逐字替换，旧文本必须原样出现，多处命中被拒并点名行号；编辑走 `read`/`write` 同一条缝 | — | `crates/uva-tool-plugins/src/edit/` |
-| G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
+| G18 | **工具批不守模型序**：按模式分桶（全部 Parallel 先跑，再全部 Sequential），模型说「先写后读」本仓先读。**已落（第二轮切 19）**：按模型序的波，排他调用是屏障 | 高 | 旧 `…/step/tools/mod.rs` 的 `bucket_by_execution_mode` + 两个桶 |
+| G19 | **并发安全只按工具名判**：dsh 的 `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)` 都按**调用**判，本仓 `shell` 永远串行、`ls` 也排队。**已落（第二轮切 20）**：`Tool::mode_for(input)`，shell 只读命令可并行 | 中 | 旧 `Tool::mode()` + `registry.execution_mode(name)` |
+| G20 | **无工具级超时**：stdio MCP 服务器不出声就把回合永远挂住（dsh 的 `timeout-policy` 给每个工具武装 `timeoutMs`，到期是结构化 `TOOL_TIMEOUT`）。**已落（第二轮切 21）**：结构化词汇 + 行内 code + stdio 传输的每请求预算 | 高 | `crates/uva-mcp/src/stdio.rs`（此前无截止时间） |
 
 ---
 
@@ -785,11 +787,195 @@ omp 的 `lsp` 也有同一组（`packages/coding-agent/src/lsp/`）。模型的
 
 ---
 
+### 切 19 — 工具批的模型序：排他调用是屏障（第二轮切 1）
+
+**要什么**：两个参考都按**模型写的顺序**执行工具批。dsh 把计划分成
+组：`mode === 'parallel' ? planned.slice(next) : [first]`，池在遇到
+第一个排他调用时停止填充（`packages/core/tools/src/batch.ts:78-83`），
+结果按模型序提交。omp 用 `lastExclusive` 链出同一个屏障
+（`packages/agent/src/agent-loop.ts:4044-4060`）：排他调用等前面的
+共享调用排干，后面的共享调用等它。本仓此前把批**按模式分桶**——全部
+Parallel 先跑（并发），再全部 Sequential 串行——模型序被破坏：模型说
+「先写后读」，本仓先读。
+
+**怎么落**：调度器重写为**按模型序的波**（`schedule.rs`）：连续的
+Parallel 调用共享一波（受 tracker 推荐的并发上限约束），Sequential
+调用独占一波——它等前面的波排干，后面的波等它。既有的保全语义按新序
+重新表述：排他调用失败 ⇒ 其后的排他调用跳过（文案不变），共享波照跑
+（dsh/omp 都不停兄弟）；取消 ⇒ 未派发的调用答「cancelled before
+dispatch; safe to retry」。
+
+**落点**：
+- `crates/uva-harness/src/agent/re_act/loop/step/tools/schedule.rs`（新）：
+  `run_batch` / `take_shared_wave` / `run_shared_wave` /
+  `run_exclusive_wave` / `recommended_concurrency`。
+- `crates/uva-harness/src/agent/re_act/loop/step/tools/mod.rs`：桶阶段
+  换成 `schedule::run_batch`；删掉 `bucket_by_execution_mode` 与两个桶。
+
+**验收**：`tests/model_order.rs` 三条——批按模型序跑（共享、独占、共享），
+独占是屏障（后面的共享等它），一波内的共享调用仍然重叠。门夹具用通道
+而不是计时器：harness 在无运行时的线程上跑调用，`tokio::time::sleep`
+在那儿会 panic（旧睡眠夹具恰好因此是空转的）。
+
+---
+
+### 切 20 — 并发安全按调用判定：`Tool::mode_for`（第二轮切 2）
+
+**要什么**：两个参考都**按调用**判并发安全——dsh 的
+`isConcurrencySafe(args)`（`packages/core/tools/src/pipeline.ts:108`，
+SSH 工具：读共享、写独占），omp 的 `resolveToolConcurrency(tool, args)`
+（`packages/agent/src/agent-loop.ts:120-135`，未声明 ⇒ 共享、抛错 ⇒
+独占）。本仓只按**工具名**判（`Tool::mode()` ⇒ 注册表
+`execution_mode(name)`）：`shell` 永远串行，`ls` 也排队。
+
+**怎么落**：`Tool` 增加带默认实现的 `mode_for(&input)`（默认回落
+`mode()`）；注册表增加 `execution_mode_for(name, input)`（未知名仍是
+Sequential，失败关闭）；harness 的调度改问**这一次调用**。`shell` 第一个
+ override：只读命令（`classify_command_risk == Low`，失败关闭的白名单）
+⇒ Parallel，其余 ⇒ Sequential。
+
+**落点**：
+- `crates/uva-tool/src/traits.rs`：`Tool::mode_for`。
+- `crates/uva-tool/src/registry/mod.rs`：`execution_mode_for`。
+- `crates/uva-harness/src/agent/re_act/loop/mod.rs` +
+  `step/tools/schedule.rs`：调度问调用。
+- `crates/uva-tool-plugins/src/shell/mod.rs`：只读 ⇒ 可并行。
+
+**验收**：shell 单测——`ls`/`cat`/`rg`/`pwd` 可并行，`rm`/重定向/
+`cargo build`（未知）/`git push` 独占；无 `command` 参数不判并行。
+
+---
+
+### 切 21 — 工具级超时：结构化 `TOOL_TIMEOUT`（第二轮切 3）
+
+**要什么**：dsh 的 `timeout-policy` 是包住 `tools/execute` 的守卫
+（`packages/guard/timeout-policy/src/index.ts:26`）：工具声明
+`timeoutMs`，包装器在 exec 信号上武装截止时间，到期把结果换成结构化
+错误——`content` 是 `Error: tool call timed out after Nms`，
+`error.info` 是 `{name: 'ToolTimeoutError', code: 'TOOL_TIMEOUT'}`，
+重试/沙箱插件可以按 code 路由。本仓一处都没有：stdio MCP 服务器不出声
+就把回合**永远**挂住（无头端没有操作员会注意到），超时了也只是散文。
+
+**怎么落**：
+1. **词汇**（uva-tool）：`ToolOutput::timeout(after)` 造出 dsh 形状的
+   结构化失败（文本 + `is_error` + `metadata.error.{name, code}`），
+   `ToolOutput::error_code()` 读回 code。
+2. **行**（uva-harness）：`commit_tool_result` 把 `metadata.error.code`
+   提升进 durable 行的 `error` 成员——中断行已经在用的那个位置，TUI 的
+   outcome 与修复过程不用解析模型可见文本就能路由。
+3. **强制**（uva-mcp）：stdio 传输的每个请求跑在一个预算下
+   （默认 30 s = HTTP 兄弟的 `DEFAULT_HTTP_TIMEOUT`；
+   `StdioConfig::call_timeout` / `with_call_timeout` 可调），
+   到期是 `Error::Timeout`；`McpTool` 把它映射成
+   `ToolOutput::timeout(transport.call_budget())`——传输知道自己
+   武装了多少（trait 的 `call_budget()`）。
+
+**落点**：
+- `crates/uva-tool/src/types.rs`：`timeout` / `TIMEOUT_CODE` /
+  `error_code`。
+- `crates/uva-harness/src/agent/re_act/loop/step/tools/commit.rs`：
+   code 提升进行。
+- `crates/uva-mcp/src/{lib.rs,stdio.rs,client.rs,tool.rs}`：预算、
+   `Error::Timeout`、`call_budget`、结构化映射。
+
+**验收**：
+- uva-tool：构造形状（文本 / 标志 / code / metadata.name）与
+  无 code 时不造一个。
+- uva-harness：结构化失败码到达 durable 行（`data.error`）。
+- uva-mcp：不出声的 stdio 服务器（`sh` 脚本握手后 `sleep 300`）在
+  一个预算内返回 `Error::Timeout`，包出的工具答案是结构化超时；
+  预算 400 ms 时端到端 < 5 s。
+---
+### 切 22 — 核心面的出站请求通道（第三轮切 1）
+
+**要什么**：核心面此前只有一条方向上的请求——客户端问，核心答。
+两个参考都有另一条：omp 的 RPC 服务器会向宿主发 `host_tool_call` 并等
+`host_tool_result`（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`），
+dsh 的插件树经 `fs/*`、`terminal/*` 问客户端（切 5 / 切 11 已对齐）。本仓的
+核心面（自有 JSON-RPC 2.0 + Content-Length）**发不出自己的问题**：出站只有
+响应和通知，没有「core→client 请求 + 应答关联」。
+
+**怎么落**：
+1. **通道**（`rpc/client_calls.rs`）：核心铸自己的请求 id
+   （`core:internal:<n>`——保留前缀，与网关的 `gateway:internal:` 同一纪律），
+   挂一张等应答的表；`RpcRuntime::call_client(method, params, timeout)` 发出
+   请求帧并在预算内等应答，过期从表里摘除、答 `Timeout`。
+2. **路由**（`rpc/stdio.rs`）：应答帧先查这张表，再落 ACP——ACP 的
+   `answers()` 此前认领**每一张**响应形状的帧（「核心不问自己的问题」），
+   这条不变量被本刀打破，注释同步改口：只有表命中的才归核心自己。
+3. **网关**：零改动。网关的 `route_frame` 早就按**会话所有权**路由核心发的
+   请求帧（ACP 的 `session/request_permission` 走的就是它），所以核心的
+   请求 params 带 `session_id` 即可：直连 stdio 时对端是唯一客户端，网关
+   模式下浏览器收到问题、应答回到核心。
+
+**落点**：
+- `crates/uva-app-server/src/rpc/client_calls.rs`：表 + id 铸造 +
+  `ClientCallError {Timeout, Refused, Closed}` + `ClientToolResult`。
+- `crates/uva-app-server/src/rpc/mod.rs`：`RpcRuntime` 持表，
+  `call_client` / `resolve_client_answer`。
+- `crates/uva-app-server/src/rpc/stdio.rs`：应答帧先查表。
+- `crates/uva-app-server/src/adapters/acp/channel.rs`：`answers()` 注释改口。
+
+**验收**：
+- 表：铸造的 id 带保留前缀且互异；result 帧到达等它的 waiter；error 帧
+  映射成 `Refused`；外来的帧（客户端自铸 id 的应答 / 请求 / 无 result 也无
+  error）不碰表；超时摘除后晚到的应答找不到 waiter。
+- 端到端在切 23 一并证明（本刀的通道在那里被完整走一遍）。
+
+---
+
+### 切 23 — 客户端拥有的工具（第三轮切 2）
+
+**要什么**：omp 的 `set_host_tools`（`packages/coding-agent/src/modes/rpc/
+rpc-types.ts:85,920`）：宿主把工具定义交给 agent，模型看到它们，调用时
+RPC 服务器向宿主发 `host_tool_call`，宿主答 `host_tool_result`。dsh 没有
+对应物（它的客户端拥有的是**能力**——文件、终端——不是工具）。§6 此前
+记它「ACP v1 没有原语、本仓不能单方面补」——那半句对 **ACP 面**成立；
+**核心面是本仓自己的协议**，可以单方面补，这一刀就在核心面补。
+
+**怎么落**：
+1. **注册**（`routes/tool/mod.rs`）：`tools/register` 增 `owner`（默认
+   `core` = 今天的部署级 passthrough；`client` = 客户端实现）与
+   `session_id`（`owner=client` 必填——问题按会话路由，网关用它找拥有
+   该会话的连接）。注册装一个 `ClientOwnedTool` 入注册表；集群广播**不
+   发**——对端节点没有客户端可问。
+2. **执行**（`session/client_tools.rs`）：`ClientOwnedTool` 是切 22 通道的
+   第一个用户——`tools/execute` 请求（`params.{session_id, name,
+   arguments}`）发给拥有该会话的客户端，应答
+   `result.{content, is_error}` 映射成 `ToolOutput`；超时是切 21 的结构化
+   `TOOL_TIMEOUT`（60 s 预算——omp 无界、dsh 有 `timeoutMs`，无头端取有界）。
+   调度模式 `Sequential`（客户端的执行对核心不透明，猜并行不 fail closed）。
+3. **所有权**：注册表是**节点一个**，名字全局（两个客户端不能同名）；
+   执行归注册会话的客户端，**别的会话调用被明确拒绝**（fail closed）；
+   模型面全节点可见（harness 投影的注册表就是节点的那个）——这是注册表
+   形状带来的已知 wart，如实记着。
+
+**落点**：
+- `crates/uva-app-server/src/session/client_tools.rs`：`ClientOwnedTool` +
+  `CLIENT_TOOL_EXECUTE` + 预算。
+- `crates/uva-app-server/src/routes/tool/mod.rs`：`owner` / `session_id` /
+  `ToolOwner` + 注册分支。
+- `crates/uva-app-server/tests/stdio_roundtrip.rs`：端到端。
+
+**验收**：
+- 单元：外会话调用被拒（拒绝点名拥有者）；无应答超时是结构化
+  `TOOL_TIMEOUT`；注册表面（名字/描述/schema/Sequential）按客户端的声明。
+- 路由：`owner=client` 无 `session_id` → `validation`；带会话注册后
+  `tools/list`/`tools/get` 如实展示声明；同名二次注册 → `already_exists`。
+- 端到端（stdio）：客户端注册 `client_tool` → `!tool client_tool {}` 驱动
+  一回合 → 核心发 `tools/execute`（id 带 `core:internal:` 前缀、params 带
+  会话与工具名）→ 客户端答 `ran on the client` → 回合 `completed`，
+  durable 行里 tool_result 的文本就是客户端的应答。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
-- **G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
-  `set_host_tools`：宿主把自己的工具交给 agent 调用）——ACP v1 没有对应的
-  原语，这是协议层的缺口，不是本仓能单方面补的。
+- ~~**G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
+  `set_host_tools`：宿主把自己的工具交给 agent 调用）~~ **已落**（第三轮
+  切 22 + 切 23）——**在核心面上**：出站请求通道 + `tools/register
+  owner=client`。ACP v1 仍没有对应的原语，那一半继续如实缺席——ACP 面
+  的协议缺口不是本仓能单方面补的。
 - **G10 的 JSON-RPC 重组协议**（若真要抄 omp v2 的分块语义）——那是线格式
   破坏：帧里不再是一个 JSON 值，而是一串需要重组的片段，客户端全都要改。
   切 10 已把**可迁移的部分**落完（背压落盘 + 64 MiB 逻辑上限），剩下的只有
@@ -800,8 +986,8 @@ omp 的 `lsp` 也有同一组（`packages/coding-agent/src/lsp/`）。模型的
   （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。
   G15 已落——切 15（`glob` + `grep`）。G16 已落——切 16（`goal` + 宿主续跑）。
   工具族一行新加，剩余缺席如实记着：`checkpoint`/`rewind`、`ask`、
-  `ast_grep`/`ast_edit`；`lsp` 已落切 17（诊断面）与切 18（查询面）。G17 已落
-  ——切 17 + 切 18。）
+  `ast_grep`/`ast_edit`。G17 已落——切 17 + 切 18。客户端扩展工具已落
+  ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。）
 
 ---
 

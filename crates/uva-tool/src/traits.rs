@@ -142,8 +142,30 @@ pub trait Tool: Send + Sync {
 
     /// Scheduling mode: `Parallel` = concurrent-safe,
     /// `Sequential` = must run alone.
+    ///
+    /// This is the tool-level default. A tool whose concurrency
+    /// safety depends on *what it was asked to do* overrides
+    /// [`Tool::mode_for`] instead, and the scheduler reads that.
     fn mode(&self) -> ExecutionMode {
         ExecutionMode::Parallel
+    }
+
+    /// The scheduling mode of **this call**, given its arguments.
+    ///
+    /// The batch scheduler decides which calls may overlap by asking
+    /// this, not [`Tool::mode`], because concurrency safety is a
+    /// property of the call: a shell running `ls` is safe beside
+    /// another read, and the same shell running `rm` is not. dsh
+    /// classifies per call the same way (`isConcurrencySafe(args)`),
+    /// and so does omp (`resolveToolConcurrency(tool, args)`).
+    ///
+    /// The default keeps the tool-level declaration: a tool whose
+    /// safety does not depend on its arguments overrides only
+    /// [`Tool::mode`]. An implementation that inspects the arguments
+    /// must fail closed — an argument it cannot classify is
+    /// `Sequential`, never a guess at `Parallel`.
+    fn mode_for(&self, _input: &serde_json::Value) -> ExecutionMode {
+        self.mode()
     }
 
     /// Advisory MCP-style hints carried on this tool's descriptor.

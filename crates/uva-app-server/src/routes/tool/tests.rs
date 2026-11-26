@@ -332,3 +332,73 @@ async fn a_limit_bounds_the_page_and_offers_the_next_cursor() {
     assert_eq!(first.total, Some(total as u64));
     assert!(first.next_cursor.is_some(), "more rows remain");
 }
+
+/// A client-owned registration without a session is refused: the
+/// core would have nowhere to send the calls.
+#[tokio::test]
+async fn a_client_owned_tool_names_its_session() {
+    let (state, _dir) = test_state().await;
+    let error = match register_tool(
+        Arc::clone(&state),
+        RegisterToolRequest {
+            name: "client_tool".to_string(),
+            description: "runs on the client".to_string(),
+            input_schema: schema("a"),
+            owner: ToolOwner::Client,
+            session_id: None,
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("a client-owned tool must name its session"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "validation");
+}
+
+/// A client-owned registration installs the entry under the
+/// client's own name, with the description and schema it declared.
+#[tokio::test]
+async fn a_client_owned_tool_is_listed_with_its_declaration() {
+    let (state, _dir) = test_state().await;
+    let info = register_tool(
+        Arc::clone(&state),
+        RegisterToolRequest {
+            name: "deploy".to_string(),
+            description: "deploys the editor's build".to_string(),
+            input_schema: schema("target"),
+            owner: ToolOwner::Client,
+            session_id: Some("s-1".to_string()),
+        },
+    )
+    .await
+    .expect("the client-owned tool registers");
+    assert_eq!(info.name, "deploy");
+    let detail = get_tool(Arc::clone(&state), "deploy".to_string()).await;
+    let detail = detail.expect("the entry is addressable");
+    assert_eq!(detail.description, "deploys the editor's build");
+    assert_eq!(detail.input_schema, schema("target"));
+    assert_eq!(detail.provenance, "dynamic");
+}
+
+/// The same name cannot be owned twice: the registry is one per
+/// node, and a second client's declaration would shadow the first.
+#[tokio::test]
+async fn a_client_owned_name_is_taken_once() {
+    let (state, _dir) = test_state().await;
+    let request = || RegisterToolRequest {
+        name: "once".to_string(),
+        description: "once only".to_string(),
+        input_schema: schema("a"),
+        owner: ToolOwner::Client,
+        session_id: Some("s-1".to_string()),
+    };
+    register_tool(Arc::clone(&state), request())
+        .await
+        .expect("the first registration takes the name");
+    let error = match register_tool(Arc::clone(&state), request()).await {
+        Ok(_) => panic!("the name is taken"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, "already_exists");
+}
