@@ -4618,6 +4618,7 @@ dependencies = [
  "futures",
  "libc",
  "parking_lot",
+ "regex",
  "reqwest",
  "schemars 1.2.2",
  "schemars_derive",

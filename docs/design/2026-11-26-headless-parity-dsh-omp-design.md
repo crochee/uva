@@ -70,6 +70,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12）**：协议没有「宿主自带工具」的原语，那一半如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
+| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`）；**如实缺席**：`lsp`、`checkpoint`/`rewind`（撤销）、`goal`（目标模式）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑） |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
@@ -91,6 +92,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
 | G12 | ~~无客户端侧 fs/terminal 委派~~ **已落**（切 5 的 fs 半边 + 切 11 的 terminal 半边）：`fs/*` 与 `terminal/*` 两套委派都走同一条「客户端拥有」的路 | — | 同左 |
 | G14 | ~~没有后台作业~~ **已落（切 13 + 切 14）**：`job` 工具把命令放到后台（`start` / `output` / `list` / `kill`），**完成通知主动送达**（切 14：作业结束 → 会话收到通知） | — | 同左 |
+| G15 | ~~工具族少 `glob` 与 `grep`~~ **已落（切 15）**：两个工具都走本仓自己的遍历（不依赖外部 ripgrep），答案有界且自报截断 | — | 同左 |
 | G13 | **工具族少一个 `edit`**：只有 `read` 与 `write`，改一行要重写整个文件——两个参考都有精确编辑（dsh `str_replace_editor`、omp `edit`） | 中 | `crates/uva-tool-plugins/src/` |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
 
@@ -611,6 +613,47 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
 
 ---
 
+
+### 切 15 — `glob` 与 `grep`：文件发现与内容搜索（G15）
+
+**要什么**：账本的§3 一直缺一行——**工具族**这一轴从没对过账。两个参考都有文
+件发现与内容搜索：dsh 的 `tool-fs-search`（一个插件注册 `glob` 与 `grep`，走打包的
+ripgrep，`packages/fs/tool-fs-search/src/glob.ts:93`）与 omp 内建的 `glob` /
+`grep`（`packages/coding-agent/src/tools/builtin-names.ts:3-33`）。本仓此前只有语
+义 `search`（跨目录检索）与 shell 里的 `rg`——**受策略限制或没有 shell 时，模型找
+不到文件**。
+
+**怎么落**：
+1. **自己遍历，不带 ripgrep**：dsh 的实现是 spawn 一个打包的二进制；本仓不引二进制
+   依赖，改为一次有界的遍历（`crate::walk`）：`.git` 不进、符号链接目录不进（防环）、
+   最多看 20000 个文件。
+2. **glob 方言**：`*`（段内任意字符）、`?`（一个字符）、`**`（任意段）、其余按字
+   面；**不含 `/` 的模式按文件名匹配任意深度**（ripgrep 的 `--glob` 就是这条规则），
+   含 `/` 的模式匹配整条相对路径。
+3. **答案有界且自报截断**：`glob` 最多 100 条（dsh 的 `GLOB_MAX_RESULTS`）、`grep`
+   最多 250 条（`GREP_MAX_MATCHES`）、单行最多 2000 字节（`GREP_MAX_LINE_BYTES`）；
+   遍历撞到上限或答案撞到上限时，**答案里写明**——截断过的搜索不能被当成完整的搜
+   索。
+4. **客户端拥有的工作区如实拒绝**：ACP 的 `fs/*` 只有按名读写，没有目录列举，
+   所以遍历看不见客户端的文件——这两个工具在这种会话里**明确拒绝**并说明原因，
+   而不是给出一个只覆盖本机磁盘的、看起来完整的答案。
+
+**落点**：
+- `crates/uva-tool-plugins/src/walk.rs`：有界遍历 + glob 方言（两者共用 ✓）。
+- `crates/uva-tool-plugins/src/glob/`、`crates/uva-tool-plugins/src/grep/`：两个
+  工具与它们的内核插件。
+- app-server：`tool-glob` / `tool-grep` 两行（profile 文档与能力矩阵同步 ✓）。
+
+**验收**：
+- 单元（walk）：glob 方言的五条规则 + 遍历跳过 `.git` + 不跟符号链接 + 相对路径 ✓。
+- 单元（glob）：相对路径的答案、子目录检索、无命中、空调法、越界路径、客户端拥有
+  的工作区被拒 ✓。
+- 单元（grep）：`path:line:text` 的形状、`include` 过滤、正则、非法正则、二进制跳
+  过、客户端拥有的工作区被拒 ✓。
+- 行为（app-server）：部署挂载了 `glob` 与 `grep` ✓。
+
+---
+
 ---
 
 ## 6. 下一轮候选（不在本轮）
@@ -625,7 +668,9 @@ Content-Length 帧——**没有「一行」就没有分块的理由**，但**�
 （G7 已驳回——取消检查在工具流的 drain 里。G2 已结——切 8：连续性已
   结构化交付，seam 留给会铸造原生状态的适配器。G4 已落——切 6。
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
-  （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。）
+  （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。
+  G15 已落——切 15（`glob` + `grep`）。工具族一行新加，剩余缺席如实记着：`lsp`、
+  `checkpoint`/`rewind`、`goal`、`ask`、`ast_grep`/`ast_edit`。）
 
 ---
 

@@ -11,6 +11,8 @@
 //! | `read` | [`mod@read`] | read a workspace file, with an optional line range |
 //! | `write` | [`mod@write`] | write a workspace file |
 //! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
+//! | `glob` | [`mod@glob`] | find the files that match a pattern |
+//! | `grep` | [`mod@grep`] | search the files' contents |
 //! | `job` | [`mod@jobs`] | run a command in the background and come back to it |
 //! | `shell` | [`mod@shell`] | run a process, under the OS execution policy it owns |
 //! | `todo` | [`mod@todo`] | the `TodoWrite` task list |
@@ -45,6 +47,10 @@
 #[cfg(feature = "edit")]
 pub use edit::{EditTool, EditToolPlugin};
 pub use files::{FileError, FileSystemOwner, LocalFileSystem};
+#[cfg(feature = "glob")]
+pub use glob::{GLOB_MAX_RESULTS, GlobTool, GlobToolPlugin};
+#[cfg(feature = "grep")]
+pub use grep::{GREP_MAX_MATCHES, GrepTool, GrepToolPlugin};
 #[cfg(feature = "job")]
 pub use jobs::{JobRegistry, JobState, JobTool, JobToolPlugin};
 #[cfg(feature = "memo")]
@@ -94,12 +100,16 @@ pub use write::{WriteTool, WriteToolPlugin};
 pub mod edit;
 /// The file-system seam the `read` and `write` tools read through.
 pub mod files;
+#[cfg(feature = "glob")]
+pub mod glob;
+#[cfg(feature = "grep")]
+pub mod grep;
 #[cfg(feature = "job")]
 pub mod jobs;
 #[cfg(feature = "memo")]
 pub mod memo;
 /// The one way this crate spawns a process (unix only).
-#[cfg(unix)]
+#[cfg(all(unix, feature = "shell"))]
 pub(crate) mod process;
 #[cfg(feature = "read")]
 pub mod read;
@@ -111,6 +121,9 @@ pub mod search;
 pub mod shell;
 #[cfg(feature = "todo")]
 pub mod todo;
+/// The walk the search tools share: the files under a root ✓.
+#[cfg(any(feature = "glob", feature = "grep"))]
+pub(crate) mod walk;
 #[cfg(feature = "web")]
 pub mod web;
 #[cfg(feature = "write")]

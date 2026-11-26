@@ -550,6 +550,10 @@ pub mod tool;
 pub mod tool_edit;
 #[cfg(feature = "tool-files")]
 pub mod tool_files;
+#[cfg(feature = "tool-glob")]
+pub mod tool_glob;
+#[cfg(feature = "tool-grep")]
+pub mod tool_grep;
 #[cfg(feature = "tool-job")]
 pub mod tool_job;
 #[cfg(feature = "tool-memo")]

@@ -15,7 +15,7 @@ async fn the_deployment_mounts_the_file_tools() {
     );
     let state = AppState::for_test(manager, dir.path().to_path_buf()).await;
 
-    for tool in ["read", "write", "edit", "job"] {
+    for tool in ["read", "write", "edit", "job", "glob", "grep"] {
         assert!(
             state.tool_registry.contains(tool),
             "the deployment mounts `{tool}`"
