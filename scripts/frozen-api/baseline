@@ -316,6 +316,7 @@ uva-session::feedback
 uva-session::finish_compaction
 uva-session::fold_log_surface
 uva-session::fold_surface
+uva-session::goal
 uva-session::hook_block
 uva-session::interrupted_turn_closers
 uva-session::is_metadata_header_row

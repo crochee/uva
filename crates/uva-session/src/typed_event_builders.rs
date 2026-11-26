@@ -208,9 +208,9 @@ pub fn approval_granted(
     }
 }
 
+#[must_use]
 /// Build a `Goal` row: one row per change, the latest one the
 /// session's goal.
-#[must_use]
 pub fn goal(
     state: &str,
     objective: &str,

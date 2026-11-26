@@ -65,6 +65,7 @@ uva = { workspace = true, features = [
   "tool-glob",
   "tool-goal",
   "tool-grep",
+  "tool-lsp",
   "tool-shell",
   "tool-todo",
   "tool-web",

@@ -122,6 +122,7 @@ required-features = [
   "tool-glob",
   "tool-goal",
   "tool-grep",
+  "tool-lsp",
   "tool-shell",
   "tool-job",
   "tool-todo",
@@ -190,6 +191,7 @@ tool-job = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/job"]
 tool-glob = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/glob"]
 tool-goal = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/goal"]
 tool-grep = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/grep"]
+tool-lsp = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/lsp"]
 tool-shell = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/shell"]
 tool-todo = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/todo"]
 # The one tool that talks to the network—the only one that pulls

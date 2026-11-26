@@ -39,7 +39,7 @@ The frozen surface is that set of names, per crate:
 | `uva-context` | 19 |
 | `uva-harness` | 59 |
 | `uva-provider` | 93 |
-| `uva-session` | 154 |
+| `uva-session` | 156 |
 | `uva-steering` | 36 |
 | `uva-tool` | 45 |
 
@@ -87,6 +87,15 @@ Be explicit about the other side of the promise:
 
 Signatures evolve under the rule above. The breaking shapes this line
 ships are recorded here, beside the promise they narrow:
+
+- **The session's durable goal joined the curated surface** (the goal
+  tool). `goal` joined the curated `uva-session` surface: the typed
+  builder for the `Goal` row — the one row per change that carries a
+  session's objective, its state and its token budget. No name left
+  the surface, so the `uva-session` count moves 155 → 156. Migration:
+  build the row with `goal(state, objective, budget_tokens)` and
+  append it with `append_event`; the tool itself
+  (`uva_tool_plugins::goal`) is what a deployment mounts.
 
 - **The streaming call returns the fold's turn** (stream fold, ADR 0029).
   `ModelProvider::complete_with_stream` returns the fold's
@@ -514,7 +523,7 @@ types, credentials, retry classification, cache policy, JSON repair.
 `repair_json`, `retry_config_for`, `synthesize_orphan_result`
 
 
-### uva-session — 155 names
+### uva-session — 156 names
 
 The durable ledger: JSONL sink and version header, events, the row
 vocabulary (tags, dialects, the restore to the current row, borrowed
@@ -543,7 +552,8 @@ approval_granted, assemble_chunks, assistant_message, balanced_cut_at_or_before,
 begin_compaction, build_balance_cache, compaction_balanced, compaction_end_committed, compaction_end_failed
 compaction_outcomes, compaction_row, compaction_start, compaction_summary, derive_history
 estimate_message_tokens, feedback, finish_compaction, fold_log_surface, fold_surface
-hook_block, interrupted_turn_closers, is_metadata_header_row, iteration_end, iteration_start
+goal, hook_block, interrupted_turn_closers, is_metadata_header_row, iteration_end
+iteration_start
 jsonl_session_search, log_tail_seq, message_row, modified_at, orphaned_compactions
 park_consumed, parked_prompt, parked_prompts, plan_compaction, plan_compaction_from_rows
 plugin_row, prune_tool_results, publish_row, publish_rows, repair_log

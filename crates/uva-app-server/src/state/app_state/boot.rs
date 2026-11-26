@@ -470,6 +470,15 @@ impl AppState {
         // through this slot, filled right after the mount.
         let sessions_slot: crate::composition::kernel::SessionSlot =
             Arc::new(std::sync::OnceLock::new());
+        // The deployment's language servers: the `tool-lsp` row asks
+        // them what the compiler says.
+        let lsp_servers = crate::session::lsp::servers_handle(
+            input
+                .server_config
+                .as_ref()
+                .map(|config| config.lsp.servers())
+                .unwrap_or_default(),
+        );
         let usage_metrics = Arc::new(UsageMetrics::default());
         let boot_services = Arc::new(BootServices {
             tool_registry: Arc::clone(&input.tool_registry),
@@ -483,6 +492,7 @@ impl AppState {
             terminals: Arc::clone(&terminals),
             jobs: Arc::clone(&jobs),
             sessions: Arc::clone(&sessions_slot),
+            lsp_servers: Arc::clone(&lsp_servers),
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same

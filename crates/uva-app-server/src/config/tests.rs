@@ -272,6 +272,7 @@ fn build_sample_server_config() -> ServerConfig {
         cluster: crate::config::server::ClusterConfig::default(),
         scheduler: crate::config::server::SchedulerConfig::default(),
         approval: crate::config::server::ApprovalConfig::default(),
+        lsp: crate::config::server::LspConfig::default(),
     }
 }
 

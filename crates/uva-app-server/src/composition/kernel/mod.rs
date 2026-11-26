@@ -160,6 +160,9 @@ pub(crate) struct BootServices {
     /// log), so it resolves through this slot, filled immediately
     /// after the mount.
     pub sessions: SessionSlot,
+    /// The deployment's language servers ✓. The `tool-lsp` row files
+    /// them, so the tool can ask the server that speaks a language ✓.
+    pub lsp_servers: Arc<dyn uva::tool_lsp::LspServers>,
 }
 
 /// Why a native mount failed — a profile-assembly or kernel verdict.
@@ -197,7 +200,7 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 27] = [
+    const ENTRIES: [&str; 28] = [
         "tool-registry",
         "tool-read",
         "tool-write",
@@ -206,6 +209,7 @@ pub(crate) fn native_profile() -> Profile {
         "tool-glob",
         "tool-goal",
         "tool-grep",
+        "tool-lsp",
         "tool-shell",
         "tool-todo",
         "tool-web",
@@ -713,6 +717,9 @@ pub(crate) fn dump_factories() -> PluginFactories {
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
         jobs: Arc::new(uva::tool_job::JobRegistry::new()),
         sessions: Arc::new(std::sync::OnceLock::new()),
+        lsp_servers: Arc::new(crate::session::lsp::DeploymentLspServers::new(
+            Vec::new(),
+        )),
     }))
 }
 
@@ -740,7 +747,7 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 11] = [
+    const SPECS: [(&str, Make); 12] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
@@ -749,6 +756,7 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
         ("tool-glob", glob_tool_plugin),
         ("tool-goal", goal_tool_plugin),
         ("tool-grep", grep_tool_plugin),
+        ("tool-lsp", lsp_tool_plugin),
         ("tool-shell", shell_tool_plugin),
         ("tool-task", task_tool_plugin),
         ("hooks", hooks_plugin),
@@ -967,6 +975,16 @@ fn read_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
         &services.file_system,
     )
         as Arc<dyn uva::tool_files::FileSystemOwner>))
+}
+
+fn lsp_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The language servers the deployment configured, and the owner of
+    // the files the tool reads ✓.
+    Arc::new(uva::tool_lsp::LspToolPlugin::with_owner(
+        Arc::clone(&services.lsp_servers),
+        Arc::clone(&services.file_system)
+            as Arc<dyn uva::tool_files::FileSystemOwner>,
+    ))
 }
 
 fn goal_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {

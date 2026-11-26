@@ -233,10 +233,20 @@ impl StioPump {
                     if output.write_all(&frame).await.is_err() {
                         return;
                     }
+                    // The peer is waiting for this frame: a buffered
+                    // stdout holds it until something else flushes
+                    // the writer, and nothing else does — the writer
+                    // owns stdout, so the flush belongs here.
+                    if output.flush().await.is_err() {
+                        return;
+                    }
                     continue;
                 }
                 if let Some(block) = queue_for_writer.take_spool_block() {
                     if output.write_all(&block).await.is_err() {
+                        return;
+                    }
+                    if output.flush().await.is_err() {
                         return;
                     }
                     continue;

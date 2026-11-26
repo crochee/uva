@@ -1939,6 +1939,7 @@ impl App {
             | RowTag::ParkedPrompt
             | RowTag::ParkConsumed
             | RowTag::Feedback
+            | RowTag::Goal
             | RowTag::Plugin => {}
         }
     }

@@ -211,8 +211,7 @@ mod tests {
     /// reads.
     #[tokio::test]
     async fn the_tool_writes_the_row_the_log_holds() {
-        use uva::tool::Tool;
-        use uva::tool_goal::GoalTool;
+        use uva::{tool::Tool, tool_goal::GoalTool};
 
         let temp = tempfile::tempdir().expect("a temp workspace");
         let sessions =

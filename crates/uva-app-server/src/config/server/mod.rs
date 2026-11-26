@@ -133,6 +133,53 @@ pub struct ServerConfig {
     /// waits for a human).
     #[serde(default)]
     pub approval: ApprovalConfig,
+    /// `[lsp]` — the deployment's language servers.
+    ///
+    /// The `tool-lsp` row publishes them, so the `lsp` tool can ask
+    /// the server that speaks a language what the compiler says about
+    /// a file. A deployment with no section has no servers, and the
+    /// tool says so by name.
+    #[serde(default)]
+    pub lsp: LspConfig,
+}
+
+/// `[lsp]` — the language servers the deployment knows.
+///
+/// One server per language: the `lsp` tool asks for the server a
+/// language names, so two servers for one language would be a
+/// configuration the tool cannot choose between ✓.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LspConfig {
+    /// The servers, one per language ✓.
+    #[serde(default)]
+    pub servers: Vec<LspServerConfig>,
+}
+
+impl LspConfig {
+    /// The servers this configuration describes ✓.
+    #[must_use]
+    pub fn servers(&self) -> Vec<uva::tool_lsp::LspServer> {
+        self.servers
+            .iter()
+            .map(|server| uva::tool_lsp::LspServer {
+                language: server.language.clone(),
+                command: server.command.clone(),
+                args: server.args.clone(),
+            })
+            .collect()
+    }
+}
+
+/// One language server the deployment starts ✓.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct LspServerConfig {
+    /// The language this server serves (`"rust"`, `"typescript"`, …) ✓.
+    pub language: String,
+    /// The command that starts the server ✓.
+    pub command: String,
+    /// The arguments the command takes ✓.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// `[approval]` — which tool calls are held, and for how long.
@@ -351,6 +398,7 @@ impl Default for ServerConfig {
             cluster: ClusterConfig::default(),
             scheduler: SchedulerConfig::default(),
             approval: ApprovalConfig::default(),
+            lsp: LspConfig::default(),
         }
     }
 }

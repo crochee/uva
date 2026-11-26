@@ -50,6 +50,12 @@ name = "tool-grep"
 
 [[core.entries]]
 disabled = false
+id = "tool-lsp"
+inject = ["tools"]
+name = "tool-lsp"
+
+[[core.entries]]
+disabled = false
 id = "tool-shell"
 inject = ["tools"]
 name = "tool-shell"

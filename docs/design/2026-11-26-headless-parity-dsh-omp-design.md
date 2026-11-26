@@ -70,7 +70,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12）**：协议没有「宿主自带工具」的原语，那一半如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
-| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑）；**如实缺席**：`lsp`、`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑） |
+| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
@@ -92,9 +92,10 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G10 | ~~无分块帧 / 协议协商 / 背压落盘~~ **已落（切 10）**：背压落盘 + 64 MiB 逻辑上限（omp v2 同值）；分块帧与协议协商对 Content-Length 传输**不适用**（逐条理由见切 10） | — | 同左 |
 | G12 | ~~无客户端侧 fs/terminal 委派~~ **已落**（切 5 的 fs 半边 + 切 11 的 terminal 半边）：`fs/*` 与 `terminal/*` 两套委派都走同一条「客户端拥有」的路 | — | 同左 |
 | G14 | ~~没有后台作业~~ **已落（切 13 + 切 14）**：`job` 工具把命令放到后台（`start` / `output` / `list` / `kill`），**完成通知主动送达**（切 14：作业结束 → 会话收到通知） | — | 同左 |
-| G16 | **工具族少 `goal`（目标模式）**：两个参考都有（dsh `tool-goal`、omp goal mode）——一个模型创建的目标、生命周期、token 预算、宿主续跑 | 高 | `crates/uva-tool-plugins/src/` |
+| G16 | ~~工具族少 `goal`（目标模式）~~ **已落（切 16）**：目标是会话日志里的行（每变一次一行），生命周期 + token 预算 + 宿主续跑（预算撞线或续跑 25 回合 → 暂停目标） | — | `crates/uva-tool-plugins/src/goal/` |
+| G17 | ~~工具族少 `lsp`~~ **已落（切 17 + 切 18）**：诊断面（编译器的话）与查询面（dsh 的四个导航动作）都齐了；服务器由部署声明，能力缺一项就按能力名回绝 | — | `crates/uva-tool-plugins/src/lsp/` |
 | G15 | ~~工具族少 `glob` 与 `grep`~~ **已落（切 15）**：两个工具都走本仓自己的遍历（不依赖外部 ripgrep），答案有界且自报截断 | — | 同左 |
-| G13 | **工具族少一个 `edit`**：只有 `read` 与 `write`，改一行要重写整个文件——两个参考都有精确编辑（dsh `str_replace_editor`、omp `edit`） | 中 | `crates/uva-tool-plugins/src/` |
+| G13 | ~~工具族少一个 `edit`~~ **已落（切 12）**：逐字替换，旧文本必须原样出现，多处命中被拒并点名行号；编辑走 `read`/`write` 同一条缝 | — | `crates/uva-tool-plugins/src/edit/` |
 | G6 | ~~插件树没有审计报告面~~ **已落**（切 7）：`profile/audit` | — | `crates/uva-app-server/src/composition/kernel/mod.rs`（`RowAudit` / `plugin_tree_audit`） |
 
 ---
@@ -700,6 +701,90 @@ ripgrep，`packages/fs/tool-fs-search/src/glob.ts:93`）与 omp 内建的 `glob`
 
 ---
 
+### 切 17 — `lsp` 工具：编译器对这个文件说了什么（工具族的最后一格）
+
+**要什么**：两个参考都有语言服务器面。dsh 的 `tool-lsp`
+（`packages/lsp/tool-lsp/src/index.ts`）是四个**查询**动作
+（`goToDefinition` / `findReferences` / `goToImplementation` / `hover`），
+走 `ctx.lsp` 的会话级客户端，60 s 的工具超时。omp 的 `lsp`
+（`packages/coding-agent/src/lsp/`）大得多：诊断 + 定义 + 引用 + 工作区符号 +
+编辑 + 客户端管理 + 配置。
+
+**怎么落**：
+1. **诊断面先行**（切 17 之一）：模型最需要的那一格是「编译器说了什么」——
+   不然模型只能去 grep 错误文本。新 `lsp` 工具启动部署为该语言配置的服务器，
+   `initialize` → `initialized` → `textDocument/didOpen`，然后等服务器发布的
+   `textDocument/publishDiagnostics`，把诊断按 `path:line:col severity message`
+   的形状回给模型。
+2. **协议手写，不引依赖**（切 17 之二）：仓库里没有 LSP crate，而 LSP 的
+   `Content-Length` 定界与本仓自己的 RPC 定界是同一形状的不同协议——抄一份
+   40 行的定界器比拉一个新依赖便宜（本仓的依赖纪律见 `AGENTS.md` §1.4）。
+3. **服务器是部署的声明**（切 17 之三）：`[lsp]` 配置段（`[[lsp.servers]]`：
+   `language` / `command` / `args`），`tool-lsp` 行发布给工具；一种语言一个
+   服务器（两个服务器会让工具无从选择），没有对应服务器时工具按语言名回绝。
+4. **一次调用一个服务器**：工具拥有服务器的长度是一次调用——启动、问、停。
+   部署付的是「每次调用一个语言服务器」的价，不是「每个会话一个」。
+
+**如实缺席**：切 17 只落了诊断面——查询面（definition / references /
+implementation / hover）是切 18。
+
+**落点**：
+- `crates/uva-tool-plugins/src/lsp/`：`client.rs`（协议：握手、didOpen、诊断的
+  收集、停机）、`mod.rs`（`LspServer` / `LspServers` 缝 + `LspTool`）、
+  `plugin.rs`（内核插件）。
+- `crates/uva-app-server/src/config/server/mod.rs`：`[lsp]` 配置段。
+- `crates/uva-app-server/src/session/lsp.rs`：`DeploymentLspServers`（配置 → 值）。
+- `crates/uva-app-server/src/composition/kernel/mod.rs`：`tool-lsp` 行。
+
+**验收**：
+- 工具：8 条单测——服务器发布的诊断真的到达模型（`path:line:col` 的形状）、
+  没有服务器的语言按名字回绝、工具名、串行模式、URI 的百分号编码、severity
+  的名字。
+- 端到端：假语言服务器（脚本）→ 握手 → 诊断 → 模型的答案。
+
+---
+
+### 切 18 — `lsp` 的查询面：符号在哪里（G15 的第二格）
+
+**要什么**：dsh 的 `tool-lsp` 是四个**查询**动作
+（`goToDefinition` / `findReferences` / `goToImplementation` / `hover`，
+`packages/lsp/tool-lsp/src/index.ts`），走 `ctx.lsp` 的会话级客户端；
+omp 的 `lsp` 也有同一组（`packages/coding-agent/src/lsp/`）。模型的
+导航问题——「这个符号在哪定义」「谁用了它」「这个 trait 谁实现了」——
+文本搜索答不准，切 17 的诊断面也答不了。
+
+**怎么落**：
+1. **同一支客户端，多一种问法**（切 18 之一）：客户端在握手时记下服务器
+   宣告的 capabilities，切 17 的 `didOpen` 变成公共的一步（诊断与查询
+   都先打开文件——没见过文件的服务器指不出地方）。
+2. **能力先问，位置后传**（切 18 之二）：服务器没宣告
+   `definitionProvider` / `referencesProvider` /
+   `implementationProvider` / `hoverProvider` 时，工具**按能力名回绝**
+   （`the server does not advertise \`hoverProvider\``）——不说「没有结果」。
+   位置在工具的边界上是 1 行的行号与列号（模型读得懂的形状），上线时
+   变成协议的 0 基 UTF-16；服务器宣告的 positionEncoding 不是 `utf-16`
+   时握手失败（每个位置都会是错的）。
+3. **引用含声明**（切 18 之三）：`findReferences` 的请求带
+   `context.includeDeclaration = true`（dsh 的工具描述就是这么写的）✓。
+4. **三种地点形状都要读**（切 18 之四）：协议给的是 `Location`、
+   `Location[]` 或 `LocationLink[]`（后者带 `targetUri` 与
+   `targetSelectionRange`）——三种都要读成同一个「路径:行:列」的形状；
+   `hover` 的内容可能是字符串、`MarkupContent`、`MarkedString` 或它们的
+   数组。
+
+**落点**：
+- `crates/uva-tool-plugins/src/lsp/client.rs`：`Operation`（四个动作 ↔ 四个
+  方法 ↔ 四个能力）、`Location`、`QueryResult`、能力检查、位置编码协商、
+  三种地点形状与 hover 内容的归一化。
+- `crates/uva-tool-plugins/src/lsp/mod.rs`：工具的 `operation` / `line` /
+  `character` 参数、导航的调度与渲染（工作区相对路径）。
+
+**验收**：
+- 工具：12 条单测——诊断面仍然通、导航面答出「路径:行:列」、服务器没宣告
+  能力时按能力名回绝、缺光标时先拒绝（不读文件）、动作名与参考一致。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
 - **G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
@@ -714,12 +799,37 @@ ripgrep，`packages/fs/tool-fs-search/src/glob.ts:93`）与 omp 内建的 `glob`
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
   （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。
   G15 已落——切 15（`glob` + `grep`）。G16 已落——切 16（`goal` + 宿主续跑）。
-  工具族一行新加，剩余缺席如实记着：`lsp`、`checkpoint`/`rewind`、`ask`、
-  `ast_grep`/`ast_edit`。）
+  工具族一行新加，剩余缺席如实记着：`checkpoint`/`rewind`、`ask`、
+  `ast_grep`/`ast_edit`；`lsp` 已落切 17（诊断面）与切 18（查询面）。G17 已落
+  ——切 17 + 切 18。）
 
 ---
 
-## 7. 诚实声明
+## 7. 一条与参考无关、但更要命的缺陷
+
+这条缺陷不是对账的结果，是**验证**的结果：跑全量测试时，`acp_over_rpc`
+这个集成测试（ACP over core 的 stdio 通道）**挂在握手那一步**——它发的
+握手帧得不到回答。查下去是切 10（出站背压落盘）留下的伤：出站拆成
+「编码器 + 写入器」两个任务后，写入器只 `write_all` 而**没有 flush**，
+而 stdout 是**行缓冲**的——帧停在写入器的缓冲里，直到**下一帧**到来才
+被带出去。对端看到的因此是「上一帧 + 这一帧」，而不是「这一帧」。
+
+两个参考都没有这个形状可以抄：dsh 与 omp 的 stdio 通道各自有自己的
+写法 ✓。但这条缺陷的性质是**协议层**的——Content-Length 定界的传输上，
+「写完就要让对端看见」是契约的一部分 ✗ 而不是实现细节 ✓。
+
+修法两处 ✓：**写入器每写一帧就 flush** ✓（帧是小的 ✓），以及一条
+**钉子** ✓——测试用**带缓冲的**写入器和一根**不结束**的输入管道跑泵 ✓，
+没有 flush 时对端在超时里看不到那一帧 ✓ ✓（先红后绿 ✓）。
+
+教训也记在这里 ✓：原来的泵测试用的是 **duplex** ✓——一个**无缓冲**的
+写入端 ✗，所以**恰好**看不见这个缺陷 ✓ ✓。测试替身与真实替身不同的时候 ✗，
+缺陷就从缝里漏过去 ✓ —— 下一轮的测试替身若要代表 stdout ✗，必须**也
+缓冲** ✓ ✓。
+
+---
+
+## 8. 诚实声明
 
 - 本轮只做**无头面**的对账；前端三端（浏览器 / 终端 / 桌面壳）的界面能力不在账本里。
 - dsh 与 omp 的实现是**参考**，不是依赖：本仓不引入它们的代码，也不引入它们的

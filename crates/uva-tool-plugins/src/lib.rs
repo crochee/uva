@@ -14,6 +14,7 @@
 //! | `glob` | [`mod@glob`] | find the files that match a pattern |
 //! | `grep` | [`mod@grep`] | search the files' contents |
 //! | `goal` | [`mod@goal`] | keep a durable objective across turns |
+//! | `lsp` | [`mod@lsp`] | what the compiler says about a file |
 //! | `job` | [`mod@jobs`] | run a command in the background and come back to it |
 //! | `shell` | [`mod@shell`] | run a process, under the OS execution policy it owns |
 //! | `todo` | [`mod@todo`] | the `TodoWrite` task list |
@@ -56,6 +57,8 @@ pub use goal::{GoalSnapshot, GoalStore, GoalTool, GoalToolPlugin};
 pub use grep::{GREP_MAX_MATCHES, GrepTool, GrepToolPlugin};
 #[cfg(feature = "job")]
 pub use jobs::{JobRegistry, JobState, JobTool, JobToolPlugin};
+#[cfg(feature = "lsp")]
+pub use lsp::{LspServer, LspServers, LspTool, LspToolPlugin};
 #[cfg(feature = "memo")]
 pub use memo::{
     InMemoryMemoStore,
@@ -111,6 +114,8 @@ pub mod goal;
 pub mod grep;
 #[cfg(feature = "job")]
 pub mod jobs;
+#[cfg(feature = "lsp")]
+pub mod lsp;
 #[cfg(feature = "memo")]
 pub mod memo;
 /// The one way this crate spawns a process (unix only).

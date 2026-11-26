@@ -234,6 +234,9 @@ crates/uva-session/src/events/mod.rs|turn|a payload field name read by normalize
 crates/uva-session/src/events/vocab/mod.rs|*|the vocabulary module: RowTag::as_wire/from_wire and RowDialect spell every tag here on purpose
 crates/uva-session/src/content_blocks.rs|tool_result|a provider content-block kind, not a session row tag
 crates/uva-session/src/typed_event_builders.rs|*|the constructor module: every row payload key and every variant literal is written here on purpose
+crates/uva-tool-plugins/src/goal/mod.rs|goal|the goal tool name and output kind, not a session row tag
+crates/uva-tool-plugins/src/lib.rs|goal|the goal module name, not a session row tag
+crates/uva-tool-plugins/src/lsp/client.rs|warning|the LSP severity name, not a session row tag
 crates/uva-tool-task/src/control/artifacts.rs|warning|the fallback label of a warning notice, not a row tag
 crates/uva-tui/src/app.rs|warning|the fallback label of a warning notice, not a row tag
 uva-web/src/components/ui/visual-utils.ts|Agent|a UI persona label, not a session row dialect

@@ -254,21 +254,35 @@ async fn the_tool_list_orders_by_name_and_a_minus_prefix_turns_it() {
         }
     }
 
-    let up = list_tools(Arc::clone(&state), PageQuery::default())
-        .await
-        .expect("the default list");
-    let names: Vec<&str> = up.data.iter().map(|t| t.name.as_str()).collect();
-    let mut ascending = names.clone();
+    let up = all_tool_names(Arc::clone(&state), PageQuery::default()).await;
+    let mut ascending = up.clone();
     ascending.sort_unstable();
-    assert_eq!(names, ascending, "the default order is by name ascending");
+    assert_eq!(up, ascending, "the default order is by name ascending");
 
     let down =
-        list_tools(Arc::clone(&state), PageQuery::new().with_sort("-name"))
-            .await
-            .expect("the descending list");
+        all_tool_names(Arc::clone(&state), PageQuery::new().with_sort("-name"))
+            .await;
     ascending.reverse();
-    let got: Vec<&str> = down.data.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(got, ascending, "`-name` reverses the same order");
+    assert_eq!(down, ascending, "`-name` reverses the same order");
+}
+
+/// Every tool name the route hands out, page by page ✓.
+///
+/// The mounted set outgrew one page ✓, so a test that reads one page
+/// would read a prefix and call it the list ✓.
+async fn all_tool_names(state: Arc<AppState>, page: PageQuery) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut query = page;
+    loop {
+        let listed = list_tools(Arc::clone(&state), query.clone())
+            .await
+            .expect("the list");
+        names.extend(listed.data.iter().map(|tool| tool.name.clone()));
+        match listed.next_cursor {
+            Some(cursor) => query = query.with_cursor(cursor),
+            None => return names,
+        }
+    }
 }
 
 /// A sort the route does not declare is refused, and so is a value
@@ -308,7 +322,7 @@ async fn a_limit_bounds_the_page_and_offers_the_next_cursor() {
     let all = list_tools(Arc::clone(&state), PageQuery::default())
         .await
         .expect("the whole set");
-    let total = all.data.len();
+    let total = all.total.expect("the list carries its total") as usize;
     assert!(total >= 3, "the fixture lists its three tools");
 
     let first = list_tools(Arc::clone(&state), PageQuery::new().with_limit(1))

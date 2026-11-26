@@ -558,6 +558,8 @@ pub mod tool_goal;
 pub mod tool_grep;
 #[cfg(feature = "tool-job")]
 pub mod tool_job;
+#[cfg(feature = "tool-lsp")]
+pub mod tool_lsp;
 #[cfg(feature = "tool-memo")]
 pub mod tool_memo;
 #[cfg(feature = "tool-read")]

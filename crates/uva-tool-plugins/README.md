@@ -1,7 +1,8 @@
 # uva-tool-plugins
 
 The shipped **tool plugins**, one module and one feature per tool:
-`read`, `write`, `shell`, `todo`, `web`, `scheduler`, `search`, `memo`.
+`read`, `write`, `edit`, `glob`, `grep`, `goal`, `job`, `lsp`, `shell`,
+`todo`, `web`, `scheduler`, `search`, `memo`.
 (The `task` tool lives in its own crate, [`uva-tool-task`](../uva-tool-task).)
 
 The paradigm — the `Tool` trait, the registry, the exposure projection,
@@ -94,6 +95,38 @@ The `search` tool plugin: cross-domain search over a host-built
 deferred exposure. Cold start advertises only name + description; on
 first call the schema upgrades to the actual `query` / `limit` /
 `domain` shape.
+
+### `lsp`
+
+What the compiler says about a file, and where a symbol lives. The tool
+starts the deployment's language server for the file's language, opens
+the file, and answers with the diagnostics the server published — the
+errors and warnings a model would otherwise grep for.
+
+The same tool answers the four navigation operations the reference
+harnesses publish — `goToDefinition`, `findReferences`,
+`goToImplementation` and `hover`. The cursor crosses the tool's
+boundary as a 1-based line and column; the server says which places
+it pointed at. A server that does not advertise the provider is
+refused by name, so "no place" never hides "this server cannot
+answer".
+
+```rust
+use uva_tool_plugins::lsp::{LspServer, LspTool};
+
+// The deployment decides which servers exist.
+let tool = LspTool::new(std::sync::Arc::new(vec![LspServer {
+    language: "rust".to_string(),
+    command: "rust-analyzer".to_string(),
+    args: Vec::new(),
+}]));
+```
+
+One server per language: the tool asks for the server a language
+names, and a deployment with no server for that language gets a
+refusal that names it. The tool owns the server for the length of one
+call — it starts it, asks it, and stops it — so a deployment pays for
+one language server per call, not one per session.
 
 ### `memo`
 

@@ -209,10 +209,7 @@ async fn a_client_that_offers_the_terminal_owns_its_sessions_commands() {
         std::path::PathBuf::from("/tmp"),
     );
     let output = shell
-        .call(
-            serde_json::json!({ "command": "echo hi" }),
-            &context,
-        )
+        .call(serde_json::json!({ "command": "echo hi" }), &context)
         .await;
     let text = output
         .content

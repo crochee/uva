@@ -17,6 +17,7 @@ write = []
 edit = []
 glob = []
 goal = []
+lsp = []
 grep = ["dep:regex"]
 shell = ["dep:libc"]
 # The background runner enforces the shell crate's execution policy,
@@ -43,6 +44,7 @@ tokio = { workspace = true, features = [
   "macros",
   "process",
   "rt",
+  "sync",
   "time",
 ] }
 # --- per-tool, optional: a tool's dependency is opened by its feature ---

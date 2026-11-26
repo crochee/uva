@@ -111,6 +111,52 @@ async fn run_pump(input: Vec<u8>, options: StioOptions) -> Vec<Value> {
     frames
 }
 
+/// The peer sees the frame while the pump is still running.
+///
+/// The writer owns stdout, and stdout is line-buffered: a frame that
+/// waits for somebody else's flush never arrives — the peer waits
+/// for the next frame instead of this one. The input pipe stays open
+/// here, so the pump is still running when the frame must arrive.
+#[tokio::test]
+async fn a_buffered_peer_sees_the_frame_before_the_pump_ends() {
+    let (state, _dir) = test_state().await;
+    let (outbound_tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let outbound = Outbound::new(outbound_tx);
+    let pump = StioPump::with_options(
+        state,
+        Arc::new(router()),
+        receiver,
+        StioOptions::default(),
+    );
+    let (mut output, output_writer) = tokio::io::duplex(64 * 1024);
+    // A buffered writer: without the writer's own flush the bytes
+    // stay here and the peer sees nothing.
+    let buffered = tokio::io::BufWriter::new(output_writer);
+    // The input pipe stays open for the whole test, so the pump does
+    // not end — and end — flush what it owes the peer.
+    let (input_reader, input_writer) =
+        std::io::pipe().expect("the input pipe opens");
+    let input_reader = std::io::BufReader::new(input_reader);
+    let running = tokio::spawn(async move {
+        pump.run_with(move || input_reader, buffered, outbound)
+            .await
+    });
+
+    let frame = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_frame(&mut output, DEFAULT_MAX_FRAME_SIZE),
+    )
+    .await
+    .expect("the writer flushes the frame it owes the peer")
+    .expect("a frame");
+    let frame: Value =
+        serde_json::from_slice(&frame).expect("the frame is JSON");
+    assert_eq!(frame["method"], "ready");
+
+    drop(input_writer);
+    let _ = running.await;
+}
+
 #[tokio::test]
 async fn ready_is_first_and_a_notification_is_not_answered() {
     let mut input = notification("health/ping");

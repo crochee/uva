@@ -12,7 +12,7 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
-### Added (无头 harness 的业界对齐：dsh + omp 逆向后的三刀)
+### Added (无头 harness 的业界对齐：dsh + omp 逆向后的十七刀)
 
 逆向证据与完整缺口账本：[`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)。
 本轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面，
@@ -63,6 +63,22 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   符号链接目录不进、最多看 20000 个文件；答案有界（glob 100 条、grep 250 条、单行
   2000 字节）且**截断时自报**——截断过的搜索不能被当成完整的搜索。客户端拥有的
   工作区**如实拒绝**：ACP 的 `fs/*` 没有目录列举，遍历看不见客户端的文件。
+- **工具族有了 `lsp`**：模型最缺的那一格是「编译器对这个文件说了什么」——
+  不然它只能去 grep 错误文本。现在 `lsp` 工具启动部署为该语言配置的服务器，
+  `initialize` → `didOpen`，等服务器发布的诊断，按 `path:line:col severity
+  message` 的形状回给模型。服务器是**部署的声明**（`[lsp]` 配置段的
+  `[[lsp.servers]]`：语言 / 命令 / 参数），`tool-lsp` 行发布给工具：一种语言
+  一个服务器（两个服务器会让工具无从选择），没有对应服务器时工具按语言名回绝。
+  协议手写（LSP 的 `Content-Length` 定界与本仓 RPC 同形不同协议，抄 40 行比拉
+  新依赖便宜）。工具拥有服务器的长度是**一次调用**：启动、问、停——部署付的是
+  「每次调用一个语言服务器」的价，不是「每个会话一个」。**查询面也齐了**：
+  `goToDefinition` / `findReferences` / `goToImplementation` / `hover` 四个动作
+  （dsh 的同名动作）——服务器没宣告对应能力时工具**按能力名回绝**（不说「没有
+  结果」）；光标在工具的边界上是 1 基行列号，上线时变成协议的 0 基 UTF-16；
+  引用含声明。如实缺席：`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓
+  的 `edit` 工具是它的有界替身）；见
+  [`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)
+  的切 17。
 - **命令可以放到后台跑**（G14）：`shell` 在前台跑命令，600 s 上限即放弃——构建、
   测试、迁移都装不进这个窗口。现在 `job` 工具可以把命令放到后台：一次调用里的
   `start` 给你作业 id，之后 `output`（可以等）、`list`、`kill` 接着用。作业住在
@@ -154,6 +170,19 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   **模型失去那段推理，回合不失去**。判定是粗的（压缩点之前那些前缀未变的
   签名也一并作废）：作废一个有效签名只是少一点上下文，保留一个作废签名会
   赔上一整个回合。
+
+### Fixed (无头通道：出站帧不再卡在行缓冲里)
+
+- **stdio 的出站帧自己 flush**：切 10 把出站拆成「编码器 + 写入器」两个
+  任务时，写入器只 `write_all` 而**没有 flush**——而 stdout 是**行缓冲**
+  的，于是帧停在写入器的缓冲里，直到**下一帧**到来才被带出去。对端于是
+  看到的不是「这一帧」，而是「上一帧 + 这一帧」：一个只发一帧就等答案的
+  客户端会一直等下去。表现最明显的地方正是无头面本身：ACP over core 的
+  集成测试（`crates/uva-app-server/tests/acp_over_rpc.rs`）**挂在握手那一步**
+  ——它发的握手帧得不到回答，直到它再发一帧。
+  现在写入器每写一帧就 flush（帧是小的，一次系统调用换「对端立刻收到」
+  是划算的），并补了一条**钉子**：测试用一个**带缓冲的**写入器 + 一根**不
+  结束**的输入管道跑泵——没有 flush 时对端在超时里看不到那一帧 ✓。
 
 ### Changed (本轮的对账结论)
 
