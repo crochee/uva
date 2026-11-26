@@ -195,6 +195,40 @@ async fn a_client_that_offers_the_terminal_owns_its_sessions_commands() {
         ran.lock()
     );
 
+    // And the same path the model takes: the session's `shell` tool
+    // asks the client, because the client owns this session's
+    // terminal. The tool, the owner and the client are three hops —
+    // the deployment wires all three.
+    let shell = state
+        .tool_registry
+        .get("shell")
+        .expect("the deployment mounts the shell tool")
+        .tool_instance();
+    let context = uva::tool::Context::new(
+        session_id.clone(),
+        std::path::PathBuf::from("/tmp"),
+    );
+    let output = shell
+        .call(
+            serde_json::json!({ "command": "echo hi" }),
+            &context,
+        )
+        .await;
+    let text = output
+        .content
+        .iter()
+        .find_map(|part| part.text().map(str::to_string))
+        .unwrap_or_default();
+    assert!(
+        text.contains("the client's pane"),
+        "the model's answer is the client's own output: {text}"
+    );
+    assert!(
+        ran.lock().iter().any(|command| command == "sh"),
+        "the command reached the client through the tool: {:?}",
+        ran.lock()
+    );
+
     // The client goes home; the agent's connection ends with it.
     release.notify_one();
     let _ = client_task.await;

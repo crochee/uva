@@ -206,6 +206,63 @@ mod tests {
         assert!(budget_allows(&unbounded, u64::MAX));
     }
 
+    /// The goal tool and the store are one path: what the tool
+    /// writes is what the log holds, and what the continuation
+    /// reads.
+    #[tokio::test]
+    async fn the_tool_writes_the_row_the_log_holds() {
+        use uva::tool::Tool;
+        use uva::tool_goal::GoalTool;
+
+        let temp = tempfile::tempdir().expect("a temp workspace");
+        let sessions =
+            Arc::new(SessionRegistry::new(temp.path().join("sessions")));
+        sessions
+            .create_with_user("s1".to_string(), "alice".to_string())
+            .await
+            .expect("the session is created");
+        let store = SessionGoals::resolved(Arc::clone(&sessions));
+        let tool = GoalTool::new(Arc::new(SessionGoals::resolved(Arc::clone(
+            &sessions,
+        ))));
+        let context = uva::tool::Context::new(
+            "s1".to_string(),
+            std::path::PathBuf::from(temp.path()),
+        );
+
+        tool.call(
+            serde_json::json!({
+                "action": "create",
+                "objective": "ship the tool family",
+                "budget_tokens": 50_000,
+            }),
+            &context,
+        )
+        .await;
+
+        // The log holds the row, and the store reads it back.
+        let rows = sessions
+            .sink("alice", "s1")
+            .read()
+            .await
+            .expect("the log reads");
+        let goal_row = rows
+            .iter()
+            .find(|row| row["type"] == serde_json::json!("goal"))
+            .expect("the goal row is in the log");
+        assert_eq!(goal_row["state"], serde_json::json!("active"));
+        assert_eq!(
+            goal_row["objective"],
+            serde_json::json!("ship the tool family")
+        );
+        assert_eq!(goal_row["budget_tokens"], serde_json::json!(50_000));
+
+        let read = store.read("s1").await.expect("the goal is there");
+        assert_eq!(read.state, "active");
+        assert_eq!(read.objective, "ship the tool family");
+        assert_eq!(read.budget_tokens, Some(50_000));
+    }
+
     #[test]
     fn only_an_active_goal_continues() {
         let active = GoalSnapshot {
