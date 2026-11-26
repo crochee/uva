@@ -186,11 +186,12 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 23] = [
+    const ENTRIES: [&str; 24] = [
         "tool-registry",
         "tool-read",
         "tool-write",
         "tool-edit",
+        "tool-job",
         "tool-shell",
         "tool-todo",
         "tool-web",
@@ -723,11 +724,12 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 7] = [
+    const SPECS: [(&str, Make); 8] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-edit", edit_tool_plugin),
+        ("tool-job", job_tool_plugin),
         ("tool-shell", shell_tool_plugin),
         ("tool-task", task_tool_plugin),
         ("hooks", hooks_plugin),
@@ -946,6 +948,13 @@ fn read_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
         &services.file_system,
     )
         as Arc<dyn uva::tool_files::FileSystemOwner>))
+}
+
+fn job_tool_plugin(_services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The job tool owns its registry: the tool is a deployment-level
+    // singleton, so a job started in one call is still there in the
+    // next one.
+    Arc::new(uva::tool_job::JobToolPlugin::new())
 }
 
 fn edit_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {

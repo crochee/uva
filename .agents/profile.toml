@@ -26,6 +26,12 @@ name = "tool-edit"
 
 [[core.entries]]
 disabled = false
+id = "tool-job"
+inject = ["tools"]
+name = "tool-job"
+
+[[core.entries]]
+disabled = false
 id = "tool-shell"
 inject = ["tools"]
 name = "tool-shell"

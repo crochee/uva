@@ -120,6 +120,7 @@ required-features = [
   "tool-write",
   "tool-edit",
   "tool-shell",
+  "tool-job",
   "tool-todo",
   "session",
   "steering",
@@ -182,6 +183,7 @@ tool-files = ["dep:uva-tool-plugins"]
 tool-read = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/read"]
 tool-write = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/write"]
 tool-edit = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/edit"]
+tool-job = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/job"]
 tool-shell = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/shell"]
 tool-todo = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/todo"]
 # The one tool that talks to the network—the only one that pulls

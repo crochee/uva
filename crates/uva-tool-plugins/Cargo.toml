@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT OR Apache-2.0"
-description = "The shipped tool plugins: read, write, edit, shell, todo, web, scheduler, search and memo — one module and one feature per tool."
+description = "The shipped tool plugins: read, write, edit, shell, job, todo, web, scheduler, search and memo — one module and one feature per tool."
 homepage.workspace = true
 documentation.workspace = true
 
@@ -16,6 +16,9 @@ read = []
 write = []
 edit = []
 shell = ["dep:libc"]
+# The background runner enforces the shell crate's execution policy,
+# so the job feature brings the shell module with it.
+job = ["shell", "dep:libc", "dep:uva-core"]
 todo = []
 web = ["dep:reqwest", "dep:url", "dep:uva-core"]
 scheduler = ["dep:uva-scheduler", "dep:uva-core"]

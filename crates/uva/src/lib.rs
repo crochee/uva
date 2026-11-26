@@ -550,6 +550,8 @@ pub mod tool;
 pub mod tool_edit;
 #[cfg(feature = "tool-files")]
 pub mod tool_files;
+#[cfg(feature = "tool-job")]
+pub mod tool_job;
 #[cfg(feature = "tool-memo")]
 pub mod tool_memo;
 #[cfg(feature = "tool-read")]

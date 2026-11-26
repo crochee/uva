@@ -11,6 +11,7 @@
 //! | `read` | [`mod@read`] | read a workspace file, with an optional line range |
 //! | `write` | [`mod@write`] | write a workspace file |
 //! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
+//! | `job` | [`mod@jobs`] | run a command in the background and come back to it |
 //! | `shell` | [`mod@shell`] | run a process, under the OS execution policy it owns |
 //! | `todo` | [`mod@todo`] | the `TodoWrite` task list |
 //! | `web` | [`mod@web`] | fetch a URL — the only tool that pulls an HTTP client |
@@ -44,6 +45,8 @@
 #[cfg(feature = "edit")]
 pub use edit::{EditTool, EditToolPlugin};
 pub use files::{FileError, FileSystemOwner, LocalFileSystem};
+#[cfg(feature = "job")]
+pub use jobs::{JobRegistry, JobState, JobTool, JobToolPlugin};
 #[cfg(feature = "memo")]
 pub use memo::{
     InMemoryMemoStore,
@@ -91,8 +94,13 @@ pub use write::{WriteTool, WriteToolPlugin};
 pub mod edit;
 /// The file-system seam the `read` and `write` tools read through.
 pub mod files;
+#[cfg(feature = "job")]
+pub mod jobs;
 #[cfg(feature = "memo")]
 pub mod memo;
+/// The one way this crate spawns a process (unix only).
+#[cfg(unix)]
+pub(crate) mod process;
 #[cfg(feature = "read")]
 pub mod read;
 #[cfg(feature = "scheduler")]

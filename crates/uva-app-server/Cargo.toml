@@ -61,6 +61,7 @@ uva = { workspace = true, features = [
   "tool-read",
   "tool-write",
   "tool-edit",
+  "tool-job",
   "tool-shell",
   "tool-todo",
   "tool-web",

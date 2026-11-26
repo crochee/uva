@@ -49,20 +49,11 @@
 // are the unix-only spawn knobs this crate leans on (process-group
 // kill escalation + piped stdout/stderr). Gating the import keeps
 // the windows-gnu build warning-clean.
-#[cfg(unix)]
-use std::process::Stdio;
 use std::{pin::Pin, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-#[cfg(unix)]
-use exec::{finish_reader, spawn_reader};
 use schemars_derive::JsonSchema;
 use serde::Deserialize;
-// `process::Command` is the unix-only handle we wrap with
-// `process_group(0)` / `kill_on_drop(true)`. Non-unix builds get
-// the typed-refusal `execute` stub below.
-#[cfg(unix)]
-use tokio::process::Command;
 // POSIX-only: `signal_of` reads `ExitStatus::signal()`, which
 // lives on `std::os::unix`. The whole `ShellTool::call` path that
 // uses it (`execute`) is gated to `#[cfg(unix)]` below; the import
@@ -81,16 +72,22 @@ use uva_tool::{
     ToolOutputDefinition,
 };
 
+#[cfg(unix)]
+use crate::process::{
+    Spawned,
+    finish_reader,
+    prepare,
+    signal_group,
+    spawn,
+    spawn_reader,
+};
+
 pub mod sandbox;
 
 /// The shell crate's native kernel plugins: the `sandbox` service and
 /// the `shell` tool brick.
 pub mod plugin;
 
-/// The pipe readers: concurrent draining plus the optional progress
-/// stream. POSIX-only, like the execution path that uses it.
-#[cfg(unix)]
-mod exec;
 mod risk;
 /// The `stream` half of the `Tool` impl: `Progress` per pipe chunk,
 /// one terminal `Result`.
@@ -176,7 +173,7 @@ pub const MAX_TIMEOUT_SECS: u64 = 600;
 /// shell tool returns a typed refusal before this constant is
 /// ever consulted.
 #[cfg(unix)]
-const KILL_GRACE_SECS: u64 = 3;
+pub(crate) const KILL_GRACE_SECS: u64 = 3;
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellSafetyConfig {
@@ -373,19 +370,6 @@ impl ShellRun {
             ));
         }
         body
-    }
-}
-
-/// Signal an entire process group (`-pgid`), falling back to the
-/// direct child when the group is already gone. POSIX-only — Windows
-/// has no process group kill primitive; the timeout escalation on
-/// non-unix platforms uses `kill_on_drop(true)` and waits for the
-/// child to exit instead.
-#[cfg(unix)]
-fn signal_group(pgid: i32, sig: i32) {
-    if pgid > 0 && unsafe { libc::kill(-pgid, sig) } == -1 {
-        // Group already reaped: best-effort direct signal.
-        let _ = unsafe { libc::kill(pgid, sig) };
     }
 }
 
@@ -621,38 +605,26 @@ async fn execute(
     progress: Option<ProgressSink>,
 ) -> Result<ShellRun, String> {
     let argv = confined.argv_for(command);
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    // Run inside the workspace (dsh session-cwd semantics); the
-    // agent loop feeds `workspace_root` on every dispatch.
-    if !context.workspace_root.as_os_str().is_empty() {
-        cmd.current_dir(&context.workspace_root);
-    }
-    // Interactive/paged output is noise for a model: suppress
-    // colour, prompts, and pagers.
-    cmd.env("NO_COLOR", "1")
-        .env("TERM", "dumb")
-        .env("PAGER", "cat")
-        .env("GIT_PAGER", "cat");
-    // Own process group → the whole spawned tree is addressable
-    // as `-pgid` when the timeout fires.
-    cmd.process_group(0);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn shell: {e}"))?;
-    let pgid = child.id().unwrap_or(0) as i32;
+    let cmd = prepare(&argv, &context.workspace_root);
+    let Spawned { mut child, pgid } =
+        spawn(cmd).map_err(|e| format!("Failed to spawn shell: {e}"))?;
 
     let (stdout_buf, stdout_task) = spawn_reader(
         child.stdout.take().expect("piped stdout"),
-        progress.clone(),
+        progress.clone().map(|sink| {
+            Box::new(move |text: String| {
+                let _ = sink.unbounded_send(ToolOutput::text(text));
+            }) as Box<dyn Fn(String) + Send + Sync>
+        }),
     );
-    let (stderr_buf, stderr_task) =
-        spawn_reader(child.stderr.take().expect("piped stderr"), progress);
+    let (stderr_buf, stderr_task) = spawn_reader(
+        child.stderr.take().expect("piped stderr"),
+        progress.map(|sink| {
+            Box::new(move |text: String| {
+                let _ = sink.unbounded_send(ToolOutput::text(text));
+            }) as Box<dyn Fn(String) + Send + Sync>
+        }),
+    );
 
     // First cause wins: natural exit vs. deadline.
     let timed_out;
