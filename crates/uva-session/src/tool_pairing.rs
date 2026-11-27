@@ -394,6 +394,7 @@ mod tests {
             is_error: false,
             tool_call_id: Some(call_id.to_string()),
             changed: None,
+            checkpoint: None,
             surface_op: Some(SurfaceOp::append()),
         }
     }

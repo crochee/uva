@@ -163,6 +163,10 @@ pub use jsonl::{
     is_metadata_header_row,
 };
 pub use log::{RepairReport, SessionLog};
+
+/// The source a rewind's row carries: the marker that closes the
+/// active checkpoint.
+pub const REWIND_SOURCE: &str = "rewind";
 pub use log_surface::{
     MappingGap,
     ResolvedReplace,

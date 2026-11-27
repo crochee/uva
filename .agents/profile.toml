@@ -14,6 +14,12 @@ name = "tool-ask"
 
 [[core.entries]]
 disabled = false
+id = "tool-checkpoint"
+inject = ["tools"]
+name = "tool-checkpoint"
+
+[[core.entries]]
+disabled = false
 id = "tool-read"
 inject = ["tools"]
 name = "tool-read"

@@ -294,6 +294,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -531,6 +538,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -768,6 +782,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1005,6 +1026,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1242,6 +1270,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1479,6 +1514,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1716,6 +1758,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1953,6 +2002,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2190,6 +2246,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2427,6 +2490,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2664,6 +2734,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2901,6 +2978,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3138,6 +3222,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3375,6 +3466,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3612,6 +3710,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3849,6 +3954,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4086,6 +4198,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4323,6 +4442,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4560,6 +4686,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4797,6 +4930,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5034,6 +5174,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5271,6 +5418,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5508,6 +5662,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5745,6 +5906,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5982,6 +6150,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6219,6 +6394,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6456,6 +6638,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6693,6 +6882,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6930,6 +7126,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7167,6 +7370,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7404,6 +7614,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7641,6 +7858,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7878,6 +8102,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -8115,6 +8346,13 @@ export type SessionTurn =
        * touched, when the live diff is long gone.
        */
       changed?: string[] | null;
+      /**
+       * The checkpoint a `tool_result` row's call marked.
+       *
+       * The boundary a later `rewind` cut back to: the log answers
+       * "what was the active checkpoint" on its own.
+       */
+      checkpoint?: string | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —

@@ -326,6 +326,14 @@ pub enum SessionEvent {
         /// and the protocol's diff block carry.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         changed: Option<Vec<String>>,
+        /// The checkpoint this call marked, if it marked one.
+        ///
+        /// A checkpoint is the boundary a later `rewind` cuts back to:
+        /// everything after it on the surface is replaced by the
+        /// rewind's report. The goal text rides the row so the log
+        /// answers "what was the active checkpoint" on its own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<String>,
         /// How this event joins the surface.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_op: Option<SurfaceOp>,

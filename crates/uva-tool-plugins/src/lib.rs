@@ -9,6 +9,7 @@
 //! | feature | module | what the tool does |
 //! |---|---|---|
 //! | `ask` | [`mod@ask`] | put questions to the operator, and return the answers |
+//! | `checkpoint` | [`mod@checkpoint`] | explore, then cut the conversation back, keeping the report |
 //! | `read` | [`mod@read`] | read a workspace file, with an optional line range |
 //! | `write` | [`mod@write`] | write a workspace file |
 //! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
@@ -63,6 +64,16 @@ pub use ask::{
     AskToolPlugin,
     NoOperator,
     QuestionOwner,
+};
+#[cfg(feature = "checkpoint")]
+pub use checkpoint::{
+    CHECKPOINT_NONE,
+    CheckpointTool,
+    CheckpointToolPlugin,
+    NoRewinds,
+    RewindError,
+    RewindStore,
+    RewindTool,
 };
 #[cfg(feature = "edit")]
 pub use edit::{EditTool, EditToolPlugin};
@@ -123,6 +134,8 @@ pub use write::{WriteTool, WriteToolPlugin};
 /// The `ask` tool: the model's questions to the operator.
 #[cfg(feature = "ask")]
 pub mod ask;
+#[cfg(feature = "checkpoint")]
+pub mod checkpoint;
 #[cfg(feature = "edit")]
 pub mod edit;
 /// The file-system seam the `read` and `write` tools read through.

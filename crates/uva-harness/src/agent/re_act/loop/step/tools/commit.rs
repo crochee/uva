@@ -86,6 +86,21 @@ async fn rewrite_output(
     replace_text_parts(&mut output.content, text);
 }
 
+/// The checkpoint a tool's output says it marked.
+///
+/// The `checkpoint` tool reports its mark the same way the file
+/// tools report their change: the row keeps the fact, so the log
+/// answers "what was the active checkpoint" on its own.
+fn checkpoint_goal(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    metadata
+        .get("checkpoint")?
+        .get("objective")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// The files a tool's output says it changed.
 ///
 /// The tool reports the change in its metadata (the same report the
@@ -183,6 +198,7 @@ pub(crate) async fn commit_tool_result(
             Some(call_id.clone()),
             is_error,
             changed_paths(&metadata),
+            checkpoint_goal(&metadata),
         ))
     });
     if tool_result_seq.is_some()

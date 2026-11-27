@@ -48,6 +48,7 @@ fn tool_row(seq: u64, call_id: &str, output: &str) -> Value {
         is_error: false,
         tool_call_id: Some(call_id.to_string()),
         changed: None,
+        checkpoint: None,
         surface_op: None,
     })
 }

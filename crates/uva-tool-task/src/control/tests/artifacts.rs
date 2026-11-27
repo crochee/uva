@@ -55,6 +55,7 @@ fn transcript() -> String {
             is_error: false,
             tool_call_id: Some("c1".to_string()),
             changed: None,
+            checkpoint: None,
             surface_op: None,
         })
         .expect("the result row serialises"),

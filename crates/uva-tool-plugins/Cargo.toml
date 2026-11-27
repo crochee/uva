@@ -15,6 +15,9 @@ default = []
 # The operator question: the tool holds a QuestionOwner seam the
 # host installs; the module needs nothing beyond the tool trait.
 ask = []
+# The explore-then-cut-back pair: the tools hold a RewindStore seam
+# the host installs; the module needs nothing beyond the tool trait.
+checkpoint = []
 # and the dependencies only that tool needs.
 read = []
 write = []

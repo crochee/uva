@@ -103,6 +103,7 @@ fn tool_result(seq: u64, ts: &str, call_id: &str) -> SessionEvent {
         is_error: false,
         tool_call_id: Some(call_id.to_string()),
         changed: None,
+        checkpoint: None,
         surface_op: None,
     }
 }
@@ -179,6 +180,7 @@ fn tool_result_message(seq: u64, ts: &str, call_id: &str) -> SessionEvent {
         is_error: false,
         tool_call_id: Some(call_id.to_string()),
         changed: None,
+        checkpoint: None,
         surface_op: None,
     }
 }

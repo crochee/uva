@@ -47,6 +47,7 @@ fn ev(tag: &str, seq: u64, data: Value, op: Option<SurfaceOp>) -> SessionEvent {
             is_error: false,
             tool_call_id: None,
             changed: None,
+            checkpoint: None,
             surface_op: op,
         },
         "compaction" => SessionEvent::Compaction {

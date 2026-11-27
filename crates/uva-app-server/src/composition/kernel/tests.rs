@@ -157,6 +157,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
     for expected in [
         "tool-registry",
         "tool-ask",
+        "tool-checkpoint",
         "tool-lsp",
         "model-adapter",
         "memory",
@@ -178,7 +179,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
             "the boot profile is missing `{expected}`: {ids:?}"
         );
     }
-    assert_eq!(ids.len(), 30, "no duplicate rows: {ids:?}");
+    assert_eq!(ids.len(), 31, "no duplicate rows: {ids:?}");
 }
 
 #[tokio::test]
@@ -258,7 +259,7 @@ async fn mounts_the_native_set_through_the_kernel() {
     ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
         .expect("hooks");
 
-    assert_eq!(handle.len(), 30);
+    assert_eq!(handle.len(), 31);
     assert!(handle.plugin_state("skills").is_some());
 }
 

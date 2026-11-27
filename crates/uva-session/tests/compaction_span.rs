@@ -124,6 +124,7 @@ fn tool_event(seq: u64, call_id: &str) -> SessionEvent {
         is_error: false,
         tool_call_id: Some(call_id.into()),
         changed: None,
+        checkpoint: None,
         surface_op: None,
     }
 }
@@ -408,6 +409,7 @@ fn steered_events() -> Vec<SessionEvent> {
         SessionEvent::ToolResult {
             seq: 4,
             changed: None,
+            checkpoint: None,
             ts: "2026-11-14T00:00:03Z".into(),
             data: serde_json::to_value(Message::tool(
                 Content::text("ok"),

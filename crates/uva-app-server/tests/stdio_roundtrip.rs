@@ -564,6 +564,90 @@ fn the_model_asks_the_operator_and_reads_the_answer() {
         "the operator's answer is the tool result: {events}"
     );
 }
+/// Explore, then cut back: the checkpoint pair over the real core.
+///
+/// Turn one marks the boundary, turn two rewinds with the report.
+/// The durable rows carry both halves — the mark on the checkpoint
+/// call's own row, the cut as one `user_message` row whose surface
+/// op **replaces** the exploration — and the fold a later run builds
+/// from those rows drops the exploration and keeps the report (the
+/// store's own test proves that fold; this proves the pair reaches
+/// it through the real deployment).
+#[test]
+fn a_checkpoint_and_rewind_mark_and_cut_the_log() {
+    let temp = workspace();
+    let mut core = Core::spawn(temp.path());
+    core.await_ready();
+    let created =
+        core.call("c1", "chat/session/create", json!({ "title": "explore" }));
+    let session_id = created["result"]["session_id"]
+        .as_str()
+        .expect("the session id")
+        .to_string();
+
+    // Turn one: mark the boundary.
+    let first = prompt_and_end(
+        &mut core,
+        &session_id,
+        "!tool checkpoint {\"goal\":\"try the redis lock\"}",
+    );
+    assert_eq!(first, json!("completed"));
+
+    // Turn two: cut back to it, keeping the report.
+    let second = prompt_and_end(
+        &mut core,
+        &session_id,
+        "!tool rewind {\"report\":\"The lock deadlocks; the mutex is enough.\"}",
+    );
+    assert_eq!(second, json!("completed"));
+
+    let events =
+        core.call("c4", "sessions/events", json!({ "id": session_id }));
+    let rows = serde_json::to_string(&events["result"]["typed"])
+        .expect("the durable rows serialise");
+    assert!(
+        rows.contains("\"checkpoint\":\"try the redis lock\""),
+        "the mark rides the checkpoint call's own row: {events}"
+    );
+    assert!(
+        rows.contains("The lock deadlocks"),
+        "the report is on the log: {events}"
+    );
+    // The cut: the rewind row carries a replace that shadows the
+    // exploration, and the source that closes the checkpoint.
+    let rewind = events["result"]["typed"]
+        .as_array()
+        .expect("the rows")
+        .iter()
+        .find(|row| row.get("source").and_then(Value::as_str) == Some("rewind"))
+        .cloned()
+        .unwrap_or_else(|| panic!("the rewind row is on the log: {events}"));
+    let op = rewind["surface_op"].to_string();
+    assert!(
+        op.contains("source_event_seqs"),
+        "the rewind replaces the span it shadows: {op}"
+    );
+}
+
+/// Send one prompt and return the turn's end reason.
+fn prompt_and_end(core: &mut Core, session_id: &str, text: &str) -> Value {
+    core.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "turn",
+        "method": "chat/message/stream",
+        "params": {"session_id": session_id, "text": text},
+    }));
+    loop {
+        let frame = core.recv();
+        if frame.get("method").and_then(Value::as_str)
+            == Some("chat/turn/event")
+            && frame["params"]["frame"]["kind"].as_str() == Some("end")
+        {
+            return frame["params"]["frame"]["reason"].clone();
+        }
+    }
+}
+
 /// The core's stdout carries the protocol and nothing else: a log
 /// line on stdout would reach the peer as a malformed frame.
 #[test]

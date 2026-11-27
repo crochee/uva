@@ -209,9 +209,10 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 30] = [
+    const ENTRIES: [&str; 31] = [
         "tool-registry",
         "tool-ask",
+        "tool-checkpoint",
         "tool-read",
         "tool-write",
         "tool-edit",
@@ -764,9 +765,10 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 14] = [
+    const SPECS: [(&str, Make); 15] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-ask", ask_tool_plugin),
+        ("tool-checkpoint", checkpoint_tool_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-edit", edit_tool_plugin),
@@ -1012,6 +1014,17 @@ fn web_search_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
     // provider is configured.
     Arc::new(uva::tool_web::WebSearchToolPlugin::with_provider(
         Arc::clone(&services.web_search),
+    ))
+}
+
+fn checkpoint_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The pair goes through the session's own log: the mark rides the
+    // checkpoint row, the cut is one replace row — the same fold the
+    // next run builds its transcript from decides both.
+    Arc::new(uva::tool_checkpoint::CheckpointToolPlugin::with_store(
+        Arc::new(crate::session::rewinds::SessionRewinds::new(Arc::clone(
+            &services.sessions,
+        ))),
     ))
 }
 

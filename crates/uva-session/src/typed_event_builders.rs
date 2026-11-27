@@ -570,6 +570,7 @@ pub fn tool_result(
     tool_call_id: Option<String>,
     is_error: bool,
     changed: Option<Vec<String>>,
+    checkpoint: Option<String>,
 ) -> SessionEvent {
     SessionEvent::ToolResult {
         seq: 0,
@@ -578,6 +579,7 @@ pub fn tool_result(
         is_error,
         tool_call_id,
         changed,
+        checkpoint,
         surface_op: None,
     }
 }
@@ -618,6 +620,7 @@ pub(crate) fn tool_result_interrupted(
         is_error: true,
         tool_call_id: Some(call_id.to_string()),
         changed: None,
+        checkpoint: None,
         surface_op: Some(SurfaceOp::append()),
     }
 }
@@ -640,7 +643,7 @@ pub fn message_row(
         }
         uva_provider::Role::Assistant => assistant_message(data),
         uva_provider::Role::Tool => {
-            tool_result(data, message.tool_call_id.clone(), false, None)
+            tool_result(data, message.tool_call_id.clone(), false, None, None)
         }
     })
 }
@@ -666,6 +669,24 @@ pub fn turn_prompt_row(
 }
 
 #[must_use]
+/// Build the `user_message` row a **rewind** writes: the report that
+/// replaces the exploration, over the span its `op` shadows.
+///
+/// The row is the rewind's durable half: `source` names it (the
+/// marker that closes the active checkpoint), and the replace is the
+/// cut. The shape is the same one a rerun's turn prompt uses — only
+/// the source says which kind it is.
+pub fn rewind_row(data: Value, op: SurfaceOp) -> SessionEvent {
+    SessionEvent::UserMessage {
+        seq: 0,
+        ts: String::new(),
+        data,
+        source: Some(super::REWIND_SOURCE.to_string()),
+        surface_op: Some(op),
+        attachments: Vec::new(),
+    }
+}
+
 /// Build a `HookBlock` row — the veto's durable half: which hook,
 /// gate or guard refused the call, why, and the call it refused.
 pub fn hook_block(
@@ -1013,6 +1034,7 @@ pub(crate) fn projected_tool_result(
         is_error: false,
         tool_call_id: None,
         changed: None,
+        checkpoint: None,
         surface_op: Some(op),
     }
 }

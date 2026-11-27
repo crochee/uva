@@ -55,24 +55,27 @@ const SCRIPTED_CALL_ID: &str = "demo-call-1";
 
 /// The tool call one message scripts, when it scripts one.
 fn scripted_call(request: &CompletionRequest) -> Option<ToolUse> {
-    // The round after the tool answered: the call already happened.
+    // The directive is the newest user message that carries one.
+    let directive_at = request.messages.iter().rposition(|message| {
+        message.role == Role::User
+            && message.content.extract_text().is_some_and(|text| {
+                !text.contains("runtime-context snapshots")
+                    && text.trim().starts_with(TOOL_DIRECTIVE)
+            })
+    })?;
+    // The round after this directive's tool answered: the call
+    // already happened. A *later* directive still scripts its own
+    // call — one call per directive, not one per conversation (the
+    // checkpoint pair needs two turns to prove itself).
     if request
         .messages
         .iter()
+        .skip(directive_at)
         .any(|message| message.role == Role::Tool)
     {
         return None;
     }
-    let text = request
-        .messages
-        .iter()
-        .rev()
-        .filter(|message| message.role == Role::User)
-        .filter_map(|message| message.content.extract_text())
-        // The harness injects a "Current runtime context" snapshot as
-        // a user-role message each turn; the directive is the user's
-        // own words, not the snapshot's.
-        .find(|text| !text.contains("runtime-context snapshots"))?;
+    let text = request.messages[directive_at].content.extract_text()?;
     let rest = text.trim().strip_prefix(TOOL_DIRECTIVE)?;
     let (name, arguments) = rest.split_once(' ')?;
     let input =

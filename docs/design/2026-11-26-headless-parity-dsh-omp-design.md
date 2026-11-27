@@ -102,6 +102,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G18 | **工具批不守模型序**：按模式分桶（全部 Parallel 先跑，再全部 Sequential），模型说「先写后读」本仓先读。**已落（第二轮切 19）**：按模型序的波，排他调用是屏障 | 高 | 旧 `…/step/tools/mod.rs` 的 `bucket_by_execution_mode` + 两个桶 |
 | G19 | **并发安全只按工具名判**：dsh 的 `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)` 都按**调用**判，本仓 `shell` 永远串行、`ls` 也排队。**已落（第二轮切 20）**：`Tool::mode_for(input)`，shell 只读命令可并行 | 中 | 旧 `Tool::mode()` + `registry.execution_mode(name)` |
 | G20 | **无工具级超时**：stdio MCP 服务器不出声就把回合永远挂住（dsh 的 `timeout-policy` 给每个工具武装 `timeoutMs`，到期是结构化 `TOOL_TIMEOUT`）。**已落（第二轮切 21）**：结构化词汇 + 行内 code + stdio 传输的每请求预算 | 高 | `crates/uva-mcp/src/stdio.rs`（此前无截止时间） |
+| G28 | **探索失败后回不去**：长任务走错路，最便宜的恢复不是撤销文件，而是**把探索从对话里剪掉、留下教训**（omp 的 `checkpoint`/`rewind`）。**已落（第四轮切 31）**：`checkpoint` 标边界（记在自己那一行上），`rewind` 用一次 `Replace` 把边界之后的表面换成报告——**会话树不变**（不 fork），剪的是**对话**不是文件 | 中 | `crates/uva-tool-plugins/src/checkpoint/` |
 | G27 | **客户端不知道 agent 正在动哪个文件**：ACP 的 `ToolCall.locations`（「follow-along」）从不发送——编辑器看不见「正在编辑 foo.rs」。**已落（第四轮切 30）**：`Tool::locations` 在调用开始前答「会动哪个文件」，ACP 面发协议的 `locations` | 低 | `crates/uva-tool/src/traits.rs` |
 | G26 | **会话列表只是一串 id**：两个参考都给会话起名字（dsh 的耐久标题状态、omp 的小模型标题），本仓的 `sessions/list` 只有 id / 状态 / 时间——客户端分不清两个会话。**已落（第四轮切 29）**：标题**从日志派生**（第一条 user 消息的第一行），不调模型、不另存一份可能漂移的真相 | 中 | `crates/uva-app-server/src/routes/sessions/mod.rs` |
 | G25 | **durable 行不知道这次调用改了哪些文件**：改动只活在 live 帧与 ACP 的 diff 块里，客户端断开后再读日志，只剩工具的一句话摘要。**已落（第四轮切 28）**：`tool_result` 行增 `changed` 成员（harness 的提交路径从工具的报告里提出来），wire 信封与前端类型同步 | 中 | `crates/uva-session/src/events/mod.rs` |
@@ -1248,6 +1249,53 @@ real-time」。omp 的 ACP 面就发它（`acp-event-mapper.ts:225-228`，从调
 
 ---
 
+### 切 31 — checkpoint/rewind：探索，然后剪回去（第四轮切 8）
+
+**要什么**：omp 有一对工具（`packages/coding-agent/src/tools/checkpoint.ts`）：
+`checkpoint(goal)` 标一个边界，`rewind(report)` 把对话剪回那个边界、用报告替换
+探索——「这条路不对，把探索从上下文里剪掉，留下教训」。长任务（本仓的 goal 模式
+正是这种）走错路时，这是最便宜的恢复：**剪对话，不动文件**（探索写下的东西还在，
+报告里说要拿它怎么办）。dsh 没有对应物（它的 `tool-worktree` 是工作区隔离，
+`tool-session-control` 是跨会话消息——三件不同的事）。
+
+**怎么落**：
+
+1. **标记在自己的行上**：`checkpoint` 工具的结果行多一个 `checkpoint` 成员
+   （harness 的提交路径从工具的报告里提出来——与 `changed` 同一条漏斗）。
+   日志自己就能答「当前活跃的检查点是什么」；崩溃后也答得出。
+2. **剪是一次 Replace**：`rewind` 写一条 `user_message` 行，载荷是报告，
+   `surface_op` 是 `Replace`——**词汇不变**（重跑的回合早已用同一形状），
+   fold 在下一次读日志时把探索剪掉 ✓。`source: "rewind"` 是关掉检查点的标记。
+3. **剪在当前回合的 prompt 前停**：调用 `rewind` 的那个回合是平衡的（它的调用
+   结果正在写），剪掉它会留下没有调用的工具结果。omp 把兄弟调用重新挂回去；
+   本仓让剪的终点停在当前回合的 prompt 上——探索被剪，正在进行的回合完好。
+4. **没有 store 就失败关闭**：`RewindStore` 缝（与 `GoalStore` 同构）；随仓的
+   `NoRewinds` 让两个工具都明确拒绝——一个没人兑现的检查点比没有更糟。
+5. **效果落在下一次 run**：fold 在日志下次被读时应用 Replace——当前回合继续
+   用它正在推理的上下文。这正是这对工具自己的形状：模型把 `rewind` 当最后
+   一步调，下一个回合（用户的下一条消息、goal 的续跑）从
+   `[…前缀…, 报告]` 开始。
+
+**落点**：
+- `crates/uva-tool-plugins/src/checkpoint/{mod,plugin}.rs`：两个工具 + 一块砖。
+- `crates/uva-session/src/events/mod.rs`：`tool_result` 行的 `checkpoint` 成员。
+- `crates/uva-harness/src/agent/re_act/loop/step/tools/commit.rs`：提标记。
+- `crates/uva-app-server/src/session/rewinds.rs`：store（读标记、一次 fold 定
+  剪的坐标、写 Replace 行）。
+- `crates/uva-app-server/src/composition/kernel/mod.rs`：`tool-checkpoint` 行。
+
+**验收**：
+- 单元（checkpoint）：标记进 metadata（harness 会提进行）；已有活跃检查点时
+  拒绝并点名；空白 goal/report 在读任何东西之前拒绝；没有 store 时双双失败关闭。
+- 单元（store）：最新的标记决定检查点（checkpoint 行开、rewind 行关）；没有
+  检查点的 rewind 被拒；**剪之后真 fold 一遍**——前缀在、探索没了、报告顶上、
+  正在剪的回合完好。
+- 端到端（stdio）：两个回合（demo provider 现在按**指令**计一次调用，不再按
+  会话）——标记在 durable 行上，报告在日志上，rewind 行带 Replace 与
+  `source: "rewind"`。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
 - ~~**G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
@@ -1264,13 +1312,13 @@ real-time」。omp 的 ACP 面就发它（`acp-event-mapper.ts:225-228`，从调
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
   （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。
   G15 已落——切 15（`glob` + `grep`）。G16 已落——切 16（`goal` + 宿主续跑）。
-  工具族一行新加，剩余缺席如实记着：`checkpoint`/`rewind`、
-  `ast_grep`/`ast_edit`。G17 已落——切 17 + 切 18。客户端扩展工具已落
+  工具族一行新加，剩余缺席如实记着：`ast_grep`/`ast_edit`
+  （`checkpoint`/`rewind` 已落——切 31）。G17 已落——切 17 + 切 18。客户端扩展工具已落
   ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。
   G21 已落——切 24（`ask`）。G22 已落——切 25（文件改动的 diff）。
   G23 已落——切 26（`web_search`）。G24 已落——切 27（断尾截断）。
   G25 已落——切 28（durable 行的 changed）。G26 已落——切 29（会话的名字）。
-  G27 已落——切 30（ACP 的 locations）。）
+  G27 已落——切 30（ACP 的 locations）。G28 已落——切 31（checkpoint/rewind）。）
 
 ---
 

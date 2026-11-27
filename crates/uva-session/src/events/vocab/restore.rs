@@ -373,6 +373,7 @@ impl<'a> CurrentRow<'a> {
                 is_error: tool_result_failed(&message),
                 tool_call_id: message.tool_call_id.clone(),
                 changed: row_changed(self.raw),
+                checkpoint: row_checkpoint(self.raw),
                 surface_op: Some(op),
             }),
             _ => None,
@@ -574,6 +575,11 @@ fn row_ts(row: &Value) -> Option<&str> {
 }
 
 /// 这一行带的表面操作。
+/// 这一行带的「这次调用标记的检查点」。
+fn row_checkpoint(row: &Value) -> Option<String> {
+    row.get("checkpoint")?.as_str().map(str::to_string)
+}
+
 /// 这一行带的「这次调用改了哪些文件」。
 fn row_changed(row: &Value) -> Option<Vec<String>> {
     let paths = row.get("changed")?.as_array()?;

@@ -122,6 +122,12 @@ pub struct SessionTurnEnvelope {
     /// touched, when the live diff is long gone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed: Option<Vec<String>>,
+    /// The checkpoint a `tool_result` row's call marked.
+    ///
+    /// The boundary a later `rewind` cut back to: the log answers
+    /// "what was the active checkpoint" on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
     /// Re-readable refs to the attachments a row's turn carried — an
     /// array of `{kind, hash, name, mime_type, byte_len, unstored}`
     /// objects. The bytes never ride the log: a multimodal payload

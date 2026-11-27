@@ -12,14 +12,14 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
-### Added (无头 harness 的业界对齐：dsh + omp 逆向后的三十刀)
+### Added (无头 harness 的业界对齐：dsh + omp 逆向后的三十一刀)
 
 逆向证据与完整缺口账本：[`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)。
 第一轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面
 对账后落了十八刀；第二轮（工具批的执行模型）再落三刀；第三轮（客户端的
-扩展工具）又落两刀；第四轮（提问、改动、检索、断尾、耐久清单、会话的名字与正在动的文件）又落七刀：
+扩展工具）又落两刀；第四轮（提问、改动、检索、断尾、耐久清单、会话的名字、正在动的文件与剪回去）又落八刀：
 
-第四轮的七刀：
+第四轮的八刀：
 
 - **模型能把问题交给人**（G21，第四轮切 24）：两个参考都有「模型问人」的
   工具——dsh 的 `tool-ask-user`（`ask_user_question`）与 omp 的 `ask`。
@@ -41,6 +41,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   （每边 128 KiB）：装不下就标 `truncated` 且**不带文本**——半个 diff
   比没有 diff 更糟。durable 行**不带** diff：改动是活的事实，事后只读
   得到工具的摘要。
+- **探索失败后剪得回去**（G28，第四轮切 31）：omp 的 `checkpoint`/`rewind`——
+  长任务走错路时最便宜的恢复是**把探索从对话里剪掉、留下教训**，不是撤销文件。
+  `checkpoint(goal)` 标边界（标记记在它自己的结果行上，日志自己能答「当前活跃
+  的检查点」）；`rewind(report)` 写一条带 `Replace` 的 `user_message` 行，把边界
+  之后的表面换成报告——**词汇不变**（重跑的回合早已用同一形状），fold 在下一次
+  读日志时剪掉探索。剪的终点停在**当前回合的 prompt** 上（剪掉它会留下没有调用
+  的工具结果）；`source: "rewind"` 关掉检查点。没有 store 就失败关闭（一个没人
+  兑现的检查点比没有更糟）。demo provider 的 `!tool` 指令现在**按指令**计一次
+  调用（原来按会话计），一对工具能在两个回合里证明自己。
 - **客户端知道 agent 正在动哪个文件**（G27，第四轮切 30）：ACP 的
   `ToolCall.locations`（「follow-along」——跟踪 agent 正在处理哪些文件）本仓
   从不发送。现在 `Tool::locations(&input, &context)`（默认：无）让**工具自己**

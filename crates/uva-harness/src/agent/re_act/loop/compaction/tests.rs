@@ -369,6 +369,7 @@ async fn steered_writer() -> Arc<LogWriter> {
         SessionEvent::ToolResult {
             seq: 0,
             changed: None,
+            checkpoint: None,
             ts: String::new(),
             data: serde_json::to_value(Message::tool(
                 Content::text("ok"),

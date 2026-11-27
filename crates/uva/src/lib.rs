@@ -548,6 +548,8 @@ pub mod test_support;
 pub mod tool;
 #[cfg(feature = "tool-ask")]
 pub mod tool_ask;
+#[cfg(feature = "tool-checkpoint")]
+pub mod tool_checkpoint;
 #[cfg(feature = "tool-edit")]
 pub mod tool_edit;
 #[cfg(feature = "tool-files")]

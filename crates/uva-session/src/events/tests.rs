@@ -1198,6 +1198,7 @@ fn the_rows_the_vocabulary_writes() -> Vec<(&'static str, SessionEvent)> {
                 Some("call-1".to_string()),
                 true,
                 None,
+                None,
             ),
         ),
         (
