@@ -157,6 +157,9 @@ impl AppState {
             default_max_iterations: uva::harness::DEFAULT_MAX_ITERATIONS,
             cluster: Arc::new(crate::cluster::ClusterRuntime::local()),
             rpc: Arc::new(crate::rpc::RpcRuntime::detached()),
+            messages: Arc::new(
+                crate::session::messages::SessionMessages::new(),
+            ),
             mode: BootMode::Fixture,
         })
         .await
