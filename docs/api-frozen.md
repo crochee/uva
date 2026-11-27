@@ -41,7 +41,7 @@ The frozen surface is that set of names, per crate:
 | `uva-provider` | 93 |
 | `uva-session` | 156 |
 | `uva-steering` | 36 |
-| `uva-tool` | 48 |
+| `uva-tool` | 49 |
 
 The full lists are in [The frozen names](#the-frozen-names) below. Every
 entry is spelled exactly as you would write it after the crate name:
@@ -114,6 +114,14 @@ ships are recorded here, beside the promise they narrow:
   unchanged, and a client renders the report as the protocol's diff
   block. The report is capped; a change too big to carry is marked
   truncated, because a half-diff is worse than no diff.
+
+- **`Tool` grew a per-call location answer** (ACP follow-along,
+  fourth round cut 30). `Tool::locations(&input, &context)` is a
+  defaulted method (default: none), so every existing implementor
+  keeps compiling; `ToolLocation` joined the curated surface. The
+  tool answers where a call will work **before** it runs, and the
+  ACP projection publishes it as the protocol's `locations` member —
+  a client follows along while the call is in flight.
 
 - **The session's durable goal joined the curated surface** (the goal
   tool). `goal` joined the curated `uva-session` surface: the typed
@@ -608,7 +616,7 @@ transformers.
 `tool_fingerprint`
 
 
-### uva-tool — 48 names
+### uva-tool — 49 names
 
 The tool paradigm: registry, traits, annotations, restriction, surface
 projection.
@@ -620,7 +628,8 @@ projection.
 `RegistrationToken`, `RenderKind`, `Result`, `RetrieveFullOutputTool`, `Risk`
 `STRUCTURED_OUTPUT_TOOL_NAME`, `SanitizationPolicy`, `StreamOutput`, `SurfacePolicyError`, `Tool`
 `ToolAnnotations`, `ToolCategory`, `ToolDescriptor`, `ToolEntry`, `ToolExposure`
-`ToolFeatures`, `ToolMetadataSnapshot`, `ToolOutput`, `ToolOutputDefinition`, `ToolProvenance`
+`ToolFeatures`, `ToolLocation`, `ToolMetadataSnapshot`, `ToolOutput`, `ToolOutputDefinition`
+`ToolProvenance`
 `ToolRegistry`, `ToolRegistryPlugin`, `ToolRestriction`, `ToolSchemaBuilder`, `ToolSurfacePolicy`
 `TruncatedBy`, `Visibility`, `bound_output`, `called_tool_names`, `full_output_tool`
 `is_mcp_self_tool`, `project_tool_definitions`, `register_tool_entries`, `signal_of`

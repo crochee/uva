@@ -103,6 +103,40 @@ async fn an_exact_match_is_replaced_and_the_line_is_named() {
     );
 }
 
+#[test]
+fn the_call_names_the_file_it_will_touch() {
+    let (dir, context) = workspace("alpha\nbeta\ngamma\n");
+    let tool = EditTool::new();
+
+    let locations = tool.locations(
+        &json!({"file_path": "file.txt", "old_string": "beta", "new_string": "BETA"}),
+        &context,
+    );
+
+    assert_eq!(locations.len(), 1, "one file, one location");
+    assert_eq!(
+        locations[0].path,
+        dir.path().join("file.txt").to_str().unwrap(),
+        "the location is the file the call resolves to"
+    );
+}
+
+#[test]
+fn a_call_outside_the_workspace_names_nothing() {
+    let (_dir, context) = workspace("alpha\nbeta\ngamma\n");
+    let tool = EditTool::new();
+
+    let locations = tool.locations(
+        &json!({"file_path": "../../secrets", "old_string": "x", "new_string": "y"}),
+        &context,
+    );
+
+    assert!(
+        locations.is_empty(),
+        "a call the tool would refuse names no file: {locations:?}"
+    );
+}
+
 #[tokio::test]
 async fn the_change_is_reported_as_data() {
     let (dir, context) = workspace("alpha\nbeta\ngamma\n");

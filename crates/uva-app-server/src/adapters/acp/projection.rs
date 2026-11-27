@@ -55,10 +55,16 @@ use uva::{
 ///
 /// `message_id` names the message the chunk belongs to — the caller
 /// owns it, because only the caller knows where a message ends.
+/// `registry` answers where a tool call will work: a client that
+/// follows along ("the agent is editing foo.rs") is told the file
+/// when the call **starts**, and the tool is the one party that
+/// knows where its own arguments resolve.
 #[must_use]
 pub fn updates_for(
     event: &AgentEvent,
     message_id: Option<&str>,
+    registry: &uva::tool::ToolRegistry,
+    context: &uva::tool::Context,
 ) -> Vec<SessionUpdate> {
     match event {
         AgentEvent::Model(ContentPart::Text(text)) => {
@@ -74,7 +80,7 @@ pub fn updates_for(
             ))]
         }
         AgentEvent::Model(ContentPart::ToolUse(call)) => {
-            vec![tool_call_update_for(call)]
+            vec![tool_call_update_for(call, registry, context)]
         }
         AgentEvent::Model(ContentPart::ToolResult(result)) => {
             vec![tool_result_update(result)]
@@ -106,8 +112,45 @@ pub fn updates_for(
 /// The `tool_call` update one model tool use maps to.
 ///
 /// The call starts `pending`: it has not run yet — it is either
-/// waiting for the approval gate or for the tool itself.
-fn tool_call_update_for(call: &ToolUse) -> SessionUpdate {
+/// waiting for the approval gate or for the tool itself. It names
+/// the files it will touch when the tool can say so **before** it
+/// runs: a client follows along ("the agent is editing foo.rs")
+/// while the call is in flight.
+fn tool_call_update_for(
+    call: &ToolUse,
+    registry: &uva::tool::ToolRegistry,
+    context: &uva::tool::Context,
+) -> SessionUpdate {
+    let locations = registry
+        .locations_for(&call.name, &call.input, context)
+        .into_iter()
+        .map(|location| {
+            agent_client_protocol::v1::schema::ToolCallLocation::new(
+                std::path::PathBuf::from(&location.path),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut tool_call = ToolCall::new(
+        ToolCallId::new(call.id.clone()),
+        title_for(&call.name, &call.input),
+    )
+    .name(call.name.clone())
+    .kind(tool_kind(&call.name))
+    .status(ToolCallStatus::Pending)
+    .raw_input(call.input.clone());
+    if !locations.is_empty() {
+        tool_call = tool_call.locations(locations);
+    }
+    SessionUpdate::ToolCall(tool_call)
+}
+
+/// The `tool_call` update a **replayed** tool use maps to.
+///
+/// The replay reads the conversation, not the registry: a replayed
+/// call carries its identity and its arguments, and the files it
+/// touched are the log's to answer (the `changed` member), not the
+/// projection's to guess.
+fn replayed_tool_call_update_for(call: &ToolUse) -> SessionUpdate {
     SessionUpdate::ToolCall(
         ToolCall::new(
             ToolCallId::new(call.id.clone()),
@@ -337,7 +380,11 @@ pub fn replay_updates(messages: &[Message]) -> Vec<SessionUpdate> {
                     )));
                 }
                 (Role::Assistant, ContentPart::ToolUse(call)) => {
-                    updates.push(tool_call_update_for(call));
+                    // The replay has no registry to ask where the
+                    // call worked: a replayed call shows its identity,
+                    // and the files it touched live in the rows a
+                    // later read serves.
+                    updates.push(replayed_tool_call_update_for(call));
                 }
                 (Role::Tool, ContentPart::ToolResult(result)) => {
                     updates.push(tool_result_update(result));
@@ -381,6 +428,20 @@ mod tests {
 
     use super::*;
 
+    /// The empty registry: a projection test that does not name a
+    /// tool needs no tools in it.
+    fn registry() -> uva::tool::ToolRegistry {
+        uva::tool::ToolRegistry::new()
+    }
+
+    /// A context for the calls the projection asks about.
+    fn context() -> uva::tool::Context {
+        uva::tool::Context::new(
+            "s1".to_string(),
+            std::path::PathBuf::from("/tmp"),
+        )
+    }
+
     /// The wire shape of one update.
     fn wire_shape(update: &SessionUpdate) -> serde_json::Value {
         serde_json::to_value(update).expect("the update serialises")
@@ -394,7 +455,7 @@ mod tests {
             text: " world".to_string(),
             cache_control: None,
         }));
-        let updates = updates_for(&event, Some("m1"));
+        let updates = updates_for(&event, Some("m1"), &registry(), &context());
         assert_eq!(updates.len(), 1);
         assert_eq!(
             wire_shape(&updates[0]),
@@ -415,7 +476,7 @@ mod tests {
                 text: "thinking".to_string(),
                 signature: None,
             }));
-        let updates = updates_for(&event, Some("m1"));
+        let updates = updates_for(&event, Some("m1"), &registry(), &context());
         assert_eq!(updates.len(), 1);
         assert_eq!(
             wire_shape(&updates[0])["sessionUpdate"],
@@ -432,7 +493,7 @@ mod tests {
             name: "read".to_string(),
             input: json!({"path": "a.txt"}),
         }));
-        let updates = updates_for(&event, Some("m1"));
+        let updates = updates_for(&event, Some("m1"), &registry(), &context());
         assert_eq!(updates.len(), 1);
         let shape = wire_shape(&updates[0]);
         assert_eq!(shape["sessionUpdate"], "tool_call");
@@ -463,10 +524,69 @@ mod tests {
             metadata: Default::default(),
             truncated_by: None,
         }));
-        let updates = updates_for(&event, Some("m1"));
+        let updates = updates_for(&event, Some("m1"), &registry(), &context());
         let shape = wire_shape(&updates[0]);
         assert_eq!(shape["sessionUpdate"], "tool_call_update");
         assert_eq!(shape["status"], "failed");
+    }
+
+    /// A tool call names the files it will touch when the tool can
+    /// say so before it runs: a client follows along while the call
+    /// is in flight.
+    #[test]
+    fn a_tool_call_names_the_files_it_will_touch() {
+        /// A tool that declares where it works.
+        struct WorkingTool;
+
+        #[async_trait::async_trait]
+        impl uva::tool::Tool for WorkingTool {
+            fn name(&self) -> &str {
+                "edit"
+            }
+
+            fn description(&self) -> &str {
+                "changes a file"
+            }
+
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object"})
+            }
+
+            fn locations(
+                &self,
+                _input: &serde_json::Value,
+                _context: &uva::tool::Context,
+            ) -> Vec<uva::tool::ToolLocation> {
+                vec![uva::tool::ToolLocation {
+                    path: "/srv/app.rs".to_string(),
+                }]
+            }
+
+            async fn call(
+                &self,
+                _input: serde_json::Value,
+                _context: &uva::tool::Context,
+            ) -> uva::tool::ToolOutput {
+                uva::tool::ToolOutput::text("done")
+            }
+        }
+
+        let registry = uva::tool::ToolRegistry::new();
+        registry.register_entry(uva::tool::ToolEntry::new(
+            std::sync::Arc::new(WorkingTool),
+        ));
+        let event = AgentEvent::Model(ContentPart::ToolUse(ToolUse {
+            id: "c1".to_string(),
+            name: "edit".to_string(),
+            input: json!({"file_path": "app.rs"}),
+        }));
+        let updates = updates_for(&event, Some("m1"), &registry, &context());
+        let shape = wire_shape(&updates[0]);
+        assert_eq!(shape["sessionUpdate"], "tool_call");
+        assert_eq!(
+            shape["locations"][0]["path"], "/srv/app.rs",
+            "the call names where it will work: {shape}"
+        );
     }
 
     /// The change a file tool made rides the settled call as the
@@ -489,7 +609,7 @@ mod tests {
             metadata,
             truncated_by: None,
         }));
-        let updates = updates_for(&event, Some("m1"));
+        let updates = updates_for(&event, Some("m1"), &registry(), &context());
         let shape = wire_shape(&updates[0]);
         assert_eq!(shape["sessionUpdate"], "tool_call_update");
         let content = shape["content"].as_array().expect("the content blocks");
@@ -522,7 +642,7 @@ mod tests {
             metadata,
             truncated_by: None,
         }));
-        let updates = updates_for(&event, Some("m1"));
+        let updates = updates_for(&event, Some("m1"), &registry(), &context());
         let shape = wire_shape(&updates[0]);
         let content = shape["content"].as_array().expect("the content blocks");
         assert!(

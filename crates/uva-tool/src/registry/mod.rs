@@ -567,6 +567,26 @@ impl ToolRegistry {
             .map(entry_from_provider)
     }
 
+    /// The files a call to `name` touches.
+    ///
+    /// The tool answers for itself (it knows how it resolves its own
+    /// arguments); a name the registry does not have touches nothing.
+    #[must_use]
+    /// The files a call to `name` touches.
+    ///
+    /// The tool answers for itself (it knows how it resolves its own
+    /// arguments); a name the registry does not have touches nothing.
+    pub fn locations_for(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+        context: &crate::types::Context,
+    ) -> Vec<crate::types::ToolLocation> {
+        self.get(name)
+            .map(|entry| entry.tool.locations(input, context))
+            .unwrap_or_default()
+    }
+
     /// Apply `mutate` to the entry `name` resolves to. Returns
     /// whether the tool existed; bumps the version only when `mutate`
     /// reports a real change. One write-lock acquisition, no awaits,

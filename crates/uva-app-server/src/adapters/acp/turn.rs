@@ -176,9 +176,19 @@ pub async fn run(
                 if starts_a_message(&event) && message_id.is_none() {
                     message_id = Some(Uuid::new_v4().to_string());
                 }
-                for update in
-                    projection::updates_for(&event, message_id.as_deref())
-                {
+                // A call names the files it will touch when the tool
+                // can say so: the client follows along while the call
+                // is in flight.
+                let call_context = uva::tool::Context::new(
+                    user_id.clone(),
+                    state.workspace_root.clone(),
+                );
+                for update in projection::updates_for(
+                    &event,
+                    message_id.as_deref(),
+                    &state.tool_registry,
+                    &call_context,
+                ) {
                     if let Err(error) = cx.send_notification(
                         SessionNotification::new(session_id.clone(), update),
                     ) {

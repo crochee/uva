@@ -168,6 +168,28 @@ pub trait Tool: Send + Sync {
         self.mode()
     }
 
+    /// The files this call touches, if the tool knows them **before**
+    /// it runs.
+    ///
+    /// The default is "none": a tool that touches no file — or that
+    /// cannot say which without running — says nothing. A tool that
+    /// touches a file says so here, and the host publishes it: a
+    /// client can then *follow along* (the ACP `locations` member is
+    /// exactly this — "the files the agent is working with, in
+    /// real-time").
+    ///
+    /// The paths are absolute, and they are the paths the call will
+    /// really touch: a tool that resolves its own arguments (a
+    /// client's workspace, a session root) resolves them here too, so
+    /// the published path cannot drift from the written one.
+    fn locations(
+        &self,
+        _input: &serde_json::Value,
+        _context: &Context,
+    ) -> Vec<crate::types::ToolLocation> {
+        Vec::new()
+    }
+
     /// Advisory MCP-style hints carried on this tool's descriptor.
     /// Default: `None` (the tool did not declare any). Override to
     /// publish `readOnlyHint` / `destructiveHint` / `idempotentHint`

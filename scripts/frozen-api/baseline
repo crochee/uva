@@ -431,6 +431,7 @@ uva-tool::ToolDescriptor
 uva-tool::ToolEntry
 uva-tool::ToolExposure
 uva-tool::ToolFeatures
+uva-tool::ToolLocation
 uva-tool::ToolMetadataSnapshot
 uva-tool::ToolOutput
 uva-tool::ToolOutputDefinition

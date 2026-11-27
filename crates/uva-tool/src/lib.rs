@@ -204,4 +204,4 @@ pub use truncate::{
 // targets should use `ExitStatus::code()` instead.
 #[cfg(unix)]
 pub use types::signal_of;
-pub use types::{Context, Result, ToolOutput, TruncatedBy};
+pub use types::{Context, Result, ToolLocation, ToolOutput, TruncatedBy};

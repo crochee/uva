@@ -98,6 +98,17 @@ impl Context {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One file a tool call touches.
+///
+/// The path is **absolute**: the file may live on a client's own
+/// machine (the workspace the client owns), and only the tool knows
+/// where that is.
+pub struct ToolLocation {
+    /// The absolute path of the file.
+    pub path: String,
+}
+
 /// Reason a [`ToolOutput`] was truncated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

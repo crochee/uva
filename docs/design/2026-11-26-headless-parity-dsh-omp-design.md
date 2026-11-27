@@ -67,6 +67,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 委派控制面 | `interrupt()` 鉴权到祖先链（`packages/subagent/subagent/src/manager.ts:196-233`） | RPC：`get_subagents` / `cancel_subagent` / `steer_subagent`，子代理记录按字节增量读（`packages/coding-agent/src/modes/rpc/rpc-subagents.ts:74-107`） | 机器有（`crates/uva-tool-task/src/control/mod.rs:389` 的 `kill`、`registry`），**但没有无头门** | **缺口 G8（本轮切）** |
 | 控制面协议 | 自有 JSON-RPC stdio server（`packages/sdk/server/src/server.ts:609-667`） | 自有 JSONL：~90 条命令、协议协商、**分块帧**（`wire/commands.ts:35-454`、`rpc-frame.ts:6,9`） | JSON-RPC 2.0 + Content-Length 帧，64 MiB 逻辑上限，超限即错（`crates/uva-app-server/src/rpc/framing.rs:32`） | **对齐（切 10）**：逻辑上限同 omp v2；分块/协商对 Content-Length 不适用（见切 10）；出站背压落盘 |
 | 增量读 | — | `get_entries?since` + 分页游标（`docs/rpc.md`） | `sessions/events` **每次整本**返回（`crates/uva-app-server/src/routes/sessions/mod.rs:827-855`） | **缺口 G11（本轮切）** |
+| 客户端的「正在动哪个文件」 | — | 工具调用的 `locations`（`acp-event-mapper.ts:225-228,482-485`，从参数里抽路径） | **已落（切 30）**：`Tool::locations(&input, &context)`（默认无）——工具在**调用开始前**答自己会动哪个文件；ACP 面把它发成协议的 `locations` 成员（客户端的 follow-along） | 对齐（omp 从参数里抽路径，本仓让**工具自己答**——工具才知道自己怎么解析参数，发布的位置不可能漂移） |
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call`/`host_tool_result` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`、`rpc-types.ts:907-953`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；**客户端自有的工具已落地**（第三轮切 23：核心面 `tools/register owner=client` + `tools/execute` 问答回到客户端）；ACP 面没有 `set_host_tools` 原语，那一半如实缺席；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12 + 23）**：核心面有了原语，ACP 面如实缺席 |
 | 会话的名字 | 耐久标题状态（最新一次胜出，模型或 provider 生成，`packages/session/session-title`）+ 异步 provider（`session-title-llm`） | 用小模型生成标题（`packages/coding-agent/src/utils/title-generator.ts`） | **已落（切 29）**：标题**从日志派生**（第一条 user 消息的第一行，截到 80 字符），`sessions/list` 与 `sessions/get` 都带着它 | **有意不同**：不调模型、不另存一份可能漂移的真相（本轮范围明确排除提示词工程；dsh/omp 的标题是模型生成的摘要） |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
@@ -101,6 +102,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G18 | **工具批不守模型序**：按模式分桶（全部 Parallel 先跑，再全部 Sequential），模型说「先写后读」本仓先读。**已落（第二轮切 19）**：按模型序的波，排他调用是屏障 | 高 | 旧 `…/step/tools/mod.rs` 的 `bucket_by_execution_mode` + 两个桶 |
 | G19 | **并发安全只按工具名判**：dsh 的 `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)` 都按**调用**判，本仓 `shell` 永远串行、`ls` 也排队。**已落（第二轮切 20）**：`Tool::mode_for(input)`，shell 只读命令可并行 | 中 | 旧 `Tool::mode()` + `registry.execution_mode(name)` |
 | G20 | **无工具级超时**：stdio MCP 服务器不出声就把回合永远挂住（dsh 的 `timeout-policy` 给每个工具武装 `timeoutMs`，到期是结构化 `TOOL_TIMEOUT`）。**已落（第二轮切 21）**：结构化词汇 + 行内 code + stdio 传输的每请求预算 | 高 | `crates/uva-mcp/src/stdio.rs`（此前无截止时间） |
+| G27 | **客户端不知道 agent 正在动哪个文件**：ACP 的 `ToolCall.locations`（「follow-along」）从不发送——编辑器看不见「正在编辑 foo.rs」。**已落（第四轮切 30）**：`Tool::locations` 在调用开始前答「会动哪个文件」，ACP 面发协议的 `locations` | 低 | `crates/uva-tool/src/traits.rs` |
 | G26 | **会话列表只是一串 id**：两个参考都给会话起名字（dsh 的耐久标题状态、omp 的小模型标题），本仓的 `sessions/list` 只有 id / 状态 / 时间——客户端分不清两个会话。**已落（第四轮切 29）**：标题**从日志派生**（第一条 user 消息的第一行），不调模型、不另存一份可能漂移的真相 | 中 | `crates/uva-app-server/src/routes/sessions/mod.rs` |
 | G25 | **durable 行不知道这次调用改了哪些文件**：改动只活在 live 帧与 ACP 的 diff 块里，客户端断开后再读日志，只剩工具的一句话摘要。**已落（第四轮切 28）**：`tool_result` 行增 `changed` 成员（harness 的提交路径从工具的报告里提出来），wire 信封与前端类型同步 | 中 | `crates/uva-session/src/events/mod.rs` |
 | G24 | **半行让日志不可读**：日志末尾那半行（写到一半的行——读者撞上正在写的行，或崩溃撕开的行）让**整个读取失败**：客户端在 agent 正在写的时候读会话，会拿到一个错误；崩溃撕开的尾巴则让日志**永远读不了**（仓库此前只合成 closer，从不截断断尾）。**已落（第四轮切 27）**：读者只读**完整的行**（末尾那半行不是行），写者在第一次写之前**切掉**它（否则下一行会被粘上去） | 高 | `crates/uva-session/src/jsonl/mod.rs` |
@@ -1210,6 +1212,42 @@ oldText/newText」）。本仓此前**从不发这个变体**——编辑到了�
 
 ---
 
+### 切 30 — 客户端的「正在动哪个文件」（第四轮切 7）
+
+**要什么**：ACP 的 `ToolCall` 有一个 `locations` 成员——「clients implement
+'follow-along' features that track which files the agent is working with in
+real-time」。omp 的 ACP 面就发它（`acp-event-mapper.ts:225-228`，从调用的
+**参数**里抽路径：`path` / `oldPath` / `newPath`）。本仓从不发送——编辑器
+看不见「正在编辑 foo.rs」。
+
+**怎么落**：
+
+1. **工具自己答**：`Tool::locations(&input, &context)`（默认：无）。omp 从
+   参数里**抽**路径是猜——本仓的规则是「工具的边界随工具走」：工具才知道
+   自己怎么解析参数（客户端的工作区、会话的根），**发布的位置**与**真正
+   被碰的文件**出自同一个答案，不可能漂移。`read` / `write` / `edit` 三个
+   工具把「解析路径」提成自己的一个方法，`call` 与 `locations` 共用它。
+2. **在调用开始前答**：`locations` 在调用**前**答，ACP 面把它发在 `tool_call`
+   （起始帧）上——客户端在调用**进行中**就能跟着走。重放（`session/load`）
+   没有注册表可问，发的是不带 locations 的形状：重放的调用带身份，碰过的
+   文件是日志的事（`changed` 成员）。
+3. **注册表代问**：`ToolRegistry::locations_for(name, input, context)`——
+   未知名字答「无」（失败关闭）。
+
+**落点**：
+- `crates/uva-tool/src/{types,traits}.rs`：`ToolLocation` + `Tool::locations`。
+- `crates/uva-tool/src/registry/mod.rs`：`locations_for`。
+- `crates/uva-tool-plugins/src/{read,write,edit}/mod.rs`：三个工具实现它
+  （解析提成一个共享方法）。
+- `crates/uva-app-server/src/adapters/acp/projection.rs`：起始帧带 `locations`。
+
+**验收**：
+- 单元（edit）：调用答出它要碰的文件（解析后的绝对路径）；工作区外的调用
+  **不**答（工具会拒绝的调用不点任何文件）。
+- 单元（ACP 投影）：声明了位置的工具，起始帧带 `locations`（协议的形状）。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
 - ~~**G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
@@ -1231,7 +1269,8 @@ oldText/newText」）。本仓此前**从不发这个变体**——编辑到了�
   ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。
   G21 已落——切 24（`ask`）。G22 已落——切 25（文件改动的 diff）。
   G23 已落——切 26（`web_search`）。G24 已落——切 27（断尾截断）。
-  G25 已落——切 28（durable 行的 changed）。G26 已落——切 29（会话的名字）。）
+  G25 已落——切 28（durable 行的 changed）。G26 已落——切 29（会话的名字）。
+  G27 已落——切 30（ACP 的 locations）。）
 
 ---
 

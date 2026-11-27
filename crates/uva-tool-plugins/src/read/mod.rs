@@ -16,7 +16,7 @@
 //! let plugin = ReadToolPlugin::new();
 //! ```
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use schemars_derive::JsonSchema;
@@ -25,6 +25,7 @@ use uva_tool::{
     Context,
     Tool,
     ToolAnnotations,
+    ToolLocation,
     ToolOutput,
     workspace::{check_path_safety, resolve_path},
 };
@@ -97,6 +98,31 @@ impl ReadTool {
     }
 }
 
+impl ReadTool {
+    /// The file this call touches, resolved the way the call resolves
+    /// it.
+    ///
+    /// The owner decides where this session's files live (the
+    /// deployment's workspace, or the client's own directory when the
+    /// client owns it), and the path must stay inside that root.
+    /// The published location and the file the call touches come from
+    /// this one answer, so they cannot drift apart.
+    fn resolve(
+        &self,
+        file_path: &str,
+        context: &Context,
+    ) -> Result<PathBuf, String> {
+        let root = self
+            .owner
+            .session_root(&context.session_id)
+            .unwrap_or_else(|| context.workspace_root.clone());
+        match check_path_safety(&root, file_path) {
+            Some(error) => Err(error),
+            None => Ok(resolve_path(&root, file_path)),
+        }
+    }
+}
+
 #[async_trait]
 impl Tool for ReadTool {
     fn name(&self) -> &str {
@@ -142,6 +168,26 @@ impl Tool for ReadTool {
         })
     }
 
+    fn locations(
+        &self,
+        input: &serde_json::Value,
+        context: &Context,
+    ) -> Vec<ToolLocation> {
+        let Ok(request) = serde_json::from_value::<ReadRequest>(input.clone())
+        else {
+            return Vec::new();
+        };
+        // The file the call really touches: the resolution is the
+        // call's own, so the published location cannot drift from
+        // the file it reads or writes.
+        match self.resolve(&request.file_path, context) {
+            Ok(path) => vec![ToolLocation {
+                path: path.display().to_string(),
+            }],
+            Err(_) => Vec::new(),
+        }
+    }
+
     async fn call(
         &self,
         input: serde_json::Value,
@@ -156,17 +202,13 @@ impl Tool for ReadTool {
 
         // The owner decides where this session's files live: the
         // deployment's workspace, or the client's own directory when
-        // the client owns the workspace.
-        let workspace_root = self
-            .owner
-            .session_root(&context.session_id)
-            .unwrap_or_else(|| context.workspace_root.clone());
-        if let Some(err) =
-            check_path_safety(&workspace_root, &request.file_path)
-        {
-            return ToolOutput::error(err);
-        }
-        let resolved = resolve_path(&workspace_root, &request.file_path);
+        // the client owns the workspace — and the path must stay
+        // inside that root. The resolution is the tool's own, so the
+        // published location and the file the call touches agree.
+        let resolved = match self.resolve(&request.file_path, context) {
+            Ok(path) => path,
+            Err(error) => return ToolOutput::error(error),
+        };
 
         let offset = request.offset.map(|v| v as usize);
         let limit = request.limit.map(|v| v as usize);

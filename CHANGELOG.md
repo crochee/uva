@@ -12,14 +12,14 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
-### Added (无头 harness 的业界对齐：dsh + omp 逆向后的二十九刀)
+### Added (无头 harness 的业界对齐：dsh + omp 逆向后的三十刀)
 
 逆向证据与完整缺口账本：[`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)。
 第一轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面
 对账后落了十八刀；第二轮（工具批的执行模型）再落三刀；第三轮（客户端的
-扩展工具）又落两刀；第四轮（提问、改动、检索、断尾、耐久清单与会话的名字）又落六刀：
+扩展工具）又落两刀；第四轮（提问、改动、检索、断尾、耐久清单、会话的名字与正在动的文件）又落七刀：
 
-第四轮的六刀：
+第四轮的七刀：
 
 - **模型能把问题交给人**（G21，第四轮切 24）：两个参考都有「模型问人」的
   工具——dsh 的 `tool-ask-user`（`ask_user_question`）与 omp 的 `ask`。
@@ -41,6 +41,15 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
   （每边 128 KiB）：装不下就标 `truncated` 且**不带文本**——半个 diff
   比没有 diff 更糟。durable 行**不带** diff：改动是活的事实，事后只读
   得到工具的摘要。
+- **客户端知道 agent 正在动哪个文件**（G27，第四轮切 30）：ACP 的
+  `ToolCall.locations`（「follow-along」——跟踪 agent 正在处理哪些文件）本仓
+  从不发送。现在 `Tool::locations(&input, &context)`（默认：无）让**工具自己**
+  在调用开始前答「会动哪个文件」——omp 从参数里抽路径是猜，本仓的规则是
+  「工具的边界随工具走」：工具才知道自己怎么解析参数（客户端的工作区、
+  会话的根），**发布的位置**与**真正被碰的文件**出自同一个答案。
+  `read` / `write` / `edit` 把「解析路径」提成自己的一个方法，`call` 与
+  `locations` 共用它。重放没有注册表可问，发的是不带 locations 的形状：
+  重放的调用带身份，碰过的文件是日志的事（`changed` 成员）。
 - **会话列表给会话起名字**（G26，第四轮切 29）：dsh 有耐久的标题状态、omp 用
   小模型生成标题；本仓的 `sessions/list` 此前只有 id / 状态 / 时间——**一串 id
   不是索引**。现在标题**从日志派生**（第一条 user 消息的第一行，截到 80 字符，
