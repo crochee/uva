@@ -648,6 +648,58 @@ fn prompt_and_end(core: &mut Core, session_id: &str, text: &str) -> Value {
     }
 }
 
+/// One session's message reaches another.
+///
+/// The caller turns with the `session_send_message` tool; the target
+/// — idle, no run of its own — receives the message as its next turn,
+/// **attributed** (dsh's shape: "Session X sent a message: …"), so
+/// the recipient knows who was talking.
+#[test]
+fn one_session_can_message_another() {
+    let temp = workspace();
+    let mut core = Core::spawn(temp.path());
+    core.await_ready();
+    let sender = core.call(
+        "c1",
+        "chat/session/create",
+        json!({ "title": "the sender" }),
+    );
+    let sender_id = sender["result"]["session_id"]
+        .as_str()
+        .expect("the sender id")
+        .to_string();
+    let target = core.call(
+        "c2",
+        "chat/session/create",
+        json!({ "title": "the target" }),
+    );
+    let target_id = target["result"]["session_id"]
+        .as_str()
+        .expect("the target id")
+        .to_string();
+
+    let reason = prompt_and_end(
+        &mut core,
+        &sender_id,
+        &format!(
+            "!tool session_send_message {{\"session_id\":\"{target_id}\",\"message\":\"the plan changed\"}}"
+        ),
+    );
+    assert_eq!(reason, json!("completed"));
+
+    // The target's log holds the attributed message: an idle session
+    // queues it as its next turn.
+    let events = core.call("c3", "sessions/events", json!({ "id": target_id }));
+    let rows = serde_json::to_string(&events["result"]["typed"])
+        .expect("the target's rows serialise");
+    assert!(
+        rows.contains(&format!(
+            "Session {sender_id} sent a message: the plan changed"
+        )),
+        "the target received the attributed message: {events}"
+    );
+}
+
 /// The core's stdout carries the protocol and nothing else: a log
 /// line on stdout would reach the peer as a malformed frame.
 #[test]

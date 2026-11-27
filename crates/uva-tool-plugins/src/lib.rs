@@ -10,6 +10,7 @@
 //! |---|---|---|
 //! | `ask` | [`mod@ask`] | put questions to the operator, and return the answers |
 //! | `checkpoint` | [`mod@checkpoint`] | explore, then cut the conversation back, keeping the report |
+//! | `session-message` | [`mod@session_message`] | deliver a message to another session |
 //! | `read` | [`mod@read`] | read a workspace file, with an optional line range |
 //! | `write` | [`mod@write`] | write a workspace file |
 //! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
@@ -115,6 +116,14 @@ pub use search::{
     register_search_tool,
     search_tool_entry,
 };
+#[cfg(feature = "session-message")]
+pub use session_message::{
+    Delivery,
+    NoSessions,
+    SessionMessageTool,
+    SessionMessageToolPlugin,
+    SessionMessenger,
+};
 #[cfg(feature = "shell")]
 pub use shell::{
     DEFAULT_DENY_PATTERNS,
@@ -161,6 +170,8 @@ pub mod read;
 pub mod scheduler;
 #[cfg(feature = "search")]
 pub mod search;
+#[cfg(feature = "session-message")]
+pub mod session_message;
 #[cfg(feature = "shell")]
 pub mod shell;
 #[cfg(feature = "todo")]

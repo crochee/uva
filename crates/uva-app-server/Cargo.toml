@@ -60,6 +60,7 @@ uva = { workspace = true, features = [
   "tool-files",
   "tool-ask",
   "tool-checkpoint",
+  "tool-session-message",
   "tool-read",
   "tool-write",
   "tool-edit",

@@ -20,6 +20,12 @@ name = "tool-checkpoint"
 
 [[core.entries]]
 disabled = false
+id = "tool-session-message"
+inject = ["tools"]
+name = "tool-session-message"
+
+[[core.entries]]
+disabled = false
 id = "tool-read"
 inject = ["tools"]
 name = "tool-read"

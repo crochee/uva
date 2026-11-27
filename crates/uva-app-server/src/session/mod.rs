@@ -6,6 +6,7 @@ pub mod files;
 pub mod goals;
 pub mod lane;
 pub mod lsp;
+pub mod messages;
 pub mod questions;
 pub mod rewinds;
 pub mod session_index;

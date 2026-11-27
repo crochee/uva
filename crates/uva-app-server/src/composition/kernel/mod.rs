@@ -168,6 +168,10 @@ pub(crate) struct BootServices {
     /// The deployment's language servers ✓. The `tool-lsp` row files
     /// them, so the tool can ask the server that speaks a language ✓.
     pub lsp_servers: Arc<dyn uva::tool_lsp::LspServers>,
+    /// How one session's message reaches another: the
+    /// `tool-session-message` row files it, so the model can deliver
+    /// an attributed message to a session the user names.
+    pub messages: Arc<crate::session::messages::SessionMessages>,
     /// Where the `web_search` tool looks things up. The
     /// `tool-web-search` row files it, so the model can search the
     /// web when the deployment configured an endpoint.
@@ -209,10 +213,11 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 31] = [
+    const ENTRIES: [&str; 32] = [
         "tool-registry",
         "tool-ask",
         "tool-checkpoint",
+        "tool-session-message",
         "tool-read",
         "tool-write",
         "tool-edit",
@@ -738,6 +743,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
             Vec::new(),
         )),
         web_search: Arc::new(uva::tool_web::NoSearch),
+        messages: Arc::new(crate::session::messages::SessionMessages::new()),
     }))
 }
 
@@ -765,10 +771,11 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 15] = [
+    const SPECS: [(&str, Make); 16] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-ask", ask_tool_plugin),
         ("tool-checkpoint", checkpoint_tool_plugin),
+        ("tool-session-message", session_message_tool_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-edit", edit_tool_plugin),
@@ -1015,6 +1022,19 @@ fn web_search_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
     Arc::new(uva::tool_web::WebSearchToolPlugin::with_provider(
         Arc::clone(&services.web_search),
     ))
+}
+
+fn session_message_tool_plugin(
+    services: &BootServices,
+) -> Arc<dyn KernelPlugin> {
+    // The delivery rides the steer path the host already owns: a
+    // live run's inbox, or the target's next turn.
+    Arc::new(
+        uva::tool_session_message::SessionMessageToolPlugin::with_messenger(
+            Arc::clone(&services.messages)
+                as Arc<dyn uva::tool_session_message::SessionMessenger>,
+        ),
+    )
 }
 
 fn checkpoint_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {

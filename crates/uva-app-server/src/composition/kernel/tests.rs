@@ -98,6 +98,7 @@ fn services_over(
             Vec::new(),
         )),
         web_search: Arc::new(uva::tool_web::NoSearch),
+        messages: Arc::new(crate::session::messages::SessionMessages::new()),
     })
 }
 
@@ -158,6 +159,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
         "tool-registry",
         "tool-ask",
         "tool-checkpoint",
+        "tool-session-message",
         "tool-lsp",
         "model-adapter",
         "memory",
@@ -179,7 +181,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
             "the boot profile is missing `{expected}`: {ids:?}"
         );
     }
-    assert_eq!(ids.len(), 31, "no duplicate rows: {ids:?}");
+    assert_eq!(ids.len(), 32, "no duplicate rows: {ids:?}");
 }
 
 #[tokio::test]
@@ -259,7 +261,7 @@ async fn mounts_the_native_set_through_the_kernel() {
     ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
         .expect("hooks");
 
-    assert_eq!(handle.len(), 31);
+    assert_eq!(handle.len(), 32);
     assert!(handle.plugin_state("skills").is_some());
 }
 

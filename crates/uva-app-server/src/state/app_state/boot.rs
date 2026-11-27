@@ -145,6 +145,10 @@ pub(crate) struct BootInputs {
     pub(crate) cluster: Arc<crate::cluster::ClusterRuntime>,
     /// The RPC runtime: connected, or detached for a fixture.
     pub(crate) rpc: Arc<crate::rpc::RpcRuntime>,
+    /// The session messenger's slot: born before the mount (the
+    /// tools hold it), filled after the state exists (the messenger
+    /// closes over the state).
+    pub(crate) messages: Arc<crate::session::messages::SessionMessages>,
     /// Which lifecycle extras to install.
     pub(crate) mode: BootMode,
 }
@@ -339,6 +343,11 @@ impl AppState {
         // resolved; the lifecycle extras only a deployment installs
         // (configured MCP servers, the `[tools]` surface, the loop's
         // default member) ride on [`BootMode::Deployment`].
+        // The session messenger's slot: the tools are mounted before
+        // the state exists, and the messenger closes over the state —
+        // so the slot is born before either and filled after both.
+        let messages =
+            Arc::new(crate::session::messages::SessionMessages::new());
         let cluster_config = server_config
             .as_ref()
             .map(|c| c.cluster.clone())
@@ -369,10 +378,14 @@ impl AppState {
                 default_max_iterations,
                 cluster,
                 rpc: Arc::new(crate::rpc::RpcRuntime::new()),
+                messages: Arc::clone(&messages),
                 mode: BootMode::Deployment,
             })
             .await?,
         );
+        // The messenger closes over the state; the tools were mounted
+        // before it existed, so they hold the slot this fills.
+        messages.set(Arc::clone(&state));
         // The self-management MCP server needs the finished state
         // handle (its tools call back into it), so it registers
         // after construction—the shared registry makes the tools
@@ -512,6 +525,7 @@ impl AppState {
             sessions: Arc::clone(&sessions_slot),
             lsp_servers: Arc::clone(&lsp_servers),
             web_search: web_search_provider,
+            messages: Arc::clone(&input.messages),
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same

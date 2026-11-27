@@ -18,6 +18,9 @@ ask = []
 # The explore-then-cut-back pair: the tools hold a RewindStore seam
 # the host installs; the module needs nothing beyond the tool trait.
 checkpoint = []
+# Cross-session messaging: the tool holds a SessionMessenger seam the
+# host installs; the module needs nothing beyond the tool trait.
+session-message = []
 # and the dependencies only that tool needs.
 read = []
 write = []

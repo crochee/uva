@@ -118,6 +118,7 @@ required-features = [
   "tool",
   "tool-ask",
   "tool-checkpoint",
+  "tool-session-message",
   "tool-read",
   "tool-write",
   "tool-edit",
@@ -187,6 +188,11 @@ tool = ["dep:uva-tool", "core", "provider", "session"]
 # depend on them. All offline except `tool-web`.
 tool-files = ["dep:uva-tool-plugins"]
 tool-ask = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/ask"]
+tool-session-message = [
+  "tool",
+  "dep:uva-tool-plugins",
+  "uva-tool-plugins/session-message",
+]
 tool-checkpoint = [
   "tool",
   "dep:uva-tool-plugins",

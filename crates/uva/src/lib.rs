@@ -572,6 +572,8 @@ pub mod tool_read;
 pub mod tool_scheduler;
 #[cfg(feature = "tool-search")]
 pub mod tool_search;
+#[cfg(feature = "tool-session-message")]
+pub mod tool_session_message;
 #[cfg(feature = "tool-shell")]
 pub mod tool_shell;
 #[cfg(feature = "tool-task")]
