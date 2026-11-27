@@ -8,6 +8,12 @@ name = "tool-registry"
 
 [[core.entries]]
 disabled = false
+id = "tool-ask"
+inject = ["tools"]
+name = "tool-ask"
+
+[[core.entries]]
+disabled = false
 id = "tool-read"
 inject = ["tools"]
 name = "tool-read"

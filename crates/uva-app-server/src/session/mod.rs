@@ -6,6 +6,7 @@ pub mod files;
 pub mod goals;
 pub mod lane;
 pub mod lsp;
+pub mod questions;
 pub mod session_index;
 pub mod status;
 pub mod subagent_router;

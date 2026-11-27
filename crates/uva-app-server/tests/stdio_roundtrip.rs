@@ -485,6 +485,85 @@ fn a_client_owned_tool_executes_on_the_client() {
         "the client's answer is the tool result: {events}"
     );
 }
+/// The model asks the operator, and the operator answers.
+///
+/// The `ask` tool is the one tool whose answer comes from a human:
+/// the core asks its peer over the same JSON-RPC face the
+/// client-owned tools travel on (`questions/ask`), the peer answers
+/// with the answers, and the model reads them as the tool result.
+#[test]
+fn the_model_asks_the_operator_and_reads_the_answer() {
+    let temp = workspace();
+    let mut core = Core::spawn(temp.path());
+    core.await_ready();
+    let created =
+        core.call("c1", "chat/session/create", json!({ "title": "an ask" }));
+    let session_id = created["result"]["session_id"]
+        .as_str()
+        .expect("the session id")
+        .to_string();
+    core.send(&json!({
+        "jsonrpc": "2.0",
+        "id": "c2",
+        "method": "chat/message/stream",
+        "params": {
+            "session_id": session_id,
+            "text": "!tool ask {\"questions\":[{\"id\":\"db\",\"question\":\"Which database?\",\"options\":[{\"label\":\"Postgres\"},{\"label\":\"SQLite\"}]}]}",
+        },
+    }));
+    let mut asked = None;
+    let mut answer = None;
+    let end;
+    loop {
+        let frame = core.recv();
+        if frame.get("method").and_then(Value::as_str) == Some("questions/ask")
+        {
+            assert_eq!(
+                frame["params"]["session_id"], session_id,
+                "the question names the session it is about: {frame}"
+            );
+            assert_eq!(
+                frame["params"]["questions"][0]["id"], "db",
+                "the question carries the model's own words: {frame}"
+            );
+            asked = Some(frame["id"].clone());
+            core.send(&json!({
+                "jsonrpc": "2.0",
+                "id": frame["id"],
+                "result": {
+                    "answers": [{"id": "db", "selected": ["Postgres"]}],
+                },
+            }));
+            continue;
+        }
+        if frame.get("id") == Some(&json!("c2")) && answer.is_none() {
+            answer = Some(frame);
+            continue;
+        }
+        if frame.get("method").and_then(Value::as_str)
+            == Some("chat/turn/event")
+            && frame["params"]["frame"]["kind"].as_str() == Some("end")
+        {
+            end = frame;
+            break;
+        }
+    }
+    let answer = answer.expect("the stream answered");
+    assert!(answer["result"]["accepted"] == true, "{answer}");
+    assert!(asked.is_some(), "the core asked the operator");
+    assert_eq!(end["params"]["frame"]["reason"], json!("completed"));
+
+    // The durable rows carry the operator's answer as the tool
+    // result: the model saw what the human chose.
+    let events =
+        core.call("c3", "sessions/events", json!({ "id": session_id }));
+    let rows = serde_json::to_string(&events["result"]["typed"])
+        .expect("the durable rows serialise");
+    assert!(
+        rows.contains("Postgres"),
+        "the operator's answer is the tool result: {events}"
+    );
+}
 /// The core's stdout carries the protocol and nothing else: a log
 /// line on stdout would reach the peer as a malformed frame.
 #[test]

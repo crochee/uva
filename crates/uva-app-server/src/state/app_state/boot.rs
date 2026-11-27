@@ -452,6 +452,16 @@ impl AppState {
         // `shell` tool asks it before it spawns anything.
         let terminals =
             Arc::new(crate::session::terminals::SessionTerminals::new());
+        // The owner of every session's questions: the core's own
+        // JSON-RPC face by default, the client's own answerer when
+        // the client claims the session. The `ask` tool asks through
+        // it.
+        let questions =
+            Arc::new(crate::session::questions::SessionQuestions::new(
+                Arc::new(crate::session::questions::CoreQuestionOwner::new(
+                    Arc::clone(&input.rpc),
+                )),
+            ));
         // The deployment's background jobs: the `tool-job` row files
         // them, and a session's controller listens for the ones it
         // owns.
@@ -490,6 +500,7 @@ impl AppState {
             plugin_host: input.plugin_host.clone(),
             file_system: Arc::clone(&file_system),
             terminals: Arc::clone(&terminals),
+            questions: Arc::clone(&questions),
             jobs: Arc::clone(&jobs),
             sessions: Arc::clone(&sessions_slot),
             lsp_servers: Arc::clone(&lsp_servers),
@@ -752,6 +763,7 @@ impl AppState {
             tool_registry,
             file_system,
             terminals,
+            questions,
             jobs,
             agent_registry: input.agent_registry,
             session_search: input.session_search,

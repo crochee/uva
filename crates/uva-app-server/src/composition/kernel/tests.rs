@@ -87,6 +87,11 @@ fn services_over(
         plugin_host,
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
+        questions: Arc::new(crate::session::questions::SessionQuestions::new(
+            Arc::new(crate::session::questions::RefusingQuestions::new(
+                "the fixture mounts no operator",
+            )),
+        )),
         jobs: Arc::new(uva::tool_job::JobRegistry::new()),
         sessions: Arc::new(std::sync::OnceLock::new()),
         lsp_servers: Arc::new(crate::session::lsp::DeploymentLspServers::new(
@@ -150,6 +155,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
         profile.core.iter().map(|entry| entry.id.as_str()).collect();
     for expected in [
         "tool-registry",
+        "tool-ask",
         "tool-lsp",
         "model-adapter",
         "memory",
@@ -171,7 +177,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
             "the boot profile is missing `{expected}`: {ids:?}"
         );
     }
-    assert_eq!(ids.len(), 28, "no duplicate rows: {ids:?}");
+    assert_eq!(ids.len(), 29, "no duplicate rows: {ids:?}");
 }
 
 #[tokio::test]
@@ -251,7 +257,7 @@ async fn mounts_the_native_set_through_the_kernel() {
     ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
         .expect("hooks");
 
-    assert_eq!(handle.len(), 28);
+    assert_eq!(handle.len(), 29);
     assert!(handle.plugin_state("skills").is_some());
 }
 

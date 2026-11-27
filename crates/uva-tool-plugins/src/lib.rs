@@ -8,6 +8,7 @@
 //!
 //! | feature | module | what the tool does |
 //! |---|---|---|
+//! | `ask` | [`mod@ask`] | put questions to the operator, and return the answers |
 //! | `read` | [`mod@read`] | read a workspace file, with an optional line range |
 //! | `write` | [`mod@write`] | write a workspace file |
 //! | `edit` | [`mod@edit`] | replace an exact piece of a workspace file's text |
@@ -26,7 +27,11 @@
 //! The [`files`](mod@files) module is not a tool: it is the seam the
 //! `read` and `write` tools read through — the owner of the files a
 //! session's tools touch (the deployment's disk by default, a
-//! client's workspace when the client owns it).
+//! client's workspace when the client owns it). The `ask` tool holds
+//! the same kind of seam — [`QuestionOwner`](ask::QuestionOwner), who
+//! answers a session's questions — so the transport (the core's own
+//! JSON-RPC face, a capable client's native question primitive) is
+//! the host's to install.
 //!
 //! ## Composing a tool surface
 //!
@@ -46,6 +51,19 @@
 //! because it needs the agent vocabulary rather than the tool trait
 //! alone.
 
+#[cfg(feature = "ask")]
+pub use ask::{
+    ASK_TIMEOUT,
+    AskAnswer,
+    AskAnswers,
+    AskError,
+    AskOption,
+    AskQuestion,
+    AskTool,
+    AskToolPlugin,
+    NoOperator,
+    QuestionOwner,
+};
 #[cfg(feature = "edit")]
 pub use edit::{EditTool, EditToolPlugin};
 pub use files::{FileError, FileSystemOwner, LocalFileSystem};
@@ -102,6 +120,9 @@ pub use web::{WebFetchTool, WebFetchToolPlugin};
 #[cfg(feature = "write")]
 pub use write::{WriteTool, WriteToolPlugin};
 
+/// The `ask` tool: the model's questions to the operator.
+#[cfg(feature = "ask")]
+pub mod ask;
 #[cfg(feature = "edit")]
 pub mod edit;
 /// The file-system seam the `read` and `write` tools read through.

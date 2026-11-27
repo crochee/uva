@@ -132,6 +132,13 @@ pub struct AppState {
     /// session's terminal registers its owner here — so an editor's
     /// commands land in the editor's pane.
     pub terminals: Arc<crate::session::terminals::SessionTerminals>,
+    /// The owner of every session's questions: the core's own
+    /// JSON-RPC face, or the client that claimed the session.
+    ///
+    /// The `ask` tool goes through it, so a question travels to
+    /// whoever can answer it — and a session whose client cannot
+    /// answer says so at once.
+    pub questions: Arc<crate::session::questions::SessionQuestions>,
     /// The deployment's background jobs.
     ///
     /// The `job` tool files them, and a session's controller listens

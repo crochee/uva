@@ -12,6 +12,10 @@ documentation.workspace = true
 default = []
 # One feature per tool. A feature turns on exactly that tool's module
 # and the dependencies only that tool needs.
+# The operator question: the tool holds a QuestionOwner seam the
+# host installs; the module needs nothing beyond the tool trait.
+ask = []
+# and the dependencies only that tool needs.
 read = []
 write = []
 edit = []

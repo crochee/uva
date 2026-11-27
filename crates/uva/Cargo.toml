@@ -116,6 +116,7 @@ required-features = [
   "provider",
   "context",
   "tool",
+  "tool-ask",
   "tool-read",
   "tool-write",
   "tool-edit",
@@ -184,6 +185,7 @@ tool = ["dep:uva-tool", "core", "provider", "session"]
 # One tool implementation per feature, exactly as a consumer would
 # depend on them. All offline except `tool-web`.
 tool-files = ["dep:uva-tool-plugins"]
+tool-ask = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/ask"]
 tool-read = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/read"]
 tool-write = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/write"]
 tool-edit = ["tool", "dep:uva-tool-plugins", "uva-tool-plugins/edit"]

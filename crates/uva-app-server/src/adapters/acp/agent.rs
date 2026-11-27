@@ -296,6 +296,18 @@ impl AcpAgent {
         cwd: &std::path::Path,
         cx: &agent_client_protocol::v1::ConnectionTo<Client>,
     ) {
+        // ACP v1 has no question primitive: a client can answer a
+        // permission request, and nothing else. A session this client
+        // owns therefore refuses the model's questions at once,
+        // instead of waiting out the budget for an answer no editor
+        // can give.
+        self.state.questions.register(
+            session_id,
+            Arc::new(crate::session::questions::RefusingQuestions::new(
+                "this session's client speaks ACP, which has no question \
+                 primitive; decide without an answer",
+            )),
+        );
         if let Some(fs) = self.fs.lock().clone() {
             let owner = Arc::new(super::files::ClientFileSystem::new(
                 cx.clone(),

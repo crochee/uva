@@ -55,11 +55,11 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 单写者 | 进程内 + `flock` 跨进程（`packages/session/session-persistence-jsonl/src/lease.ts:1-24`） | 进程租约 `~/.omp/run/session-owners/<id>`，发现别人在写就**换新文件**（`docs/session.md:648-651`） | 进程内单写者 + **`owner.lock` 跨进程所有权**（切 9）：写路径首次追加时 flock 认领、拒绝**失败关闭**（不换文件——本仓的会话 id 就是身份） | 对齐 |
 | 崩溃修复 | 断尾截断 + 开回合补closer（`packages/core/session/src/repair.ts:59-105`） | 追加不 fsync，落盘即返回（`packages/coding-agent/src/session/session-storage.ts:66-76`） | `crates/uva-session/src/repair/mod.rs` 合成 `tool_result` / `step_end` / `turn_end` | 对齐 |
 | 审批闸门 | `tools/pre-execute` 水瀑，先于任何工具体（`packages/core/tools/src/pipeline.ts:196-215`） | 扩展包装器再查一次**真正要执行的参数**（`packages/coding-agent/src/extensibility/extensions/wrapper.ts:374-389`） | 五级否决流水线（`…/loop/guard.rs:47-85`） | 对齐 |
-| 审批**超时** | 工具级 `timeoutMs` → `TOOL_TIMEOUT` 结构化错误（`packages/guard/timeout-policy/src/index.ts:26`） | **没有超时**：要么有人回答，要么回合被 abort（`wrapper.ts:495-500`） | **没有超时**；而 `crates/uva-app-server/src/rpc/mod.rs:29` 却写着「a timeout still defaults to deny」 | **缺口 G1（本轮切）**：文档承诺了代码没有的东西 |
+| 审批**超时** | 工具级 `timeoutMs` → `TOOL_TIMEOUT` 结构化错误（`packages/guard/timeout-policy/src/index.ts:26`） | **没有超时**：要么有人回答，要么回合被 abort（`wrapper.ts:495-500`） | **已落**（切 1）：策略带 `timeout_secs`，控制器到期走同一条 resume 路径，模型看到「没人回答」的拒绝 | 对齐 |
 | 审批可分辨的拒绝 | `allowed-once / rejected / cancelled / unavailable` 四态（`packages/interaction/user-approval/src/types.ts:31-34`） | 拒绝文案分工具策略 / 用户策略（`packages/coding-agent/src/tools/approval.ts:591-602`） | `resolved / cancelled / rejected`（`crates/uva-approval/src/approval.rs:305-309`） | 对齐（无「超时」态，随 G1 一起补） |
-| 审批策略来源 | `permission-presets` 写 `setApprovalPolicy`（`packages/interaction/permission-presets/src/index.ts:180-250`） | `tools.approvalMode` + 每工具策略 + 每目标授权（`docs/approval-mode.md`） | **行配置被忽略**：永远发布 `ApprovalPolicy::default()`（`crates/uva-app-server/src/composition/kernel/mod.rs:975-979`） | **缺口 G1b（本轮切）** |
+| 审批策略来源 | `permission-presets` 写 `setApprovalPolicy`（`packages/interaction/permission-presets/src/index.ts:180-250`） | `tools.approvalMode` + 每工具策略 + 每目标授权（`docs/approval-mode.md`） | **已落**（切 1）：`[approval]` 配置段的策略经 `BootExtras.approval` 发布（`crates/uva-app-server/src/config/server/mod.rs:185-219`） | 对齐 |
 | 压缩 | 摘要指令作为**最后一条 user 消息**追加 ⇒ 复用 KV cache（`packages/compaction/compaction-basic/src/summarizer.ts:74-79`） | 缓存友好的裁剪：只裁「省得够多且结果不太小」的（`packages/agent/src/compaction/pruning.ts`） | **同形**（见「切 6」）：`SummaryInput` 携带会话自己的 system prompt 与工具 schema，摘要请求 = `[system, …shadowed…, user(指令)]`——上一个被路由请求的真前缀；裁剪到 `[tool result pruned]` 保持不变 | 对齐 |
-| 签名思维块 | 前缀摘要变了就**剥掉**签名思维块，否则整请求被拒（`packages/llm/llm-pi-ai/src/prefix-binding.ts:31-93`） | 同类机制（`prefixDroppedThinkingBlocks` 会话状态） | 压缩后原样回送签名块（`crates/uva-provider/src/anthropic/provider/transform/mod.rs:410-415`） | **缺口 G5**：压缩后 Anthropic 会 400 |
+| 签名思维块 | 前缀摘要变了就**剥掉**签名思维块，否则整请求被拒（`packages/llm/llm-pi-ai/src/prefix-binding.ts:31-93`） | 同类机制（`prefixDroppedThinkingBlocks` 会话状态） | **已落**（切 4）：压缩点之前的消息失去签名（`…/re_act/transcript.rs:235`），压缩后的请求不再带作废签名 | 对齐 |
 | 原生 replay state | `ReplayEnvelope` 按块对齐，装配丢块就丢信封（`packages/llm/llm/src/assembler.ts:130-152`） | `ProviderPayload` 不透明载荷（`packages/ai/src/types.ts:1494`） | **字段存在但没人写**：`replay_state` 全仓只有 `None`（`crates/uva-provider/src/types/completion/mod.rs:42,76`） | **缺口 G2**：声称已对账的能力是死的 |
 | 原始 delta 留存 | 压缩的记录列表，可无损展开（`packages/llm/llm/src/assistant-stream.ts:99-181`） | transcript 存消息，不存 delta | 词汇有 `assistant_chunk`，**没有生产者**；且有测试钉住「每回合一行」（`crates/uva-harness/src/agent/re_act/tests/lifecycle/one_row_per_turn.rs:285`） | 有意不同（记录级 vs 行级），**不算缺口** |
 | 插件树 | entry 模型 / group / 按 id diff / 三态审计（`packages/preset/agent-preset-registry/src/mount.ts:115-152`） | — | 同一套（`crates/uva-kernel/src/mount.rs:216-238`） | 对齐 |
@@ -70,7 +70,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call`/`host_tool_result` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`、`rpc-types.ts:907-953`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；**客户端自有的工具已落地**（第三轮切 23：核心面 `tools/register owner=client` + `tools/execute` 问答回到客户端）；ACP 面没有 `set_host_tools` 原语，那一半如实缺席；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12 + 23）**：核心面有了原语，ACP 面如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
-| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ask`（自由提问——本仓的审批闸门是它的有界替身）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
+| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**提问齐了**（切 24 的 `ask`：结构化问题、客户端作答、有界等待）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
@@ -80,12 +80,12 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 
 | # | 缺口 | 严重度 | 证据 |
 |---|---|---|---|
-| G1 | **被持有的审批永不超时**：无头客户端不在，审批永远开着，会话永远暂停；文档却写着「a timeout still defaults to deny」 | 高 | `crates/uva-app-server/src/rpc/mod.rs:29`；`crates/uva-approval/src/approval.rs:305-309` |
-| G1b | **`approval` 行的 config 是摆设**：发布的一直是 `ApprovalPolicy::default()` | 高 | `crates/uva-app-server/src/composition/kernel/mod.rs:975-979` |
+| G1 | ~~被持有的审批永不超时~~ **已落（切 1）**：策略带 `timeout_secs`，控制器在 `AwaitingApproval` 时起截止时间，到期走**同一条** resume 路径（派生 token → 构造拒绝决定 → 提交 → 起跑）；日志状态与模型文案区分「没人回答」与「有人说不」 | — | `crates/uva-approval/src/approval.rs:90`；`crates/uva-app-server/src/session/controller/dispatch.rs` |
+| G1b | ~~`approval` 行的 config 是摆设~~ **已落（切 1）**：`[approval]` 配置段（`mode` / `ask_unknown` / `timeout_secs` / 逐工具 `overrides`）经 `BootExtras.approval` 发布——部署的策略第一次真的生效 | — | `crates/uva-app-server/src/config/server/mod.rs:185-219` |
 | G2 | ~~`replay_state` 是死字段~~ **已结**（切 8）：字段背后的机制——推理连续性——已由「签名 + 压缩边界规则」结构化交付；两个在仓适配器都没有可铸造的原生状态（OpenAI 走 Chat Completions，Anthropic Messages 无可回放的 response id）。字段保留为 seam，文档如实 | — | 同左 |
-| G5 | **压缩后原样回送 Anthropic 签名思维块**：签名绑定请求前缀，压缩改前缀 ⇒ 整请求被 provider 拒 | 高 | `crates/uva-provider/src/anthropic/provider/transform/mod.rs:410-415` |
-| G8 | **委派没有无头控制面**：子代理跑飞时，宿主无法列举 / 杀 / 转向 | 高 | `crates/uva-tool-task/src/control/mod.rs:389`；`crates/uva-app-server/src/rpc/methods/names.rs` 无对应方法 |
-| G11 | **durable 读没有游标**：整本回传，客户端只能 O(n²) | 中 | `crates/uva-app-server/src/routes/sessions/mod.rs:827-855` |
+| G5 | ~~压缩后原样回送 Anthropic 签名思维块~~ **已落（切 4）**：作废判定放在知道前缀被改写过的那一层（harness）——压缩点之前的消息失去签名（`Transcript::void_signatures_before`），provider 自己的规则丢掉无签名的思维块 | — | `crates/uva-harness/src/agent/re_act/transcript.rs:235` |
+| G8 | ~~委派没有无头控制面~~ **已落（切 2）**：核心面有 `subagents/list` / `subagents/cancel` / `subagents/steer`（`rpc/methods/names.rs:71-75`），宿主能列举、硬杀、转向 | — | 同左 |
+| G11 | ~~durable 读没有游标~~ **已落（切 3）**：`sessions/events` 接受 `since` 序号，只回之后的行并回 `last_seq` | — | 同左 |
 | G4 | ~~压缩摘要是旁路请求~~ **已落**（切 6）：`SummaryInput` 信封让摘要复用被路由请求的暖前缀 | — | `crates/uva-session/src/compaction/mod.rs`（`SummaryInput`） |
 | G7 | ~~并行工具桶不观察取消~~ **已驳回**：取消检查在工具流的 drain 里（`crates/uva-harness/src/agent/re_act/loop/step/tools/route.rs:168`），两个桶都经过它——未开始的调用不跑。补了一个回归钉子（`agent/re_act/tests/parallel_unsafe.rs`） | — | 同左 |
 | G9 | ~~无跨进程会话租约~~ **已落**（切 9）：`owner.lock` + flock，append 拒绝失败关闭 | — | `crates/uva-session/src/ownership.rs` |
@@ -99,6 +99,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G18 | **工具批不守模型序**：按模式分桶（全部 Parallel 先跑，再全部 Sequential），模型说「先写后读」本仓先读。**已落（第二轮切 19）**：按模型序的波，排他调用是屏障 | 高 | 旧 `…/step/tools/mod.rs` 的 `bucket_by_execution_mode` + 两个桶 |
 | G19 | **并发安全只按工具名判**：dsh 的 `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)` 都按**调用**判，本仓 `shell` 永远串行、`ls` 也排队。**已落（第二轮切 20）**：`Tool::mode_for(input)`，shell 只读命令可并行 | 中 | 旧 `Tool::mode()` + `registry.execution_mode(name)` |
 | G20 | **无工具级超时**：stdio MCP 服务器不出声就把回合永远挂住（dsh 的 `timeout-policy` 给每个工具武装 `timeoutMs`，到期是结构化 `TOOL_TIMEOUT`）。**已落（第二轮切 21）**：结构化词汇 + 行内 code + stdio 传输的每请求预算 | 高 | `crates/uva-mcp/src/stdio.rs`（此前无截止时间） |
+| G21 | **工具族少一个 `ask`**：模型要问人，只能走审批闸门（一个有界替身，且只会问「准不准」）。**已落（第四轮切 24）**：结构化问题 + 客户端作答 + 有界等待；ACP 面如实缺席（ACP v1 没有提问原语） | 中 | `crates/uva-tool-plugins/src/ask/` |
 
 ---
 
@@ -969,6 +970,55 @@ RPC 服务器向宿主发 `host_tool_call`，宿主答 `host_tool_result`。dsh 
 
 ---
 
+### 切 24 — `ask`：模型把问题交给人（第四轮切 1）
+
+**要什么**：两个参考都有一个「模型问人」的工具：dsh 的 `tool-ask-user`
+（`ask_user_question`，`packages/interaction/tool-ask-user/src/index.ts:36-108`）
+与 omp 的 `ask`（`packages/coding-agent/src/tools/ask.ts:76-79`）。形状是同一
+个：**模型发问 → 工具挂起 → 人回答 → 回答作为普通工具结果回到模型**。本仓此前
+只有审批闸门——一个「准不准」的有界替身，问不了「用哪个数据库」。
+
+**怎么落**：
+
+1. **工具**（`crates/uva-tool-plugins/src/ask/`）：问题取 dsh 的结构化形状
+   （`id` / `question` / `header` / `options` / `multi_select`），回答取同一个
+   形状（`{id, selected, custom}`）——omp 的 `ask` 收一段 HTML `<form>`，那是
+   **渲染**，核心面是 JSON-only 的，所以本仓取结构化的一边。
+2. **一条缝**：`QuestionOwner`——与文件（`FileSystemOwner`）、终端
+   （`TerminalOwner`）同构的「谁回答」缝。工具自己不碰传输；宿主装实现：
+   核心自己的 JSON-RPC 面（`questions/ask`，切 22 的出站通道）或一个能提问的
+   客户端的原生原语。没人装 → `NoOperator`：**失败关闭，而不是把回合挂在
+   一个没人答得了的问题上**。
+3. **有界的等待**：dsh 的定时变体默认 120 s，omp 的 `ask.timeout` 可配。头less
+   的默认是**有界**：客户端走人不能让回合永远挂着——预算用尽是结构化的
+   `TOOL_TIMEOUT`（切 21 的词汇），模型看得见、可以重试。
+4. **答案是不可信的输入**：客户端回的批次必须**每个问题恰好一次**——漏答、
+   重答、答了没问的问题，都不是答案；把这样的批次当答案喂给模型，等于让
+   一个坏客户端替人说话。
+5. **ACP 面如实缺席**：ACP v1 只有一个原语能问人——`session/request_permission`
+   （一次调用的准 / 不准），没有提问、没有选项、没有自由文本。ACP 客户端开的
+   会话因此**立刻回绝**（「这个客户端说 ACP，ACP 没有提问原语；自己拿主意」），
+   而不是把 120 s 的预算耗在一个编辑器根本给不出的答案上。
+
+**落点**：
+- `crates/uva-tool-plugins/src/ask/{mod,plugin}.rs`：工具 + 内核插件。
+- `crates/uva-app-server/src/session/questions.rs`：`SessionQuestions`（会话 →
+  主人）、`CoreQuestionOwner`（核心面作答）、`RefusingQuestions`（ACP 面回绝）。
+- `crates/uva-app-server/src/composition/kernel/mod.rs`：`tool-ask` 行。
+- `crates/uva-app-server/src/adapters/acp/agent.rs`：ACP 会话认领时登记回绝。
+
+**验收**：
+- 单元（ask）：答案成为工具结果（dsh 的 JSON 形状）；跳过是一个答案而不是失败；
+  漏答 / 重答 / 答了没问的问题都被拒；没人答时失败关闭；回绝带理由；超时是
+  结构化的 `TOOL_TIMEOUT`；空问题与超量问题**不**抵达操作者。
+- 单元（questions）：认领的会话问它的主人；未认领的问默认主人；释放后回到
+  默认主人；没人应答的客户端是超时。
+- 端到端（stdio）：模型发问 → 核心发 `questions/ask`（id 带 `core:internal:`
+  前缀、params 带会话与问题）→ 客户端答 → 回合 `completed`，durable 行里
+  tool_result 的文本就是人的答案。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
 - ~~**G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
@@ -985,9 +1035,10 @@ RPC 服务器向宿主发 `host_tool_call`，宿主答 `host_tool_result`。dsh 
   G6 已落——切 7。G9 已落——切 9。G10 已落——切 10。G12 已落——切 5（fs）+ 切 11
   （terminal）。G13 已落——切 12。G14 已落——切 13（工具）+ 切 14（通知送达）。
   G15 已落——切 15（`glob` + `grep`）。G16 已落——切 16（`goal` + 宿主续跑）。
-  工具族一行新加，剩余缺席如实记着：`checkpoint`/`rewind`、`ask`、
+  工具族一行新加，剩余缺席如实记着：`checkpoint`/`rewind`、
   `ast_grep`/`ast_edit`。G17 已落——切 17 + 切 18。客户端扩展工具已落
-  ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。）
+  ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。
+  G21 已落——切 24（`ask`）。）
 
 ---
 

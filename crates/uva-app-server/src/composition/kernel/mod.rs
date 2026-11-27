@@ -149,6 +149,11 @@ pub(crate) struct BootServices {
     /// asks it before it spawns anything, so a session whose client
     /// owns the terminal runs there instead of on this machine.
     pub terminals: Arc<crate::session::terminals::SessionTerminals>,
+    /// The owner of every session's questions. The `tool-ask` row
+    /// files it, so the model's questions travel to whoever can
+    /// answer them — the core's own face, or a client that claimed
+    /// the session.
+    pub questions: Arc<crate::session::questions::SessionQuestions>,
     /// The deployment's background jobs. The `tool-job` row files
     /// them, so a job started in one call is still there in the next.
     pub jobs: Arc<uva::tool_job::JobRegistry>,
@@ -200,8 +205,9 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 28] = [
+    const ENTRIES: [&str; 29] = [
         "tool-registry",
+        "tool-ask",
         "tool-read",
         "tool-write",
         "tool-edit",
@@ -715,6 +721,11 @@ pub(crate) fn dump_factories() -> PluginFactories {
         plugin_host: Host::default(),
         file_system: Arc::new(crate::session::files::SessionFileSystem::new()),
         terminals: Arc::new(crate::session::terminals::SessionTerminals::new()),
+        questions: Arc::new(crate::session::questions::SessionQuestions::new(
+            Arc::new(crate::session::questions::RefusingQuestions::new(
+                "the manifest dump mounts nothing",
+            )),
+        )),
         jobs: Arc::new(uva::tool_job::JobRegistry::new()),
         sessions: Arc::new(std::sync::OnceLock::new()),
         lsp_servers: Arc::new(crate::session::lsp::DeploymentLspServers::new(
@@ -747,8 +758,9 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 12] = [
+    const SPECS: [(&str, Make); 13] = [
         ("tool-registry", tool_registry_plugin),
+        ("tool-ask", ask_tool_plugin),
         ("tool-read", read_tool_plugin),
         ("tool-write", write_tool_plugin),
         ("tool-edit", edit_tool_plugin),
@@ -985,6 +997,15 @@ fn lsp_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
         Arc::clone(&services.file_system)
             as Arc<dyn uva::tool_files::FileSystemOwner>,
     ))
+}
+
+fn ask_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The questions travel to whoever can answer them: the core's own
+    // JSON-RPC face, or the client that claimed the session.
+    Arc::new(uva::tool_ask::AskToolPlugin::with_owner(Arc::clone(
+        &services.questions,
+    )
+        as Arc<dyn uva::tool_ask::QuestionOwner>))
 }
 
 fn goal_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
