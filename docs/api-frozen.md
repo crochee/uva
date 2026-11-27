@@ -106,6 +106,13 @@ ships are recorded here, beside the promise they narrow:
   `metadata.error.code` into the durable `tool_result` row's `error`
   member (the one interrupted rows already use).
 
+- **`tool_result` grew the checkpoint mark** (the checkpoint pair,
+  fourth round cut 31). The `checkpoint` member rides the row the
+  same way `changed` does — lifted by the harness's commit path from
+  the tool's report — so the log answers "what was the active
+  checkpoint" on its own. No crate-root name moved; the `uva-session`
+  count stays 156.
+
 - **The tool output grew the file-change report** (ACP diff parity,
   fourth round cut 25). `FileDiff`, `DIFF_METADATA_KEY` and
   `MAX_DIFF_TEXT_BYTES` joined the curated `uva-tool` surface: a tool
