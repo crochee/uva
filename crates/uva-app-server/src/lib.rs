@@ -54,6 +54,22 @@
 //! See `DEPLOYMENT.md` for the deployment contract (config keys,
 //! variables, probes, Nginx notes).
 
+/// How long a test waits for a thing that is supposed to arrive.
+///
+/// The waits in this crate's tests are **not** assertions about
+/// latency — they are waits for work that is already under way
+/// (a controller's decision, a row's arrival). A deadline that is
+/// tight enough to fail on a busy machine turns a slow runner into a
+/// red suite, and a red suite that nobody can reproduce is worse
+/// than no suite: it hides the real failures behind noise.
+///
+/// Thirty seconds is far longer than any of these waits needs on an
+/// idle machine and still bounded, so a genuinely broken path fails
+/// instead of hanging.
+#[cfg(test)]
+pub(crate) const TEST_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
 pub mod adapters;
 pub mod agent_run_config;
 pub mod agent_run_config_types;

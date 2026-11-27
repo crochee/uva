@@ -245,6 +245,44 @@ async fn overwrite_replaces_existing_contents() {
 }
 
 #[tokio::test]
+async fn the_change_is_reported_as_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.txt");
+    std::fs::write(&p, "before").unwrap();
+    let tool = WriteTool::new();
+    let out = tool
+        .call(
+            json!({"file_path": p.to_str().unwrap(), "content": "after"}),
+            &make_context(dir.path().to_path_buf()),
+        )
+        .await;
+    let diff = FileDiff::from_output(&out).expect("the change is reported");
+    assert_eq!(diff.path, p.to_str().unwrap());
+    assert_eq!(diff.old_text.as_deref(), Some("before"));
+    assert_eq!(diff.new_text, "after");
+    assert!(!diff.truncated);
+}
+
+#[tokio::test]
+async fn a_new_file_reports_no_old_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.txt");
+    let tool = WriteTool::new();
+    let out = tool
+        .call(
+            json!({"file_path": p.to_str().unwrap(), "content": "hello"}),
+            &make_context(dir.path().to_path_buf()),
+        )
+        .await;
+    let diff = FileDiff::from_output(&out).expect("the change is reported");
+    assert!(
+        diff.old_text.is_none(),
+        "a file that did not exist has no old text"
+    );
+    assert_eq!(diff.new_text, "hello");
+}
+
+#[tokio::test]
 async fn append_concatenates_to_existing_contents() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("a.txt");

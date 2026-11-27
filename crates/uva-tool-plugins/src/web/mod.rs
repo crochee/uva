@@ -1,8 +1,11 @@
 //! # uva-tool-plugins — the `web` module
 //!
-//! `web_fetch`: the one builtin that talks to the network. This crate is
-//! the only place that pulls `reqwest` — the tool's entire body is an
-//! HTTP GET with an allowlist policy and UTF-8-safe truncation.
+//! The two builtins that talk to the network: `web_fetch` (read a URL
+//! the model already knows) and `web_search` (look something up). This
+//! crate is the only place that pulls `reqwest` — the fetch tool's body
+//! is an HTTP GET with an allowlist policy and UTF-8-safe truncation,
+//! and the search tool's body is one JSON request to the deployment's
+//! search endpoint.
 //!
 //! This is a self-contained tool plugin depending only on the
 //! [`uva_tool`] paradigm crate.
@@ -25,8 +28,24 @@ use uva_tool::{
 
 /// The `web_fetch` tool brick as a native kernel plugin.
 pub mod plugin;
+/// The `web_search` tool: the model's way to look something up.
+pub mod search;
+/// The `web_search` tool brick as a native kernel plugin.
+pub mod search_plugin;
 
 pub use plugin::WebFetchToolPlugin;
+pub use search::{
+    JsonSearchProvider,
+    MAX_ANSWER_BYTES,
+    MAX_SEARCH_RESULTS,
+    MAX_SUMMARY_CHARS,
+    NoSearch,
+    SearchError,
+    SearchResult,
+    WebSearchProvider,
+    WebSearchTool,
+};
+pub use search_plugin::WebSearchToolPlugin;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 

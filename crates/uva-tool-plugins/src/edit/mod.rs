@@ -34,7 +34,9 @@ use schemars_derive::JsonSchema;
 use serde::Deserialize;
 use uva_tool::{
     Context,
+    DIFF_METADATA_KEY,
     ExecutionMode,
+    FileDiff,
     Tool,
     ToolAnnotations,
     ToolOutput,
@@ -355,7 +357,13 @@ impl Tool for EditTool {
                 resolved.display()
             )
         };
-        ToolOutput::text(summary)
+        // The change the tool made, as data: the client renders it as
+        // a diff, the model reads the sentence.
+        ToolOutput::text(summary).with_metadata(
+            DIFF_METADATA_KEY,
+            FileDiff::new(resolved.display().to_string(), Some(text), updated)
+                .to_metadata(),
+        )
     }
 }
 

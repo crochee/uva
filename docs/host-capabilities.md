@@ -41,6 +41,7 @@
 | `tool-lsp` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-shell` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-todo` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
+| `tool-web-search` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `tool-web` | 工具（对话执行的支撑面，不单列域） | 对话流内的工具调用呈现 | provides — · inject tools | 不挂载，能力与界面同消（D32） |
 | `model-adapter` | 模型 | 设置 · 模型 | provides llm, llm.default · inject — | boot 失败（llm / llm.default 缺，`src/state/app_state/boot.rs:341-355`）；运行期撤销 → 建会话报错（`src/state/app_state/sessions.rs:351-357`） |
 | `memory` | 支撑（steering / 记忆，不进设置面，D24） | 无直接界面 | provides memory · inject — | 不挂载，能力与界面同消（D32） |

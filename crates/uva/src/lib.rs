@@ -367,8 +367,8 @@ use uva::provider::OpenAICompatibleProvider;
 #![cfg_attr(
     not(feature = "tool-web"),
     doc = r#"```compile_fail
-// The `tool-web` feature is off: `web_fetch` (the one tool that
-// talks to the network) must not exist.
+// The `tool-web` feature is off: the network tools (`web_fetch` and
+// `web_search`) must not exist.
 use uva::tool_web::WebFetchTool;
 ```"#
 )]

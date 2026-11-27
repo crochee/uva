@@ -181,6 +181,76 @@ fn test_approval_config_defaults_to_the_built_in_policy() {
 }
 
 // =============================================================================
+// WebSearchConfig
+
+/// A local search endpoint that answers `body` to every request.
+///
+/// The fixture is a real server on a real socket: the provider's HTTP
+/// path is exercised end to end, not stubbed out.
+async fn search_endpoint(body: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("the fixture binds");
+    let address = listener.local_addr().expect("the fixture's address");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let mut request = vec![0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.flush().await;
+        }
+    });
+    format!("http://{address}")
+}
+
+/// The `[web_search]` section names the endpoint the tool asks: the
+/// deployment's search provider.
+///
+/// The endpoint is a real one — a local server that answers the JSON
+/// search contract — so the test proves the whole path (config →
+/// provider → HTTP → result), not just that a field was read.
+#[tokio::test]
+async fn test_web_search_config_becomes_the_provider() {
+    let endpoint = search_endpoint(
+        r#"{"results":[{"title":"Rust","url":"https://www.rust-lang.org","content":"A language."}]}"#,
+    )
+    .await;
+    let config: ServerConfig =
+        serde_yaml::from_str(&format!("web_search:\n  endpoint: {endpoint}\n"))
+            .unwrap();
+    let provider = config.web_search.provider();
+    let results = provider
+        .search("rust", 5)
+        .await
+        .expect("the endpoint answers");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].title, "Rust");
+    assert_eq!(results[0].url, "https://www.rust-lang.org");
+    assert_eq!(results[0].snippet, "A language.");
+}
+
+/// A configuration that says nothing keeps the refusing provider: the
+/// tool stays mounted and says that no search is configured.
+#[tokio::test]
+async fn test_web_search_config_defaults_to_no_provider() {
+    let config: ServerConfig = serde_yaml::from_str("{}").unwrap();
+    let provider = config.web_search.provider();
+    let error = provider
+        .search("rust", 1)
+        .await
+        .expect_err("a deployment without an endpoint cannot search");
+    assert_eq!(error.to_string(), "no web search provider is configured");
+}
+
+// =============================================================================
 // AgentConfig
 
 // ServerConfig — defaults and full round-trip
@@ -273,6 +343,7 @@ fn build_sample_server_config() -> ServerConfig {
         scheduler: crate::config::server::SchedulerConfig::default(),
         approval: crate::config::server::ApprovalConfig::default(),
         lsp: crate::config::server::LspConfig::default(),
+        web_search: crate::config::server::WebSearchConfig::default(),
     }
 }
 

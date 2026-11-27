@@ -141,6 +141,63 @@ pub struct ServerConfig {
     /// tool says so by name.
     #[serde(default)]
     pub lsp: LspConfig,
+    /// `[web_search]` — where the `web_search` tool looks things up.
+    ///
+    /// A deployment with no endpoint still mounts the tool; the call
+    /// then says that no search provider is configured, rather than
+    /// answering "no results" and pretending the web is empty.
+    #[serde(default)]
+    pub web_search: WebSearchConfig,
+}
+
+/// `[web_search]` — the search endpoint the `web_search` tool asks.
+///
+/// One endpoint, one shape: the endpoint answers the JSON search
+/// contract (`{"results": [{"title", "url", "content"}]}`), which
+/// SearXNG and its compatible instances speak. A deployment that
+/// wants another provider points the endpoint at an adapter for it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct WebSearchConfig {
+    /// The search endpoint's base URL.
+    ///
+    /// Absent means "no search": the tool is mounted, and every call
+    /// says that no provider is configured.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// The credential the endpoint wants, sent verbatim in the
+    /// `api_key_header` header.
+    ///
+    /// A deployment that wants `Bearer …` writes it that way; a
+    /// deployment that wants no credential leaves it out.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// The header the credential rides in.
+    ///
+    /// Defaults to `Authorization`.
+    #[serde(default)]
+    pub api_key_header: Option<String>,
+}
+
+impl WebSearchConfig {
+    /// The provider this configuration describes.
+    ///
+    /// No endpoint ⇒ [`NoSearch`](uva::tool_web::NoSearch): the tool
+    /// stays mounted and fails closed.
+    #[must_use]
+    pub fn provider(
+        &self,
+    ) -> std::sync::Arc<dyn uva::tool_web::WebSearchProvider> {
+        match self.endpoint.as_deref().map(str::trim) {
+            Some(endpoint) if !endpoint.is_empty() => std::sync::Arc::new(
+                uva::tool_web::JsonSearchProvider::with_credential(
+                    endpoint,
+                    self.api_key.clone(),
+                    self.api_key_header.as_deref().unwrap_or("Authorization"),
+                ),
+            ),
+            _ => std::sync::Arc::new(uva::tool_web::NoSearch),
+        }
+    }
 }
 
 /// `[lsp]` — the language servers the deployment knows.
@@ -399,6 +456,7 @@ impl Default for ServerConfig {
             scheduler: SchedulerConfig::default(),
             approval: ApprovalConfig::default(),
             lsp: LspConfig::default(),
+            web_search: WebSearchConfig::default(),
         }
     }
 }

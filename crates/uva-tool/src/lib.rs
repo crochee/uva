@@ -128,6 +128,9 @@
 /// The brick lifecycle: register a brick's tools in the `tools`
 /// service and withdraw exactly those when the brick unloads.
 pub mod brick;
+/// The file change a tool reports: the path, the text before, the
+/// text after.
+pub mod diff;
 pub mod full_output;
 pub mod mcp_self;
 pub mod output;
@@ -150,6 +153,7 @@ mod tool_test;
 mod types_test;
 
 pub use brick::register_tool_entries;
+pub use diff::{DIFF_METADATA_KEY, FileDiff, MAX_DIFF_TEXT_BYTES};
 pub use full_output::{
     FULL_OUTPUT_TOOL_NAME,
     RetrieveFullOutputTool,

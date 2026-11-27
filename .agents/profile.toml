@@ -74,6 +74,12 @@ name = "tool-todo"
 
 [[core.entries]]
 disabled = false
+id = "tool-web-search"
+inject = ["tools"]
+name = "tool-web-search"
+
+[[core.entries]]
+disabled = false
 id = "tool-web"
 inject = ["tools"]
 name = "tool-web"

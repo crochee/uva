@@ -70,8 +70,9 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call`/`host_tool_result` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`、`rpc-types.ts:907-953`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；**客户端自有的工具已落地**（第三轮切 23：核心面 `tools/register owner=client` + `tools/execute` 问答回到客户端）；ACP 面没有 `set_host_tools` 原语，那一半如实缺席；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12 + 23）**：核心面有了原语，ACP 面如实缺席 |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
-| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp`（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**提问齐了**（切 24 的 `ask`：结构化问题、客户端作答、有界等待）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
+| 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp` / **`tool-web`（`web_search` + `web_fetch`）**（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**提问齐了**（切 24 的 `ask`：结构化问题、客户端作答、有界等待）；**检索齐了**（切 26 的 `web_search`：JSON 搜索契约 + 有界答案）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
+| 文件改动的呈现 | 工作区改动摘要（git 工作树快照 + 文件工具的整文件捕获，`packages/deliverables/workspace-changes`） | 编辑器的 diff 面板（工具结果带 `oldText`/`newText`，`packages/coding-agent/src/modes/acp/acp-event-mapper.ts:708-745`） | **已落（切 25）**：文件工具把改动报进结果 metadata（`path` / `old_text` / `new_text`）；ACP 面发 `ToolCallContent::Diff`，核心面 live 帧带 `diff` | 对齐（**durable 行不带**——改动是活的事实，事后只读得到工具的摘要） |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
 ---
@@ -99,6 +100,8 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G18 | **工具批不守模型序**：按模式分桶（全部 Parallel 先跑，再全部 Sequential），模型说「先写后读」本仓先读。**已落（第二轮切 19）**：按模型序的波，排他调用是屏障 | 高 | 旧 `…/step/tools/mod.rs` 的 `bucket_by_execution_mode` + 两个桶 |
 | G19 | **并发安全只按工具名判**：dsh 的 `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)` 都按**调用**判，本仓 `shell` 永远串行、`ls` 也排队。**已落（第二轮切 20）**：`Tool::mode_for(input)`，shell 只读命令可并行 | 中 | 旧 `Tool::mode()` + `registry.execution_mode(name)` |
 | G20 | **无工具级超时**：stdio MCP 服务器不出声就把回合永远挂住（dsh 的 `timeout-policy` 给每个工具武装 `timeoutMs`，到期是结构化 `TOOL_TIMEOUT`）。**已落（第二轮切 21）**：结构化词汇 + 行内 code + stdio 传输的每请求预算 | 高 | `crates/uva-mcp/src/stdio.rs`（此前无截止时间） |
+| G23 | **模型看不见网**：只有 `web_fetch`（读一个模型已经知道的 URL），没有 `web_search`——两个参考都有，账本此前漏记。**已落（第四轮切 26）**：`web_search` 工具 + JSON 搜索契约 + 有界答案 | 高 | `crates/uva-tool-plugins/src/web/search.rs` |
+| G22 | **文件改动到不了客户端**：工具结果只有一句话（「改了第 12 行」），ACP 的 `Diff` 内容块与 omp 的 diff 面板都没有数据可画。**已落（第四轮切 25）**：工具报改动 → ACP 发 diff 块 → 核心面 live 帧带 `diff` | 中 | `crates/uva-app-server/src/adapters/acp/projection.rs` |
 | G21 | **工具族少一个 `ask`**：模型要问人，只能走审批闸门（一个有界替身，且只会问「准不准」）。**已落（第四轮切 24）**：结构化问题 + 客户端作答 + 有界等待；ACP 面如实缺席（ACP v1 没有提问原语） | 中 | `crates/uva-tool-plugins/src/ask/` |
 
 ---
@@ -1019,6 +1022,94 @@ RPC 服务器向宿主发 `host_tool_call`，宿主答 `host_tool_result`。dsh 
 
 ---
 
+### 切 25 — 文件改动以 diff 呈现（第四轮切 2）
+
+**要什么**：ACP 的 `ToolCallContent` 有一个 `Diff` 变体
+（`agent-client-protocol-schema-1.22.0/src/v1/tool_call.rs:543-561`：
+`path` / `old_text` / `new_text`），omp 的 ACP 面就靠它把每次编辑画成
+diff（`packages/coding-agent/src/modes/acp/acp-event-mapper.ts:708-745`：
+「Emit a `diff` ToolCallContent for each per-file edit result that carries
+oldText/newText」）。本仓此前**从不发这个变体**——编辑到了客户端，只剩一句
+「Replaced the text on line 12 of '/srv/app.rs'.」：编辑器画不出改动，
+无头客户端也算不出。
+
+**怎么落**：
+
+1. **词汇**（`crates/uva-tool/src/diff.rs`）：`FileDiff`（`path` /
+   `old_text` / `new_text` / `truncated`）+ 保留的 metadata 键
+   `diff`。**形状就是协议的形状**——画 diff 的客户端不需要翻译。
+2. **报告在 metadata 里，不在内容里**：模型看到的还是那句话；改动是给
+   **人**看的字节，放进内容就是拿上下文窗口换渲染。工具的输出多一个
+   metadata 成员，模型的视图一字不变。
+3. **有界**：一边的文本上限 128 KiB。装不下的改动标 `truncated` 且
+   **不带文本**——半个 diff 比没有 diff 更糟（它会显示不存在的改动）。
+   消费方遇到 `truncated` 就画摘要，不画 diff。
+4. **两个消费方**：ACP 面的投影在**结算**的那次更新里发 `Diff` 内容块
+   （改动只有跑完才知道，所以不是 `tool_call` 起始帧——omp 也一样）；核心面的
+   live 帧多一个 `diff` 成员，无头客户端据此画 diff。
+
+**如实缺席**：**durable 行不带 diff**。行的载荷归词汇所有（ADR 0021），
+把 diff 塞进行里要么改行 schema、要么另立一行类型——那是下一次的事。
+今天的形状是：改动是**活的事实**，客户端看着它画；事后只读得到工具的摘要。
+（dsh 的 `workspace-changes` 走另一条路：回合首尾的 git 工作树快照——
+它答的是「这一回合改了哪些文件」，与本刀答的「这一次调用改了什么」是两件事。）
+
+**落点**：
+- `crates/uva-tool/src/diff.rs`：`FileDiff` + 保留键 + 上限。
+- `crates/uva-tool-plugins/src/{write,edit}/mod.rs`：两个工具报改动。
+- `crates/uva-app-server/src/adapters/acp/projection.rs`：`Diff` 内容块。
+- `crates/uva-app-server/src/routes/chat/stream.rs`：live 帧的 `diff` 成员。
+
+**验收**：
+- 单元（uva-tool）：两边都在；新文件没有旧文本；装不下就是 truncated 且不带
+  文本；报告在 metadata 里来回读得出来。
+- 单元（write / edit）：改动被报出来（路径 + 改前 + 改后）；新文件没有旧文本。
+- 单元（ACP 投影）：结算帧带 `Diff` 块（`path` / `oldText` / `newText`）；
+  truncated 的报告**不**变成 diff。
+- 单元（live 帧）：`tool_result` 帧带 `diff`。
+
+---
+
+### 切 26 — `web_search`：模型能查网（第四轮切 3）
+
+**要什么**：本仓此前只有 `web_fetch`——读一个**模型已经知道**的 URL。dsh 的
+`tool-web` 同时注册 `web_search` 与 `web_fetch`
+（`packages/web/tool-web/src/index.ts:52-58`），omp 也有 `web_search`。
+**模型不能搜索就是瞎的**：训练之后发生的事它一无所知，而无头 harness 没有
+人来递一个链接。账本的§3 此前把 `web` 一行算作覆盖，漏了这一格——本轮补上。
+
+**怎么落**：
+
+1. **一条缝**：`WebSearchProvider`——工具自己不碰传输，宿主装实现。与
+   `FileSystemOwner` / `TerminalOwner` / `QuestionOwner` 同构。
+2. **一个契约**：随仓发布的适配器问一个**回答 JSON 的搜索端点**
+   （`{"results":[{"title","url","content"}]}`——SearXNG 及其兼容实例的形状）。
+   一个形状、一个适配器；部署要别的供应商，就写一个 `WebSearchProvider`
+   ——工具不变。
+3. **没有端点就失败关闭**：没配端点的部署**照样挂载**工具（dsh 的规矩：
+   「an enabled tool remains visible when its provider is unavailable and fails
+   with a structured error at execution time」），调用时明确说「没配搜索供应商」
+   ——而不是回一句「没有结果」，假装网上是空的。
+4. **答案有界**：最多 10 条（dsh 的 `WEB_SEARCH_MAX_RESULTS`），每条摘要最多
+   800 字符（`WEB_SEARCH_SUMMARY_MAX_CHARS`），整篇答案最多 16 KiB；被截断的
+   答案**自己说被截断**。
+
+**落点**：
+- `crates/uva-tool-plugins/src/web/search.rs`：缝 + 适配器 + 工具。
+- `crates/uva-tool-plugins/src/web/search_plugin.rs`：内核插件。
+- `crates/uva-app-server/src/config/server/mod.rs`：`[web_search]` 配置段。
+- `crates/uva-app-server/src/composition/kernel/mod.rs`：`tool-web-search` 行。
+
+**验收**：
+- 单元（search）：工具名与模式；查询抵达供应商；答案就是结果；没有供应商时
+  失败关闭；空查询不抵达供应商；空结果如此说；条数有界；摘要被截；答案被截
+  时自报。
+- 单元（config）：配了端点 ⇒ 供应商真的问那个端点（**真的本地 HTTP 服务器**，
+  端到端）；没配 ⇒ 回绝的供应商。
+- 行为（app-server）：部署挂载了 `web_search`。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
 - ~~**G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
@@ -1038,7 +1129,8 @@ RPC 服务器向宿主发 `host_tool_call`，宿主答 `host_tool_result`。dsh 
   工具族一行新加，剩余缺席如实记着：`checkpoint`/`rewind`、
   `ast_grep`/`ast_edit`。G17 已落——切 17 + 切 18。客户端扩展工具已落
   ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。
-  G21 已落——切 24（`ask`）。）
+  G21 已落——切 24（`ask`）。G22 已落——切 25（文件改动的 diff）。
+  G23 已落——切 26（`web_search`）。）
 
 ---
 

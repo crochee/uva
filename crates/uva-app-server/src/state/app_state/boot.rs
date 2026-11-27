@@ -489,6 +489,13 @@ impl AppState {
                 .map(|config| config.lsp.servers())
                 .unwrap_or_default(),
         );
+        // Where the `web_search` tool looks things up: the
+        // deployment's configured endpoint, or the refusing default.
+        let web_search_provider = input
+            .server_config
+            .as_ref()
+            .map(|config| config.web_search.provider())
+            .unwrap_or_else(|| Arc::new(uva::tool_web::NoSearch));
         let usage_metrics = Arc::new(UsageMetrics::default());
         let boot_services = Arc::new(BootServices {
             tool_registry: Arc::clone(&input.tool_registry),
@@ -504,6 +511,7 @@ impl AppState {
             jobs: Arc::clone(&jobs),
             sessions: Arc::clone(&sessions_slot),
             lsp_servers: Arc::clone(&lsp_servers),
+            web_search: web_search_provider,
         });
         // The one build recipe: the boot's mount and every hot reload
         // the assembly later performs build rows from these same

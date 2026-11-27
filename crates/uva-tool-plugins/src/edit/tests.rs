@@ -104,6 +104,40 @@ async fn an_exact_match_is_replaced_and_the_line_is_named() {
 }
 
 #[tokio::test]
+async fn the_change_is_reported_as_data() {
+    let (dir, context) = workspace("alpha\nbeta\ngamma\n");
+    let tool = EditTool::new();
+
+    let out = tool
+        .call(
+            json!({
+                "file_path": "file.txt",
+                "old_string": "beta",
+                "new_string": "BETA",
+            }),
+            &context,
+        )
+        .await;
+
+    let diff = FileDiff::from_output(&out).expect("the change is reported");
+    assert_eq!(
+        diff.path,
+        dir.path().join("file.txt").to_str().unwrap(),
+        "the report names the file that changed"
+    );
+    assert_eq!(
+        diff.old_text.as_deref(),
+        Some("alpha\nbeta\ngamma\n"),
+        "the report carries the file's text before the edit"
+    );
+    assert_eq!(
+        diff.new_text, "alpha\nBETA\ngamma\n",
+        "the report carries the file's text after the edit"
+    );
+    assert!(!diff.truncated);
+}
+
+#[tokio::test]
 async fn a_non_unique_match_is_refused_with_the_lines_it_appears_on() {
     let (_dir, context) = workspace("dup\nkeep\ndup\n");
     let tool = EditTool::new();

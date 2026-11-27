@@ -102,7 +102,7 @@ async fn shared_bus_forwards_ops_and_mirrors_the_tail() {
         .await
         .unwrap();
 
-    let saw_text = tokio::time::timeout(Duration::from_secs(5), async {
+    let saw_text = tokio::time::timeout(crate::TEST_DEADLINE, async {
         while let Ok(item) = tail.recv().await {
             if let crate::event_stream::BroadcastEvent::Run { event, .. } = item
                 && let crate::session::controller::AgentEvent::Model(
@@ -159,7 +159,7 @@ async fn closing_the_owner_hands_the_lease_over() {
         })
         .await
         .unwrap();
-    let ran = tokio::time::timeout(Duration::from_secs(5), async {
+    let ran = tokio::time::timeout(crate::TEST_DEADLINE, async {
         while let Ok(item) = tail.recv().await {
             if let crate::event_stream::BroadcastEvent::Run { event, .. } = item
                 && let crate::session::controller::AgentEvent::Model(
@@ -307,7 +307,7 @@ async fn a_takeover_requeues_a_prompt_the_dead_node_parked() {
 
     // The recovered prompt must actually run: the run records the turn
     // it was started for as a typed `user_message` row.
-    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+    let rows = tokio::time::timeout(crate::TEST_DEADLINE, async {
         loop {
             let rows = b
                 .session_manager
@@ -522,7 +522,7 @@ async fn a_second_parked_prompt_survives_the_first_turns_consumption() {
         .await
         .expect("the session opens");
 
-    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+    let rows = tokio::time::timeout(crate::TEST_DEADLINE, async {
         loop {
             let rows = state
                 .session_manager
@@ -603,7 +603,7 @@ async fn a_park_behind_a_long_run_is_still_recovered() {
         .await
         .expect("the session opens");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(crate::TEST_DEADLINE, async {
         loop {
             let rows = state
                 .session_manager
@@ -690,7 +690,7 @@ async fn an_ordinary_user_message_is_not_a_consumption_frontier() {
         .await
         .expect("the session opens");
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(crate::TEST_DEADLINE, async {
         loop {
             let rows = state
                 .session_manager
@@ -757,7 +757,7 @@ async fn two_concurrent_cold_opens_start_exactly_one_run() {
     );
 
     // Exactly one recovered turn: the run records the prompt once.
-    let rows = tokio::time::timeout(Duration::from_secs(5), async {
+    let rows = tokio::time::timeout(crate::TEST_DEADLINE, async {
         loop {
             let rows = state
                 .session_manager

@@ -12,12 +12,43 @@ bottom of this file. The per-round development log (R0 – R125, May – Sep
 
 ## [Unreleased]
 
-### Added (无头 harness 的业界对齐：dsh + omp 逆向后的二十三刀)
+### Added (无头 harness 的业界对齐：dsh + omp 逆向后的二十六刀)
 
 逆向证据与完整缺口账本：[`docs/design/2026-11-26-headless-parity-dsh-omp-design.md`](docs/design/2026-11-26-headless-parity-dsh-omp-design.md)。
 第一轮参照 **DeepSeek Harness（dsh）** 与 **omp（oh-my-pi）** 的无头控制面
 对账后落了十八刀；第二轮（工具批的执行模型）再落三刀；第三轮（客户端的
-扩展工具）又落两刀：
+扩展工具）又落两刀；第四轮（提问、改动与检索）又落三刀：
+
+第四轮的三刀：
+
+- **模型能把问题交给人**（G21，第四轮切 24）：两个参考都有「模型问人」的
+  工具——dsh 的 `tool-ask-user`（`ask_user_question`）与 omp 的 `ask`。
+  本仓此前只有审批闸门（一个只会问「准不准」的有界替身）。现在 `ask` 工具
+  发**结构化问题**（id / 问题 / 选项 / 可多选），等**有界**的答案（默认
+  120 s），答案作为普通工具结果回到模型。答案批次必须**每个问题恰好一次**
+  ——漏答 / 重答 / 答了没问的问题都被拒：把坏客户端的批次当答案，等于让
+  它替人说话。谁回答是**宿主的缝**（`QuestionOwner`，与文件、终端同构）：
+  核心面经 `questions/ask` 向客户端发问（第三轮切 22 的出站通道），没人
+  可问就**失败关闭**而不是把回合挂住。**ACP 面如实缺席**：ACP v1 只有
+  `session/request_permission` 能问人，编辑器开的会话**立刻回绝**，
+  不把预算耗在一个给不出的答案上。
+- **文件改动以 diff 呈现**（G22，第四轮切 25）：ACP 的 `ToolCallContent`
+  有 `Diff` 变体（`path` / `old_text` / `new_text`），omp 的 ACP 面就靠它
+  把每次编辑画成 diff；本仓此前**从不发这个变体**——编辑到了客户端只剩
+  一句「改了第 12 行」。现在 `write` / `edit` 把改动报进结果的 metadata
+  （**不在**内容里：模型看到的还是那句话，改动是给**人**看的字节），ACP
+  面在结算帧发 `Diff` 内容块，核心面的 live 帧带 `diff` 成员。报告有界
+  （每边 128 KiB）：装不下就标 `truncated` 且**不带文本**——半个 diff
+  比没有 diff 更糟。durable 行**不带** diff：改动是活的事实，事后只读
+  得到工具的摘要。
+- **模型能查网**（G23，第四轮切 26）：本仓此前只有 `web_fetch`（读一个模型
+  **已经知道**的 URL）——模型不能搜索就是瞎的，训练之后发生的事它一无所知。
+  现在 `web_search` 工具问一条**缝**（`WebSearchProvider`）：随仓发布的
+  适配器问一个回答 JSON 的搜索端点（SearXNG 及其兼容实例的形状），一个
+  形状一个适配器，部署要别的供应商就写一个实现——工具不变。**没配端点就
+  失败关闭**：工具照样挂载，调用明确说「没配搜索供应商」，而不是回一句
+  「没有结果」假装网上是空的。答案有界（10 条 / 每条 800 字符 / 整篇
+  16 KiB），被截断时**自报**。
 
 - **核心面有了出站请求通道**（第三轮切 22）：omp 的 RPC 服务器会向宿主发
   `host_tool_call` 并等 `host_tool_result`，本仓的核心面此前只有一条方向

@@ -19,9 +19,12 @@
 //! The projection is one direction only: it never decides what a
 //! turn means, it only decides what the wire says.
 
+use std::path::PathBuf;
+
 use agent_client_protocol::v1::schema::{
     ContentBlock,
     ContentChunk,
+    Diff,
     EmbeddedResource,
     EmbeddedResourceResource,
     ImageContent,
@@ -31,6 +34,7 @@ use agent_client_protocol::v1::schema::{
     TextContent,
     TextResourceContents,
     ToolCall,
+    ToolCallContent,
     ToolCallId,
     ToolCallStatus,
     ToolCallUpdate,
@@ -41,6 +45,7 @@ use serde_json::Value;
 use uva::{
     harness::{AgentEvent, SystemEvent},
     provider::{Content, ContentPart, Message, Role, ToolResult, ToolUse},
+    tool::FileDiff,
 };
 
 /// The session updates one live event maps to.
@@ -122,11 +127,24 @@ fn tool_call_update_for(call: &ToolUse) -> SessionUpdate {
 /// content the tool returned.
 fn tool_result_update(result: &ToolResult) -> SessionUpdate {
     let failed = result.is_error.unwrap_or(false);
-    let content = result
+    let mut content = result
         .content
         .iter()
         .map(tool_call_content)
         .collect::<Vec<_>>();
+    // The change the tool made, as the protocol's diff block: an
+    // editor renders it, and the model's own view of the call is
+    // unchanged (the report rides the result's metadata, not its
+    // content). A truncated report is not a diff — the tool's own
+    // summary is the honest picture, so nothing is added.
+    if let Some(diff) = FileDiff::from_metadata(&result.metadata)
+        && !diff.truncated
+    {
+        content.push(ToolCallContent::Diff(
+            Diff::new(PathBuf::from(&diff.path), diff.new_text)
+                .old_text(diff.old_text),
+        ));
+    }
     let mut fields = ToolCallUpdateFields::new().status(if failed {
         ToolCallStatus::Failed
     } else {
@@ -356,7 +374,10 @@ pub fn resource_block(text: impl Into<String>) -> ContentBlock {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
-    use uva::provider::{ReasoningContent, TextContent};
+    use uva::{
+        provider::{ReasoningContent, TextContent},
+        tool::{DIFF_METADATA_KEY, MAX_DIFF_TEXT_BYTES},
+    };
 
     use super::*;
 
@@ -446,6 +467,68 @@ mod tests {
         let shape = wire_shape(&updates[0]);
         assert_eq!(shape["sessionUpdate"], "tool_call_update");
         assert_eq!(shape["status"], "failed");
+    }
+
+    /// The change a file tool made rides the settled call as the
+    /// protocol's diff block: an editor renders it, and the model's
+    /// own view of the call is unchanged.
+    #[test]
+    fn a_file_change_is_reported_as_a_diff() {
+        let diff = FileDiff::new("/srv/app.rs", Some("old".to_string()), "new");
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(DIFF_METADATA_KEY.to_string(), diff.to_metadata());
+        let event = AgentEvent::Model(ContentPart::ToolResult(ToolResult {
+            tool_use_id: "c1".to_string(),
+            tool_name: Some("edit".to_string()),
+            content: vec![ContentPart::Text(TextContent {
+                text: "Replaced the text on line 2.".to_string(),
+                cache_control: None,
+            })],
+            structured_content: None,
+            is_error: Some(false),
+            metadata,
+            truncated_by: None,
+        }));
+        let updates = updates_for(&event, Some("m1"));
+        let shape = wire_shape(&updates[0]);
+        assert_eq!(shape["sessionUpdate"], "tool_call_update");
+        let content = shape["content"].as_array().expect("the content blocks");
+        let rendered = content
+            .iter()
+            .find(|block| block["type"] == "diff")
+            .expect("the diff block is there");
+        assert_eq!(rendered["path"], "/srv/app.rs");
+        assert_eq!(rendered["oldText"], "old");
+        assert_eq!(rendered["newText"], "new");
+    }
+
+    /// A change too big to carry is not a diff: the client's own
+    /// summary is the honest picture.
+    #[test]
+    fn a_truncated_change_is_not_a_diff() {
+        let big = "x".repeat(MAX_DIFF_TEXT_BYTES + 1);
+        let diff = FileDiff::new("/srv/app.rs", Some(big.clone()), big);
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(DIFF_METADATA_KEY.to_string(), diff.to_metadata());
+        let event = AgentEvent::Model(ContentPart::ToolResult(ToolResult {
+            tool_use_id: "c1".to_string(),
+            tool_name: Some("edit".to_string()),
+            content: vec![ContentPart::Text(TextContent {
+                text: "Replaced the text on line 2.".to_string(),
+                cache_control: None,
+            })],
+            structured_content: None,
+            is_error: Some(false),
+            metadata,
+            truncated_by: None,
+        }));
+        let updates = updates_for(&event, Some("m1"));
+        let shape = wire_shape(&updates[0]);
+        let content = shape["content"].as_array().expect("the content blocks");
+        assert!(
+            !content.iter().any(|block| block["type"] == "diff"),
+            "a truncated report is not a diff: {shape}"
+        );
     }
 
     /// A prompt's blocks map to the parts the model sees.

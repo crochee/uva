@@ -46,7 +46,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use uuid::Uuid;
-use uva::{core::Error, harness::AgentEvent, provider::ContentPart};
+use uva::{
+    core::Error,
+    harness::AgentEvent,
+    provider::ContentPart,
+    tool::FileDiff,
+};
 
 use super::SendMessageRequest;
 use crate::{
@@ -259,13 +264,29 @@ fn delta_frame(event: &AgentEvent) -> Option<Value> {
                 "name": call.name,
                 "arguments": call.input,
             })),
-            ContentPart::ToolResult(result) => Some(json!({
-                "kind": "tool_result",
-                "call_id": result.tool_use_id,
-                "tool": result.tool_name,
-                "content": result.content,
-                "is_error": result.is_error,
-            })),
+            ContentPart::ToolResult(result) => {
+                // The change the tool made rides the frame as data:
+                // a headless consumer renders it as a diff. A
+                // truncated report is not a diff, so it stays out.
+                let diff = FileDiff::from_metadata(&result.metadata)
+                    .filter(|diff| !diff.truncated);
+                let mut frame = json!({
+                    "kind": "tool_result",
+                    "call_id": result.tool_use_id,
+                    "tool": result.tool_name,
+                    "content": result.content,
+                    "is_error": result.is_error,
+                });
+                if let (Some(diff), Some(object)) =
+                    (diff, frame.as_object_mut())
+                {
+                    object.insert(
+                        "diff".to_string(),
+                        serde_json::to_value(diff).unwrap_or(Value::Null),
+                    );
+                }
+                Some(frame)
+            }
             // Media and resource parts are inputs a request carried,
             // not deltas a run produced.
             _ => None,
@@ -306,7 +327,8 @@ fn delta_frame(event: &AgentEvent) -> Option<Value> {
 mod tests {
     use uva::{
         harness::SystemEvent,
-        provider::{TextContent, ToolUse},
+        provider::{TextContent, ToolResult, ToolUse},
+        tool::DIFF_METADATA_KEY,
     };
 
     use super::*;
@@ -344,6 +366,32 @@ mod tests {
                 "arguments": {"path": "a.txt"},
             }))
         );
+    }
+
+    /// A tool result that changed a file carries the change as data:
+    /// a headless consumer renders it as a diff.
+    #[test]
+    fn a_tool_result_carries_the_change_it_made() {
+        let diff = FileDiff::new("/srv/app.rs", Some("old".to_string()), "new");
+        let mut metadata = serde_json::Map::new();
+        metadata.insert(DIFF_METADATA_KEY.to_string(), diff.to_metadata());
+        let event = AgentEvent::Model(ContentPart::ToolResult(ToolResult {
+            tool_use_id: "c1".to_string(),
+            tool_name: Some("edit".to_string()),
+            content: vec![ContentPart::Text(TextContent {
+                text: "Replaced the text on line 2.".to_string(),
+                cache_control: None,
+            })],
+            structured_content: None,
+            is_error: Some(false),
+            metadata,
+            truncated_by: None,
+        }));
+        let frame = delta_frame(&event).expect("the frame");
+        assert_eq!(frame["kind"], "tool_result");
+        assert_eq!(frame["diff"]["path"], "/srv/app.rs");
+        assert_eq!(frame["diff"]["old_text"], "old");
+        assert_eq!(frame["diff"]["new_text"], "new");
     }
 
     /// The dropped-events notification maps to the `gap` frame: the

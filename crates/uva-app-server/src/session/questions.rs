@@ -14,7 +14,7 @@
 //! about, so a gateway routes it to the connection that owns that
 //! session; the answer comes back on the same id.
 //!
-//! ```
+//! ```text
 //! → {"jsonrpc":"2.0","id":"core:internal:3","method":"questions/ask",
 //!    "params":{"session_id":"s-1","questions":[{"id":"db", …}]}}
 //! ← {"jsonrpc":"2.0","id":"core:internal:3",

@@ -403,11 +403,14 @@ uva-steering::event_name
 uva-steering::run_guards
 uva-steering::tool_fingerprint
 uva-tool::Context
+uva-tool::DIFF_METADATA_KEY
 uva-tool::DispatchPlan
 uva-tool::DispatchRefusal
 uva-tool::ExecutionMode
 uva-tool::FULL_OUTPUT_TOOL_NAME
+uva-tool::FileDiff
 uva-tool::KEY_TOOLS
+uva-tool::MAX_DIFF_TEXT_BYTES
 uva-tool::MCP_SELF_TOOL_PREFIX
 uva-tool::OutputBound
 uva-tool::OverflowStrategy

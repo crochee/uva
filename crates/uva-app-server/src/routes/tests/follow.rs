@@ -783,7 +783,7 @@ async fn suspended_with_tool_calls(
 
 /// Wait for both decisions and return the rows.
 async fn await_decisions(writer: &Arc<uva::session::LogWriter>) -> Vec<Value> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + crate::TEST_DEADLINE;
     loop {
         let rows = writer.read().await.expect("rows");
         let decided = rows
@@ -802,7 +802,7 @@ async fn await_rows(
     writer: &Arc<uva::session::LogWriter>,
     ready: impl Fn(&[Value]) -> bool,
 ) -> Vec<Value> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + crate::TEST_DEADLINE;
     loop {
         let rows = writer.read().await.expect("rows");
         if ready(&rows) || tokio::time::Instant::now() > deadline {
@@ -1227,7 +1227,7 @@ async fn suspended_one_call(fixture: &Fixture) {
     );
     // A resume submitted while the stamping run is still live is
     // ignored by the controller, so wait for it to settle first.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + crate::TEST_DEADLINE;
     while controller.session_state().await == SessionState::Running {
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -2020,7 +2020,7 @@ async fn a_run_cannot_start_while_the_compaction_gate_is_held() {
         .await;
 
     // The gate is released with the work it was given.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let deadline = tokio::time::Instant::now() + crate::TEST_DEADLINE;
     loop {
         let rows = writer.read().await.expect("rows");
         if rows.iter().any(|row| row["type"] == "request_header") {

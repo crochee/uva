@@ -97,6 +97,7 @@ fn services_over(
         lsp_servers: Arc::new(crate::session::lsp::DeploymentLspServers::new(
             Vec::new(),
         )),
+        web_search: Arc::new(uva::tool_web::NoSearch),
     })
 }
 
@@ -177,7 +178,7 @@ fn baseline_profile_names_every_native_plugin_in_dependency_order() {
             "the boot profile is missing `{expected}`: {ids:?}"
         );
     }
-    assert_eq!(ids.len(), 29, "no duplicate rows: {ids:?}");
+    assert_eq!(ids.len(), 30, "no duplicate rows: {ids:?}");
 }
 
 #[tokio::test]
@@ -257,7 +258,7 @@ async fn mounts_the_native_set_through_the_kernel() {
     ctx.require::<uva::hook::HookRegistry>(uva::hook::KEY_HOOKS)
         .expect("hooks");
 
-    assert_eq!(handle.len(), 29);
+    assert_eq!(handle.len(), 30);
     assert!(handle.plugin_state("skills").is_some());
 }
 

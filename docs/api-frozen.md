@@ -41,7 +41,7 @@ The frozen surface is that set of names, per crate:
 | `uva-provider` | 93 |
 | `uva-session` | 156 |
 | `uva-steering` | 36 |
-| `uva-tool` | 45 |
+| `uva-tool` | 48 |
 
 The full lists are in [The frozen names](#the-frozen-names) below. Every
 entry is spelled exactly as you would write it after the crate name:
@@ -105,6 +105,15 @@ ships are recorded here, beside the promise they narrow:
   so the `uva-tool` count stays 45. The harness's commit path lifts
   `metadata.error.code` into the durable `tool_result` row's `error`
   member (the one interrupted rows already use).
+
+- **The tool output grew the file-change report** (ACP diff parity,
+  fourth round cut 25). `FileDiff`, `DIFF_METADATA_KEY` and
+  `MAX_DIFF_TEXT_BYTES` joined the curated `uva-tool` surface: a tool
+  that changes a file reports the change (`path`, `old_text`,
+  `new_text`) in its result's metadata — the model's view is
+  unchanged, and a client renders the report as the protocol's diff
+  block. The report is capped; a change too big to carry is marked
+  truncated, because a half-diff is worse than no diff.
 
 - **The session's durable goal joined the curated surface** (the goal
   tool). `goal` joined the curated `uva-session` surface: the typed
@@ -599,14 +608,15 @@ transformers.
 `tool_fingerprint`
 
 
-### uva-tool — 45 names
+### uva-tool — 48 names
 
 The tool paradigm: registry, traits, annotations, restriction, surface
 projection.
 
 
-`Context`, `DispatchPlan`, `DispatchRefusal`, `ExecutionMode`, `FULL_OUTPUT_TOOL_NAME`
-`KEY_TOOLS`, `MCP_SELF_TOOL_PREFIX`, `OutputBound`, `OverflowStrategy`, `RegistrationScope`
+`Context`, `DIFF_METADATA_KEY`, `DispatchPlan`, `DispatchRefusal`, `ExecutionMode`, `FileDiff`
+`FULL_OUTPUT_TOOL_NAME`, `KEY_TOOLS`, `MAX_DIFF_TEXT_BYTES`, `MCP_SELF_TOOL_PREFIX`, `OutputBound`
+`OverflowStrategy`, `RegistrationScope`
 `RegistrationToken`, `RenderKind`, `Result`, `RetrieveFullOutputTool`, `Risk`
 `STRUCTURED_OUTPUT_TOOL_NAME`, `SanitizationPolicy`, `StreamOutput`, `SurfacePolicyError`, `Tool`
 `ToolAnnotations`, `ToolCategory`, `ToolDescriptor`, `ToolEntry`, `ToolExposure`

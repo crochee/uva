@@ -168,6 +168,10 @@ pub(crate) struct BootServices {
     /// The deployment's language servers ✓. The `tool-lsp` row files
     /// them, so the tool can ask the server that speaks a language ✓.
     pub lsp_servers: Arc<dyn uva::tool_lsp::LspServers>,
+    /// Where the `web_search` tool looks things up. The
+    /// `tool-web-search` row files it, so the model can search the
+    /// web when the deployment configured an endpoint.
+    pub web_search: Arc<dyn uva::tool_web::WebSearchProvider>,
 }
 
 /// Why a native mount failed — a profile-assembly or kernel verdict.
@@ -205,7 +209,7 @@ type Make = fn(&BootServices) -> Arc<dyn KernelPlugin>;
 /// app-server did not already resolve.
 #[must_use]
 pub(crate) fn native_profile() -> Profile {
-    const ENTRIES: [&str; 29] = [
+    const ENTRIES: [&str; 30] = [
         "tool-registry",
         "tool-ask",
         "tool-read",
@@ -218,6 +222,7 @@ pub(crate) fn native_profile() -> Profile {
         "tool-lsp",
         "tool-shell",
         "tool-todo",
+        "tool-web-search",
         "tool-web",
         "model-adapter",
         "memory",
@@ -731,6 +736,7 @@ pub(crate) fn dump_factories() -> PluginFactories {
         lsp_servers: Arc::new(crate::session::lsp::DeploymentLspServers::new(
             Vec::new(),
         )),
+        web_search: Arc::new(uva::tool_web::NoSearch),
     }))
 }
 
@@ -758,7 +764,7 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
     // and the deployment's one interception table — the `hooks` row
     // publishes the same registry the host carries, and a remount
     // rebuilds the plugin over that same instance (ADR 0028).
-    const SPECS: [(&str, Make); 13] = [
+    const SPECS: [(&str, Make); 14] = [
         ("tool-registry", tool_registry_plugin),
         ("tool-ask", ask_tool_plugin),
         ("tool-read", read_tool_plugin),
@@ -771,6 +777,7 @@ fn native_factories(services: Arc<BootServices>) -> PluginFactories {
         ("tool-lsp", lsp_tool_plugin),
         ("tool-shell", shell_tool_plugin),
         ("tool-task", task_tool_plugin),
+        ("tool-web-search", web_search_tool_plugin),
         ("hooks", hooks_plugin),
     ];
     let mut factories = PluginFactories::new();
@@ -996,6 +1003,15 @@ fn lsp_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
         Arc::clone(&services.lsp_servers),
         Arc::clone(&services.file_system)
             as Arc<dyn uva::tool_files::FileSystemOwner>,
+    ))
+}
+
+fn web_search_tool_plugin(services: &BootServices) -> Arc<dyn KernelPlugin> {
+    // The search endpoint the deployment configured; a deployment
+    // without one still mounts the tool, which then says that no
+    // provider is configured.
+    Arc::new(uva::tool_web::WebSearchToolPlugin::with_provider(
+        Arc::clone(&services.web_search),
     ))
 }
 

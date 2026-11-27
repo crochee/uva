@@ -20,7 +20,9 @@ use schemars_derive::JsonSchema;
 use serde::Deserialize;
 use uva_tool::{
     Context,
+    DIFF_METADATA_KEY,
     ExecutionMode,
+    FileDiff,
     Tool,
     ToolAnnotations,
     ToolOutput,
@@ -211,6 +213,13 @@ impl Tool for WriteTool {
                 Err(_) => None,
             };
         let existed = prior.is_some();
+        // The prior content as text, for the change report: a file
+        // that is not valid UTF-8 has no text to show (overwrite mode
+        // does not care; append mode refuses below).
+        let prior_text: Option<String> = prior
+            .as_ref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::to_owned);
         let new_text = if mode == WriteMode::Append {
             let prior = match prior {
                 Some(bytes) => match String::from_utf8(bytes) {
@@ -254,7 +263,19 @@ impl Tool for WriteTool {
         } else {
             "Created"
         };
+        // The change the tool made, as data: the client renders it as
+        // a diff, the model reads the sentence. The old text is the
+        // file's prior content — a file that did not exist has none.
         ToolOutput::text(format!("{action} file: {}", resolved.display()))
+            .with_metadata(
+                DIFF_METADATA_KEY,
+                FileDiff::new(
+                    resolved.display().to_string(),
+                    prior_text,
+                    new_text.clone(),
+                )
+                .to_metadata(),
+            )
     }
 }
 
