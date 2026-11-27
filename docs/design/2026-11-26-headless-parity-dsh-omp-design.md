@@ -1307,6 +1307,18 @@ real-time」。omp 的 ACP 面就发它（`acp-event-mapper.ts:225-228`，从调
   破坏：帧里不再是一个 JSON 值，而是一串需要重组的片段，客户端全都要改。
   切 10 已把**可迁移的部分**落完（背压落盘 + 64 MiB 逻辑上限），剩下的只有
   这一条真破坏。
+下一轮还应过账的三件 dsh 工具族缺席（本轮先记下，未对账）：
+
+- **`session_send_message`**（`packages/session/tool-session-control`）：
+  模型向**另一个**会话发消息。本仓的 `task` 覆盖委派（开子会话、内联驱动），
+  但「向一个已存在的会话投一条消息」没有面——多会话协作（长驻研究会话 ×
+  主会话）要用到它。落点形状：一条 parked-prompt 行 + 宿主的投递缝。
+- **`list_session` / `list_workspace`**（`packages/session-query/tool-session-list`）：
+  模型自己列会话与工作区（id / 标题 / 时间）。本仓的 `search` 覆盖会话**内容**
+  的语义召回，但不答「有哪些会话」；切 29 给了会话名字之后，列表面更有料了。
+- **`tool-worktree`**：每个任务一个 git worktree 的隔离。本仓的沙箱（进程级）
+  是另一件事；worktree 是**工作区级**隔离，动的是 shell/edit 的根。
+
 （`ast_grep`/`ast_edit` 仍缺席，且这是**有意的**：omp 的实现依赖原生
   tree-sitter 语法包（`@oh-my-pi/pi-natives` 的 `astGrep` + `~/.omp/natives/
   grammars`）——引入原生语法依赖是治理层的决定（AGENTS.md §1.4 的依赖纪律），
