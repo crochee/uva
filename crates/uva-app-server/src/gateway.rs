@@ -16,7 +16,9 @@
 //! 3. **Event distribution** — the core's `session/event` and
 //!    `anthropic/messages/event` notifications are routed by
 //!    `session_id` to the connections that follow that session, not
-//!    broadcast. Responses are routed by `id` to the connection that
+//!    broadcast. A turn's own frames (`chat/turn/event`) go to the
+//!    connection that asked for that turn, because only it knows the
+//!    turn's id. Responses are routed by `id` to the connection that
 //!    asked.
 //! 4. **Approval interrupts** — the core projects a durable
 //!    suspension as an `approval/request` **notification**
@@ -132,6 +134,16 @@ struct ConnectionHandle {
     pending: DashMap<String, Value>,
     /// The sessions this connection follows.
     subscriptions: DashMap<String, ()>,
+    /// The sessions this connection asked a **turn stream** for.
+    ///
+    /// A turn's frames (`chat/turn/event`) belong to the client that
+    /// asked for that turn, not to the session's followers: the
+    /// frames carry the turn's id, and only the client that started
+    /// the turn knows it. The core answers `chat/message/stream` with
+    /// that id, so the request itself is what records the relation —
+    /// before the answer, so the frames that race the answer still
+    /// find their way.
+    streams: DashMap<String, ()>,
     /// The sessions this connection *owns*: the ones it opened over
     /// ACP (`session/new`) or prompted (`session/prompt`).
     ///
@@ -239,6 +251,20 @@ impl AppServer {
                     handle.subscriptions.remove(session);
                 }
             }
+            // A turn stream is the connection's own: the frames that
+            // answer it carry that turn's id, which only this
+            // connection knows. The relation is recorded when the
+            // request is forwarded, so the frames that race the
+            // answer still find their way.
+            Some("chat/message/stream") => {
+                if let Some(session) = parsed
+                    .get("params")
+                    .and_then(|params| params.get("session_id"))
+                    .and_then(Value::as_str)
+                {
+                    handle.streams.insert(session.to_string(), ());
+                }
+            }
             _ => {}
         }
         // A session the connection names in a request is a session it
@@ -327,11 +353,23 @@ impl AppServer {
                 self.broadcast(frame);
                 return;
             }
+            // The turn's frames go to the connection that asked for
+            // that turn — not to the session's followers, who do not
+            // know the turn's id and could not use them.
+            Some("chat/turn/event") => {
+                if let Some(session) = session_of(parsed) {
+                    for handle in self.connections.iter() {
+                        if handle.streams.contains_key(session) {
+                            handle.send(frame);
+                        }
+                    }
+                }
+                return;
+            }
             Some(
                 "session/event"
                 | "anthropic/messages/event"
                 | "approval/request"
-                | "chat/turn/event"
                 | "agui/event",
             ) => {}
             _ => {
@@ -698,6 +736,7 @@ fn drop_subscriptions(app_server: &AppServer) {
             .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         handle.subscriptions.clear();
+        handle.streams.clear();
         for (key, id) in pending {
             handle.pending.remove(&key);
             let refusal = json!({
@@ -777,6 +816,7 @@ async fn serve_connection(
             tx: outbound_tx,
             pending: DashMap::new(),
             subscriptions: DashMap::new(),
+            streams: DashMap::new(),
             owned: DashMap::new(),
         },
     );

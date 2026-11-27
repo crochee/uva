@@ -73,6 +73,7 @@ fn connect(app_server: &AppServer) -> (u64, mpsc::UnboundedReceiver<String>) {
             tx,
             pending: DashMap::new(),
             subscriptions: DashMap::new(),
+            streams: DashMap::new(),
             owned: DashMap::new(),
         },
     );
@@ -344,6 +345,58 @@ async fn routes_session_event_to_followers_only() {
     route(&app_server, &anthropic.to_string());
     assert_eq!(second_rx.recv().await, Some(anthropic.to_string()));
     assert!(first_rx.try_recv().is_err());
+}
+
+/// A turn's frames go to the connection that asked for that turn.
+///
+/// The frames carry the turn's id, which only the client that called
+/// `chat/message/stream` knows — so they are not the session's
+/// followers' business. The relation is recorded when the request is
+/// forwarded, so the frames that race the answer still find their
+/// way.
+#[tokio::test]
+async fn routes_turn_frames_to_the_connection_that_asked_for_the_stream() {
+    let app_server = app();
+    let reader = attach_core_stdin(&app_server).await;
+    let (streamer, mut streamer_rx) = connect(&app_server);
+    let (follower, mut follower_rx) = connect(&app_server);
+    subscribe(&app_server, follower, "s1");
+
+    // The request: the connection asks for a turn's stream on the
+    // session. The gateway records the relation before the core
+    // answers it.
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "c1",
+        "method": "chat/message/stream",
+        "params": { "session_id": "s1", "text": "hello" },
+    });
+    app_server
+        .forward_upstream(streamer, &request.to_string())
+        .await
+        .expect("the request crosses to the core");
+
+    // The turn's frame, published by the core.
+    let frame = json!({
+        "jsonrpc": "2.0",
+        "method": "chat/turn/event",
+        "params": {
+            "session_id": "s1",
+            "turn_id": "t1",
+            "seq": 1,
+            "frame": { "kind": "text", "text": "hi" },
+        },
+    });
+    route(&app_server, &frame.to_string());
+    assert_eq!(
+        streamer_rx.recv().await,
+        Some(frame.to_string()),
+        "the client that asked for the turn gets its frames"
+    );
+    assert!(
+        follower_rx.try_recv().is_err(),
+        "a follower never sees another client's turn frames"
+    );
 }
 
 /// `approval/request` is a session-scoped notification: followers get
