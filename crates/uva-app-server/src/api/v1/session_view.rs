@@ -116,6 +116,12 @@ pub struct SessionTurnEnvelope {
     /// The provider call id a `tool_result` row answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// The files a `tool_result` row's call changed.
+    ///
+    /// A client that reads the log later learns what the call
+    /// touched, when the live diff is long gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Vec<String>>,
     /// Re-readable refs to the attachments a row's turn carried — an
     /// array of `{kind, hash, name, mime_type, byte_len, unstored}`
     /// objects. The bytes never ride the log: a multimodal payload

@@ -41,6 +41,7 @@ async fn live_session_state_none_when_controller_absent() {
 fn session_detail_serialises_with_legacy_artifacts_field() {
     let detail = SessionDetail {
         id: "abc".into(),
+        title: None,
         status: SessionStatus::Completed,
         context_id: "abc".into(),
         created_at: None,
@@ -398,6 +399,68 @@ fn write_current_transcript(
         body.push('\n');
     }
     std::fs::write(dir.join("events.jsonl"), body).expect("transcript");
+}
+
+/// A listing names the session after the first thing the user said.
+///
+/// A listing of ids is not an index: the name is what tells two
+/// conversations apart. It is derived from the log — never stored —
+/// so it cannot drift from the conversation it names.
+#[tokio::test]
+async fn the_listing_names_the_session_after_its_first_message() {
+    let (state, dir) = durable_state().await;
+    write_current_transcript(
+        dir.path(),
+        "s-titled",
+        &[serde_json::json!({
+            "type": "user_message",
+            "seq": 1,
+            "ts": "2026-11-27T10:00:00Z",
+            "data": {
+                "role": "user",
+                "content": [{"type": "text", "text": "Fix the login bug\nin the auth module"}],
+            },
+        })],
+    );
+    let listed = list_sessions(Arc::clone(&state), SessionPageQuery::new())
+        .await
+        .expect("the listing answers");
+    let row = listed
+        .data
+        .iter()
+        .find(|row| row.id == "s-titled")
+        .expect("the session is listed");
+    assert_eq!(
+        row.title.as_deref(),
+        Some("Fix the login bug"),
+        "the name is the first line of the first message: {row:?}"
+    );
+}
+
+/// A session with no user message has no name: the listing says so
+/// rather than inventing one.
+#[tokio::test]
+async fn a_session_without_a_message_has_no_name() {
+    let (state, dir) = durable_state().await;
+    write_current_transcript(
+        dir.path(),
+        "s-unnamed",
+        &[serde_json::json!({
+            "type": "user_message",
+            "seq": 1,
+            "ts": "2026-11-27T10:00:00Z",
+            "data": {"role": "user", "content": [{"type": "text", "text": "   \n  "}]},
+        })],
+    );
+    let listed = list_sessions(Arc::clone(&state), SessionPageQuery::new())
+        .await
+        .expect("the listing answers");
+    let row = listed
+        .data
+        .iter()
+        .find(|row| row.id == "s-unnamed")
+        .expect("the session is listed");
+    assert_eq!(row.title, None, "a blank message names nothing");
 }
 
 /// The session directory for `session_id` under a temp workspace.

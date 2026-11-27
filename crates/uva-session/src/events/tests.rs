@@ -1197,6 +1197,7 @@ fn the_rows_the_vocabulary_writes() -> Vec<(&'static str, SessionEvent)> {
                 json!({"role": "tool", "content": "ok"}),
                 Some("call-1".to_string()),
                 true,
+                None,
             ),
         ),
         (

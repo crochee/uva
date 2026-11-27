@@ -785,7 +785,10 @@ async fn suspended_with_tool_calls(
 async fn await_decisions(writer: &Arc<uva::session::LogWriter>) -> Vec<Value> {
     let deadline = tokio::time::Instant::now() + crate::TEST_DEADLINE;
     loop {
-        let rows = writer.read().await.expect("rows");
+        let rows = writer
+            .read()
+            .await
+            .unwrap_or_else(|error| panic!("the log read failed: {error}"));
         let decided = rows
             .iter()
             .filter(|row| row["type"] == "approval_decided")
@@ -804,7 +807,10 @@ async fn await_rows(
 ) -> Vec<Value> {
     let deadline = tokio::time::Instant::now() + crate::TEST_DEADLINE;
     loop {
-        let rows = writer.read().await.expect("rows");
+        let rows = writer
+            .read()
+            .await
+            .unwrap_or_else(|error| panic!("the log read failed: {error}"));
         if ready(&rows) || tokio::time::Instant::now() > deadline {
             return rows;
         }

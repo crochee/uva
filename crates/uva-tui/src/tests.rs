@@ -443,6 +443,7 @@ fn conversation_responder() -> Responder {
 /// One row of the session listing, as the server's summary type.
 fn session_summary(id: &str, status: SessionStatus) -> SessionSummary {
     SessionSummary {
+        title: None,
         id: id.to_string(),
         status,
         context_id: None,

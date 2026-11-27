@@ -632,6 +632,7 @@ async fn the_writer_feeds_the_ledger_with_log_ordinals() {
     writer
         .append_event(&uva::session::SessionEvent::ToolResult {
             seq: 0,
+            changed: None,
             ts: String::new(),
             data: serde_json::to_value(uva::provider::Message::tool(
                 uva::provider::Content::text("out"),
@@ -741,6 +742,7 @@ async fn the_writer_takes_its_ordinal_from_the_sink_not_a_local_counter() {
     writer
         .append_event(&uva::session::SessionEvent::ToolResult {
             seq: 0,
+            changed: None,
             ts: String::new(),
             data: serde_json::to_value(uva::provider::Message::tool(
                 uva::provider::Content::text("out"),

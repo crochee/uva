@@ -88,6 +88,15 @@ pub const SESSION_LIST_TAIL_WINDOW: usize = 512;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSummary {
     pub id: String,
+    /// The session's name — the first thing the user said, cut to a
+    /// line.
+    ///
+    /// A listing of ids is not an index: the name is what tells two
+    /// conversations apart. It is **derived** from the log (the first
+    /// user message), not stored: the log is the truth, and a title
+    /// that could drift from it would be a second truth.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The session status — one of the five the status module
     /// produces. The wire spells it `unspecified`, `working`,
     /// `input_required`, `canceled` or `completed`.
@@ -121,6 +130,10 @@ pub struct SessionSummary {
 #[derive(Serialize, JsonSchema)]
 pub struct SessionDetail {
     pub id: String,
+    /// The session's name — the same value the summary reports
+    /// ([`SessionSummary::title`]), derived from the log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The session status — the same closed set the summary carries.
     pub status: SessionStatus,
     pub context_id: String,
@@ -245,6 +258,9 @@ fn subagent_attribution(
 #[derive(Debug)]
 struct ScannedSession {
     id: String,
+    /// The session's name, derived from the log's head — the scan
+    /// already reads it, so naming the session costs no extra I/O.
+    title: Option<String>,
     created_at: Option<DateTime<Utc>>,
     parent_session_id: Option<String>,
     agent_name: Option<String>,
@@ -254,6 +270,49 @@ struct ScannedSession {
     /// process has not opened since it restarted.
     awaiting_approval: bool,
 }
+
+/// The session's name, derived from the log's first user message.
+///
+/// The name is **derived**, never stored: the log is the truth, and a
+/// stored title could drift from it (a rewritten prompt, a forked
+/// session). The first thing the user said is what the session is
+/// about, and a listing of ids is not an index.
+///
+/// The first non-empty line, cut to [`TITLE_MAX_CHARS`]. A session
+/// with no user message yet (a delegation that has not run, a
+/// session created and abandoned) has no name — and the listing says
+/// so rather than inventing one.
+fn title_from_head(head: &[Value]) -> Option<String> {
+    let user_message = uva::session::RowTag::UserMessage.as_wire();
+    let row = head.iter().find(|row| row["type"] == user_message)?;
+    let text = uva::session::restore_row(row)
+        .message()?
+        .content
+        .extract_text()?;
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    Some(cut_title(line))
+}
+
+/// Cut a name to the listing's budget.
+///
+/// A cut that splits a word is cut at the word's edge: a name that
+/// ends mid-word reads as damage.
+fn cut_title(line: &str) -> String {
+    if line.chars().count() <= TITLE_MAX_CHARS {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(TITLE_MAX_CHARS - 1).collect();
+    let cut = head.rfind(' ').unwrap_or(0);
+    let head = if cut > TITLE_MAX_CHARS / 2 {
+        &head[..cut]
+    } else {
+        &head
+    };
+    format!("{}…", head.trim_end())
+}
+
+/// The most characters a session's name carries.
+const TITLE_MAX_CHARS: usize = 80;
 
 /// The unregistered sessions under the user's sessions directory:
 /// id and transcript path, ready for the async scan.
@@ -332,6 +391,7 @@ async fn scan_unregistered_transcripts(
         );
         let (parent_session_id, agent_name) =
             subagent_attribution(&head, &session_id);
+        let title = title_from_head(&head);
         // Judging approval from a bounded tail window is exact, not
         // an approximation: a pending approval suspends its run, and
         // nothing is appended after it, so an unmatched
@@ -340,6 +400,7 @@ async fn scan_unregistered_transcripts(
         let awaiting_approval = !uva::harness::open_requests(&tail).is_empty();
         found.push(ScannedSession {
             id: session_id,
+            title,
             created_at,
             parent_session_id,
             agent_name,
@@ -542,6 +603,7 @@ pub async fn list_sessions(
         }
         rows.push(SessionSummary {
             id: session.id.clone(),
+            title: title_from_head(&head),
             status,
             context_id: Some(session.id),
             created_at,
@@ -574,6 +636,7 @@ pub async fn list_sessions(
         }
         rows.push(SessionSummary {
             id: scanned.id.clone(),
+            title: scanned.title.clone(),
             status,
             context_id: Some(scanned.id),
             created_at: scanned.created_at,
@@ -629,12 +692,14 @@ pub async fn get_session(
             .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
         let (parent_session_id, agent_name) =
             subagent_attribution(&history, &id);
+        let title = title_from_head(&history);
         // Every fact above reads the raw log rows; publishing is the
         // last step so no fold sees the rewritten shapes (a dropped
         // row would otherwise move `updated_at`).
         let history = publish_rows(history);
         return Ok(SessionDetail {
             id: id.clone(),
+            title,
             status,
             context_id: id,
             created_at,
@@ -673,6 +738,7 @@ pub async fn get_session(
         .rev()
         .find_map(|ev| parse_rfc3339(ev.get("ts").and_then(Value::as_str)));
     let (parent_session_id, agent_name) = subagent_attribution(&history, &id);
+    let title = title_from_head(&history);
     // Disk-only means no controller and no in-memory state: the
     // transcript is the only place the paused state can come from, and
     // it is exactly the post-restart case.
@@ -686,6 +752,7 @@ pub async fn get_session(
     let history = publish_rows(history);
     Ok(SessionDetail {
         id: id.clone(),
+        title,
         status,
         context_id: id,
         // No registry record, so the creation time comes from the

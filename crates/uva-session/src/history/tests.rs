@@ -47,6 +47,7 @@ fn tool_row(seq: u64, call_id: &str, output: &str) -> Value {
         data: message_json(&Message::tool(output, call_id)),
         is_error: false,
         tool_call_id: Some(call_id.to_string()),
+        changed: None,
         surface_op: None,
     })
 }

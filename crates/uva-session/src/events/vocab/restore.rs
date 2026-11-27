@@ -372,6 +372,7 @@ impl<'a> CurrentRow<'a> {
                 data,
                 is_error: tool_result_failed(&message),
                 tool_call_id: message.tool_call_id.clone(),
+                changed: row_changed(self.raw),
                 surface_op: Some(op),
             }),
             _ => None,
@@ -573,6 +574,17 @@ fn row_ts(row: &Value) -> Option<&str> {
 }
 
 /// 这一行带的表面操作。
+/// 这一行带的「这次调用改了哪些文件」。
+fn row_changed(row: &Value) -> Option<Vec<String>> {
+    let paths = row.get("changed")?.as_array()?;
+    let paths: Vec<String> = paths
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
+    (!paths.is_empty()).then_some(paths)
+}
+
 fn row_op(row: &Value) -> SurfaceOp {
     row.get("surface_op")
         .and_then(|value| {

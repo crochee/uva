@@ -328,6 +328,7 @@ mod row_seam_tests {
             serde_json::json!({"role": "tool", "content": "ok"}),
             Some("call-1".to_string()),
             true,
+            None,
         );
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["type"], "tool_result");
@@ -911,6 +912,7 @@ mod one_owner_per_tag {
                     json!({"role": "tool", "content": "ok"}),
                     Some("call-1".to_string()),
                     true,
+                    None,
                 ),
             )
             .payload(Payload::Caller {

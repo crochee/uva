@@ -259,6 +259,36 @@ fn the_restored_event_carries_the_rows_own_facts() {
     assert_eq!(seq, 10);
 }
 
+/// A row's changed paths survive the read boundary.
+///
+/// The row is the log's own record of what a call touched: a client
+/// that reads the log later must still learn it, so the member
+/// rides the restored row.
+#[test]
+fn a_rows_changed_paths_survive_the_restore() {
+    let mut row = typed_row(
+        RowTag::ToolResult,
+        json!({
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [{"type": "text", "text": "Replaced the text."}],
+        }),
+    );
+    if let Some(object) = row.as_object_mut() {
+        object.insert("changed".into(), json!(["/srv/app.rs"]));
+    }
+    let SessionEvent::ToolResult { changed, .. } =
+        restore_row(&row).event().expect("the row restores")
+    else {
+        panic!("a tool-result row restores to a ToolResult event");
+    };
+    assert_eq!(
+        changed,
+        Some(vec!["/srv/app.rs".to_string()]),
+        "the changed paths ride the row"
+    );
+}
+
 /// A typed row keeps its own tag: the payload never overrides it.
 #[test]
 fn a_typed_row_keeps_its_tag() {

@@ -561,10 +561,15 @@ pub fn warning(kind: &str, message: &str) -> SessionEvent {
 /// output, not the failure); `is_error` rides beside it so the row
 /// says what the live event says. `tool_call_id` is `None` only for
 /// a result that answers no call.
+///
+/// `changed` names the files the call changed — a client that reads
+/// the log later still learns what the call touched, when the live
+/// diff is long gone.
 pub fn tool_result(
     data: Value,
     tool_call_id: Option<String>,
     is_error: bool,
+    changed: Option<Vec<String>>,
 ) -> SessionEvent {
     SessionEvent::ToolResult {
         seq: 0,
@@ -572,6 +577,7 @@ pub fn tool_result(
         data,
         is_error,
         tool_call_id,
+        changed,
         surface_op: None,
     }
 }
@@ -611,6 +617,7 @@ pub(crate) fn tool_result_interrupted(
         // this as a call that returned.
         is_error: true,
         tool_call_id: Some(call_id.to_string()),
+        changed: None,
         surface_op: Some(SurfaceOp::append()),
     }
 }
@@ -633,7 +640,7 @@ pub fn message_row(
         }
         uva_provider::Role::Assistant => assistant_message(data),
         uva_provider::Role::Tool => {
-            tool_result(data, message.tool_call_id.clone(), false)
+            tool_result(data, message.tool_call_id.clone(), false, None)
         }
     })
 }
@@ -1005,6 +1012,7 @@ pub(crate) fn projected_tool_result(
         data,
         is_error: false,
         tool_call_id: None,
+        changed: None,
         surface_op: Some(op),
     }
 }

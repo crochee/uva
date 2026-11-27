@@ -25,6 +25,7 @@
 //! | [`tool_metrics`]           | The Prometheus tool counters the loop's dispatch feeds      |
 //! | [`compaction_wiring`]      | Which context manager / compactor a run uses                |
 //! | [`host_wiring`]            | Host registrations reaching the loop's decision points      |
+//! | [`changed_paths`]          | The durable row says what the call changed                  |
 //! | [`steering_guards`]        | Guard pipeline + sanitising rewrites                        |
 //! | [`steering_hints`]         | Hints                                                       |
 //! | [`steering_hooks`]         | Hook dispatch                                               |
@@ -47,6 +48,7 @@ use crate::{
 };
 
 mod agent_smoke;
+mod changed_paths;
 mod compaction;
 mod compaction_wiring;
 mod compose_pipeline_tests;

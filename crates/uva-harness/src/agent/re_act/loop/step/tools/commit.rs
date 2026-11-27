@@ -86,6 +86,19 @@ async fn rewrite_output(
     replace_text_parts(&mut output.content, text);
 }
 
+/// The files a tool's output says it changed.
+///
+/// The tool reports the change in its metadata (the same report the
+/// protocol's diff block and the live frame carry); the row keeps the
+/// paths, so the log answers "what did this call touch" on its own.
+fn changed_paths(
+    metadata: &serde_json::Map<String, serde_json::Value>,
+) -> Option<Vec<String>> {
+    let diff = metadata.get(uva_tool::DIFF_METADATA_KEY)?;
+    let path = diff.get("path")?.as_str()?;
+    Some(vec![path.to_string()])
+}
+
 fn replace_text_parts(content: &mut Vec<ContentPart>, text: String) {
     let insert_at = content
         .iter()
@@ -162,11 +175,14 @@ pub(crate) async fn commit_tool_result(
     let tool_result_seq = row.map(|data| {
         // The message payload carries the tool's output, not the
         // failure; the flag rides beside it so the row says what
-        // the live event below says.
+        // the live event below says. The files the call changed ride
+        // beside them too: a client that reads the log later still
+        // learns what the call touched, when the live diff is gone.
         this.sink.append_typed(uva_session::tool_result(
             data,
             Some(call_id.clone()),
             is_error,
+            changed_paths(&metadata),
         ))
     });
     if tool_result_seq.is_some()

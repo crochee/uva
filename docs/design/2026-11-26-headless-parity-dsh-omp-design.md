@@ -53,7 +53,7 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 取消时未跑的调用 | 合成错误结果，日志仍可回放（`packages/core/tools/src/batch.ts:250-260`） | 合成结果，`aborted`/`skipped`/`length` 各有文案（`agent-loop.ts:4204-4265`） | 未开始的调用**不跑**（取消检查在工具流的 drain 里，`…/step/tools/route.rs:168`），已跑完的结果照旧 | 对齐 |
 | 日志即真源 | `session.deriveMessages()` 从日志派生（`agent.ts:203`） | `session-entries.ts` 逐条追加 | 审批 / 压缩 / resume 全是日志折叠 | 对齐（本仓更强：单写者） |
 | 单写者 | 进程内 + `flock` 跨进程（`packages/session/session-persistence-jsonl/src/lease.ts:1-24`） | 进程租约 `~/.omp/run/session-owners/<id>`，发现别人在写就**换新文件**（`docs/session.md:648-651`） | 进程内单写者 + **`owner.lock` 跨进程所有权**（切 9）：写路径首次追加时 flock 认领、拒绝**失败关闭**（不换文件——本仓的会话 id 就是身份） | 对齐 |
-| 崩溃修复 | 断尾截断 + 开回合补closer（`packages/core/session/src/repair.ts:59-105`） | 追加不 fsync，落盘即返回（`packages/coding-agent/src/session/session-storage.ts:66-76`） | `crates/uva-session/src/repair/mod.rs` 合成 `tool_result` / `step_end` / `turn_end` | 对齐 |
+| 崩溃修复 | 断尾截断 + 开回合补closer（`packages/core/session/src/repair.ts:59-105`） | 追加不 fsync，落盘即返回（`packages/coding-agent/src/session/session-storage.ts:66-76`） | `crates/uva-session/src/repair/mod.rs` 合成 `tool_result` / `step_end` / `turn_end`；**断尾截断已落（切 27）**：写者在第一次写之前切掉日志末尾那半行，读者也容忍它 | 对齐 |
 | 审批闸门 | `tools/pre-execute` 水瀑，先于任何工具体（`packages/core/tools/src/pipeline.ts:196-215`） | 扩展包装器再查一次**真正要执行的参数**（`packages/coding-agent/src/extensibility/extensions/wrapper.ts:374-389`） | 五级否决流水线（`…/loop/guard.rs:47-85`） | 对齐 |
 | 审批**超时** | 工具级 `timeoutMs` → `TOOL_TIMEOUT` 结构化错误（`packages/guard/timeout-policy/src/index.ts:26`） | **没有超时**：要么有人回答，要么回合被 abort（`wrapper.ts:495-500`） | **已落**（切 1）：策略带 `timeout_secs`，控制器到期走同一条 resume 路径，模型看到「没人回答」的拒绝 | 对齐 |
 | 审批可分辨的拒绝 | `allowed-once / rejected / cancelled / unavailable` 四态（`packages/interaction/user-approval/src/types.ts:31-34`） | 拒绝文案分工具策略 / 用户策略（`packages/coding-agent/src/tools/approval.ts:591-602`） | `resolved / cancelled / rejected`（`crates/uva-approval/src/approval.rs:305-309`） | 对齐（无「超时」态，随 G1 一起补） |
@@ -68,11 +68,12 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | 控制面协议 | 自有 JSON-RPC stdio server（`packages/sdk/server/src/server.ts:609-667`） | 自有 JSONL：~90 条命令、协议协商、**分块帧**（`wire/commands.ts:35-454`、`rpc-frame.ts:6,9`） | JSON-RPC 2.0 + Content-Length 帧，64 MiB 逻辑上限，超限即错（`crates/uva-app-server/src/rpc/framing.rs:32`） | **对齐（切 10）**：逻辑上限同 omp v2；分块/协商对 Content-Length 不适用（见切 10）；出站背压落盘 |
 | 增量读 | — | `get_entries?since` + 分页游标（`docs/rpc.md`） | `sessions/events` **每次整本**返回（`crates/uva-app-server/src/routes/sessions/mod.rs:827-855`） | **缺口 G11（本轮切）** |
 | 客户端侧工具 | — | `set_host_tools` + `host_tool_call`/`host_tool_result` 帧（`packages/coding-agent/src/modes/rpc/host-tools.ts:76`、`rpc-types.ts:907-953`） | **fs 委派已落地**（客户端声明 `clientCapabilities.fs` 后，会话的 `read`/`write`/`edit` 经 ACP `fs/*` 回到客户端，见「切 5」与「切 12」）；**terminal 委派已落地**（客户端声明 `clientCapabilities.terminal` 后，会话的 `shell` 命令经 ACP `terminal/*` 跑在客户端的窗格里，见「切 11」）；**客户端自有的工具已落地**（第三轮切 23：核心面 `tools/register owner=client` + `tools/execute` 问答回到客户端）；ACP 面没有 `set_host_tools` 原语，那一半如实缺席；每会话 MCP 仍如实缺席 | **对齐（切 5 + 11 + 12 + 23）**：核心面有了原语，ACP 面如实缺席 |
+| 会话的名字 | 耐久标题状态（最新一次胜出，模型或 provider 生成，`packages/session/session-title`）+ 异步 provider（`session-title-llm`） | 用小模型生成标题（`packages/coding-agent/src/utils/title-generator.ts`） | **已落（切 29）**：标题**从日志派生**（第一条 user 消息的第一行，截到 80 字符），`sessions/list` 与 `sessions/get` 都带着它 | **有意不同**：不调模型、不另存一份可能漂移的真相（本轮范围明确排除提示词工程；dsh/omp 的标题是模型生成的摘要） |
 | 帧内事件投影 | `--json` 只投影**已提交**事件，单串 8 KiB / 单事件 32 KiB 上限（`packages/bundle/headless/src/json-stream.ts:20-27`） | v1 物理帧 1 MiB，v2 分块到 64 MiB（`rpc-frame.ts:6,9`） | live 事件 + durable 行两路（`crates/uva-app-server/src/routes/chat/stream.rs:1-40`） | 对齐（上限策略不同，见切 10） |
 | 后台作业 | `job_output` / `job_list` / `job_kill`（`packages/jobs/tool-jobs/src/index.ts:1-60`）：完成通知送进主人的下一步 | 后台作业 + `wait` 工具（`packages/coding-agent/src/tools/wait.ts`） | **已落**（切 13 + 14）：`job` 工具的 `start` / `output`（可等）/ `list` / `kill`，作业住在一个部署级的注册表里；**完成通知主动送达**（作业结束 → 拥有它的会话收到通知，切 14） | 对齐 |
 | 工具族 | `tool-fs` / `tool-fs-search`（`glob` + `grep`，走打包的 ripgrep）/ `tool-str-replace-editor` / `tool-bash` / `tool-subagent(-control)` / `tool-session-{control,list,query}` / `tool-schedule` / `tool-skill` / `tool-ask-user` / `tool-jobs` / `tool-goal` / `tool-terminal` / `tool-worktree` / `tool-lsp` / **`tool-web`（`web_search` + `web_fetch`）**（`packages/*/tool-*`） | 31 个内建：`read` / `bash` / `edit` / `ast_grep` / `ast_edit` / `ask` / `glob` / `grep` / `find` / `lsp` / `checkpoint` / `rewind` / `task` / `wait` / `todo` / `web_search` / `write` / `memory_edit` / `manage_skill` …（`packages/coding-agent/src/tools/builtin-names.ts:3-33`） | read / write / **edit**（切 12）/ shell / **job**（切 13）/ **glob** + **grep**（切 15）/ **lsp**（切 17）/ todo / web / search（语义）/ memo / task / 技能 | **大半对齐**：两个参考都有的文件工具齐了（切 12 的 `edit`、切 15 的 `glob`/`grep`），**目标模式齐了**（切 16 的 `goal` 工具 + 宿主的续跑），**语言服务器齐了**（切 17 的诊断面 + 切 18 的查询面）；**提问齐了**（切 24 的 `ask`：结构化问题、客户端作答、有界等待）；**检索齐了**（切 26 的 `web_search`：JSON 搜索契约 + 有界答案）；**如实缺席**：`checkpoint`/`rewind`（撤销——两个参考各自的「会话回卷」与「工作区 worktree」是两件不同的事）、`ast_grep`/`ast_edit`（结构化编辑）、`lsp` 的**编辑面**（omp 的 `applyWorkspaceEdit`——本仓的 `edit` 工具是它的有界替身） |
 | 文件编辑 | `str_replace_editor`（`view` / `create` / `str_replace` / `insert`）：旧文本必须**逐字**命中；多处命中被拒并点名行号（`packages/fs/tool-str-replace-editor/src/index.ts:295-320`） | `edit`（`old_string` / `new_string` / `replace_all`）：同一逐字规则，外加两条让失败可解释的拒绝（相同替换、空白替换_all）与「为什么没命中」的诊断（`packages/coding-agent/src/edit/magic-tools.ts:191-210`） | **已落**（切 12）：`edit` 工具逐字命中、多处命中点名行号、`replace_all` 显式开启；失败分两种可能（已应用 / 文本不符）各给一条下一步 | 对齐 |
-| 文件改动的呈现 | 工作区改动摘要（git 工作树快照 + 文件工具的整文件捕获，`packages/deliverables/workspace-changes`） | 编辑器的 diff 面板（工具结果带 `oldText`/`newText`，`packages/coding-agent/src/modes/acp/acp-event-mapper.ts:708-745`） | **已落（切 25）**：文件工具把改动报进结果 metadata（`path` / `old_text` / `new_text`）；ACP 面发 `ToolCallContent::Diff`，核心面 live 帧带 `diff` | 对齐（**durable 行不带**——改动是活的事实，事后只读得到工具的摘要） |
+| 文件改动的呈现 | 工作区改动摘要（git 工作树快照 + 文件工具的整文件捕获，`packages/deliverables/workspace-changes`） | 编辑器的 diff 面板（工具结果带 `oldText`/`newText`，`packages/coding-agent/src/modes/acp/acp-event-mapper.ts:708-745`） | **已落（切 25 + 切 28）**：文件工具把改动报进结果 metadata（`path` / `old_text` / `new_text`）；ACP 面发 `ToolCallContent::Diff`，核心面 live 帧带 `diff`；**durable 行也带 `changed`**（事后读日志仍知道这次调用改了哪些文件） | 对齐（durable 行带**路径**，不带 diff 本身——diff 太大，日志只记事实） |
 | 退出契约 | 终态 `completed` → 0，其余 → 1（`packages/bundle/headless/src/index.ts:430-440`） | `prompt_result.status`（`docs/rpc.md`） | `chat/turn/event` 的 `end.reason`（`routes/chat/stream.rs:270-280`） | 对齐 |
 
 ---
@@ -100,6 +101,9 @@ dsh 是 Cordis 插件 monorepo（TypeScript），无头控制面在
 | G18 | **工具批不守模型序**：按模式分桶（全部 Parallel 先跑，再全部 Sequential），模型说「先写后读」本仓先读。**已落（第二轮切 19）**：按模型序的波，排他调用是屏障 | 高 | 旧 `…/step/tools/mod.rs` 的 `bucket_by_execution_mode` + 两个桶 |
 | G19 | **并发安全只按工具名判**：dsh 的 `isConcurrencySafe(args)` 与 omp 的 `resolveToolConcurrency(tool, args)` 都按**调用**判，本仓 `shell` 永远串行、`ls` 也排队。**已落（第二轮切 20）**：`Tool::mode_for(input)`，shell 只读命令可并行 | 中 | 旧 `Tool::mode()` + `registry.execution_mode(name)` |
 | G20 | **无工具级超时**：stdio MCP 服务器不出声就把回合永远挂住（dsh 的 `timeout-policy` 给每个工具武装 `timeoutMs`，到期是结构化 `TOOL_TIMEOUT`）。**已落（第二轮切 21）**：结构化词汇 + 行内 code + stdio 传输的每请求预算 | 高 | `crates/uva-mcp/src/stdio.rs`（此前无截止时间） |
+| G26 | **会话列表只是一串 id**：两个参考都给会话起名字（dsh 的耐久标题状态、omp 的小模型标题），本仓的 `sessions/list` 只有 id / 状态 / 时间——客户端分不清两个会话。**已落（第四轮切 29）**：标题**从日志派生**（第一条 user 消息的第一行），不调模型、不另存一份可能漂移的真相 | 中 | `crates/uva-app-server/src/routes/sessions/mod.rs` |
+| G25 | **durable 行不知道这次调用改了哪些文件**：改动只活在 live 帧与 ACP 的 diff 块里，客户端断开后再读日志，只剩工具的一句话摘要。**已落（第四轮切 28）**：`tool_result` 行增 `changed` 成员（harness 的提交路径从工具的报告里提出来），wire 信封与前端类型同步 | 中 | `crates/uva-session/src/events/mod.rs` |
+| G24 | **半行让日志不可读**：日志末尾那半行（写到一半的行——读者撞上正在写的行，或崩溃撕开的行）让**整个读取失败**：客户端在 agent 正在写的时候读会话，会拿到一个错误；崩溃撕开的尾巴则让日志**永远读不了**（仓库此前只合成 closer，从不截断断尾）。**已落（第四轮切 27）**：读者只读**完整的行**（末尾那半行不是行），写者在第一次写之前**切掉**它（否则下一行会被粘上去） | 高 | `crates/uva-session/src/jsonl/mod.rs` |
 | G23 | **模型看不见网**：只有 `web_fetch`（读一个模型已经知道的 URL），没有 `web_search`——两个参考都有，账本此前漏记。**已落（第四轮切 26）**：`web_search` 工具 + JSON 搜索契约 + 有界答案 | 高 | `crates/uva-tool-plugins/src/web/search.rs` |
 | G22 | **文件改动到不了客户端**：工具结果只有一句话（「改了第 12 行」），ACP 的 `Diff` 内容块与 omp 的 diff 面板都没有数据可画。**已落（第四轮切 25）**：工具报改动 → ACP 发 diff 块 → 核心面 live 帧带 `diff` | 中 | `crates/uva-app-server/src/adapters/acp/projection.rs` |
 | G21 | **工具族少一个 `ask`**：模型要问人，只能走审批闸门（一个有界替身，且只会问「准不准」）。**已落（第四轮切 24）**：结构化问题 + 客户端作答 + 有界等待；ACP 面如实缺席（ACP v1 没有提问原语） | 中 | `crates/uva-tool-plugins/src/ask/` |
@@ -1110,6 +1114,102 @@ oldText/newText」）。本仓此前**从不发这个变体**——编辑到了�
 
 ---
 
+### 切 27 — 断尾截断：半行不是行（第四轮切 4）
+
+**要什么**：日志是**追加**的，每一行都以换行结尾。日志末尾那**没有换行**的半截
+不是一行：它是「读者撞上了正在写的行」或「崩溃撕开的行」。dsh 的崩溃修复第一
+步就是**断尾截断**（`packages/core/session/src/repair.ts:59-105`）。
+
+本仓此前**两头都缺**：
+
+- **读者不容忍**：读到最后那半行会**解析失败**，整个读取失败 ⇒ 客户端在
+  agent 正在写的时候读会话（`sessions/events` / `follow`）会拿到一个错误，
+  而客户端分不清「agent 正在写」与「日志坏了」。
+- **写者不截断**：崩溃撕开的尾巴**留在原地**，下一次追加会被**粘上去**——
+  一行变成两行，写者盖的序号从此读不出来；而且那半行让日志**永远读不了**
+  （本仓的修复只合成 closer，从不截断断尾）。
+
+**怎么落**：
+
+1. **读者只读完整的行**（`complete_lines`）：文件不以换行结尾时，末尾那截
+   **不是行**——丢掉它。中间的坏行仍然**大声失败**（那是真损坏，不是半行）。
+2. **写者在第一次写之前切掉它**（`cut_torn_tail`）：切到最后一个完整行的
+   末尾，文件恢复可写，下一行不会被粘上去。检查只做一次（`tail_cut`），
+   而且**只读尾巴**（`read_tail` 有预算）——开一个 sink 仍然是 O(1)（日志长
+   度无关）。日志的长度先问、字节后读：**不是普通文件的东西（设备、管道）
+   不会被读**。
+3. **切不切由写者说了算**：读者只读不写（单写者纪律），截断是**写**。
+
+**验收**：
+- 单元（session）：半行日志读回**完整的行**（不失败）；写者切掉断尾后再写，
+  新行**完整**（没有被粘上）；写与读同时进行时读**不失败**。
+
+---
+
+### 切 28 — 耐久的「这次调用改了哪些文件」（第四轮切 5）
+
+**要什么**：切 25 让改动**当场**看得见（ACP 的 diff 块、核心面的 live 帧），
+但 live 帧是**活的事实**：客户端断开、重连、或者事后读日志，改动就没了——
+只剩工具的一句话摘要（「改了第 12 行」）。dsh 的 `workspace-changes` 答的是
+「这一回合改了哪些文件」，omp 的编辑结果带着 `oldText`/`newText`。
+
+**怎么落**：
+
+1. **行上多一个成员**：`tool_result` 行增 `changed`（`Vec<String>`，绝对
+   路径）。**路径**而不是 diff 本身：diff 是两个文件的大小，进日志太重；
+   路径是事实，客户端拿它自己对版本库求 diff。
+2. **harness 的提交路径提出来**：与它已经提 `metadata.error.code` 进行的
+   `error` 成员**同一条漏斗**——工具在 metadata 里报了改动，harness 在提交
+   那一行时把路径提进行里。
+3. **词汇是唯一的主人**：行形状归词汇（ADR 0021），构造器多一个参数；
+   wire 信封（`SessionTurnEnvelope`）与前端类型**重新生成**——契约测试
+   （「行信封覆盖词汇能写的每一个成员」）自己抓到了这个新成员 ✓。
+
+**落点**：
+- `crates/uva-session/src/events/mod.rs`：`tool_result` 行的 `changed`。
+- `crates/uva-session/src/typed_event_builders.rs`：构造器多一个参数。
+- `crates/uva-session/src/events/vocab/restore.rs`：读回时把 `changed` 还原。
+- `crates/uva-harness/src/agent/re_act/loop/step/tools/commit.rs`：提路径。
+- `crates/uva-app-server/src/api/v1/session_view.rs`：wire 信封 + 重新生成的
+  前端类型。
+
+**验收**：
+- 单元（harness）：改了文件的调用，行上带着 `changed`；没改东西的调用，
+  行上**没有**这个成员（不是空数组）。
+- 单元（session）：行上的 `changed` 读回时还在。
+
+---
+
+### 切 29 — 会话列表给会话起名字（第四轮切 6）
+
+**要什么**：dsh 有**耐久的标题状态**（`packages/session/session-title`，最新一次
+胜出）+ 一个异步 provider（`session-title-llm`）；omp 用小模型生成标题
+（`packages/coding-agent/src/utils/title-generator.ts`）。本仓的
+`sessions/list` 此前只有 id / 状态 / 时间——**一串 id 不是索引**：客户端分不清
+两个会话。
+
+**怎么落**：
+
+1. **派生，不存**：标题是**日志里第一条 user 消息的第一行**（截到 80 字符，
+   截在词边）。**不调模型**（本轮范围明确排除提示词工程与成本优化），也
+   **不另存一份**可能与日志漂移的真相（改写过的 prompt、fork 出来的会话，
+   存的标题都会过期）。
+2. **读头就有**：列表本来就为「创建时间」读**头几行**（每会话一次有界
+   读）⇒ 标题**不额外读盘**；磁盘上才有的会话（进程重启前留下的）也一样
+   ——扫描本来就读头 ✓。
+3. **没有消息就没有名字**：刚建的会话、没跑过的委派，名字缺席而不是被
+   编造。
+
+**落点**：
+- `crates/uva-app-server/src/routes/sessions/mod.rs`：`title_from_head` /
+  `cut_title`；`SessionSummary` 与 `SessionDetail` 增 `title`。
+
+**验收**：
+- 行为（app-server）：列表里的会话带着第一条消息的第一行；只有空白消息的
+  会话**没有**名字。
+
+---
+
 ## 6. 下一轮候选（不在本轮）
 
 - ~~**G12 之后**：与编辑器对接的下一层是客户端的**扩展工具**（omp 的
@@ -1130,7 +1230,8 @@ oldText/newText」）。本仓此前**从不发这个变体**——编辑到了�
   `ast_grep`/`ast_edit`。G17 已落——切 17 + 切 18。客户端扩展工具已落
   ——第三轮切 22 + 23（核心面）。G18/G19/G20 已落——切 19/20/21。
   G21 已落——切 24（`ask`）。G22 已落——切 25（文件改动的 diff）。
-  G23 已落——切 26（`web_search`）。）
+  G23 已落——切 26（`web_search`）。G24 已落——切 27（断尾截断）。
+  G25 已落——切 28（durable 行的 changed）。G26 已落——切 29（会话的名字）。）
 
 ---
 

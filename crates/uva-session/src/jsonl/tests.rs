@@ -52,6 +52,107 @@ async fn opening_a_sink_defers_the_whole_log_pass() {
 }
 
 // -----------------------------------------------------------------
+// Reading while writing
+// -----------------------------------------------------------------
+
+/// A reader that shares the log with a live writer must not fail.
+///
+/// The writer appends a row and the reader reads the whole log at
+/// the same time: the reader may catch the file mid-row. A read
+/// that fails on a half-written tail turns "the agent is writing"
+/// into "the client got an error" — and the client cannot tell the
+/// two apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_during_an_append_never_fails() {
+    let dir = temp_dir().join("s_read_while_write");
+    let sink = Arc::new(JsonlSessionSink::new("s_read_while_write", dir));
+    // A row big enough that the write is not a single page: the
+    // window where a reader can catch it mid-row is real.
+    let padding = "x".repeat(8 * 1024);
+    let mut failures = Vec::new();
+    for index in 0..20 {
+        write(&sink, json!({"type": "Model", "i": index, "pad": padding}))
+            .await;
+        if let Err(error) = sink.read().await {
+            failures.push(format!("{error}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "a read during an append must not fail: {failures:?}"
+    );
+}
+
+// -----------------------------------------------------------------
+// The torn tail
+// -----------------------------------------------------------------
+
+/// A reader over a log whose last row was half-written must still
+/// read the rows that are whole.
+///
+/// The half-written row is not a row: it is a write in flight (a
+/// reader that looked while the agent was writing) or a write a
+/// crash tore. A reader that failed on it would turn "the agent is
+/// writing" into "the client got an error".
+#[tokio::test]
+async fn a_read_over_a_torn_tail_returns_the_whole_rows() {
+    let dir = temp_dir().join("s_torn_read");
+    let sink = JsonlSessionSink::new("s_torn_read", dir.clone());
+    for index in 0..3 {
+        write(&sink, json!({"type": "Model", "i": index})).await;
+    }
+    // Tear the last row: the file keeps its bytes, minus the
+    // newline that would have finished it.
+    let path = dir.join("events.jsonl");
+    let bytes = std::fs::read(&path).expect("the log");
+    let torn = &bytes[..bytes.len() - 1];
+    std::fs::write(&path, torn).expect("the torn log");
+
+    let rows = sink.read().await.expect("the read");
+    assert_eq!(
+        rows.len(),
+        2,
+        "the two whole rows read back; the torn one is not a row: \
+         {rows:?}"
+    );
+}
+
+/// The writer cuts the torn tail before it writes again.
+///
+/// Otherwise the next row is glued onto the fragment and the row the
+/// writer stamps is unreadable: one line made of two rows.
+#[tokio::test]
+async fn the_writer_cuts_the_torn_tail_before_it_writes() {
+    let dir = temp_dir().join("s_torn_write");
+    let sink = JsonlSessionSink::new("s_torn_write", dir.clone());
+    for index in 0..3 {
+        write(&sink, json!({"type": "Model", "i": index})).await;
+    }
+    // Tear the last row.
+    let path = dir.join("events.jsonl");
+    let bytes = std::fs::read(&path).expect("the log");
+    std::fs::write(&path, &bytes[..bytes.len() - 1]).expect("the torn log");
+
+    // The next write opens the log again — the writer that finds the
+    // torn tail cuts it. The first writer is gone (a crash took it
+    // down), so the lock is free.
+    drop(sink);
+    let reopened = JsonlSessionSink::new("s_torn_write", dir.clone());
+    write(&reopened, json!({"type": "Model", "i": 3})).await;
+
+    let rows = reopened.read().await.expect("the read");
+    let indexes: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| row.get("i").and_then(Value::as_i64))
+        .collect();
+    assert_eq!(
+        indexes,
+        vec![0, 1, 3],
+        "every row is whole: the fragment was cut, not glued: {rows:?}"
+    );
+}
+
+// -----------------------------------------------------------------
 // Cross-process ownership
 // -----------------------------------------------------------------
 

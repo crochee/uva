@@ -317,6 +317,15 @@ pub enum SessionEvent {
         /// The provider call id this result answers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<String>,
+        /// The files this call changed.
+        ///
+        /// A tool that changes a file says so: the paths ride the
+        /// row, so a client that reads the log **later** still knows
+        /// what the call touched (the live diff is gone by then). The
+        /// paths are absolute — the same paths the tool's own report
+        /// and the protocol's diff block carry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed: Option<Vec<String>>,
         /// How this event joins the surface.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         surface_op: Option<SurfaceOp>,

@@ -287,6 +287,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -517,6 +524,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -747,6 +761,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -977,6 +998,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1207,6 +1235,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1437,6 +1472,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1667,6 +1709,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -1897,6 +1946,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2127,6 +2183,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2357,6 +2420,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2587,6 +2657,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -2817,6 +2894,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3047,6 +3131,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3277,6 +3368,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3507,6 +3605,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3737,6 +3842,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -3967,6 +4079,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4197,6 +4316,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4427,6 +4553,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4657,6 +4790,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -4887,6 +5027,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5117,6 +5264,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5347,6 +5501,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5577,6 +5738,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -5807,6 +5975,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6037,6 +6212,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6267,6 +6449,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6497,6 +6686,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6727,6 +6923,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -6957,6 +7160,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7187,6 +7397,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7417,6 +7634,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7647,6 +7871,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -7877,6 +8108,13 @@ export type SessionTurn =
        * The provider call id a `tool_result` row answers.
        */
       tool_call_id?: string | null;
+      /**
+       * The files a `tool_result` row's call changed.
+       *
+       * A client that reads the log later learns what the call
+       * touched, when the live diff is long gone.
+       */
+      changed?: string[] | null;
       attachments?: unknown;
       /**
        * The surface op the row applies instead of appending —
@@ -9186,6 +9424,11 @@ export interface SessionArtifactMetadata {
 export interface SessionDetail {
   id: string;
   /**
+   * The session's name — the same value the summary reports
+   * ([`SessionSummary::title`]), derived from the log.
+   */
+  title?: string | null;
+  /**
    * The session status — the same closed set the summary carries.
    */
   status: SessionStatus;
@@ -9220,6 +9463,16 @@ export interface SessionDetail {
  */
 export interface SessionSummary {
   id: string;
+  /**
+   * The session's name — the first thing the user said, cut to a
+   * line.
+   *
+   * A listing of ids is not an index: the name is what tells two
+   * conversations apart. It is **derived** from the log (the first
+   * user message), not stored: the log is the truth, and a title
+   * that could drift from it would be a second truth.
+   */
+  title?: string | null;
   /**
    * The session status — one of the five the status module
    * produces. The wire spells it `unspecified`, `working`,

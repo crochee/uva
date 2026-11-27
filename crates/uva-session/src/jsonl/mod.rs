@@ -272,6 +272,16 @@ struct State {
     /// is skipped, never written twice, and a batch that was rolled
     /// back is written once.
     pending_write: Option<PendingWrite>,
+    /// Whether this sink already looked at the log's tail for a
+    /// torn row.
+    ///
+    /// The check runs once, before this sink's first write: the log
+    /// it opens may carry a row a crash tore, and the writer must
+    /// cut that fragment before it writes — otherwise the next row
+    /// would be glued onto the fragment and the row it writes would
+    /// be corrupt. A sink that only reads never looks (a reader must
+    /// not write), and a sink that already wrote has nothing to cut.
+    tail_cut: bool,
 }
 
 /// A dispatched batch write whose fate the sink still owes its
@@ -458,6 +468,7 @@ impl JsonlSessionSink {
                 idem_keys: VecDeque::new(),
                 barrier_pending: false,
                 pending_write: None,
+                tail_cut: false,
             })),
             fs: FsBackend::default(),
             next_seq,
@@ -528,6 +539,9 @@ impl SessionSink for JsonlSessionSink {
                 supported: CURRENT_SCHEMA_VERSION,
             });
         }
+        // The log may carry a row a crash tore: cut that fragment
+        // before this row is written, or the two would share a line.
+        self.cut_torn_tail(&mut state).await?;
         let line = serde_json::to_string(event).map_err(|e| {
             SessionError::AppendFailed(format!("serialize event: {e}"))
         })?;
@@ -629,6 +643,10 @@ impl SessionSink for JsonlSessionSink {
                 supported: CURRENT_SCHEMA_VERSION,
             });
         }
+        // The log may carry a row a crash tore: cut that fragment
+        // before this batch is written, or the two would share a
+        // line.
+        self.cut_torn_tail(&mut state).await?;
         // anything is filtered: its bytes may be in the file while
         // the mark still says otherwise, and filtering against a
         // stale mark would write them a second time.
@@ -1096,12 +1114,14 @@ impl JsonlSessionSink {
         window: usize,
         reached_start: bool,
     ) -> Result<Vec<Value>, SessionError> {
-        let mut lines: Vec<&[u8]> =
-            bytes.split(|byte| *byte == b'\n').collect();
+        let mut lines: Vec<&[u8]> = Self::complete_lines(bytes);
         // The writer terminates every row, so the split ends on an
-        // empty piece. A file without that terminator (a truncated
-        // write) keeps its last piece and is parsed — and fails — the
-        // way `read` fails, rather than being silently dropped.
+        // empty piece. A file without that terminator (a write in
+        // flight, or one a crash tore) keeps its last piece — and that
+        // piece is **not** a row: it is half of one. It is dropped
+        // rather than parsed: half a row is not a row, and a reader
+        // that failed on it would turn "the agent is writing" into
+        // "the client got an error".
         if lines.last().is_some_and(|line| line.is_empty()) {
             lines.pop();
         }
@@ -1121,6 +1141,121 @@ impl JsonlSessionSink {
             rows.drain(..keep);
         }
         Ok(rows)
+    }
+
+    /// The file's **complete** lines: every row the writer finished.
+    ///
+    /// A writer terminates every row with a newline, so a file that
+    /// ends with one holds only complete rows. A file that does
+    /// not end with one holds a **torn tail**: the last row was
+    /// half-written — a write in flight while a reader looked, or a
+    /// write a crash tore. That piece is not a row, and this drops
+    /// it: a reader that parsed it would fail on bytes that are not
+    /// yet a row (and may never be one).
+    ///
+    /// The writer cuts the torn tail before it writes again (see
+    /// [`Self::cut_torn_tail`]), so the fragment cannot be glued to
+    /// the next row.
+    fn complete_lines(bytes: &[u8]) -> Vec<&[u8]> {
+        let mut lines: Vec<&[u8]> =
+            bytes.split(|byte| *byte == b'\n').collect();
+        if !bytes.ends_with(b"\n")
+            && lines.last().is_some_and(|line| !line.is_empty())
+        {
+            lines.pop();
+        }
+        lines
+    }
+
+    /// Cut the log's torn tail, once, before this sink's first write.
+    ///
+    /// A log whose last row was half-written — a crash between the
+    /// write's bytes and its end — would otherwise take the next row
+    /// **onto** the fragment: the file would hold one line made of
+    /// two rows, and the row this writer stamps would be unreadable.
+    ///
+    /// The cut removes only the incomplete tail: the file keeps every
+    /// complete row, and the log is writable again.
+    ///
+    /// A sink that only reads never cuts (a reader must not write),
+    /// and the check runs once per sink — the tail cannot tear again
+    /// while this sink holds the log.
+    async fn cut_torn_tail(
+        &self,
+        state: &mut State,
+    ) -> Result<(), SessionError> {
+        if state.tail_cut {
+            return Ok(());
+        }
+        // The flag is set on every path out of here — including the
+        // ones that cut nothing: the log's tail was looked at, and a
+        // second look would find the same thing.
+        let outcome = self.cut_torn_tail_once(state).await;
+        state.tail_cut = true;
+        outcome
+    }
+
+    /// The tail check itself; [`Self::cut_torn_tail`] owns the
+    /// once-per-sink bookkeeping.
+    async fn cut_torn_tail_once(
+        &self,
+        state: &mut State,
+    ) -> Result<(), SessionError> {
+        let path = self.events_path();
+        // An empty log has no tail to cut — and the length is asked
+        // before the bytes are: a log that is not a regular file (a
+        // device, a pipe) must not be read for this.
+        let len = self.fs.file_len(&path).await.map_err(|message| {
+            SessionError::AppendFailed(format!(
+                "stat the log before writing: {message}"
+            ))
+        })?;
+        if len == 0 {
+            return Ok(());
+        }
+        // The tail, not the whole log: opening a sink stays O(1) in
+        // the log's length, and the fragment — if there is one — is
+        // at the end.
+        let mut budget = TAIL_READ_CHUNK;
+        let keep = loop {
+            let chunk =
+                self.fs.read_tail(&path, budget).await.map_err(|message| {
+                    SessionError::AppendFailed(format!(
+                        "read the log's tail before writing: {message}"
+                    ))
+                })?;
+            if chunk.bytes.is_empty() {
+                // Nothing to read: the log is empty (or was emptied
+                // under us). There is no fragment to cut — and cutting
+                // to zero here would throw rows away.
+                return Ok(());
+            }
+            if chunk.bytes.ends_with(b"\n") {
+                // The log's last row is whole: nothing to cut.
+                return Ok(());
+            }
+            // The fragment starts after the last newline: everything
+            // before it is a complete row. A fragment longer than the
+            // chunk has no newline in it — the window grows until the
+            // chunk reaches the log's start.
+            if let Some(index) =
+                chunk.bytes.iter().rposition(|byte| *byte == b'\n')
+            {
+                break chunk.start + index as u64 + 1;
+            }
+            if chunk.start == 0 {
+                // The whole log is one fragment: there is no complete
+                // row to keep.
+                break 0;
+            }
+            budget = budget.saturating_mul(4);
+        };
+        self.fs
+            .truncate_to(&path, keep)
+            .await
+            .map_err(SessionError::AppendFailed)?;
+        state.bytes_on_disk = keep;
+        Ok(())
     }
 
     /// Inner `read` / `read_from` body. `with_from` selects the
@@ -1147,7 +1282,7 @@ impl JsonlSessionSink {
         let mut header_skipped = false;
         let mut out = Vec::new();
         let mut index: u64 = 0;
-        for line in bytes.split(|b| *b == b'\n') {
+        for line in Self::complete_lines(&bytes) {
             if line.is_empty() {
                 continue;
             }

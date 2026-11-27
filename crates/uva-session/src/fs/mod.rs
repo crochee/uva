@@ -199,6 +199,61 @@ impl FsBackend {
         .await?
     }
 
+    /// A file's length in bytes.
+    ///
+    /// A missing file is zero: a session's log is read before its
+    /// first row is written, and "no file yet" is that log's empty
+    /// state.
+    ///
+    /// # Errors
+    ///
+    /// The path's I/O error, formatted.
+    pub async fn file_len(&self, path: &Path) -> Result<u64, String> {
+        let path = path.to_path_buf();
+        self.run(move || match fs::metadata(&path) {
+            Ok(meta) => Ok(meta.len()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(error) => Err(format!("stat {}: {error}", path.display())),
+        })
+        .await?
+    }
+
+    /// Cut a file back to `len` bytes.
+    ///
+    /// The one use is the **torn tail**: a log whose last row was
+    /// half-written when the process died. Cutting the file at the
+    /// end of the last complete row leaves the log writable again —
+    /// the next append would otherwise be glued onto the fragment and
+    /// corrupt the row it writes.
+    ///
+    /// A `len` beyond the file's length is a no-op: the caller asks
+    /// for a cut that the file already satisfies.
+    ///
+    /// # Errors
+    ///
+    /// The path's I/O error, formatted.
+    pub async fn truncate_to(
+        &self,
+        path: &Path,
+        len: u64,
+    ) -> Result<(), String> {
+        let path = path.to_path_buf();
+        self.run(move || {
+            let file = fs::OpenOptions::new().write(true).open(&path).map_err(
+                |error| {
+                    format!("open {} for truncation: {error}", path.display())
+                },
+            )?;
+            file.set_len(len).map_err(|error| {
+                format!("truncate {} to {len} bytes: {error}", path.display())
+            })?;
+            file.sync_all().map_err(|error| {
+                format!("sync {} after truncation: {error}", path.display())
+            })
+        })
+        .await?
+    }
+
     /// Append `lines` (preceded by `header`, if any) as one durable
     /// batch.
     ///

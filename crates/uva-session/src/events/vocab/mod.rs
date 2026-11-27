@@ -450,6 +450,7 @@ impl RowTag {
                 data: Value::Null,
                 is_error: false,
                 tool_call_id: None,
+                changed: None,
                 surface_op: Some(SurfaceOp::append()),
             },
             Self::Compaction => SessionEvent::Compaction {

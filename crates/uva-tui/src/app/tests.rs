@@ -173,6 +173,7 @@ fn session_listing(rows: Vec<SessionSummary>) -> Value {
 /// One row of the session listing.
 fn session_summary(id: &str, status: SessionStatus) -> SessionSummary {
     SessionSummary {
+        title: None,
         id: id.to_string(),
         status,
         context_id: None,
